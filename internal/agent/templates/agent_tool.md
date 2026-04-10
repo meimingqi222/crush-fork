@@ -13,12 +13,18 @@ When to use the Agent tool:
 - Do not claim that you are delegating, spinning up subagents, or parallelizing work unless this response actually includes the corresponding `agent` tool calls.
 
 When NOT to use the Agent tool:
+- **CRITICAL: NEVER spawn a subagent for file reading tasks.** This includes:
+  - Reading single or multiple files and returning their contents
+  - Reading files without analysis, transformation, or synthesis
+  - Tasks that can be accomplished with direct `view`, `glob`, or `grep` tool calls
+  - Example violations: "Read file X", "Get contents of files A, B, C", "Read these files and return them"
+- **Why this matters:** Spawning a subagent just to read files wastes an entire LLM turn and session context. The subagent will spend output tokens returning file contents that you could have read directly.
+- **Correct approach:** Call `view`/`glob`/`grep` directly in your current response. These tools support parallel invocation, so you can read multiple files simultaneously without subagent overhead.
 - If the next step depends immediately on the result, do the work directly instead of delegating and waiting.
 - Do not delegate tiny, tightly-coupled edits that are faster to do in the current thread.
 - Do not delegate lightweight isolated single-file operations when direct tool calls are likely cheaper in tokens and just as fast.
 - If several independent lightweight file operations can proceed in parallel, prefer multiple direct tool calls in one response instead of subagents.
 - Do not use the main thread for broad implementation work just because you already know which files are involved. If those file changes are still separable, delegate them.
-- **NEVER spawn a subagent whose sole job is to read files and return their contents.** If you already know the file paths, call `view`/`grep`/`glob` directly in the main thread — in parallel if needed. Spawning a subagent just to call `view` wastes a full LLM turn and a session context for zero benefit.
 
 Usage notes:
 1. Each subagent call is stateless and returns a single final report.
