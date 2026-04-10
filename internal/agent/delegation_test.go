@@ -36,6 +36,7 @@ func TestBuildDelegationPromptPrefixAddsCostAwareDelegationPolicyForPrimaryAgent
 	assert.Contains(t, prefix, "Phase 4")
 	assert.Contains(t, prefix, "Cost comparison")
 	assert.Contains(t, prefix, "view/grep/glob")
+	assert.Contains(t, prefix, "read/list files and return raw contents")
 }
 
 func TestPromptForAgentUsesWorkerPromptForWritableSubagents(t *testing.T) {

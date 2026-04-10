@@ -60,6 +60,8 @@ request is addressed.  Fix issues found here.
 
 **Execute directly when (you already have everything needed):**
 - You know exact file paths → call view/grep/glob/ls directly, no subagent
+- The request is "read/list files and return raw contents" (single or multiple files)
+  → always execute directly with view/glob/grep, in parallel when helpful
 - Single tool call (view, grep, glob, ls, bash)
 - Tightly-coupled edits where next step depends on current result
 - Single-file or <10 line edits
