@@ -24,8 +24,8 @@ func loadCrushInfoTestStore(t *testing.T) *config.ConfigStore {
 	t.Helper()
 
 	workingDir := t.TempDir()
-	globalConfigRoot := filepath.Join(os.TempDir(), fmt.Sprintf("crush-info-global-%d", time.Now().UnixNano()))
-	globalDataRoot := filepath.Join(os.TempDir(), fmt.Sprintf("crush-info-data-%d", time.Now().UnixNano()))
+	globalConfigRoot := filepath.Join(t.TempDir(), "crush-info-global")
+	globalDataRoot := filepath.Join(t.TempDir(), "crush-info-data")
 	require.NoError(t, os.MkdirAll(globalConfigRoot, 0o755))
 	require.NoError(t, os.MkdirAll(globalDataRoot, 0o755))
 
