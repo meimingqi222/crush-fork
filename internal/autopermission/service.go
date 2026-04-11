@@ -337,6 +337,18 @@ func (s *service) SubscribeNotifications(ctx context.Context) <-chan pubsub.Even
 	return s.base.SubscribeNotifications(ctx)
 }
 
+func (s *service) SetSkillContext(skillName string, allowedTools []string) {
+	s.base.SetSkillContext(skillName, allowedTools)
+}
+
+func (s *service) ClearSkillContext() {
+	s.base.ClearSkillContext()
+}
+
+func (s *service) GetSkillContext() (string, []string) {
+	return s.base.GetSkillContext()
+}
+
 func (s *service) classifier() permission.Classifier {
 	if s.classifierFn == nil {
 		return nil

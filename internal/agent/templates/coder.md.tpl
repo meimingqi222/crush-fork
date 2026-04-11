@@ -389,9 +389,26 @@ Diagnostics (lint/typecheck) included in tool output.
 {{.AvailSkillXML}}
 
 <skills_usage>
-When a user task matches a skill's description, read the skill's SKILL.md file to get full instructions.
-Skills are activated by reading their location path. Follow the skill's instructions to complete the task.
-If a skill mentions scripts, references, or assets, they are placed in the same folder as the skill itself (e.g., scripts/, references/, assets/ subdirectories within the skill's folder).
+Skills are reusable workflow packages that extend your capabilities. Each skill has:
+- name: The skill identifier (use with the Skill tool)
+- description: What the skill does
+- when_to_use: Scenarios when this skill should be used (if present)
+- allowed_tools: Tools the skill is pre-authorized to use (if present)
+- arguments: Named parameters the skill accepts (if present)
+- context: Execution mode - 'inline' (default) or 'fork' (run as sub-agent)
+
+To use a skill:
+1. Match the skill's `when_to_use` or `description` to the user's task
+2. Read the skill's SKILL.md file at the location path to get full instructions
+3. Optionally use the Skill tool to invoke the skill with arguments
+
+Skill argument substitution:
+- $ARGUMENTS: Full arguments string
+- $ARGUMENTS[0], $ARGUMENTS[1]: Indexed arguments
+- $0, $1: Shorthand for indexed arguments
+- $name: Named argument (if skill defines `arguments`)
+
+If a skill mentions scripts, references, or assets, they are in the skill's folder (scripts/, references/, assets/ subdirectories).
 </skills_usage>
 {{end}}
 

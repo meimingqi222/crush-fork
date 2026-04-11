@@ -168,6 +168,10 @@ type Service interface {
 	SetSkipRequests(skip bool)
 	SkipRequests() bool
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
+	// SkillContext methods for per-skill permission control
+	SetSkillContext(skillName string, allowedTools []string)
+	ClearSkillContext()
+	GetSkillContext() (skillName string, allowedTools []string)
 }
 
 type permissionService struct {
@@ -187,6 +191,11 @@ type permissionService struct {
 	requestMu       sync.Mutex
 	activeRequest   *PermissionRequest
 	activeRequestMu sync.Mutex
+
+	// Skill context for per-skill permission control
+	skillName       string
+	skillAllowed    []string
+	skillContextMu  sync.RWMutex
 }
 
 func (s *permissionService) GrantPersistent(permission PermissionRequest) {
@@ -395,6 +404,91 @@ func (s *permissionService) SetSkipRequests(skip bool) {
 
 func (s *permissionService) SkipRequests() bool {
 	return s.skip
+}
+
+// SetSkillContext sets the active skill context for per-skill permission control.
+// When a skill context is active, tool permissions are evaluated against the skill's
+// allowed_tools list in addition to global permissions.
+func (s *permissionService) SetSkillContext(skillName string, allowedTools []string) {
+	s.skillContextMu.Lock()
+	defer s.skillContextMu.Unlock()
+	s.skillName = skillName
+	s.skillAllowed = allowedTools
+}
+
+// ClearSkillContext clears the active skill context.
+func (s *permissionService) ClearSkillContext() {
+	s.skillContextMu.Lock()
+	defer s.skillContextMu.Unlock()
+	s.skillName = ""
+	s.skillAllowed = nil
+}
+
+// GetSkillContext returns the current skill context if any.
+func (s *permissionService) GetSkillContext() (string, []string) {
+	s.skillContextMu.RLock()
+	defer s.skillContextMu.RUnlock()
+	return s.skillName, s.skillAllowed
+}
+
+// isToolAllowedBySkill checks if a tool is allowed by the current skill context.
+// Returns true if:
+// - No skill context is active (no restriction)
+// - The tool matches one of the allowed patterns
+func (s *permissionService) isToolAllowedBySkill(toolName, action string) bool {
+	s.skillContextMu.RLock()
+	defer s.skillContextMu.RUnlock()
+
+	// No skill context active, allow all tools.
+	if s.skillName == "" || len(s.skillAllowed) == 0 {
+		return true
+	}
+
+	// Check if the tool matches any allowed pattern.
+	for _, pattern := range s.skillAllowed {
+		if matchesToolPattern(pattern, toolName, action) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchesToolPattern checks if a tool/action matches an allowed pattern.
+// Patterns can be:
+// - "ToolName" - matches the tool exactly
+// - "ToolName(action)" - matches tool with specific action
+// - "ToolName(prefix:*)" - matches tool with action starting with prefix
+func matchesToolPattern(pattern, toolName, action string) bool {
+	// Simple tool name match
+	if pattern == toolName {
+		return true
+	}
+
+	// Pattern with action: ToolName(action) or ToolName(prefix:*).
+	if idx := strings.IndexByte(pattern, '('); idx > 0 {
+		patternTool := pattern[:idx]
+		if patternTool != toolName {
+			return false
+		}
+
+		// Extract action pattern.
+		if !strings.HasSuffix(pattern, ")") {
+			return false
+		}
+		actionPattern := pattern[idx+1 : len(pattern)-1] // Remove trailing ')'
+
+		// Wildcard suffix: prefix:*
+		if strings.HasSuffix(actionPattern, ":*") {
+			prefix := actionPattern[:len(actionPattern)-2]
+			return strings.HasPrefix(action, prefix)
+		}
+
+		// Exact action match.
+		return actionPattern == action
+	}
+
+	return false
 }
 
 func matchesPersistentPermission(granted PermissionRequest, requested PermissionRequest) bool {

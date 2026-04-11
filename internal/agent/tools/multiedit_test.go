@@ -58,6 +58,12 @@ func (m *mockPermissionService) SubscribeNotifications(ctx context.Context) <-ch
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
 }
 
+func (m *mockPermissionService) SetSkillContext(string, []string) {}
+func (m *mockPermissionService) ClearSkillContext()               {}
+func (m *mockPermissionService) GetSkillContext() (string, []string) {
+	return "", nil
+}
+
 type mockHistoryService struct {
 	*pubsub.Broker[history.File]
 }

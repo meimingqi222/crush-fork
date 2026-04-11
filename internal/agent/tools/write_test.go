@@ -51,6 +51,12 @@ func (m *mockWritePermissionService) SubscribeNotifications(context.Context) <-c
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
 }
 
+func (m *mockWritePermissionService) SetSkillContext(string, []string) {}
+func (m *mockWritePermissionService) ClearSkillContext()               {}
+func (m *mockWritePermissionService) GetSkillContext() (string, []string) {
+	return "", nil
+}
+
 type mockFileTracker struct{}
 
 func (m *mockFileTracker) RecordRead(context.Context, string, string) {}

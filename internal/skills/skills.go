@@ -21,9 +21,19 @@ const (
 	MaxNameLength          = 64
 	MaxDescriptionLength   = 1024
 	MaxCompatibilityLength = 500
+	MaxWhenToUseLength     = 2000
+	MaxArgumentHintLength  = 200
 )
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+
+// SkillContext defines how a skill should be executed.
+type SkillContext string
+
+const (
+	SkillContextInline SkillContext = "inline" // Default: skill content expands into current conversation
+	SkillContextFork   SkillContext = "fork"   // Skill runs as a sub-agent with separate context
+)
 
 // Skill represents a parsed SKILL.md file.
 type Skill struct {
@@ -32,9 +42,20 @@ type Skill struct {
 	License       string            `yaml:"license,omitempty" json:"license,omitempty"`
 	Compatibility string            `yaml:"compatibility,omitempty" json:"compatibility,omitempty"`
 	Metadata      map[string]string `yaml:"metadata,omitempty" json:"metadata,omitempty"`
-	Instructions  string            `yaml:"-" json:"instructions"`
-	Path          string            `yaml:"-" json:"path"`
-	SkillFilePath string            `yaml:"-" json:"skill_file_path"`
+
+	// Extended fields from Claude Code skill specification
+	WhenToUse          string       `yaml:"when_to_use,omitempty" json:"when_to_use,omitempty"`
+	AllowedTools       []string     `yaml:"allowed-tools,omitempty" json:"allowed_tools,omitempty"`
+	Arguments          []string     `yaml:"arguments,omitempty" json:"arguments,omitempty"`
+	ArgumentHint       string       `yaml:"argument-hint,omitempty" json:"argument_hint,omitempty"`
+	Model              string       `yaml:"model,omitempty" json:"model,omitempty"`
+	Context            SkillContext `yaml:"context,omitempty" json:"context,omitempty"`
+	DisableModelInvoke bool         `yaml:"disable-model-invocation,omitempty" json:"disable_model_invocation,omitempty"`
+	UserInvocable      *bool        `yaml:"user-invocable,omitempty" json:"user_invocable,omitempty"`
+
+	Instructions  string `yaml:"-" json:"instructions"`
+	Path          string `yaml:"-" json:"path"`
+	SkillFilePath string `yaml:"-" json:"skill_file_path"`
 }
 
 // Validate checks if the skill meets spec requirements.
@@ -63,6 +84,19 @@ func (s *Skill) Validate() error {
 
 	if len(s.Compatibility) > MaxCompatibilityLength {
 		errs = append(errs, fmt.Errorf("compatibility exceeds %d characters", MaxCompatibilityLength))
+	}
+
+	if len(s.WhenToUse) > MaxWhenToUseLength {
+		errs = append(errs, fmt.Errorf("when_to_use exceeds %d characters", MaxWhenToUseLength))
+	}
+
+	if len(s.ArgumentHint) > MaxArgumentHintLength {
+		errs = append(errs, fmt.Errorf("argument-hint exceeds %d characters", MaxArgumentHintLength))
+	}
+
+	// Validate context value
+	if s.Context != "" && s.Context != SkillContextInline && s.Context != SkillContextFork {
+		errs = append(errs, fmt.Errorf("invalid context value: %s (must be 'inline' or 'fork')", s.Context))
 	}
 
 	return errors.Join(errs...)
@@ -171,6 +205,45 @@ func ToPromptXML(skills []*Skill) string {
 		fmt.Fprintf(&sb, "    <name>%s</name>\n", escape(s.Name))
 		fmt.Fprintf(&sb, "    <description>%s</description>\n", escape(s.Description))
 		fmt.Fprintf(&sb, "    <location>%s</location>\n", escape(s.SkillFilePath))
+
+		// Write when_to_use if present
+		if s.WhenToUse != "" {
+			fmt.Fprintf(&sb, "    <when_to_use>%s</when_to_use>\n", escape(s.WhenToUse))
+		}
+
+		// Write allowed_tools if present
+		if len(s.AllowedTools) > 0 {
+			sb.WriteString("    <allowed_tools>\n")
+			for _, tool := range s.AllowedTools {
+				fmt.Fprintf(&sb, "      <tool>%s</tool>\n", escape(tool))
+			}
+			sb.WriteString("    </allowed_tools>\n")
+		}
+
+		// Write arguments if present
+		if len(s.Arguments) > 0 {
+			sb.WriteString("    <arguments>\n")
+			for _, arg := range s.Arguments {
+				fmt.Fprintf(&sb, "      <arg>%s</arg>\n", escape(arg))
+			}
+			sb.WriteString("    </arguments>\n")
+		}
+
+		// Write argument_hint if present
+		if s.ArgumentHint != "" {
+			fmt.Fprintf(&sb, "    <argument_hint>%s</argument_hint>\n", escape(s.ArgumentHint))
+		}
+
+		// Write context if present (non-default)
+		if s.Context != "" && s.Context != SkillContextInline {
+			fmt.Fprintf(&sb, "    <context>%s</context>\n", s.Context)
+		}
+
+		// Write model if present
+		if s.Model != "" {
+			fmt.Fprintf(&sb, "    <model>%s</model>\n", escape(s.Model))
+		}
+
 		sb.WriteString("  </skill>\n")
 	}
 	sb.WriteString("</available_skills>")
@@ -180,4 +253,176 @@ func ToPromptXML(skills []*Skill) string {
 func escape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&apos;")
 	return r.Replace(s)
+}
+
+// SubstituteArguments replaces $ARGUMENTS placeholders in content with actual argument values.
+// Supports:
+//   - $ARGUMENTS - replaced with the full arguments string
+//   - $ARGUMENTS[0], $ARGUMENTS[1], etc. - replaced with individual indexed arguments
+//   - $0, $1, etc. - shorthand for $ARGUMENTS[0], $ARGUMENTS[1]
+//   - Named arguments (e.g., $foo, $bar) - when argument names are defined in skill.Arguments
+//
+// The function parses arguments using shell-like quoting rules.
+func SubstituteArguments(content, args string, argNames []string) string {
+	if args == "" {
+		return content
+	}
+
+	originalContent := content
+	parsedArgs := parseArguments(args)
+
+	// Replace named arguments (e.g., $foo, $bar) with their values
+	// Named arguments map to positions: argNames[0] -> parsedArgs[0], etc.
+	for i, name := range argNames {
+		if name == "" {
+			continue
+		}
+		replacement := ""
+		if i < len(parsedArgs) {
+			replacement = parsedArgs[i]
+		}
+		content = replaceNamedArg(content, name, replacement)
+	}
+
+	// Replace indexed arguments ($ARGUMENTS[0], $ARGUMENTS[1], etc.)
+	indexedPattern := regexp.MustCompile(`\$ARGUMENTS\[(\d+)\]`)
+	content = indexedPattern.ReplaceAllStringFunc(content, func(match string) string {
+		submatches := indexedPattern.FindStringSubmatch(match)
+		if len(submatches) < 2 {
+			return match
+		}
+		index := 0
+		fmt.Sscanf(submatches[1], "%d", &index)
+		if index < len(parsedArgs) {
+			return parsedArgs[index]
+		}
+		return ""
+	})
+
+	// Replace shorthand indexed arguments ($0, $1, etc.)
+	// Only match $N where N is digits and not followed by word character
+	shorthandPattern := regexp.MustCompile(`\$(\d+)`)
+	content = shorthandPattern.ReplaceAllStringFunc(content, func(match string) string {
+		submatches := shorthandPattern.FindStringSubmatch(match)
+		if len(submatches) < 2 {
+			return match
+		}
+		// Check if followed by word character - if so, don't replace
+		// We do this by finding the position in the original content
+		index := 0
+		fmt.Sscanf(submatches[1], "%d", &index)
+		if index < len(parsedArgs) {
+			return parsedArgs[index]
+		}
+		return ""
+	})
+
+	// Replace $ARGUMENTS with the full arguments string
+	content = strings.ReplaceAll(content, "$ARGUMENTS", args)
+
+	// If no placeholders were found, append the arguments
+	if content == originalContent {
+		content = content + "\n\nARGUMENTS: " + args
+	}
+
+	return content
+}
+
+// replaceNamedArg replaces $name in content with replacement, but only if
+// $name is not followed by [ or word characters.
+func replaceNamedArg(content, name, replacement string) string {
+	prefix := "$" + name
+	result := strings.Builder{}
+	i := 0
+	for i < len(content) {
+		// Look for $name
+		if strings.HasPrefix(content[i:], prefix) {
+			// Check what follows
+			endPos := i + len(prefix)
+			if endPos >= len(content) {
+				// $name is at end of string
+				result.WriteString(replacement)
+				break
+			}
+			nextChar := content[endPos]
+			// Don't replace if followed by [ or word character
+			if nextChar == '[' || isWordChar(nextChar) {
+				result.WriteByte(content[i])
+				i++
+				continue
+			}
+			// Safe to replace
+			result.WriteString(replacement)
+			i = endPos
+			continue
+		}
+		result.WriteByte(content[i])
+		i++
+	}
+	return result.String()
+}
+
+func isWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// parseArguments parses an arguments string into an array of individual arguments.
+// Uses shell-like argument parsing including quoted strings.
+func parseArguments(args string) []string {
+	if args == "" {
+		return nil
+	}
+
+	var result []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := byte(0)
+	escaped := false
+
+	for i := 0; i < len(args); i++ {
+		c := args[i]
+
+		if escaped {
+			current.WriteByte(c)
+			escaped = false
+			continue
+		}
+
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+
+		if inQuote {
+			if c == quoteChar {
+				inQuote = false
+				quoteChar = 0
+			} else {
+				current.WriteByte(c)
+			}
+			continue
+		}
+
+		if c == '"' || c == '\'' {
+			inQuote = true
+			quoteChar = c
+			continue
+		}
+
+		if c == ' ' || c == '\t' {
+			if current.Len() > 0 {
+				result = append(result, current.String())
+				current.Reset()
+			}
+			continue
+		}
+
+		current.WriteByte(c)
+	}
+
+	if current.Len() > 0 {
+		result = append(result, current.String())
+	}
+
+	return result
 }
