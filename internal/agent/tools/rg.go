@@ -26,8 +26,9 @@ func getRgCmd(ctx context.Context, globPattern string) *exec.Cmd {
 	if name == "" {
 		return nil
 	}
-	// Note: -L (--follow) is not used on Windows due to historical bugs in ripgrep < 0.8.1
-	// On Windows, symlinks have different semantics and the -L flag can cause issues.
+	// Note: -L (--follow) is not used on Windows due to historical
+	// bugs in ripgrep < 0.8.1. On Windows, symlinks have different
+	// semantics and the -L flag can cause issues.
 	var args []string
 	if runtime.GOOS == "windows" {
 		args = []string{"--files", "--null"}
