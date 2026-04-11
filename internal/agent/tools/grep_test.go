@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -57,15 +58,13 @@ func TestGlobIncludePattern(t *testing.T) {
 		include string
 		want    int
 	}{
-		// *.go matches only files in root directory, not subdirectories
-		{"single extension", "*.go", 1},
-		// *.{js,ts} matches file2.js and file3.ts (root level only)
-		{"brace expansion", "*.{js,ts}", 2},
+		// *.go matches .go files at any depth (ripgrep basename semantics)
+		{"single extension", "*.go", 2},
+		// *.{js,ts} matches file2.js, file3.ts, and src/lib.js (any depth)
+		{"brace expansion", "*.{js,ts}", 3},
 		// src/*.go matches files directly in src/
 		{"nested pattern", "src/*.go", 1},
-		// **/*.go matches all .go files at any depth (file1.go and src/app.go)
-		// Note: **/*.go in doublestar matches files in subdirectories, but not root level
-		// For root level, just *.go is needed
+		// src/**/*.go matches all .go files under src/
 		{"double star subdirectory", "src/**/*.go", 1},
 	}
 

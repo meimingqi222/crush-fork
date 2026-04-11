@@ -118,7 +118,7 @@ func runRipgrep(cmd *exec.Cmd, searchRoot string, limit int) ([]string, error) {
 		matches = append(matches, fileWithModTime{path: absPath, modTime: info.ModTime().Unix()})
 	}
 
-	// Sort by modification time (newest first) for consistency with fallback implementation
+	// Sort by modification time (newest first) for consistency with fallback implementation.
 	sort.SliceStable(matches, func(i, j int) bool {
 		return matches[i].modTime > matches[j].modTime
 	})
