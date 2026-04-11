@@ -65,6 +65,12 @@ func (m *mockBashPermissionService) SubscribeNotifications(ctx context.Context) 
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
 }
 
+func (m *mockBashPermissionService) SetSkillContext(string, []string) {}
+func (m *mockBashPermissionService) ClearSkillContext()               {}
+func (m *mockBashPermissionService) GetSkillContext() (string, []string) {
+	return "", nil
+}
+
 func TestBashTool_DefaultAutoBackgroundThreshold(t *testing.T) {
 	workingDir := t.TempDir()
 	tool := newBashToolForTest(workingDir)

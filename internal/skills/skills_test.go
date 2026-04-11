@@ -13,16 +13,21 @@ func TestParse(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		content     string
-		wantName    string
-		wantDesc    string
-		wantLicense string
-		wantCompat  string
-		wantMeta    map[string]string
-		wantTools   string
-		wantInstr   string
-		wantErr     bool
+		name             string
+		content          string
+		wantName         string
+		wantDesc         string
+		wantLicense      string
+		wantCompat       string
+		wantMeta         map[string]string
+		wantWhenToUse    string
+		wantAllowedTools []string
+		wantArguments    []string
+		wantArgHint      string
+		wantModel        string
+		wantContext      SkillContext
+		wantInstr        string
+		wantErr          bool
 	}{
 		{
 			name: "full skill",
@@ -47,6 +52,44 @@ Use this skill when the user needs to work with PDF files.
 			wantCompat:  "Requires python 3.8+, pdfplumber, pdfrw libraries",
 			wantMeta:    map[string]string{"author": "example-org", "version": "1.0"},
 			wantInstr:   "# PDF Processing\n\n## When to use this skill\nUse this skill when the user needs to work with PDF files.",
+		},
+		{
+			name: "skill with extended fields",
+			content: `---
+name: cherry-pick-pr
+description: Cherry-picks a PR to a release branch
+when_to_use: "Use when the user wants to cherry-pick a PR to a release branch. Examples: cherry-pick to release, CP this PR, hotfix."
+allowed-tools:
+  - Bash(gh:*)
+  - Read
+  - Edit
+arguments:
+  - pr_number
+  - target_branch
+argument-hint: "[pr_number] [target_branch]"
+model: opus
+context: fork
+---
+
+# Cherry-pick PR
+
+## Inputs
+- $pr_number: The PR number to cherry-pick
+- $target_branch: The target branch
+
+## Steps
+1. Fetch the PR
+2. Cherry-pick to target branch
+`,
+			wantName:         "cherry-pick-pr",
+			wantDesc:         "Cherry-picks a PR to a release branch",
+			wantWhenToUse:    "Use when the user wants to cherry-pick a PR to a release branch. Examples: cherry-pick to release, CP this PR, hotfix.",
+			wantAllowedTools: []string{"Bash(gh:*)", "Read", "Edit"},
+			wantArguments:    []string{"pr_number", "target_branch"},
+			wantArgHint:      "[pr_number] [target_branch]",
+			wantModel:        "opus",
+			wantContext:      SkillContextFork,
+			wantInstr:        "# Cherry-pick PR\n\n## Inputs\n- $pr_number: The PR number to cherry-pick\n- $target_branch: The target branch\n\n## Steps\n1. Fetch the PR\n2. Cherry-pick to target branch",
 		},
 		{
 			name: "minimal skill",
@@ -93,6 +136,30 @@ Instructions here.
 
 			if tt.wantMeta != nil {
 				require.Equal(t, tt.wantMeta, skill.Metadata)
+			}
+
+			if tt.wantWhenToUse != "" {
+				require.Equal(t, tt.wantWhenToUse, skill.WhenToUse)
+			}
+
+			if tt.wantAllowedTools != nil {
+				require.Equal(t, tt.wantAllowedTools, skill.AllowedTools)
+			}
+
+			if tt.wantArguments != nil {
+				require.Equal(t, tt.wantArguments, skill.Arguments)
+			}
+
+			if tt.wantArgHint != "" {
+				require.Equal(t, tt.wantArgHint, skill.ArgumentHint)
+			}
+
+			if tt.wantModel != "" {
+				require.Equal(t, tt.wantModel, skill.Model)
+			}
+
+			if tt.wantContext != "" {
+				require.Equal(t, tt.wantContext, skill.Context)
 			}
 
 			require.Equal(t, tt.wantInstr, skill.Instructions)
@@ -246,4 +313,141 @@ func TestToPromptXMLEmpty(t *testing.T) {
 	t.Parallel()
 	require.Empty(t, ToPromptXML(nil))
 	require.Empty(t, ToPromptXML([]*Skill{}))
+}
+
+func TestToPromptXMLExtended(t *testing.T) {
+	t.Parallel()
+
+	skills := []*Skill{
+		{
+			Name:         "cherry-pick-pr",
+			Description:  "Cherry-picks a PR to a release branch",
+			WhenToUse:    "Use when the user wants to cherry-pick a PR. Examples: 'CP this PR'.",
+			AllowedTools: []string{"Bash(gh:*)", "Read", "Edit"},
+			Arguments:    []string{"pr_number", "target_branch"},
+			ArgumentHint: "[pr_number] [target_branch]",
+			Model:        "opus",
+			Context:      SkillContextFork,
+		},
+	}
+
+	xml := ToPromptXML(skills)
+
+	require.Contains(t, xml, "<name>cherry-pick-pr</name>")
+	require.Contains(t, xml, "<when_to_use>")
+	require.Contains(t, xml, "<allowed_tools>")
+	require.Contains(t, xml, "<tool>Bash(gh:*)</tool>")
+	require.Contains(t, xml, "<arguments>")
+	require.Contains(t, xml, "<arg>pr_number</arg>")
+	require.Contains(t, xml, "<argument_hint>")
+	require.Contains(t, xml, "<model>opus</model>")
+	require.Contains(t, xml, "<context>fork</context>")
+}
+
+func TestSubstituteArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		content  string
+		args     string
+		argNames []string
+		want     string
+	}{
+		{
+			name:    "full arguments",
+			content: "Hello $ARGUMENTS",
+			args:    "world",
+			want:    "Hello world",
+		},
+		{
+			name:    "indexed arguments",
+			content: "First: $ARGUMENTS[0], Second: $ARGUMENTS[1]",
+			args:    "foo bar",
+			want:    "First: foo, Second: bar",
+		},
+		{
+			name:    "shorthand indexed",
+			content: "First: $0, Second: $1",
+			args:    "foo bar",
+			want:    "First: foo, Second: bar",
+		},
+		{
+			name:     "named arguments",
+			content:  "PR: $pr_number, Branch: $target_branch",
+			args:     "123 main",
+			argNames: []string{"pr_number", "target_branch"},
+			want:     "PR: 123, Branch: main",
+		},
+		{
+			name:    "quoted arguments",
+			content: "Value: $0",
+			args:    `"hello world"`,
+			want:    "Value: hello world",
+		},
+		{
+			name:    "no placeholder appends arguments",
+			content: "No placeholders here",
+			args:    "some args",
+			want:    "No placeholders here\n\nARGUMENTS: some args",
+		},
+		{
+			name:    "empty args no change",
+			content: "Content",
+			args:    "",
+			want:    "Content",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := SubstituteArguments(tt.content, tt.args, tt.argNames)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args string
+		want []string
+	}{
+		{
+			name: "simple",
+			args: "foo bar baz",
+			want: []string{"foo", "bar", "baz"},
+		},
+		{
+			name: "double quoted",
+			args: `foo "hello world" baz`,
+			want: []string{"foo", "hello world", "baz"},
+		},
+		{
+			name: "single quoted",
+			args: `foo 'hello world' baz`,
+			want: []string{"foo", "hello world", "baz"},
+		},
+		{
+			name: "escaped",
+			args: `foo\ bar baz`,
+			want: []string{"foo bar", "baz"},
+		},
+		{
+			name: "empty",
+			args: "",
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseArguments(tt.args)
+			require.Equal(t, tt.want, got)
+		})
+	}
 }

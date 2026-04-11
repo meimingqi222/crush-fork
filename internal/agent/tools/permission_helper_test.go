@@ -46,6 +46,11 @@ func (m *mockToolPermissionService) SkipRequests() bool                 { return
 func (m *mockToolPermissionService) SubscribeNotifications(context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
 }
+func (m *mockToolPermissionService) SetSkillContext(string, []string) {}
+func (m *mockToolPermissionService) ClearSkillContext()               {}
+func (m *mockToolPermissionService) GetSkillContext() (string, []string) {
+	return "", nil
+}
 
 func TestRequestPermission_ReturnsToolErrorForPolicyDenied(t *testing.T) {
 	t.Parallel()

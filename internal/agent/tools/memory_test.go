@@ -48,6 +48,12 @@ func (m *memoryPermissionService) SubscribeNotifications(context.Context) <-chan
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
 }
 
+func (m *memoryPermissionService) SetSkillContext(string, []string) {}
+func (m *memoryPermissionService) ClearSkillContext()               {}
+func (m *memoryPermissionService) GetSkillContext() (string, []string) {
+	return "", nil
+}
+
 func runLongTermMemoryTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params LongTermMemoryParams) (fantasy.ToolResponse, error) {
 	t.Helper()
 	input, err := json.Marshal(params)

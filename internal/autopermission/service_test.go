@@ -70,6 +70,12 @@ func (m *mockPermissionService) SubscribeNotifications(context.Context) <-chan p
 	return make(<-chan pubsub.Event[permission.PermissionNotification])
 }
 
+func (m *mockPermissionService) SetSkillContext(string, []string) {}
+func (m *mockPermissionService) ClearSkillContext()               {}
+func (m *mockPermissionService) GetSkillContext() (string, []string) {
+	return "", nil
+}
+
 type mockSessionService struct {
 	mode  session.PermissionMode
 	modes map[string]session.PermissionMode
