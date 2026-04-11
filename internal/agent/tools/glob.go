@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -94,7 +95,11 @@ func runRipgrep(cmd *exec.Cmd, searchRoot string, limit int) ([]string, error) {
 		return nil, fmt.Errorf("ripgrep: %w\n%s", err, out)
 	}
 
-	var matches []string
+	type fileWithModTime struct {
+		path    string
+		modTime int64
+	}
+	var matches []fileWithModTime
 	for p := range bytes.SplitSeq(out, []byte{0}) {
 		if len(p) == 0 {
 			continue
@@ -106,17 +111,27 @@ func runRipgrep(cmd *exec.Cmd, searchRoot string, limit int) ([]string, error) {
 		if fsext.SkipHidden(absPath) {
 			continue
 		}
-		matches = append(matches, absPath)
+		info, statErr := os.Stat(absPath)
+		if statErr != nil {
+			continue
+		}
+		matches = append(matches, fileWithModTime{path: absPath, modTime: info.ModTime().Unix()})
 	}
 
+	// Sort by modification time (newest first) for consistency with fallback implementation
 	sort.SliceStable(matches, func(i, j int) bool {
-		return len(matches[i]) < len(matches[j])
+		return matches[i].modTime > matches[j].modTime
 	})
 
 	if limit > 0 && len(matches) > limit {
 		matches = matches[:limit]
 	}
-	return matches, nil
+
+	result := make([]string, len(matches))
+	for i, m := range matches {
+		result[i] = m.path
+	}
+	return result, nil
 }
 
 func normalizeFilePaths(paths []string) {

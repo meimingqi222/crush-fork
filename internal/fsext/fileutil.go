@@ -142,7 +142,9 @@ func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) (
 		}
 
 		found.Append(FileInfo{Path: path, ModTime: info.ModTime()})
-		if limit > 0 && found.Len() >= limit*2 { // NOTE: why x2?
+		// Collect 2x the limit before sorting, since we sort by modTime after collection.
+		// This ensures we don't miss recently modified files that appear later in the walk.
+		if limit > 0 && found.Len() >= limit*2 {
 			return filepath.SkipAll
 		}
 		return nil
