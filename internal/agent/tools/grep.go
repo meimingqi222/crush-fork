@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/fsext"
@@ -51,15 +52,11 @@ func (rc *regexCache) get(pattern string) (*regexp.Regexp, error) {
 // ResetCache clears compiled regex caches to prevent unbounded growth across sessions.
 func ResetCache() {
 	searchRegexCache.Reset(map[string]*regexp.Regexp{})
-	globRegexCache.Reset(map[string]*regexp.Regexp{})
 }
 
 // Global regex cache instances
 var (
 	searchRegexCache = newRegexCache()
-	globRegexCache   = newRegexCache()
-	// Pre-compiled regex for glob conversion (used frequently)
-	globBraceRegex = regexp.MustCompile(`\{([^}]+)\}`)
 )
 
 type GrepParams struct {
@@ -272,15 +269,6 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 		return nil, fmt.Errorf("invalid regex pattern: %w", err)
 	}
 
-	var includePattern *regexp.Regexp
-	if include != "" {
-		regexPattern := globToRegex(include)
-		includePattern, err = globRegexCache.get(regexPattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid include pattern: %w", err)
-		}
-	}
-
 	// Create walker with gitignore and crushignore support
 	walker := fsext.NewFastGlobWalker(rootPath)
 
@@ -308,8 +296,23 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 			return nil
 		}
 
-		if includePattern != nil && !includePattern.MatchString(path) {
-			return nil
+		// Use doublestar for glob matching (supports **, character classes, etc.).
+		if include != "" {
+			relPath, relErr := filepath.Rel(rootPath, path)
+			if relErr != nil {
+				return nil
+			}
+			relPath = filepath.ToSlash(relPath)
+			// Ripgrep treats patterns without path separator as basename matches at any depth.
+			// Mirror this by prepending **/ for patterns without /.
+			includePattern := filepath.ToSlash(include)
+			if !strings.Contains(includePattern, "/") {
+				includePattern = "**/" + includePattern
+			}
+			matched, matchErr := doublestar.Match(includePattern, relPath)
+			if matchErr != nil || !matched {
+				return nil
+			}
 		}
 
 		match, lineNum, charNum, lineText, err := fileContainsPattern(path, regex)
@@ -390,18 +393,4 @@ func isTextFile(filePath string) bool {
 		contentType == "application/xml" ||
 		contentType == "application/javascript" ||
 		contentType == "application/x-sh"
-}
-
-func globToRegex(glob string) string {
-	regexPattern := strings.ReplaceAll(glob, ".", "\\.")
-	regexPattern = strings.ReplaceAll(regexPattern, "*", ".*")
-	regexPattern = strings.ReplaceAll(regexPattern, "?", ".")
-
-	// Use pre-compiled regex instead of compiling each time
-	regexPattern = globBraceRegex.ReplaceAllStringFunc(regexPattern, func(match string) string {
-		inner := match[1 : len(match)-1]
-		return "(" + strings.ReplaceAll(inner, ",", "|") + ")"
-	})
-
-	return regexPattern
 }

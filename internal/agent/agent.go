@@ -1476,6 +1476,28 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		isCancelErr := errors.Is(err, context.Canceled)
 		isPermissionErr := permission.IsPermissionError(err)
 		permissionErr, hasPermissionErr := permission.AsPermissionError(err)
+		failureKind := "error"
+		if isCancelErr {
+			failureKind = "canceled"
+		} else if isPermissionErr {
+			failureKind = "permission_denied"
+		}
+		logArgs := []any{
+			"session_id", call.SessionID,
+			"error", err,
+			"failure_kind", failureKind,
+			"completed_steps", completedStepsThisRun,
+			"runToolUses", runToolUses,
+			"runLastTool", runLastTool,
+			"retryAttempt", retryAttempt,
+			"model", largeModel.ModelCfg.Model,
+			"provider", largeModel.ModelCfg.Provider,
+		}
+		if isCancelErr {
+			slog.Warn("Agent run interrupted", logArgs...)
+		} else {
+			slog.Error("Agent run failed", logArgs...)
+		}
 		if currentAssistant == nil {
 			return result, err
 		}

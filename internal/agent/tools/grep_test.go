@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -35,24 +36,44 @@ func TestRegexCache(t *testing.T) {
 	}
 }
 
-func TestGlobToRegexCaching(t *testing.T) {
-	// Test that globToRegex uses pre-compiled regex
-	pattern1 := globToRegex("*.{js,ts}")
+func TestGlobIncludePattern(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
 
-	// Should not panic and should work correctly
-	regex1, err := regexp.Compile(pattern1)
-	if err != nil {
-		t.Fatalf("Failed to compile glob regex: %v", err)
+	// Create test files with different extensions
+	for path, content := range map[string]string{
+		"file1.go":         "package main",
+		"file2.js":         "console.log",
+		"file3.ts":         "const x",
+		"src/app.go":       "package main",
+		"src/lib.js":       "export default",
+	} {
+		fullPath := filepath.Join(tempDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0o755))
+		require.NoError(t, os.WriteFile(fullPath, []byte(content), 0o644))
 	}
 
-	if !regex1.MatchString("test.js") {
-		t.Error("Glob regex should match .js files")
+	tests := []struct {
+		name    string
+		include string
+		want    int
+	}{
+		// *.go matches .go files at any depth (ripgrep basename semantics)
+		{"single extension", "*.go", 2},
+		// *.{js,ts} matches file2.js, file3.ts, and src/lib.js (any depth)
+		{"brace expansion", "*.{js,ts}", 3},
+		// src/*.go matches files directly in src/
+		{"nested pattern", "src/*.go", 1},
+		// src/**/*.go matches all .go files under src/
+		{"double star subdirectory", "src/**/*.go", 1},
 	}
-	if !regex1.MatchString("test.ts") {
-		t.Error("Glob regex should match .ts files")
-	}
-	if regex1.MatchString("test.go") {
-		t.Error("Glob regex should not match .go files")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches, err := searchFilesWithRegex("package|console|const|export", tempDir, tt.include)
+			require.NoError(t, err)
+			require.Len(t, matches, tt.want, "include pattern %q should match %d files", tt.include, tt.want)
+		})
 	}
 }
 
@@ -418,4 +439,27 @@ func TestColumnMatch(t *testing.T) {
 			require.Equal(t, "testdata/grep.txt", filepath.ToSlash(filepath.Clean(match.path)))
 		})
 	}
+}
+
+func TestGrepSortingByModTime(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	// Create files with a small delay to ensure different modification times
+	file1 := filepath.Join(tempDir, "older.txt")
+	file2 := filepath.Join(tempDir, "newer.txt")
+
+	require.NoError(t, os.WriteFile(file1, []byte("test content"), 0o644))
+	// Small delay to ensure different mod time
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, os.WriteFile(file2, []byte("test content"), 0o644))
+
+	// Test regex implementation
+	matches, err := searchFilesWithRegex("test", tempDir, "")
+	require.NoError(t, err)
+	require.Len(t, matches, 2)
+
+	// Newer file should come first (sorted by mod time descending)
+	require.Equal(t, file2, matches[0].path, "newer file should be first")
+	require.Equal(t, file1, matches[1].path, "older file should be second")
 }

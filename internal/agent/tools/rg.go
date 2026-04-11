@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os/exec"
+	"runtime"
 	"sync"
 
 	"github.com/charmbracelet/crush/internal/log"
@@ -25,7 +26,15 @@ func getRgCmd(ctx context.Context, globPattern string) *exec.Cmd {
 	if name == "" {
 		return nil
 	}
-	args := []string{"--files", "-L", "--null"}
+	// Note: -L (--follow) is not used on Windows due to historical
+	// bugs in ripgrep < 0.8.1. On Windows, symlinks have different
+	// semantics and the -L flag can cause issues.
+	var args []string
+	if runtime.GOOS == "windows" {
+		args = []string{"--files", "--null"}
+	} else {
+		args = []string{"--files", "-L", "--null"}
+	}
 	if globPattern != "" {
 		args = append(args, "--glob", globPattern)
 	}
@@ -37,8 +46,8 @@ func getRgSearchCmd(ctx context.Context, pattern, path, include string) *exec.Cm
 	if name == "" {
 		return nil
 	}
-	// Use -n to show line numbers, -0 for null separation to handle Windows paths
-	args := []string{"--json", "-H", "-n", "-0", pattern}
+	// Use -n to show line numbers. Note: -0 is not needed with --json mode.
+	args := []string{"--json", "-H", "-n", pattern}
 	if include != "" {
 		args = append(args, "--glob", include)
 	}
