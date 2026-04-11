@@ -120,3 +120,31 @@ func TestShouldExcludeFileCommonPatterns(t *testing.T) {
 		require.True(t, ShouldExcludeFile(tempDir, dir), "Expected %s to be ignored by common patterns", filepath.Base(dir))
 	}
 }
+
+func TestShouldExcludeFileGitCoreExcludesFile(t *testing.T) {
+	tempDir := t.TempDir()
+	xdgConfigDir := filepath.Join(tempDir, "xdg")
+	excludesFile := filepath.Join(tempDir, "global-ignore")
+
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(xdgConfigDir, "git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(xdgConfigDir, "git", "config"), []byte("[core]\n\texcludesFile = "+filepath.ToSlash(excludesFile)+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(excludesFile, []byte("global_ignored/\n"), 0o644))
+
+	globalIgnored := filepath.Join(tempDir, "global_ignored")
+	normalDir := filepath.Join(tempDir, "normal")
+	require.NoError(t, os.MkdirAll(globalIgnored, 0o755))
+	require.NoError(t, os.MkdirAll(normalDir, 0o755))
+
+	oldGitGlobalIgnorePatterns := gitGlobalIgnorePatterns
+	oldCrushGlobalIgnorePatterns := crushGlobalIgnorePatterns
+	gitGlobalIgnorePatterns = newGitGlobalIgnorePatternsLoader()
+	crushGlobalIgnorePatterns = newCrushGlobalIgnorePatternsLoader()
+	t.Cleanup(func() {
+		gitGlobalIgnorePatterns = oldGitGlobalIgnorePatterns
+		crushGlobalIgnorePatterns = oldCrushGlobalIgnorePatterns
+	})
+
+	require.True(t, ShouldExcludeFile(tempDir, globalIgnored), "Expected global_ignored to be ignored by git core.excludesfile")
+	require.False(t, ShouldExcludeFile(tempDir, normalDir), "Expected normal directory to not be ignored")
+}

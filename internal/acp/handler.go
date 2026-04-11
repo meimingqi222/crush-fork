@@ -317,7 +317,9 @@ loop:
 				case event := <-msgSub:
 					drained = true
 					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleMessageEvent(params.SessionID, event.Payload, readBytes)
+						h.handleMessageEvent(event.Payload, readBytes, func(update SessionUpdate) {
+							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+						})
 					}
 				default:
 				}
@@ -326,7 +328,9 @@ loop:
 				case event := <-sessionSub:
 					drained = true
 					if event.Payload.ID == params.SessionID {
-						h.handleSessionEvent(params.SessionID, event)
+						h.handleSessionEvent(event, func(update SessionUpdate) {
+							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+						})
 						continue
 					}
 					if event.Payload.ParentSessionID == params.SessionID {
@@ -339,7 +343,9 @@ loop:
 				case event := <-runtimeSub:
 					drained = true
 					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleToolRuntimeEvent(params.SessionID, event, runtimeSnapshotHashes)
+						h.handleToolRuntimeEvent(event, runtimeSnapshotHashes, func(update SessionUpdate) {
+							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+						})
 					}
 				default:
 				}
@@ -348,7 +354,9 @@ loop:
 				case event := <-timelineSub:
 					drained = true
 					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleTimelineEvent(params.SessionID, event)
+						h.handleTimelineEvent(event, func(update SessionUpdate) {
+							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+						})
 					}
 				default:
 				}
@@ -363,11 +371,15 @@ loop:
 			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, msg.SessionID, trackedSessionIDs) {
 				continue
 			}
-			h.handleMessageEvent(params.SessionID, msg, readBytes)
+			h.handleMessageEvent(msg, readBytes, func(update SessionUpdate) {
+				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+			})
 
 		case event := <-sessionSub:
 			if event.Payload.ID == params.SessionID {
-				h.handleSessionEvent(params.SessionID, event)
+				h.handleSessionEvent(event, func(update SessionUpdate) {
+					h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+				})
 				continue
 			}
 			if event.Payload.ParentSessionID == params.SessionID {
@@ -378,13 +390,17 @@ loop:
 			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
 				continue
 			}
-			h.handleToolRuntimeEvent(params.SessionID, event, runtimeSnapshotHashes)
+			h.handleToolRuntimeEvent(event, runtimeSnapshotHashes, func(update SessionUpdate) {
+				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+			})
 
 		case event := <-timelineSub:
 			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
 				continue
 			}
-			h.handleTimelineEvent(params.SessionID, event)
+			h.handleTimelineEvent(event, func(update SessionUpdate) {
+				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
+			})
 
 		case <-ctx.Done():
 			stopReason = StopReasonCancelled
@@ -395,7 +411,7 @@ loop:
 }
 
 // handleMessageEvent converts a message update into session/update notifications.
-func (h *Handler) handleMessageEvent(sessionID string, msg message.Message, readBytes map[string]int) {
+func (h *Handler) handleMessageEvent(msg message.Message, readBytes map[string]int, send func(SessionUpdate)) {
 	switch msg.Role {
 	case message.Assistant:
 		// Stream text content as agent_message_chunk.
@@ -404,7 +420,7 @@ func (h *Handler) handleMessageEvent(sessionID string, msg message.Message, read
 		if len(content) > prev {
 			chunk := content[prev:]
 			readBytes[msg.ID] = len(content)
-			h.sendUpdate(sessionID, SessionUpdate{
+			send(SessionUpdate{
 				SessionUpdate: SessionUpdateAgentMessageChunk,
 				Content:       TextBlock(chunk),
 			})
@@ -416,7 +432,7 @@ func (h *Handler) handleMessageEvent(sessionID string, msg message.Message, read
 		if len(thinking) > prevThink {
 			chunk := thinking[prevThink:]
 			readBytes[msg.ID+":think"] = len(thinking)
-			h.sendUpdate(sessionID, SessionUpdate{
+			send(SessionUpdate{
 				SessionUpdate: SessionUpdateAgentThoughtChunk,
 				Content:       TextBlock(chunk),
 			})
@@ -431,7 +447,7 @@ func (h *Handler) handleMessageEvent(sessionID string, msg message.Message, read
 				if tc.Finished {
 					status = ToolCallStatusCompleted
 				}
-				h.sendUpdate(sessionID, SessionUpdate{
+				send(SessionUpdate{
 					SessionUpdate: SessionUpdateToolCall,
 					ToolCallID:    tc.ID,
 					Title:         tc.Name,
@@ -443,7 +459,7 @@ func (h *Handler) handleMessageEvent(sessionID string, msg message.Message, read
 				finishedKey := msg.ID + ":tc:" + tc.ID + ":done"
 				if _, done := readBytes[finishedKey]; !done {
 					readBytes[finishedKey] = 1
-					h.sendUpdate(sessionID, SessionUpdate{
+					send(SessionUpdate{
 						SessionUpdate: SessionUpdateToolCallUpdate,
 						ToolCallID:    tc.ID,
 						Title:         tc.Name,
@@ -459,13 +475,13 @@ func (h *Handler) handleMessageEvent(sessionID string, msg message.Message, read
 			key := msg.ID + ":tr:" + tr.ToolCallID
 			if _, seen := readBytes[key]; !seen {
 				readBytes[key] = 1
-				h.sendUpdate(sessionID, h.sessionUpdateFromToolResult(tr))
+				send(h.sessionUpdateFromToolResult(tr))
 			}
 		}
 	}
 }
 
-func (h *Handler) handleToolRuntimeEvent(sessionID string, event pubsub.Event[toolruntime.State], snapshotHashes map[string][32]byte) {
+func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], snapshotHashes map[string][32]byte, send func(SessionUpdate)) {
 	if event.Type == pubsub.DeletedEvent {
 		return
 	}
@@ -487,7 +503,7 @@ func (h *Handler) handleToolRuntimeEvent(sessionID string, event pubsub.Event[to
 		}
 		snapshotHashes[state.ToolCallID] = hash
 
-		h.sendUpdate(sessionID, SessionUpdate{
+		send(SessionUpdate{
 			SessionUpdate:  SessionUpdateToolCallUpdate,
 			ToolCallID:     state.ToolCallID,
 			Title:          state.ToolName,
@@ -513,7 +529,7 @@ func (h *Handler) handleToolRuntimeEvent(sessionID string, event pubsub.Event[to
 		status = ToolCallStatusCanceled
 	}
 
-	h.sendUpdate(sessionID, SessionUpdate{
+	send(SessionUpdate{
 		SessionUpdate:  SessionUpdateToolCallUpdate,
 		ToolCallID:     state.ToolCallID,
 		Title:          state.ToolName,
@@ -525,20 +541,20 @@ func (h *Handler) handleToolRuntimeEvent(sessionID string, event pubsub.Event[to
 }
 
 // handleSessionEvent converts a session update into session/update notifications.
-func (h *Handler) handleSessionEvent(sessionID string, event pubsub.Event[session.Session]) {
+func (h *Handler) handleSessionEvent(event pubsub.Event[session.Session], send func(SessionUpdate)) {
 	sess := event.Payload
-	h.sendUpdate(sessionID, SessionUpdate{
+	send(SessionUpdate{
 		SessionUpdate: SessionUpdateSessionInfoUpdate,
 		Title:         sess.Title,
 		UpdatedAt:     time.Unix(sess.UpdatedAt, 0).UTC().Format(time.RFC3339),
 	})
 }
 
-func (h *Handler) handleTimelineEvent(sessionID string, event pubsub.Event[timeline.Event]) {
+func (h *Handler) handleTimelineEvent(event pubsub.Event[timeline.Event], send func(SessionUpdate)) {
 	if event.Type == pubsub.DeletedEvent {
 		return
 	}
-	h.sendUpdate(sessionID, SessionUpdate{
+	send(SessionUpdate{
 		SessionUpdate: SessionUpdateTimelineEvent,
 		TimelineEvent: timelineEventPayload(event.Payload),
 	})

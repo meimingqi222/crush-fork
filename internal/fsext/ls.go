@@ -1,6 +1,7 @@
 package fsext
 
 import (
+	"cmp"
 	"errors"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/charlievieth/fastwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/home"
+	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
@@ -80,20 +82,58 @@ var commonIgnorePatterns = sync.OnceValue(func() []gitignore.Pattern {
 	return parsePatterns(patterns, nil)
 })
 
-var homeIgnorePatterns = sync.OnceValue(func() []gitignore.Pattern {
-	homeDir := home.Dir()
-	var lines []string
-	for _, name := range []string{
-		filepath.Join(homeDir, ".gitignore"),
-		filepath.Join(homeDir, ".config", "git", "ignore"),
-		filepath.Join(homeDir, ".config", "crush", "ignore"),
-	} {
-		if bts, err := os.ReadFile(name); err == nil {
-			lines = append(lines, strings.Split(string(bts), "\n")...)
+var gitGlobalIgnorePatterns = newGitGlobalIgnorePatternsLoader()
+
+var crushGlobalIgnorePatterns = newCrushGlobalIgnorePatternsLoader()
+
+func newGitGlobalIgnorePatternsLoader() func() []gitignore.Pattern {
+	return sync.OnceValue(func() []gitignore.Pattern {
+		cfg, err := gitconfig.LoadConfig(gitconfig.GlobalScope)
+		if err != nil {
+			slog.Debug("Failed to load global git config", "error", err)
+			return nil
 		}
-	}
-	return parsePatterns(lines, nil)
-})
+
+		configPath := cmp.Or(
+			os.Getenv("XDG_CONFIG_HOME"),
+			filepath.Join(home.Dir(), ".config"),
+		)
+		excludesFilePath := cmp.Or(
+			cfg.Raw.Section("core").Options.Get("excludesfile"),
+			filepath.Join(configPath, "git", "ignore"),
+		)
+		excludesFilePath = home.Long(excludesFilePath)
+
+		bts, err := os.ReadFile(excludesFilePath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Debug("Failed to read git global excludes file", "path", excludesFilePath, "error", err)
+			}
+			return nil
+		}
+
+		return parsePatterns(strings.Split(string(bts), "\n"), nil)
+	})
+}
+
+func newCrushGlobalIgnorePatternsLoader() func() []gitignore.Pattern {
+	return sync.OnceValue(func() []gitignore.Pattern {
+		configPath := cmp.Or(
+			os.Getenv("XDG_CONFIG_HOME"),
+			filepath.Join(home.Dir(), ".config"),
+		)
+		name := filepath.Join(configPath, "crush", "ignore")
+		bts, err := os.ReadFile(name)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Debug("Failed to read crush global ignore file", "path", name, "error", err)
+			}
+			return nil
+		}
+
+		return parsePatterns(strings.Split(string(bts), "\n"), nil)
+	})
+}
 
 // parsePatterns parses gitignore pattern strings into Pattern objects.
 // domain is the path components where the patterns are defined (nil for global).
@@ -169,8 +209,9 @@ func (dl *directoryLister) getCombinedMatcher(dir string) gitignore.Matcher {
 		// Add common patterns first (lowest priority).
 		allPatterns = append(allPatterns, commonIgnorePatterns()...)
 
-		// Add home ignore patterns.
-		allPatterns = append(allPatterns, homeIgnorePatterns()...)
+		// Add global ignore patterns.
+		allPatterns = append(allPatterns, gitGlobalIgnorePatterns()...)
+		allPatterns = append(allPatterns, crushGlobalIgnorePatterns()...)
 
 		// Collect patterns from root to this directory.
 		relDir, _ := filepath.Rel(dl.rootPath, dir)

@@ -169,10 +169,10 @@ func TestYourFunction(t *testing.T) {
 ## Creating Pull Requests
 
 - **Default target**: When asked to create a PR, always create it in the fork
-  repository (`meimingqi222/crush`), NOT the upstream repository
+  repository (`meimingqi222/crush-fork`), NOT the upstream repository
   (`charmbracelet/crush`).
 - PRs should be from a feature branch to `main` within the fork.
-- Use `gh pr create --repo meimingqi222/crush` to ensure the PR is created in
+- Use `gh pr create --repo meimingqi222/crush-fork` to ensure the PR is created in
   the correct repository.
 
 ## Working on the TUI (UI)
