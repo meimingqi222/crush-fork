@@ -370,6 +370,63 @@ func TestCrushLogs_PartialTrailingLine(t *testing.T) {
 	}
 }
 
+func TestCrushLogs_ChunkBoundaryPreservesSplitLines(t *testing.T) {
+	t.Parallel()
+
+	entries := []map[string]any{
+		makeLogEntry("INFO", "Entry 1", "app.go", 1, map[string]any{
+			"payload": strings.Repeat("a", 5000),
+		}),
+		makeLogEntry("INFO", "Entry 2", "app.go", 2, map[string]any{
+			"payload": strings.Repeat("b", 5000),
+		}),
+	}
+
+	logFile := createTestLogFile(t, entries)
+
+	readEntries, err := readLastLines(logFile, 10)
+	require.NoError(t, err)
+	require.Len(t, readEntries, 2)
+	require.Equal(t, "Entry 1", readEntries[0]["msg"])
+	require.Equal(t, "Entry 2", readEntries[1]["msg"])
+}
+
+func TestCrushLogs_ChunkBoundaryWithoutTrailingNewline(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	logFile := filepath.Join(tempDir, "crush.log")
+
+	file, err := os.Create(logFile)
+	require.NoError(t, err)
+
+	entry1 := makeLogEntry("INFO", "Entry 1", "app.go", 1, map[string]any{
+		"payload": strings.Repeat("a", 5000),
+	})
+	entry2 := makeLogEntry("INFO", "Entry 2", "app.go", 2, map[string]any{
+		"payload": strings.Repeat("b", 5000),
+	})
+
+	line1, err := json.Marshal(entry1)
+	require.NoError(t, err)
+	line2, err := json.Marshal(entry2)
+	require.NoError(t, err)
+
+	_, err = file.Write(line1)
+	require.NoError(t, err)
+	_, err = file.WriteString("\n")
+	require.NoError(t, err)
+	_, err = file.Write(line2)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	readEntries, err := readLastLines(logFile, 10)
+	require.NoError(t, err)
+	require.Len(t, readEntries, 2)
+	require.Equal(t, "Entry 1", readEntries[0]["msg"])
+	require.Equal(t, "Entry 2", readEntries[1]["msg"])
+}
+
 func TestCrushLogs_ValueQuoting(t *testing.T) {
 	t.Parallel()
 	entries := []map[string]any{

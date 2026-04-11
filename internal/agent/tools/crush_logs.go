@@ -149,18 +149,20 @@ func readLastLines(filePath string, n int) ([]map[string]any, error) {
 			return nil, err
 		}
 
-		// Combine with remainder from previous (earlier) chunk.
+		// Combine with the partial first line carried from the later chunk.
 		data := append(chunk, remainder...)
 
-		// Split into lines (without the final incomplete line if any).
+		// Split into lines. When reading backwards, the first line is partial
+		// whenever the chunk does not start at the beginning of the file.
 		lines := splitLines(data)
 
-		// Keep the incomplete line for next iteration.
-		if len(data) > 0 && data[len(data)-1] != '\n' {
-			remainder = lines[len(lines)-1]
-			lines = lines[:len(lines)-1]
+		// Carry the partial first line into the next iteration so it can be
+		// joined with the preceding chunk.
+		if chunkStart > 0 && len(lines) > 0 {
+			remainder = append([]byte(nil), lines[0]...)
+			lines = lines[1:]
 		} else {
-			remainder = nil
+			remainder = remainder[:0]
 		}
 
 		// Parse lines from end to start to get most recent first.
@@ -184,16 +186,6 @@ func readLastLines(filePath string, n int) ([]map[string]any, error) {
 		}
 
 		pos = chunkStart
-	}
-
-	// Handle final remainder.
-	if len(remainder) > 0 && len(remainder) <= maxLogLineSize {
-		var entry map[string]any
-		if err := json.Unmarshal(remainder, &entry); err == nil {
-			if len(entries) < n {
-				entries = append(entries, entry)
-			}
-		}
 	}
 
 	// Reverse to get chronological order (oldest first).
