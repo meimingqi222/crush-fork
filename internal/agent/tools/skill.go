@@ -35,7 +35,7 @@ func NewSkillTool(skillsPaths []string) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("skill name is required"), nil
 			}
 
-			// Discover skills
+			// Discover skills.
 			if len(skillsPaths) == 0 {
 				return fantasy.NewTextErrorResponse("no skills paths configured"), nil
 			}
@@ -45,7 +45,7 @@ func NewSkillTool(skillsPaths []string) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("no skills found"), nil
 			}
 
-			// Find the requested skill
+			// Find the requested skill.
 			var targetSkill *skills.Skill
 			for _, s := range discoveredSkills {
 				if s.Name == params.Name {
@@ -62,25 +62,25 @@ func NewSkillTool(skillsPaths []string) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("skill %q not found. Available skills: %s", params.Name, strings.Join(availableNames, ", "))), nil
 			}
 
-			// Read the full skill content
+			// Read the full skill content.
 			content, err := os.ReadFile(targetSkill.SkillFilePath)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to read skill file: %s", err)), nil
 			}
 
-			// Get the instruction part (after frontmatter)
+			// Get the instruction part (after frontmatter).
 			instructions := targetSkill.Instructions
 			if instructions == "" {
-				// Fallback to full content if instructions not parsed
+				// Fallback to full content if instructions not parsed.
 				instructions = string(content)
 			}
 
-			// Substitute arguments
+			// Substitute arguments.
 			if params.Args != "" {
 				instructions = skills.SubstituteArguments(instructions, params.Args, targetSkill.Arguments)
 			}
 
-			// Build the response with skill metadata
+			// Build the response with skill metadata.
 			var response strings.Builder
 			response.WriteString(fmt.Sprintf("Skill: %s\n", targetSkill.Name))
 			response.WriteString(fmt.Sprintf("Description: %s\n", targetSkill.Description))

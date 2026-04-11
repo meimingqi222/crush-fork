@@ -439,12 +439,12 @@ func (s *permissionService) isToolAllowedBySkill(toolName, action string) bool {
 	s.skillContextMu.RLock()
 	defer s.skillContextMu.RUnlock()
 
-	// No skill context active, allow all tools
+	// No skill context active, allow all tools.
 	if s.skillName == "" || len(s.skillAllowed) == 0 {
 		return true
 	}
 
-	// Check if the tool matches any allowed pattern
+	// Check if the tool matches any allowed pattern.
 	for _, pattern := range s.skillAllowed {
 		if matchesToolPattern(pattern, toolName, action) {
 			return true
@@ -465,14 +465,17 @@ func matchesToolPattern(pattern, toolName, action string) bool {
 		return true
 	}
 
-	// Pattern with action: ToolName(action) or ToolName(prefix:*)
+	// Pattern with action: ToolName(action) or ToolName(prefix:*).
 	if idx := strings.IndexByte(pattern, '('); idx > 0 {
 		patternTool := pattern[:idx]
 		if patternTool != toolName {
 			return false
 		}
 
-		// Extract action pattern
+		// Extract action pattern.
+		if !strings.HasSuffix(pattern, ")") {
+			return false
+		}
 		actionPattern := pattern[idx+1 : len(pattern)-1] // Remove trailing ')'
 
 		// Wildcard suffix: prefix:*
@@ -481,7 +484,7 @@ func matchesToolPattern(pattern, toolName, action string) bool {
 			return strings.HasPrefix(action, prefix)
 		}
 
-		// Exact action match
+		// Exact action match.
 		return actionPattern == action
 	}
 

@@ -296,14 +296,20 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 			return nil
 		}
 
-		// Use doublestar for glob matching (supports **, character classes, etc.)
+		// Use doublestar for glob matching (supports **, character classes, etc.).
 		if include != "" {
 			relPath, relErr := filepath.Rel(rootPath, path)
 			if relErr != nil {
 				return nil
 			}
 			relPath = filepath.ToSlash(relPath)
-			matched, matchErr := doublestar.Match(filepath.ToSlash(include), relPath)
+			// Ripgrep treats patterns without path separator as basename matches at any depth.
+			// Mirror this by prepending **/ for patterns without /.
+			includePattern := filepath.ToSlash(include)
+			if !strings.Contains(includePattern, "/") {
+				includePattern = "**/" + includePattern
+			}
+			matched, matchErr := doublestar.Match(includePattern, relPath)
 			if matchErr != nil || !matched {
 				return nil
 			}
