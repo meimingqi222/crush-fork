@@ -95,6 +95,16 @@ const pasteColsThreshold = 1000
 // Session details panel max height.
 const sessionDetailsMaxHeight = 20
 
+// TextareaMaxHeight is the maximum height of the prompt textarea.
+const TextareaMaxHeight = 15
+
+// editorHeightMargin is the vertical margin added to the textarea height to
+// account for the attachments row and bottom spacing.
+const editorHeightMargin = 2
+
+// TextareaMinHeight is the minimum height of the prompt textarea.
+const TextareaMinHeight = 3
+
 // uiFocusState represents the current focus state of the UI.
 type uiFocusState uint8
 
@@ -351,6 +361,9 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 	ta.ShowLineNumbers = false
 	ta.CharLimit = -1
 	ta.SetVirtualCursor(false)
+	ta.DynamicHeight = true
+	ta.MinHeight = TextareaMinHeight
+	ta.MaxHeight = TextareaMaxHeight
 	ta.Focus()
 
 	ch := NewChat(com)
@@ -599,11 +612,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 		if m.session != nil && m.session.Kind == session.KindHandoff && m.session.MessageCount == 0 && strings.TrimSpace(m.session.HandoffDraftPrompt) != "" {
+			prevHeight := m.textarea.Height()
 			m.textarea.SetValue(m.session.HandoffDraftPrompt)
 			m.textarea.MoveToEnd()
-			var cmd tea.Cmd
-			m.textarea, cmd = m.textarea.Update(nil)
-			if cmd != nil {
+			if cmd := m.updateTextareaWithPrevHeight(nil, prevHeight); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			if m.attachments != nil {
@@ -1010,11 +1022,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case openEditorMsg:
-		var cmd tea.Cmd
+		prevHeight := m.textarea.Height()
 		m.textarea.SetValue(msg.Text)
 		m.textarea.MoveToEnd()
-		m.textarea, cmd = m.textarea.Update(msg)
-		if cmd != nil {
+		if cmd := m.updateTextareaWithPrevHeight(msg, prevHeight); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case message.Attachment:
@@ -2891,15 +2902,22 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 
 			case key.Matches(msg, m.keyMap.Editor.SendMessage):
+				prevHeight := m.textarea.Height()
 				value := m.textarea.Value()
 				if before, ok := strings.CutSuffix(value, "\\"); ok {
 					// If the last character is a backslash, remove it and add a newline.
 					m.textarea.SetValue(before)
+					if cmd := m.handleTextareaHeightChange(prevHeight); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 					break
 				}
 
 				// Otherwise, send the message
 				m.textarea.Reset()
+				if cmd := m.handleTextareaHeightChange(prevHeight); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 
 				value = strings.TrimSpace(value)
 				if value == "exit" || value == "quit" {
@@ -2945,11 +2963,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Editor.Newline):
+				prevHeight := m.textarea.Height()
 				m.textarea.InsertRune('\n')
 				m.closeCompletions()
-				ta, cmd := m.textarea.Update(msg)
-				m.textarea = ta
-				cmds = append(cmds, cmd)
+				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
 			case key.Matches(msg, m.keyMap.Editor.HistoryPrev):
 				cmd := m.handleHistoryUp(msg)
 				if cmd != nil {
@@ -2998,9 +3015,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					m.updateLayoutAndSize()
 				}
 
-				ta, cmd := m.textarea.Update(msg)
-				m.textarea = ta
-				cmds = append(cmds, cmd)
+				prevHeight := m.textarea.Height()
+				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
 
 				// Any text modification becomes the current draft.
 				m.updateHistoryDraft(curValue)
@@ -3564,17 +3580,53 @@ func (m *UI) updateLayoutAndSize() {
 	if m.state == uiChat {
 		if m.forceCompactMode {
 			m.isCompact = true
-			return
-		}
-		if m.width < compactModeWidthBreakpoint || m.height < compactModeHeightBreakpoint {
+		} else if m.width < compactModeWidthBreakpoint || m.height < compactModeHeightBreakpoint {
 			m.isCompact = true
 		} else {
 			m.isCompact = false
 		}
 	}
 
+	// First pass sizes components from the current textarea height.
 	m.layout = m.generateLayout(m.width, m.height)
+	prevHeight := m.textarea.Height()
 	m.updateSize()
+
+	// SetWidth can change textarea height due to soft-wrap recalculation.
+	// If that happens, run one reconciliation pass with the new height.
+	if m.textarea.Height() != prevHeight {
+		m.layout = m.generateLayout(m.width, m.height)
+		m.updateSize()
+	}
+}
+
+// handleTextareaHeightChange recalculates layout after the textarea grows or
+// shrinks. When the chat is following new output it keeps the viewport pinned
+// to the bottom.
+func (m *UI) handleTextareaHeightChange(prevHeight int) tea.Cmd {
+	if m.textarea.Height() == prevHeight {
+		return nil
+	}
+	m.updateLayoutAndSize()
+	if m.state == uiChat && m.chat.Follow() {
+		return m.chat.ScrollToBottomAndAnimate()
+	}
+	return nil
+}
+
+// updateTextarea updates the textarea and reconciles layout if its height
+// changed as a result.
+func (m *UI) updateTextarea(msg tea.Msg) tea.Cmd {
+	return m.updateTextareaWithPrevHeight(msg, m.textarea.Height())
+}
+
+// updateTextareaWithPrevHeight updates the textarea after callers have already
+// mutated its content and need height reconciliation against the previous
+// height.
+func (m *UI) updateTextareaWithPrevHeight(msg tea.Msg, prevHeight int) tea.Cmd {
+	ta, cmd := m.textarea.Update(msg)
+	m.textarea = ta
+	return tea.Batch(cmd, m.handleTextareaHeightChange(prevHeight))
 }
 
 // updateSize updates the sizes of UI components based on the current layout.
@@ -3583,11 +3635,8 @@ func (m *UI) updateSize() {
 	m.status.SetWidth(m.layout.status.Dx())
 
 	m.chat.SetSize(m.layout.main.Dx(), m.layout.main.Dy())
+	m.textarea.MaxHeight = TextareaMaxHeight
 	m.textarea.SetWidth(m.layout.editor.Dx())
-	// TODO: Abstract the textarea and attachments into a single editor
-	// component so we don't have to manually account for the attachments
-	// height here.
-	m.textarea.SetHeight(m.layout.editor.Dy() - 2) // Account for top margin/attachments and bottom margin
 	m.renderPills()
 
 	// Handle different app states
@@ -3607,8 +3656,8 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 
 	// The help height
 	helpHeight := 1
-	// The editor height
-	editorHeight := 5
+	// The editor height includes the dynamic textarea plus editor margins.
+	editorHeight := m.textarea.Height() + editorHeightMargin
 	// The sidebar width
 	sidebarWidth := 30
 	// The header height
@@ -3923,11 +3972,13 @@ func (m *UI) insertCompletionText(text string) bool {
 // insertFileCompletion inserts the selected file path into the textarea,
 // replacing the @query, and adds the file as an attachment.
 func (m *UI) insertFileCompletion(path string) tea.Cmd {
+	prevHeight := m.textarea.Height()
 	if !m.insertCompletionText(path) {
 		return nil
 	}
+	heightCmd := m.handleTextareaHeightChange(prevHeight)
 
-	return func() tea.Msg {
+	fileCmd := func() tea.Msg {
 		absPath, _ := filepath.Abs(path)
 
 		if m.hasSession() {
@@ -3958,6 +4009,7 @@ func (m *UI) insertFileCompletion(path string) tea.Cmd {
 			Content:  content,
 		}
 	}
+	return tea.Batch(heightCmd, fileCmd)
 }
 
 // insertMCPResourceCompletion inserts the selected resource into the textarea,
@@ -3965,11 +4017,13 @@ func (m *UI) insertFileCompletion(path string) tea.Cmd {
 func (m *UI) insertMCPResourceCompletion(item completions.ResourceCompletionValue) tea.Cmd {
 	displayText := cmp.Or(item.Title, item.URI)
 
+	prevHeight := m.textarea.Height()
 	if !m.insertCompletionText(displayText) {
 		return nil
 	}
+	heightCmd := m.handleTextareaHeightChange(prevHeight)
 
-	return func() tea.Msg {
+	resourceCmd := func() tea.Msg {
 		contents, err := mcp.ReadResource(
 			context.Background(),
 			m.com.Store(),
@@ -4010,6 +4064,7 @@ func (m *UI) insertMCPResourceCompletion(item completions.ResourceCompletionValu
 			Content:  data,
 		}
 	}
+	return tea.Batch(heightCmd, resourceCmd)
 }
 
 // completionsPosition returns the X and Y position for the completions popup.
@@ -4862,9 +4917,8 @@ func (m *UI) handleClipboardFallback(msg clipboardFallbackMsg) tea.Cmd {
 		return true
 	}
 	if !allExistsAndValid() {
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg.pasteMsg)
-		return cmd
+		prevHeight := m.textarea.Height()
+		return m.updateTextareaWithPrevHeight(msg.pasteMsg, prevHeight)
 	}
 
 	var cmds []tea.Cmd

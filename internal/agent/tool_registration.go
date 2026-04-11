@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 
 	"charm.land/fantasy"
@@ -95,6 +96,8 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		agenttools.NewSourcegraphTool(nil),
 		agenttools.NewHistorySearchTool(c.history),
+		agenttools.NewCrushInfoTool(c.cfg, c.lspManager),
+		agenttools.NewCrushLogsTool(filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
 		agenttools.NewLongTermMemoryTool(c.longTermMemory, c.permissions, c.cfg.WorkingDir()),
 		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewSendMessageTool(c.mailbox),

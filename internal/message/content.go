@@ -466,6 +466,7 @@ func PromptWithTextAttachments(prompt string, attachments []Attachment) string {
 
 func (m *Message) ToAIMessage() []fantasy.Message {
 	var messages []fantasy.Message
+	metadata := newFantasyMessageMetadata(*m)
 	switch m.Role {
 	case System:
 		if _, ok := ParseAutoModePrompt(*m); ok {
@@ -475,7 +476,12 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		if text == "" {
 			return nil
 		}
-		messages = append(messages, fantasy.NewSystemMessage(text))
+		messages = append(messages, fantasy.Message{
+			Role: fantasy.MessageRoleSystem,
+			Content: attachFantasyMessageMetadata([]fantasy.MessagePart{
+				fantasy.TextPart{Text: text},
+			}, metadata),
+		})
 	case User:
 		var parts []fantasy.MessagePart
 		text := strings.TrimSpace(m.Content().Text)
@@ -505,6 +511,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				MediaType: content.MIMEType,
 			})
 		}
+		parts = attachFantasyMessageMetadata(parts, metadata)
 		messages = append(messages, fantasy.Message{
 			Role:    fantasy.MessageRoleUser,
 			Content: parts,
@@ -547,6 +554,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				ProviderExecuted: call.ProviderExecuted,
 			})
 		}
+		parts = attachFantasyMessageMetadata(parts, metadata)
 		messages = append(messages, fantasy.Message{
 			Role:    fantasy.MessageRoleAssistant,
 			Content: parts,
@@ -574,6 +582,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				Output:     content,
 			})
 		}
+		parts = attachFantasyMessageMetadata(parts, metadata)
 		messages = append(messages, fantasy.Message{
 			Role:    fantasy.MessageRoleTool,
 			Content: parts,
@@ -588,8 +597,10 @@ func FromFantasyMessages(msgs []fantasy.Message) []Message {
 	result := make([]Message, 0, len(msgs))
 	for _, msg := range msgs {
 		m := Message{
-			ID:      "",
-			Parts:   make([]ContentPart, 0),
+			Parts: make([]ContentPart, 0),
+		}
+		if metadata, ok := fantasyMessageMetadataFromMessage(msg); ok {
+			applyFantasyMessageMetadata(&m, metadata)
 		}
 		switch msg.Role {
 		case fantasy.MessageRoleSystem:

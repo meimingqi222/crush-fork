@@ -219,6 +219,148 @@ func TestFromFantasyMessages_RoundTrip(t *testing.T) {
 	require.Len(t, result[2].ToolResults(), 1)
 }
 
+func TestFromFantasyMessages_RoundTripPreservesMetadata(t *testing.T) {
+	t.Parallel()
+
+	original := []Message{
+		{
+			ID:        "user-1",
+			SessionID: "session-1",
+			Role:      User,
+			Parts: []ContentPart{
+				TextContent{Text: "hello"},
+			},
+			Model:            "gpt-5.4",
+			Provider:         "openai",
+			CreatedAt:        100,
+			UpdatedAt:        110,
+			IsSummaryMessage: true,
+		},
+		{
+			ID:        "assistant-1",
+			SessionID: "session-1",
+			Role:      Assistant,
+			Parts: []ContentPart{
+				TextContent{Text: "hi"},
+				ToolCall{
+					ID:    "call-1",
+					Name:  "bash",
+					Input: `{"command": "ls"}`,
+				},
+			},
+			Model:     "gpt-5.4",
+			Provider:  "openai",
+			CreatedAt: 120,
+			UpdatedAt: 130,
+		},
+		{
+			ID:        "tool-1",
+			SessionID: "session-1",
+			Role:      Tool,
+			Parts: []ContentPart{
+				ToolResult{
+					ToolCallID: "call-1",
+					Name:       "bash",
+					Content:    "file1.txt\nfile2.txt",
+				},
+			},
+			Model:     "gpt-5.4",
+			Provider:  "openai",
+			CreatedAt: 140,
+			UpdatedAt: 150,
+		},
+	}
+
+	fantasyMsgs := make([]fantasy.Message, 0, len(original))
+	for _, m := range original {
+		fantasyMsgs = append(fantasyMsgs, m.ToAIMessage()...)
+	}
+
+	result := FromFantasyMessages(fantasyMsgs)
+
+	require.Len(t, result, len(original))
+	for i := range original {
+		require.Equal(t, original[i].ID, result[i].ID)
+		require.Equal(t, original[i].SessionID, result[i].SessionID)
+		require.Equal(t, original[i].Model, result[i].Model)
+		require.Equal(t, original[i].Provider, result[i].Provider)
+		require.Equal(t, original[i].CreatedAt, result[i].CreatedAt)
+		require.Equal(t, original[i].UpdatedAt, result[i].UpdatedAt)
+		require.Equal(t, original[i].IsSummaryMessage, result[i].IsSummaryMessage)
+	}
+}
+
+func TestFromFantasyMessages_PreservesIDsAfterMessageProviderOptionsCleared(t *testing.T) {
+	t.Parallel()
+
+	original := []Message{
+		{
+			ID:        "msg-user",
+			SessionID: "session-1",
+			Role:      User,
+			Parts: []ContentPart{
+				TextContent{Text: "hello"},
+			},
+		},
+		{
+			ID:        "msg-assistant",
+			SessionID: "session-1",
+			Role:      Assistant,
+			Parts: []ContentPart{
+				TextContent{Text: "working"},
+				ToolCall{
+					ID:    "call-1",
+					Name:  "bash",
+					Input: `{"command":"pwd"}`,
+				},
+			},
+		},
+		{
+			ID:        "msg-tool",
+			SessionID: "session-1",
+			Role:      Tool,
+			Parts: []ContentPart{
+				ToolResult{
+					ToolCallID: "call-1",
+					Name:       "bash",
+					Content:    "D:/repo",
+				},
+			},
+		},
+	}
+
+	fantasyMsgs := make([]fantasy.Message, 0, len(original))
+	for _, m := range original {
+		fantasyMsgs = append(fantasyMsgs, m.ToAIMessage()...)
+	}
+	for i := range fantasyMsgs {
+		fantasyMsgs[i].ProviderOptions = nil
+	}
+
+	firstPass := FromFantasyMessages(fantasyMsgs)
+	require.Len(t, firstPass, len(original))
+	for i := range original {
+		require.Equal(t, original[i].ID, firstPass[i].ID)
+	}
+
+	// Morph-compact tracks previously compacted messages by original message ID.
+	knownIDs := make(map[string]struct{}, len(firstPass))
+	for _, msg := range firstPass {
+		knownIDs[msg.ID] = struct{}{}
+	}
+
+	secondPass := FromFantasyMessages(fantasyMsgs)
+	require.Len(t, secondPass, len(original))
+
+	matched := 0
+	for _, msg := range secondPass {
+		if _, ok := knownIDs[msg.ID]; ok {
+			matched++
+		}
+	}
+	require.Equal(t, len(original), matched)
+}
+
 func assertAnError(msg string) error {
 	return &testError{msg: msg}
 }

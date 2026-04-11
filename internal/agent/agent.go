@@ -734,12 +734,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			return nil, markNonRetriableError(err)
 		}
 
+		var maxOutputTokens *int64
+		if call.MaxOutputTokens > 0 {
+			maxOutputTokens = &call.MaxOutputTokens
+		}
+
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 			Files:            requestState.Files,
 			Messages:         requestState.History,
 			ProviderOptions:  providerOptions,
-			MaxOutputTokens:  &call.MaxOutputTokens,
+			MaxOutputTokens:  maxOutputTokens,
 			TopP:             call.TopP,
 			Temperature:      call.Temperature,
 			PresencePenalty:  call.PresencePenalty,

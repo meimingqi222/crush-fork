@@ -53,10 +53,11 @@ func main() {
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
 		{
-			Name:    "test-passthrough",
-			Enabled: &enabled,
-			Events:  []hooks.Event{hooks.EventPreToolUse},
-			Type:    hooks.HandlerTypeCommand,
+			Name:      "test-passthrough",
+			Enabled:   &enabled,
+			Events:    []hooks.Event{hooks.EventPreToolUse},
+			Type:      hooks.HandlerTypeCommand,
+			TimeoutMs: 15000,
 			Command: &hooks.CommandConfig{
 				Command:     bin,
 				Passthrough: true,
@@ -84,10 +85,11 @@ func main() { os.Exit(1) }`
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
 		{
-			Name:    "test-fail",
-			Enabled: &enabled,
-			Events:  []hooks.Event{hooks.EventPreToolUse},
-			Type:    hooks.HandlerTypeCommand,
+			Name:      "test-fail",
+			Enabled:   &enabled,
+			Events:    []hooks.Event{hooks.EventPreToolUse},
+			Type:      hooks.HandlerTypeCommand,
+			TimeoutMs: 15000,
 			Command: &hooks.CommandConfig{
 				Command:     bin,
 				Passthrough: true,
@@ -119,10 +121,11 @@ func main() {
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
 		{
-			Name:    "deny-hook",
-			Enabled: &enabled,
-			Events:  []hooks.Event{hooks.EventPreToolUse},
-			Type:    hooks.HandlerTypeCommand,
+			Name:      "deny-hook",
+			Enabled:   &enabled,
+			Events:    []hooks.Event{hooks.EventPreToolUse},
+			Type:      hooks.HandlerTypeCommand,
+			TimeoutMs: 15000,
 			Command: &hooks.CommandConfig{
 				Command: bin,
 			},
@@ -199,18 +202,20 @@ func main() {
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
 		{
-			Name:    "hook1",
-			Enabled: &enabled,
-			Events:  []hooks.Event{hooks.EventPreToolUse},
-			Type:    hooks.HandlerTypeCommand,
-			Command: &hooks.CommandConfig{Command: bin1},
+			Name:      "hook1",
+			Enabled:   &enabled,
+			Events:    []hooks.Event{hooks.EventPreToolUse},
+			Type:      hooks.HandlerTypeCommand,
+			TimeoutMs: 15000,
+			Command:   &hooks.CommandConfig{Command: bin1},
 		},
 		{
-			Name:    "hook2",
-			Enabled: &enabled,
-			Events:  []hooks.Event{hooks.EventPreToolUse},
-			Type:    hooks.HandlerTypeCommand,
-			Command: &hooks.CommandConfig{Command: bin2},
+			Name:      "hook2",
+			Enabled:   &enabled,
+			Events:    []hooks.Event{hooks.EventPreToolUse},
+			Type:      hooks.HandlerTypeCommand,
+			TimeoutMs: 15000,
+			Command:   &hooks.CommandConfig{Command: bin2},
 		},
 	})
 	require.NoError(t, err)
