@@ -284,6 +284,7 @@ type UI struct {
 	// Notification state
 	notifyBackend       notification.Backend
 	notifyWindowFocused bool
+	statusMsgSeq        uint64
 	// custom commands & mcp commands
 	customCommands []commands.CustomCommand
 	mcpPrompts     []commands.MCPPrompt
@@ -1106,14 +1107,21 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.loadSession(msg.sessionID))
 		}
 	case util.InfoMsg:
+		m.statusMsgSeq++
+		currentSeq := m.statusMsgSeq
 		m.status.SetInfoMsg(msg)
+		if msg.Type == util.InfoTypeError {
+			break
+		}
 		ttl := msg.TTL
 		if ttl <= 0 {
 			ttl = DefaultStatusTTL
 		}
-		cmds = append(cmds, clearInfoMsgCmd(ttl))
+		cmds = append(cmds, clearInfoMsgCmd(ttl, currentSeq))
 	case util.ClearStatusMsg:
-		m.status.ClearInfoMsg()
+		if msg.Seq == m.statusMsgSeq {
+			m.status.ClearInfoMsg()
+		}
 	case completions.CompletionItemsLoadedMsg:
 		if m.completionsOpen {
 			m.completions.SetItems(msg.Files, msg.Resources)
@@ -4193,6 +4201,11 @@ func (m *UI) startMemoryDream(sessionID string, force bool) tea.Cmd {
 func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.Cmd {
 	if m.com.App.AgentCoordinator == nil {
 		return util.ReportError(fmt.Errorf("coder agent is not initialized"))
+	}
+
+	if m.status != nil && m.status.msg.Type == util.InfoTypeError {
+		m.statusMsgSeq++
+		m.status.ClearInfoMsg()
 	}
 
 	trimmedContent := strings.TrimSpace(content)

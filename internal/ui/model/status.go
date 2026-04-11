@@ -114,8 +114,8 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 
 // clearInfoMsgCmd returns a command that clears the info message after the
 // given TTL.
-func clearInfoMsgCmd(ttl time.Duration) tea.Cmd {
+func clearInfoMsgCmd(ttl time.Duration, seq uint64) tea.Cmd {
 	return tea.Tick(ttl, func(time.Time) tea.Msg {
-		return util.ClearStatusMsg{}
+		return util.ClearStatusMsg{Seq: seq}
 	})
 }

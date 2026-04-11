@@ -103,6 +103,20 @@ func truncatedToolResultNotice(omitted int, fullOutputPath string) string {
 	return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not assume it contains the full result. If you need more detail, rerun the tool with a narrower scope or use a precise read with offsets/limits when available.]", omitted)
 }
 
+func stepBudgetExhaustedToolResultNotice(omitted int, fullOutputPath string) string {
+	if fullOutputPath != "" {
+		return fmt.Sprintf("[Step tool-result budget exhausted. This result was omitted to keep the conversation within the context window. %d characters omitted. The full output was saved to `%s`. Use the view tool to inspect that file with offset/limit.]", omitted, filepath.ToSlash(fullOutputPath))
+	}
+	return fmt.Sprintf("[Step tool-result budget exhausted. This result was omitted to keep the conversation within the context window. Re-run the tool with a narrower scope if you still need it. %d characters omitted.]", omitted)
+}
+
+func messageBudgetExhaustedToolResultNotice(totalUsed, omitted int, fullOutputPath string) string {
+	if fullOutputPath != "" {
+		return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). This result was omitted to keep the conversation within the context window. %d characters omitted. The full output was saved to `%s`. Use the view tool to inspect that file with offset/limit.]", totalUsed, contextWindowMessageToolResultCharsLimit, omitted, filepath.ToSlash(fullOutputPath))
+	}
+	return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). This result was omitted to keep the conversation within the context window. Re-run the tool with a narrower scope if you still need it. %d characters omitted.]", totalUsed, contextWindowMessageToolResultCharsLimit, omitted)
+}
+
 func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.ToolResult) (string, error) {
 	if a == nil || a.workingDir == "" || tr.Content == "" {
 		return "", nil
@@ -154,7 +168,16 @@ func (a *sessionAgent) enforceStepToolResultBudget(sessionID string, tr message.
 	}
 	remaining := contextWindowStepToolResultCharsLimit - *used
 	if remaining <= 0 {
-		tr.Content = fmt.Sprintf("[Step tool-result budget exhausted. This result was omitted to keep the conversation within the context window. Re-run the tool with a narrower scope if you still need it. %d characters omitted.]", len([]rune(tr.Content)))
+		fullOutputPath := ""
+		if a != nil {
+			persistedPath, err := a.persistToolResultContent(sessionID, tr)
+			if err != nil {
+				slog.Warn("Failed to persist exhausted step-budget tool result", "error", err, "session_id", sessionID, "tool_name", tr.Name)
+			} else {
+				fullOutputPath = persistedPath
+			}
+		}
+		tr.Content = stepBudgetExhaustedToolResultNotice(len([]rune(tr.Content)), fullOutputPath)
 		return tr
 	}
 	contentRunes := []rune(tr.Content)
@@ -210,11 +233,16 @@ func (a *sessionAgent) enforceMessageToolResultBudget(sessionID string, results 
 		remaining := contextWindowMessageToolResultCharsLimit - totalUsed
 
 		if remaining <= 0 {
-			out[i].Content = fmt.Sprintf(
-				"[Message tool-result budget exhausted (%d/%d chars used). "+
-					"This result was omitted to keep the conversation within the context window. "+
-					"Re-run the tool with a narrower scope if you still need it. %d characters omitted.]",
-				totalUsed, contextWindowMessageToolResultCharsLimit, len(contentRunes))
+			fullOutputPath := ""
+			if a != nil {
+				persistedPath, err := a.persistToolResultContent(sessionID, tr)
+				if err != nil {
+					slog.Warn("Failed to persist exhausted message-budget tool result", "error", err, "session_id", sessionID, "tool_name", tr.Name)
+				} else {
+					fullOutputPath = persistedPath
+				}
+			}
+			out[i].Content = messageBudgetExhaustedToolResultNotice(totalUsed, len(contentRunes), fullOutputPath)
 			continue
 		}
 

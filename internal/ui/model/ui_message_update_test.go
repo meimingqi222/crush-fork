@@ -3,7 +3,9 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/app"
@@ -14,10 +16,12 @@ import (
 	"github.com/charmbracelet/crush/internal/planmode"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
@@ -563,4 +567,92 @@ func TestUpdateLatestProposedPlanRequiresPlanModeAndPlanExit(t *testing.T) {
 	planMsg.Parts = append(planMsg.Parts, message.ToolCall{ID: "tool-2", Name: agenttools.PlanExitToolName, Finished: true})
 	ui.updateLatestProposedPlan(planMsg)
 	require.Equal(t, "- Step 1", ui.latestProposedPlan)
+}
+
+func TestStatusErrorPersistsAndIgnoresStaleClear(t *testing.T) {
+	t.Parallel()
+
+	ui := newStatusTestUI()
+
+	_, oldCmd := ui.Update(util.InfoMsg{Type: util.InfoTypeInfo, Msg: "old", TTL: time.Nanosecond})
+	staleClear, ok := firstClearStatusMsg(oldCmd)
+	require.True(t, ok)
+
+	_, errCmd := ui.Update(util.InfoMsg{Type: util.InfoTypeError, Msg: "broken"})
+	require.False(t, ui.status.msg.IsEmpty())
+	require.Equal(t, util.InfoTypeError, ui.status.msg.Type)
+	_, hasClear := firstClearStatusMsg(errCmd)
+	require.False(t, hasClear)
+
+	_, _ = ui.Update(staleClear)
+	require.False(t, ui.status.msg.IsEmpty())
+	require.Equal(t, util.InfoTypeError, ui.status.msg.Type)
+}
+
+func TestSendMessageClearsPersistentErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	ui := newStatusTestUI()
+	ui.session = &session.Session{ID: "s1", CollaborationMode: session.CollaborationModeDefault}
+	ui.status.SetInfoMsg(util.InfoMsg{Type: util.InfoTypeError, Msg: "broken"})
+	ui.statusMsgSeq = 9
+
+	cmd := ui.sendMessage("next prompt")
+	require.NotNil(t, cmd)
+	require.True(t, ui.status.msg.IsEmpty())
+	require.Equal(t, uint64(10), ui.statusMsgSeq)
+}
+
+func TestStatusNonErrorStillSchedulesAndClearsBySeq(t *testing.T) {
+	t.Parallel()
+
+	ui := newStatusTestUI()
+
+	_, cmd := ui.Update(util.InfoMsg{Type: util.InfoTypeWarn, Msg: "warn", TTL: time.Nanosecond})
+	clearMsg, ok := firstClearStatusMsg(cmd)
+	require.True(t, ok)
+	require.Equal(t, ui.statusMsgSeq, clearMsg.Seq)
+	require.Equal(t, util.InfoTypeWarn, ui.status.msg.Type)
+
+	_, _ = ui.Update(clearMsg)
+	require.True(t, ui.status.msg.IsEmpty())
+}
+
+func newStatusTestUI() *UI {
+	theme := styles.DefaultStyles()
+	com := &common.Common{
+		App:    &app.App{AgentCoordinator: &mockQueueCoordinator{}},
+		Styles: &theme,
+	}
+	return &UI{
+		com:    com,
+		status: NewStatus(com, nil),
+		attachments: attachments.New(
+			attachments.NewRenderer(
+				com.Styles.Attachments.Normal,
+				com.Styles.Attachments.Deleting,
+				com.Styles.Attachments.Image,
+				com.Styles.Attachments.Text,
+			),
+			attachments.Keymap{},
+		),
+	}
+}
+
+func firstClearStatusMsg(cmd tea.Cmd) (util.ClearStatusMsg, bool) {
+	if cmd == nil {
+		return util.ClearStatusMsg{}, false
+	}
+	msg := cmd()
+	switch msg := msg.(type) {
+	case util.ClearStatusMsg:
+		return msg, true
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			if clear, ok := firstClearStatusMsg(sub); ok {
+				return clear, true
+			}
+		}
+	}
+	return util.ClearStatusMsg{}, false
 }

@@ -307,3 +307,51 @@ func TestTruncateOversizedToolResults_ErrorResultUntouched(t *testing.T) {
 	require.NoError(t, globErr)
 	assert.Empty(t, artifactMatches)
 }
+
+func TestEnforceStepToolResultBudget_OmitsWhenBudgetExhausted_PersistsFullOutput(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	agent := &sessionAgent{workingDir: env.workingDir}
+	used := contextWindowStepToolResultCharsLimit
+	original := strings.Repeat("x", 200)
+	result := message.ToolResult{Name: "glob", Content: original}
+
+	truncated := agent.enforceStepToolResultBudget("sess", result, &used)
+
+	assert.Contains(t, truncated.Content, "Step tool-result budget exhausted")
+	assert.Contains(t, truncated.Content, ".crush/truncation/")
+	assert.Equal(t, contextWindowStepToolResultCharsLimit, used)
+
+	artifactMatches, globErr := filepath.Glob(filepath.Join(env.workingDir, ".crush", "truncation", "*.txt"))
+	require.NoError(t, globErr)
+	require.Len(t, artifactMatches, 1)
+	artifactContent, readErr := os.ReadFile(artifactMatches[0])
+	require.NoError(t, readErr)
+	assert.Equal(t, original, string(artifactContent))
+}
+
+func TestEnforceMessageToolResultBudget_OmitsWhenBudgetExhausted_PersistsFullOutput(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	agent := &sessionAgent{workingDir: env.workingDir}
+	results := []message.ToolResult{
+		{Name: "glob", Content: strings.Repeat("a", contextWindowMessageToolResultCharsLimit)},
+		{Name: "grep", Content: strings.Repeat("b", 120)},
+	}
+
+	budgeted := agent.enforceMessageToolResultBudget("sess", results)
+
+	require.Len(t, budgeted, 2)
+	assert.Equal(t, results[0].Content, budgeted[0].Content)
+	assert.Contains(t, budgeted[1].Content, "Message tool-result budget exhausted")
+	assert.Contains(t, budgeted[1].Content, ".crush/truncation/")
+
+	artifactMatches, globErr := filepath.Glob(filepath.Join(env.workingDir, ".crush", "truncation", "*.txt"))
+	require.NoError(t, globErr)
+	require.Len(t, artifactMatches, 1)
+	artifactContent, readErr := os.ReadFile(artifactMatches[0])
+	require.NoError(t, readErr)
+	assert.Equal(t, results[1].Content, string(artifactContent))
+}
