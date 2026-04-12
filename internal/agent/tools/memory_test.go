@@ -65,7 +65,8 @@ func newLongTermMemoryToolForTest(t *testing.T, permissions permission.Service) 
 	t.Helper()
 	memorySvc, err := memory.NewService(t.TempDir())
 	require.NoError(t, err)
-	return NewLongTermMemoryTool(memorySvc, permissions, "/workspace")
+	client := memory.NewServiceAdapter(memorySvc, memory.ServiceAdapterOptions{})
+	return NewLongTermMemoryTool(client, permissions, "/workspace")
 }
 
 func TestLongTermMemoryToolStoreAndGet(t *testing.T) {

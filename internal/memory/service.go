@@ -1,5 +1,9 @@
 package memory
 
+// service.go — DEPRECATED: This file implements the original file-backed memory backend.
+// Use ManagedRuntimeClient (stdio JSON-RPC) for the canonical universal-memory runtime instead.
+// This implementation is kept for backward compatibility only.
+
 import (
 	"context"
 	"crypto/sha256"

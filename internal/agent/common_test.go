@@ -41,7 +41,7 @@ type fakeEnv struct {
 	messages    message.Service
 	permissions permission.Service
 	history     history.Service
-	memory      memory.Service
+	memory      memory.MemoryClient
 	filetracker *filetracker.Service
 	lspClients  *csync.Map[string, *lsp.Client]
 }
@@ -150,8 +150,9 @@ func testEnv(t *testing.T) fakeEnv {
 
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
 	history := history.NewService(q, conn)
-	memoryService, err := memory.NewService(t.TempDir())
+	svc, err := memory.NewService(t.TempDir())
 	require.NoError(t, err)
+	memoryService := memory.NewServiceAdapter(svc, memory.ServiceAdapterOptions{})
 	filetrackerService := filetracker.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
 

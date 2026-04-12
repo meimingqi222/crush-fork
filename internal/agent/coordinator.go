@@ -112,7 +112,7 @@ type coordinator struct {
 	permissions    permission.Service
 	userInput      userinput.Service
 	history        history.Service
-	longTermMemory memory.Service
+	longTermMemory memory.MemoryClient
 	filetracker    filetracker.Service
 	lspManager     *lsp.Manager
 	notify         pubsub.Publisher[notify.Notification]
@@ -148,7 +148,7 @@ func NewCoordinator(
 	permissions permission.Service,
 	userInput userinput.Service,
 	history history.Service,
-	longTermMemory memory.Service,
+	longTermMemory memory.MemoryClient,
 	filetracker filetracker.Service,
 	checkpointSvc checkpoint.Service,
 	lspManager *lsp.Manager,
@@ -274,9 +274,19 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
 	defer prefetchCancel()
 	memoryPrefetch := &MemoryPrefetch{}
-	bgModel := c.resolveBackgroundModel(ctx)
+	_ = c.resolveBackgroundModel // bgModel consumed inside agent; not needed for MemoryClient recall
 	go func() {
-		recall := buildAutoRecallBlock(prefetchCtx, c.history, c.longTermMemory, bgModel, sessionID, prompt)
+		query := extractRecallQuery(prompt)
+		var recall string
+		if query != "" && c.longTermMemory != nil {
+			scope, include := autoRecallMemoryScope(prefetchCtx)
+			if include {
+				lines, recallErr := c.longTermMemory.Recall(prefetchCtx, query, scope, sessionID)
+				if recallErr == nil && len(lines) > 0 {
+					recall = strings.Join(lines, "\n")
+				}
+			}
+		}
 		memoryPrefetch.Settle(recall)
 		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)
 	}()

@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	autoRecallMemoryLimit      = 3
 	autoRecallHistoryLimit     = 3
 	autoRecallSectionCharLimit = 600
 	autoRecallQueryMaxWords    = 12
@@ -28,7 +27,7 @@ var recallIdentPattern = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]{3,}\b`)
 
 // buildAutoRecall returns a closure that, given a session and prompt, retrieves
 // relevant long-term memories and session history to inject into the system prompt.
-func buildAutoRecall(historySvc history.Service, memorySvc memory.Service, bgModel *backgroundModel) func(context.Context, string, string) string {
+func buildAutoRecall(historySvc history.Service, memorySvc memory.MemoryClient, bgModel *backgroundModel) func(context.Context, string, string) string {
 	if historySvc == nil && memorySvc == nil {
 		return nil
 	}
@@ -44,7 +43,7 @@ type backgroundModel struct {
 	provider config.ProviderConfig
 }
 
-func buildAutoRecallBlock(ctx context.Context, historySvc history.Service, memorySvc memory.Service, bgModel *backgroundModel, sessionID, prompt string) string {
+func buildAutoRecallBlock(ctx context.Context, historySvc history.Service, memorySvc memory.MemoryClient, bgModel *backgroundModel, sessionID, prompt string) string {
 	query := extractRecallQuery(prompt)
 	if query == "" {
 		return ""
@@ -55,22 +54,9 @@ func buildAutoRecallBlock(ctx context.Context, historySvc history.Service, memor
 	if memorySvc != nil {
 		scope, includeMemory := autoRecallMemoryScope(ctx)
 		if includeMemory {
-			var entries []memory.Entry
-			if bgModel != nil {
-				entries = selectRelevantMemories(ctx, memorySvc, bgModel.model, bgModel.provider, query, scope)
-			} else {
-				search := memory.SearchParams{Query: query, Limit: autoRecallMemoryLimit}
-				if scope != "" {
-					search.Scope = scope
-				}
-				var err error
-				entries, err = memorySvc.Search(ctx, search)
-				if err != nil {
-					entries = nil
-				}
-			}
-			if len(entries) > 0 {
-				sections = append(sections, formatAutoRecallMemory(entries))
+			lines, err := memorySvc.Recall(ctx, query, scope, sessionID)
+			if err == nil && len(lines) > 0 {
+				sections = append(sections, formatAutoRecallLines(lines))
 			}
 		}
 	}
@@ -131,47 +117,14 @@ func extractRecallQuery(prompt string) string {
 	return strings.Join(words, " ")
 }
 
-func formatAutoRecallMemory(entries []memory.Entry) string {
-	lines := make([]string, 0, len(entries)+1)
-	lines = append(lines, "Relevant long-term memory:")
-	for _, entry := range entries {
-		value := truncateRecallText(strings.TrimSpace(entry.Value), autoRecallSectionCharLimit)
-		lines = append(lines, fmt.Sprintf("- %s: %s", formatAutoRecallMemoryLabel(entry), value))
+func formatAutoRecallLines(lines []string) string {
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, "Relevant long-term memory:")
+	for _, line := range lines {
+		text := truncateRecallText(strings.TrimSpace(line), autoRecallSectionCharLimit)
+		out = append(out, "- "+text)
 	}
-	return strings.Join(lines, "\n")
-}
-
-func formatAutoRecallMemoryLabel(entry memory.Entry) string {
-	label := strings.TrimSpace(entry.Key)
-	qualifiers := make([]string, 0, 2)
-
-	switch {
-	case entry.Category != "" && entry.Type != "":
-		qualifiers = append(qualifiers, fmt.Sprintf("%s/%s", strings.TrimSpace(entry.Category), strings.TrimSpace(entry.Type)))
-	case entry.Category != "":
-		qualifiers = append(qualifiers, strings.TrimSpace(entry.Category))
-	case entry.Type != "":
-		qualifiers = append(qualifiers, strings.TrimSpace(entry.Type))
-	}
-
-	if len(entry.Tags) > 0 {
-		tags := make([]string, 0, len(entry.Tags))
-		for _, tag := range entry.Tags {
-			trimmed := strings.TrimSpace(tag)
-			if trimmed == "" {
-				continue
-			}
-			tags = append(tags, "#"+trimmed)
-		}
-		if len(tags) > 0 {
-			qualifiers = append(qualifiers, strings.Join(tags, " "))
-		}
-	}
-
-	if len(qualifiers) == 0 {
-		return label
-	}
-	return fmt.Sprintf("%s (%s)", label, strings.Join(qualifiers, "; "))
+	return strings.Join(out, "\n")
 }
 
 func formatAutoRecallHistory(results []history.MessageSearchResult) string {

@@ -321,7 +321,7 @@ type sessionAgent struct {
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
-	memory               memory.Service
+	memory               memory.MemoryClient
 	backgroundModel      *backgroundModel
 	reviewToolResult     func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
 	disableAutoSummarize bool
@@ -358,7 +358,7 @@ type SessionAgentOptions struct {
 	IsYolo               bool
 	Sessions             session.Service
 	Messages             message.Service
-	Memory               memory.Service
+	Memory               memory.MemoryClient
 	BackgroundModel      *backgroundModel
 	ReviewToolResult     func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
 	Tools                []fantasy.AgentTool
@@ -1691,7 +1691,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	cancel()
 	wg.Wait()
 
-	if !a.isSubAgent && a.memory != nil && a.backgroundModel != nil && !a.disableAutoMemory && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
+	if !a.isSubAgent && a.memory != nil && !a.disableAutoMemory && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
 		a.extractionMu.Lock()
 		a.extractionTurnCount[call.SessionID]++
 		turns := a.extractionTurnCount[call.SessionID]
@@ -1701,7 +1701,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			// Track pending extraction for graceful shutdown
 			a.pendingExtractions[call.SessionID] = append(a.pendingExtractions[call.SessionID], cancel)
 			go func() {
-				extractMemories(context.Background(), a.memory, a.backgroundModel, call.SessionID, call.Prompt, historyForExtraction)
+				_ = a.memory.Extract(context.Background(), memory.ExtractRequest{
+					SessionID:  call.SessionID,
+					Scope:      "project",
+					Agent:      "crush",
+					Prompt:     call.Prompt,
+					Transcript: historyForExtraction,
+				})
 				a.extractionMu.Lock()
 				delete(a.pendingExtractions, call.SessionID)
 				a.extractionMu.Unlock()

@@ -197,7 +197,7 @@ func TestSetupMessageSubscriber_TriggersMessageCreatedHook(t *testing.T) {
 
 	var wg sync.WaitGroup
 	outputCh := make(chan tea.Msg, 8)
-	setupMessageSubscriber(ctx, &wg, messages.Subscribe, outputCh)
+	setupMessageSubscriber(ctx, &wg, messages.Subscribe, outputCh, nil, sessions)
 
 	testSession, err := sessions.Create(ctx, "message hook")
 	require.NoError(t, err)

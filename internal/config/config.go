@@ -339,26 +339,51 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 	}
 }
 
+// MemoryRuntimeConfig holds configuration for the managed universal-memory runtime.
+type MemoryRuntimeConfig struct {
+	Command   string                 `json:"command,omitempty" jsonschema:"description=Command to start the runtime (e.g., 'node'),default=node"`
+	Args      []string               `json:"args,omitempty" jsonschema:"description=Arguments to the runtime (e.g., ['./node_modules/universal-memory/dist/bin/runtime.js'])"`
+	Root      string                 `json:"root,omitempty" jsonschema:"description=Memory root directory,default=.memory"`
+	Profile   string                 `json:"profile,omitempty" jsonschema:"description=Profile: balanced or semantic,default=balanced,enum=balanced,enum=semantic"`
+	LLM       *MemoryLLMConfig       `json:"llm,omitempty" jsonschema:"description=LLM configuration for extractor/consolidator"`
+	Embedding *MemoryEmbeddingConfig `json:"embedding,omitempty" jsonschema:"description=Embedding configuration for semantic retrieval"`
+}
+
+// MemoryLLMConfig holds LLM configuration for memory maintenance.
+type MemoryLLMConfig struct {
+	BaseURL string `json:"baseUrl,omitempty" jsonschema:"description=LLM endpoint URL,example=http://127.0.0.1:4141/v1/chat/completions"`
+	Model   string `json:"model,omitempty" jsonschema:"description=LLM model name,default=gpt-4o"`
+}
+
+// MemoryEmbeddingConfig holds embedding configuration for semantic retrieval.
+type MemoryEmbeddingConfig struct {
+	BaseURL   string `json:"baseUrl,omitempty" jsonschema:"description=Embedding endpoint URL,example=https://api.openai.com"`
+	Model     string `json:"model,omitempty" jsonschema:"description=Embedding model name,default=text-embedding-3-small"`
+	APIKeyEnv string `json:"apiKeyEnv,omitempty" jsonschema:"description=Environment variable name for API key,default=OPENAI_API_KEY"`
+}
+
 type Options struct {
-	ContextPaths               []string     `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
-	SkillsPaths                []string     `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
-	TUI                        *TUIOptions  `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
-	PreferredPermissionMode    string       `json:"preferred_permission_mode,omitempty" jsonschema:"description=Default interactive permission mode for new sessions,enum=default,enum=auto,enum=yolo,default=auto"`
-	PreferredCollaborationMode string       `json:"preferred_collaboration_mode,omitempty" jsonschema:"-"`
-	Debug                      bool         `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
-	DebugLSP                   bool         `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
-	DisableAutoSummarize       bool         `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
-	DisableAutoMemory          bool         `json:"disable_auto_memory,omitempty" jsonschema:"description=Disable automatic long-term memory extraction and background consolidation,default=false"`
-	DataDirectory              string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing project-scoped application data (defaults to .crush in the working directory; falls back to a safe global workspace path when startup cwd is unsafe),default=.crush,example=.crush"`
-	DisabledTools              []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
-	DisableProviderAutoUpdate  bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
-	DisableDefaultProviders    bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs,default=false"`
-	Attribution                *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
-	DisableMetrics             bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
-	InitializeAs               string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
-	AutoLSP                    *bool        `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
-	Progress                   *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
-	DisableNotifications       bool         `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
+	ContextPaths               []string             `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
+	SkillsPaths                []string             `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
+	TUI                        *TUIOptions          `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
+	PreferredPermissionMode    string               `json:"preferred_permission_mode,omitempty" jsonschema:"description=Default interactive permission mode for new sessions,enum=default,enum=auto,enum=yoyo,default=auto"`
+	PreferredCollaborationMode string               `json:"preferred_collaboration_mode,omitempty" jsonschema:"-"`
+	Debug                      bool                 `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
+	DebugLSP                   bool                 `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
+	DisableAutoSummarize       bool                 `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
+	DisableAutoMemory          bool                 `json:"disable_auto_memory,omitempty" jsonschema:"description=Disable automatic long-term memory extraction and background consolidation,default=false"`
+	MemorySidecarURL           string               `json:"memory_sidecar_url,omitempty" jsonschema:"description=DEPRECATED: Use memory_runtime instead. URL of an external universal-memory HTTP sidecar (e.g. http://127.0.0.1:7779). When set the built-in memory service is bypassed and all memory operations are delegated to the sidecar.,example=http://127.0.0.1:7779"`
+	MemoryRuntime              *MemoryRuntimeConfig `json:"memory_runtime,omitempty" jsonschema:"description=Configuration for the managed universal-memory runtime (canonical path). When set, crush automatically starts and manages the runtime subprocess via stdio JSON-RPC."`
+	DataDirectory              string               `json:"data_directory,omitempty" jsonschema:"description=Directory for storing project-scoped application data (defaults to .crush in the working directory; falls back to a safe global workspace path when startup cwd is unsafe),default=.crush,example=.crush"`
+	DisabledTools              []string             `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
+	DisableProviderAutoUpdate  bool                 `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
+	DisableDefaultProviders    bool                 `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs,default=false"`
+	Attribution                *Attribution         `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
+	DisableMetrics             bool                 `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
+	InitializeAs               string               `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
+	AutoLSP                    *bool                `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
+	Progress                   *bool                `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
+	DisableNotifications       bool                 `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
 }
 
 type MCPs map[string]MCPConfig

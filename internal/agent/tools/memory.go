@@ -29,7 +29,7 @@ type LongTermMemoryParams struct {
 	Limit    int      `json:"limit,omitempty" description:"Maximum number of items to return"`
 }
 
-func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Service, workingDir string) fantasy.AgentTool {
+func NewLongTermMemoryTool(memorySvc memory.MemoryClient, permissions permission.Service, workingDir string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		LongTermMemoryToolName,
 		string(longTermMemoryDescription),

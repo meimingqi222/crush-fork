@@ -61,7 +61,7 @@ type App struct {
 	Sessions       session.Service
 	Messages       message.Service
 	History        history.Service
-	LongTermMemory memory.Service
+	LongTermMemory memory.MemoryClient
 	UserInput      userinput.Service
 	Permissions    permission.Service
 	FileTracker    filetracker.Service
@@ -101,9 +101,22 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
 	checkpointSvc := checkpoint.NewService(q, conn, files, store.WorkingDir())
-	longTermMemory, err := memory.NewService(cfg.Options.DataDirectory)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
+	var longTermMemory memory.MemoryClient
+	if sidecarURL := cfg.Options.MemorySidecarURL; sidecarURL != "" {
+		longTermMemory = memory.NewHTTPMemoryClient(memory.HTTPMemoryClientConfig{
+			BaseURL: sidecarURL,
+		})
+		slog.Info("Using external universal-memory sidecar", "url", sidecarURL)
+	} else {
+		svc, err := memory.NewService(cfg.Options.DataDirectory)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
+		}
+		// Note: Original recall/extract/consolidate logic is in agent package.
+		// ServiceAdapterOptions are empty here because the agent coordinator
+		// handles these operations directly via its own logic.
+		// This maintains semantic equivalence with the original implementation.
+		longTermMemory = memory.NewServiceAdapter(svc, memory.ServiceAdapterOptions{})
 	}
 	skipPermissionsRequests := cfg.Permissions != nil && cfg.Permissions.SkipRequests
 	var allowedTools []string
@@ -543,7 +556,7 @@ func (app *App) setupEvents() {
 	app.eventsCtx = ctx
 	app.setupTimeline(ctx)
 	setupSubscriber(ctx, app.serviceEventsWG, "sessions", app.Sessions.Subscribe, app.events)
-	setupMessageSubscriber(ctx, app.serviceEventsWG, app.Messages.Subscribe, app.events)
+	setupMessageSubscriber(ctx, app.serviceEventsWG, app.Messages.Subscribe, app.events, app.LongTermMemory, app.Sessions)
 	setupSubscriber(ctx, app.serviceEventsWG, "user-input", app.UserInput.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "permissions", app.Permissions.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "permissions-notifications", app.Permissions.SubscribeNotifications, app.events)
@@ -616,6 +629,8 @@ func setupMessageSubscriber(
 	wg *sync.WaitGroup,
 	subscriber func(context.Context) <-chan pubsub.Event[message.Message],
 	outputCh chan<- tea.Msg,
+	memoryClient memory.MemoryClient,
+	sessions session.Service,
 ) {
 	wg.Go(func() {
 		subCh := subscriber(ctx)
@@ -633,6 +648,30 @@ func setupMessageSubscriber(
 				if event.Type == pubsub.CreatedEvent {
 					if err := plugin.TriggerMessageCreated(ctx, event.Payload); err != nil {
 						slog.Error("Plugin message created hook failed", "error", err, "message_id", event.Payload.ID)
+					}
+
+					// Append message to memory journal for universal-memory runtime
+					if memoryClient != nil {
+						msg := event.Payload
+						// Only append user and assistant messages
+						if msg.Role == message.User || msg.Role == message.Assistant {
+							text := msg.Content().Text
+							if text != "" && msg.SessionID != "" {
+								appendMsg := memory.AppendMessage{
+									Role:      string(msg.Role),
+									Content:   text,
+									Timestamp: time.Unix(msg.CreatedAt, 0).Format(time.RFC3339),
+								}
+
+								go func() {
+									appendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+									defer cancel()
+									if err := memoryClient.AppendMessages(appendCtx, msg.SessionID, []memory.AppendMessage{appendMsg}); err != nil {
+										slog.Debug("Failed to append message to memory journal", "error", err, "session_id", msg.SessionID)
+									}
+								}()
+							}
+						}
 					}
 				}
 				var msg tea.Msg = event
