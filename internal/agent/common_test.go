@@ -150,9 +150,7 @@ func testEnv(t *testing.T) fakeEnv {
 
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
 	history := history.NewService(q, conn)
-	svc, err := memory.NewService(t.TempDir())
-	require.NoError(t, err)
-	memoryService := memory.NewServiceAdapter(svc, memory.ServiceAdapterOptions{})
+	memoryService := memory.NewInMemoryClient()
 	filetrackerService := filetracker.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
 

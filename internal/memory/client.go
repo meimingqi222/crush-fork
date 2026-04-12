@@ -13,12 +13,20 @@ package memory
 // Plus the LLM-callable tool surface (Store / Get / Delete / Search / List).
 //
 // Concrete implementations:
-//   - NullMemoryClient        — no-op, used when memory is disabled
-//   - ManagedRuntimeClient    — recommended, manages universal-memory runtime via stdio JSON-RPC
-//   - HTTPMemoryClient        — DEPRECATED, delegates to HTTP sidecar (use ManagedRuntimeClient instead)
-//   - ServiceAdapter          — wraps the original file-backed memory.Service for backward compatibility
+//   - NullMemoryClient        — no-op, used when memory is disabled (default)
+//   - ManagedRuntimeClient    — manages universal-memory runtime via stdio JSON-RPC
+//   - HTTPMemoryClient        — DEPRECATED, delegates to HTTP sidecar
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotFound is returned when a memory entry is not found.
+var ErrNotFound = errors.New("memory entry not found")
+
+// ErrLLMRequired is returned when an operation requires LLM but none is configured.
+var ErrLLMRequired = errors.New("LLM configuration required for this operation")
 
 // MemoryClient is the minimal interface crush calls for all memory operations.
 type MemoryClient interface {
@@ -89,4 +97,45 @@ type ConsolidateRequest struct {
 type FreshnessResult struct {
 	HasMemories bool
 	Warning     string // non-empty when memories are stale
+}
+
+// StoreParams holds parameters for the Store operation.
+type StoreParams struct {
+	Key      string
+	Value    string
+	Scope    string
+	Category string
+	Type     string
+	Tags     []string
+	Metadata map[string]interface{}
+}
+
+// Entry represents a single memory entry.
+type Entry struct {
+	Key       string
+	Value     string
+	Scope     string
+	Category  string
+	Type      string
+	Tags      []string
+	UpdatedAt int64 // Unix timestamp
+}
+
+// SearchParams holds parameters for the Search operation.
+type SearchParams struct {
+	Query    string
+	Scope    string
+	Category string
+	Type     string
+	Tags     []string
+	Limit    int
+}
+
+// ListParams holds parameters for the List operation.
+type ListParams struct {
+	Scope    string
+	Category string
+	Type     string
+	Tags     []string
+	Limit    int
 }

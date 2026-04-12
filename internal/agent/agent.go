@@ -1701,13 +1701,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			// Track pending extraction for graceful shutdown
 			a.pendingExtractions[call.SessionID] = append(a.pendingExtractions[call.SessionID], cancel)
 			go func() {
-				_ = a.memory.Extract(context.Background(), memory.ExtractRequest{
+				err := a.memory.Extract(context.Background(), memory.ExtractRequest{
 					SessionID:  call.SessionID,
 					Scope:      "project",
 					Agent:      "crush",
 					Prompt:     call.Prompt,
 					Transcript: historyForExtraction,
 				})
+				if errors.Is(err, memory.ErrLLMRequired) {
+					slog.Debug("Memory extraction skipped: configure memory_runtime for LLM-powered extraction")
+				} else if err != nil {
+					slog.Warn("Memory extraction failed", "error", err)
+				}
 				a.extractionMu.Lock()
 				delete(a.pendingExtractions, call.SessionID)
 				a.extractionMu.Unlock()

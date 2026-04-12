@@ -103,10 +103,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	checkpointSvc := checkpoint.NewService(q, conn, files, store.WorkingDir())
 	var longTermMemory memory.MemoryClient
 
-	// Memory client initialization priority:
-	// 1. memory_runtime (canonical) -> ManagedRuntimeClient
-	// 2. memory_sidecar_url (deprecated) -> HTTPMemoryClient
-	// 3. default fallback -> ServiceAdapter (file-backed)
+	// Memory is optional and requires explicit configuration.
+	// Without memory_runtime or memory_sidecar_url, memory features are disabled.
 	if runtimeCfg := cfg.Options.MemoryRuntime; runtimeCfg != nil {
 		longTermMemory = memory.NewManagedRuntimeClient(memory.RuntimeConfig{
 			Command: runtimeCfg.Command,
@@ -122,16 +120,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			BaseURL: sidecarURL,
 		})
 		slog.Info("Using external universal-memory sidecar (DEPRECATED, use memory_runtime instead)", "url", sidecarURL)
-	} else {
-		svc, err := memory.NewService(cfg.Options.DataDirectory)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
-		}
-		// Note: ServiceAdapter provides basic file-backed memory without LLM-driven extraction.
-		// For full memory semantics (extract/consolidate with LLM), configure memory_runtime.
-		longTermMemory = memory.NewServiceAdapter(svc, memory.ServiceAdapterOptions{})
-		slog.Info("Using file-backed memory (basic mode, configure memory_runtime for full semantics)")
 	}
+	// If no memory configuration, longTermMemory remains nil (memory disabled)
 	skipPermissionsRequests := cfg.Permissions != nil && cfg.Permissions.SkipRequests
 	var allowedTools []string
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {

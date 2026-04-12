@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -189,7 +190,10 @@ func formatMemoryMetadataLines(entry memory.Entry) []string {
 		parts = append(parts, fmt.Sprintf("type=%s", kind))
 	}
 	if len(entry.Tags) > 0 {
-		parts = append(parts, fmt.Sprintf("tags=%s", strings.Join(entry.Tags, ", ")))
+		sortedTags := make([]string, len(entry.Tags))
+		copy(sortedTags, entry.Tags)
+		slices.Sort(sortedTags)
+		parts = append(parts, fmt.Sprintf("tags=%s", strings.Join(sortedTags, ", ")))
 	}
 	return parts
 }

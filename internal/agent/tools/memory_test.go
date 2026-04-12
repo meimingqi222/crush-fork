@@ -63,9 +63,7 @@ func runLongTermMemoryTool(t *testing.T, tool fantasy.AgentTool, ctx context.Con
 
 func newLongTermMemoryToolForTest(t *testing.T, permissions permission.Service) fantasy.AgentTool {
 	t.Helper()
-	memorySvc, err := memory.NewService(t.TempDir())
-	require.NoError(t, err)
-	client := memory.NewServiceAdapter(memorySvc, memory.ServiceAdapterOptions{})
+	client := memory.NewInMemoryClient()
 	return NewLongTermMemoryTool(client, permissions, "/workspace")
 }
 

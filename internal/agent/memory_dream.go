@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -43,7 +44,11 @@ func (c *coordinator) Dream(ctx context.Context, sessionID string, force bool) e
 			Force:     force,
 		})
 		if consolidateErr != nil {
-			slog.Warn("Memory consolidation failed", "error", consolidateErr)
+			if errors.Is(consolidateErr, memory.ErrLLMRequired) {
+				slog.Debug("Memory consolidation skipped: configure memory_runtime for LLM-powered consolidation")
+			} else {
+				slog.Warn("Memory consolidation failed", "error", consolidateErr)
+			}
 			c.publishMemoryDreamNotification(sessionID, title, notify.TypeMemoryDreamFailed)
 		} else {
 			c.publishMemoryDreamNotification(sessionID, title, notify.TypeMemoryDreamFinished)
