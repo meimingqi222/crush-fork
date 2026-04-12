@@ -102,21 +102,35 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	files := history.NewService(q, conn)
 	checkpointSvc := checkpoint.NewService(q, conn, files, store.WorkingDir())
 	var longTermMemory memory.MemoryClient
-	if sidecarURL := cfg.Options.MemorySidecarURL; sidecarURL != "" {
+
+	// Memory client initialization priority:
+	// 1. memory_runtime (canonical) -> ManagedRuntimeClient
+	// 2. memory_sidecar_url (deprecated) -> HTTPMemoryClient
+	// 3. default fallback -> ServiceAdapter (file-backed)
+	if runtimeCfg := cfg.Options.MemoryRuntime; runtimeCfg != nil {
+		longTermMemory = memory.NewManagedRuntimeClient(memory.RuntimeConfig{
+			Command: runtimeCfg.Command,
+			Args:    runtimeCfg.Args,
+			Root:    runtimeCfg.Root,
+			Profile: runtimeCfg.Profile,
+			LLM:     convertLLMConfig(runtimeCfg.LLM),
+			Embedding: convertEmbeddingConfig(runtimeCfg.Embedding),
+		})
+		slog.Info("Using managed universal-memory runtime", "command", runtimeCfg.Command, "args", runtimeCfg.Args)
+	} else if sidecarURL := cfg.Options.MemorySidecarURL; sidecarURL != "" {
 		longTermMemory = memory.NewHTTPMemoryClient(memory.HTTPMemoryClientConfig{
 			BaseURL: sidecarURL,
 		})
-		slog.Info("Using external universal-memory sidecar", "url", sidecarURL)
+		slog.Info("Using external universal-memory sidecar (DEPRECATED, use memory_runtime instead)", "url", sidecarURL)
 	} else {
 		svc, err := memory.NewService(cfg.Options.DataDirectory)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
 		}
-		// Note: Original recall/extract/consolidate logic is in agent package.
-		// ServiceAdapterOptions are empty here because the agent coordinator
-		// handles these operations directly via its own logic.
-		// This maintains semantic equivalence with the original implementation.
+		// Note: ServiceAdapter provides basic file-backed memory without LLM-driven extraction.
+		// For full memory semantics (extract/consolidate with LLM), configure memory_runtime.
 		longTermMemory = memory.NewServiceAdapter(svc, memory.ServiceAdapterOptions{})
+		slog.Info("Using file-backed memory (basic mode, configure memory_runtime for full semantics)")
 	}
 	skipPermissionsRequests := cfg.Permissions != nil && cfg.Permissions.SkipRequests
 	var allowedTools []string
@@ -824,5 +838,28 @@ func (app *App) checkForUpdates(ctx context.Context) {
 		CurrentVersion: info.Current,
 		LatestVersion:  info.Latest,
 		IsDevelopment:  info.IsDevelopment(),
+	}
+}
+
+// convertLLMConfig converts config.MemoryLLMConfig to memory.LLMConfig.
+func convertLLMConfig(cfg *config.MemoryLLMConfig) memory.LLMConfig {
+	if cfg == nil {
+		return memory.LLMConfig{}
+	}
+	return memory.LLMConfig{
+		BaseURL: cfg.BaseURL,
+		Model:   cfg.Model,
+	}
+}
+
+// convertEmbeddingConfig converts config.MemoryEmbeddingConfig to memory.EmbeddingConfig.
+func convertEmbeddingConfig(cfg *config.MemoryEmbeddingConfig) *memory.EmbeddingConfig {
+	if cfg == nil {
+		return nil
+	}
+	return &memory.EmbeddingConfig{
+		BaseURL:   cfg.BaseURL,
+		Model:     cfg.Model,
+		APIKeyEnv: cfg.APIKeyEnv,
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -21,9 +20,10 @@ type RuntimeProcess struct {
 	stdout io.Reader
 	stderr io.Reader
 
-	mu       sync.Mutex
-	running  bool
-	stopped  chan struct{}
+	mu         sync.Mutex
+	running    bool
+	stopped    chan struct{}
+	closeOnce  sync.Once // Ensure stopped is closed only once
 }
 
 // NewRuntimeProcess creates a new runtime process manager.
@@ -87,7 +87,7 @@ func (p *RuntimeProcess) Stop() error {
 		return nil
 	}
 
-	// Try graceful shutdown first
+	// Try graceful shutdown first via JSON-RPC
 	if p.stdin != nil {
 		p.stdin.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"shutdown","params":{}}` + "\n"))
 	}
@@ -97,13 +97,15 @@ func (p *RuntimeProcess) Stop() error {
 
 	// Force kill if still running
 	if p.cmd.Process != nil {
-		p.cmd.Process.Signal(syscall.SIGTERM)
-		time.Sleep(100 * time.Millisecond)
+		// On Windows, SIGTERM is not supported, so we use Kill directly
+		// On Unix, we try SIGTERM first, then Kill
 		p.cmd.Process.Kill()
 	}
 
 	p.running = false
-	close(p.stopped)
+	p.closeOnce.Do(func() {
+		close(p.stopped)
+	})
 
 	return nil
 }
@@ -161,7 +163,9 @@ func (p *RuntimeProcess) monitorExit(ctx context.Context) {
 	err := p.cmd.Wait()
 	p.mu.Lock()
 	p.running = false
-	close(p.stopped)
+	p.closeOnce.Do(func() {
+		close(p.stopped)
+	})
 	p.mu.Unlock()
 
 	if err != nil {
