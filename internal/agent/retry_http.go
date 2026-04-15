@@ -95,37 +95,51 @@ func isRetriableError(err error) bool {
 				strings.Contains(strings.ToLower(providerErr.Message), "overloaded") {
 				return true
 			}
+			// Rate limit errors should be retried even if returned as 400.
+			if providerErr.StatusCode == 400 &&
+				(strings.Contains(strings.ToLower(providerErr.Message), "too many requests") ||
+					strings.Contains(strings.ToLower(providerErr.Message), "rate limit") ||
+					strings.Contains(strings.ToLower(providerErr.Message), "ratelimit")) {
+				return true
+			}
 			return false
 		}
 		return true
 	}
 
-			errStr := strings.ToLower(err.Error())
-			// Server overloaded errors should be retried even if the message
-			// contains other non-retriable indicators like 'bad request'.
-			// Use more specific patterns to avoid false positives (e.g., field names containing 'overloaded').
-			if strings.Contains(errStr, "server overloaded") ||
-				strings.Contains(errStr, "service overloaded") ||
-				strings.Contains(errStr, "capacity overloaded") ||
-				strings.Contains(errStr, "temporarily overloaded") {
-				return true
-			}
-		if strings.Contains(errStr, "status: 400") ||
-			strings.Contains(errStr, "status: 401") ||
-			strings.Contains(errStr, "status: 403") ||
-			strings.Contains(errStr, "status: 404") ||
-			strings.Contains(errStr, "http 400") ||
-			strings.Contains(errStr, "http 401") ||
-			strings.Contains(errStr, "http 403") ||
-			strings.Contains(errStr, "http 404") ||
-			strings.Contains(errStr, "bad request") ||
-			strings.Contains(errStr, "unauthorized") ||
-			strings.Contains(errStr, "forbidden") ||
-			strings.Contains(errStr, "not found") ||
-			strings.Contains(errStr, "context canceled") ||
-			strings.Contains(errStr, "context deadline exceeded") {
-			return false
+	errStr := strings.ToLower(err.Error())
+	// Server overloaded errors should be retried even if the message
+	// contains other non-retriable indicators like 'bad request'.
+	// Use more specific patterns to avoid false positives (e.g., field names containing 'overloaded').
+	// Check for overload-related phrases. These patterns match common
+	// server overload messages while avoiding false positives on field names.
+	overloadedPatterns := []string{
+		"server overloaded", "server is overloaded", "the server is overloaded",
+		"service overloaded", "service is overloaded",
+		"capacity overloaded", "capacity is overloaded",
+		"temporarily overloaded",
+	}
+	for _, pattern := range overloadedPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
 		}
+	}
+	if strings.Contains(errStr, "status: 400") ||
+		strings.Contains(errStr, "status: 401") ||
+		strings.Contains(errStr, "status: 403") ||
+		strings.Contains(errStr, "status: 404") ||
+		strings.Contains(errStr, "http 400") ||
+		strings.Contains(errStr, "http 401") ||
+		strings.Contains(errStr, "http 403") ||
+		strings.Contains(errStr, "http 404") ||
+		strings.Contains(errStr, "bad request") ||
+		strings.Contains(errStr, "unauthorized") ||
+		strings.Contains(errStr, "forbidden") ||
+		strings.Contains(errStr, "not found") ||
+		strings.Contains(errStr, "context canceled") ||
+		strings.Contains(errStr, "context deadline exceeded") {
+		return false
+	}
 
 	return true
 }

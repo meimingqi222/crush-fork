@@ -102,6 +102,15 @@ func TestIsRetriableError(t *testing.T) {
 		}))
 	})
 
+	t.Run("400 bad request with rate limit message is retriable", func(t *testing.T) {
+		t.Parallel()
+		require.True(t, isRetriableError(&fantasy.ProviderError{
+			StatusCode: 400,
+			Title:      "bad request",
+			Message:    "Too many requests, the rate limit is 5000000 tokens per minute",
+		}))
+	})
+
 	t.Run("400 bad request is not retriable", func(t *testing.T) {
 		t.Parallel()
 		require.False(t, isRetriableError(&fantasy.ProviderError{
