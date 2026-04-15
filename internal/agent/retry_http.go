@@ -91,7 +91,8 @@ func isRetriableError(err error) bool {
 				return true
 			}
 			// Server overloaded errors should be retried even if returned as 400.
-			if strings.Contains(strings.ToLower(providerErr.Message), "overloaded") {
+			if providerErr.StatusCode == 400 &&
+				strings.Contains(strings.ToLower(providerErr.Message), "overloaded") {
 				return true
 			}
 			return false
@@ -99,23 +100,28 @@ func isRetriableError(err error) bool {
 		return true
 	}
 
-	errStr := strings.ToLower(err.Error())
-	if strings.Contains(errStr, "status: 400") ||
-		strings.Contains(errStr, "status: 401") ||
-		strings.Contains(errStr, "status: 403") ||
-		strings.Contains(errStr, "status: 404") ||
-		strings.Contains(errStr, "http 400") ||
-		strings.Contains(errStr, "http 401") ||
-		strings.Contains(errStr, "http 403") ||
-		strings.Contains(errStr, "http 404") ||
-		strings.Contains(errStr, "bad request") ||
-		strings.Contains(errStr, "unauthorized") ||
-		strings.Contains(errStr, "forbidden") ||
-		strings.Contains(errStr, "not found") ||
-		strings.Contains(errStr, "context canceled") ||
-		strings.Contains(errStr, "context deadline exceeded") {
-		return false
-	}
+		errStr := strings.ToLower(err.Error())
+		// Server overloaded errors should be retried even if the message
+		// contains other non-retriable indicators like 'bad request'.
+		if strings.Contains(errStr, "overloaded") {
+			return true
+		}
+		if strings.Contains(errStr, "status: 400") ||
+			strings.Contains(errStr, "status: 401") ||
+			strings.Contains(errStr, "status: 403") ||
+			strings.Contains(errStr, "status: 404") ||
+			strings.Contains(errStr, "http 400") ||
+			strings.Contains(errStr, "http 401") ||
+			strings.Contains(errStr, "http 403") ||
+			strings.Contains(errStr, "http 404") ||
+			strings.Contains(errStr, "bad request") ||
+			strings.Contains(errStr, "unauthorized") ||
+			strings.Contains(errStr, "forbidden") ||
+			strings.Contains(errStr, "not found") ||
+			strings.Contains(errStr, "context canceled") ||
+			strings.Contains(errStr, "context deadline exceeded") {
+			return false
+		}
 
 	return true
 }

@@ -260,6 +260,9 @@ type SessionAgentCall struct {
 	// run's next provider step instead of waiting for the current run to
 	// finish.
 	JoinActiveRun    bool
+	// BypassQueuePause allows this queued call to be processed even if the
+	// queue is paused. Used for auto-resume calls after summarization.
+	BypassQueuePause bool
 	ProviderOptions  fantasy.ProviderOptions
 	Attachments      []message.Attachment
 	MaxOutputTokens  int64
@@ -1682,6 +1685,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				call.Purpose = plugin.ChatTransformPurposeRecover
 			}
 			call.InitiatorType = copilot.InitiatorAgent
+			call.BypassQueuePause = true
 			a.enqueueQueuedCall(call.SessionID, call)
 		}
 	}
@@ -1713,9 +1717,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if a.QueuedPrompts(call.SessionID) == 0 {
 		return result, err
 	}
-	// Don't auto-process the next queued message while the queue is paused.
+	// Don't auto-process the next queued message while the queue is paused,
+	// unless the queued call has BypassQueuePause set (auto-resume calls).
 	if a.IsQueuePaused(call.SessionID) {
-		return result, err
+		// Peek at the next queued message to check if it can bypass pause.
+		a.queueMu.Lock()
+		queuedCalls, ok := a.messageQueue.Get(call.SessionID)
+		if !ok || len(queuedCalls) == 0 {
+			a.queueMu.Unlock()
+			return result, err
+		}
+		nextCall := queuedCalls[0]
+		a.queueMu.Unlock()
+		if !nextCall.BypassQueuePause {
+			return result, err
+		}
 	}
 	// There are queued messages restart the loop.
 	firstQueuedMessage, ok := a.popNextQueuedCall(call.SessionID)
