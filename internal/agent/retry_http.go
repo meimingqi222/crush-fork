@@ -100,12 +100,16 @@ func isRetriableError(err error) bool {
 		return true
 	}
 
-		errStr := strings.ToLower(err.Error())
-		// Server overloaded errors should be retried even if the message
-		// contains other non-retriable indicators like 'bad request'.
-		if strings.Contains(errStr, "overloaded") {
-			return true
-		}
+			errStr := strings.ToLower(err.Error())
+			// Server overloaded errors should be retried even if the message
+			// contains other non-retriable indicators like 'bad request'.
+			// Use more specific patterns to avoid false positives (e.g., field names containing 'overloaded').
+			if strings.Contains(errStr, "server overloaded") ||
+				strings.Contains(errStr, "service overloaded") ||
+				strings.Contains(errStr, "capacity overloaded") ||
+				strings.Contains(errStr, "temporarily overloaded") {
+				return true
+			}
 		if strings.Contains(errStr, "status: 400") ||
 			strings.Contains(errStr, "status: 401") ||
 			strings.Contains(errStr, "status: 403") ||
