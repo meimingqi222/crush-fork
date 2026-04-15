@@ -93,6 +93,15 @@ func TestIsRetriableError(t *testing.T) {
 		require.True(t, isRetriableError(errors.New("received error while streaming: {\"message\":\"All accounts exhausted\",\"type\":\"rate_limit_error\"}")))
 	})
 
+	t.Run("400 bad request with overloaded message is retriable", func(t *testing.T) {
+		t.Parallel()
+		require.True(t, isRetriableError(&fantasy.ProviderError{
+			StatusCode: 400,
+			Title:      "bad request",
+			Message:    "Decode server is overloaded",
+		}))
+	})
+
 	t.Run("400 bad request is not retriable", func(t *testing.T) {
 		t.Parallel()
 		require.False(t, isRetriableError(&fantasy.ProviderError{

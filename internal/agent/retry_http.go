@@ -90,6 +90,10 @@ func isRetriableError(err error) bool {
 			if providerErr.StatusCode == 429 {
 				return true
 			}
+			// Server overloaded errors should be retried even if returned as 400.
+			if strings.Contains(strings.ToLower(providerErr.Message), "overloaded") {
+				return true
+			}
 			return false
 		}
 		return true
