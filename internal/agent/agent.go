@@ -259,7 +259,7 @@ type SessionAgentCall struct {
 	// JoinActiveRun allows this queued call to be injected into the active
 	// run's next provider step instead of waiting for the current run to
 	// finish.
-	JoinActiveRun    bool
+	JoinActiveRun bool
 	// BypassQueuePause allows this queued call to be processed even if the
 	// queue is paused. Used for auto-resume calls after summarization.
 	BypassQueuePause bool
@@ -1687,13 +1687,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			call.InitiatorType = copilot.InitiatorAgent
 			call.BypassQueuePause = true
 			a.enqueueQueuedCall(call.SessionID, call)
-			} else if compactionTrigger == sessionCompactionTriggerRecover && !a.isSubAgent {
-				// Context limit was reached after tools already ran; pause the queue
-				// for top-level sessions so the user can manually re-run their request
-				// to continue safely without replaying completed tool calls.
-				// (Sub-agent sessions are not paused since they have no user to re-run.)
-				a.PauseQueue(call.SessionID)
-			}
+		} else if compactionTrigger == sessionCompactionTriggerRecover && !a.isSubAgent {
+			// Context limit was reached after tools already ran; pause the queue
+			// for top-level sessions so the user can manually re-run their request
+			// to continue safely without replaying completed tool calls.
+			// (Sub-agent sessions are not paused since they have no user to re-run.)
+			a.PauseQueue(call.SessionID)
+		}
 	}
 
 	// Release active request before processing queued messages.
@@ -2628,7 +2628,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	}
 
 	promptTokens := promptTokensForUsage(resp.TotalUsage, usageProvider(model))
-	completionTokens := resp.TotalUsage.OutputTokens
+	completionTokens := resp.TotalUsage.OutputTokens + resp.TotalUsage.ReasoningTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
 	// concurrent session updates.
@@ -3078,7 +3078,7 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	session.CompletionTokens += usage.OutputTokens
 	session.PromptTokens += promptTokens
 	session.LastPromptTokens = promptTokens
-	session.LastCompletionTokens = usage.OutputTokens
+	session.LastCompletionTokens = usage.OutputTokens + usage.ReasoningTokens
 }
 
 func (a *sessionAgent) Cancel(sessionID string) {

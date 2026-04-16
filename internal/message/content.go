@@ -520,6 +520,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		var parts []fantasy.MessagePart
 		text := strings.TrimSpace(m.Content().Text)
 		reasoning := m.ReasoningContent()
+		hasToolCalls := len(m.ToolCalls()) > 0
 		if reasoning.Thinking != "" {
 			reasoningPart := fantasy.ReasoningPart{Text: reasoning.Thinking, ProviderOptions: fantasy.ProviderOptions{}}
 			if reasoning.Signature != "" {
@@ -536,9 +537,12 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 					ToolID:    reasoning.ToolID,
 				}
 			}
-			// Only include the reasoning part if we have valid provider metadata.
-			// Without metadata, the provider cannot verify the thinking block and will
-			// reject the request (e.g. Kimi rejects redacted_thinking entirely).
+			if len(reasoningPart.ProviderOptions) == 0 && hasToolCalls {
+				reasoningPart.Text = ""
+				reasoningPart.ProviderOptions[anthropic.Name] = &anthropic.ReasoningOptionMetadata{
+					RedactedData: base64.StdEncoding.EncodeToString([]byte(reasoning.Thinking)),
+				}
+			}
 			if len(reasoningPart.ProviderOptions) > 0 {
 				parts = append(parts, reasoningPart)
 			}

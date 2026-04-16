@@ -262,9 +262,9 @@ func (s Session) LastExchangeTokens() int64 {
 }
 
 // LastTotalTokens returns the total token count for the last exchange,
-// including prompt tokens, completion tokens, and cached tokens.
-// This matches opencode's token counting approach for consistent UI display
-// and context window threshold calculations.
+// including prompt tokens (input + cache) and completion tokens (output + reasoning).
+// This matches opencode's token counting approach where
+// total = input + output + reasoning + cache_read + cache_write.
 func (s Session) LastTotalTokens() int64 {
 	return s.LastPromptTokens + s.LastCompletionTokens
 }

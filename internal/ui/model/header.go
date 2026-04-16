@@ -133,8 +133,9 @@ func renderHeaderDetails(
 			contextWindow = model.ContextWindow
 		}
 	}
-	// Use LastInputTokens for context usage display (matches sidebar and shouldAutoSummarize).
-	totalTokens := session.LastInputTokens()
+	// Use total tokens (input + output) for context usage display, matching
+	// opencode's approach where usage = (input + output + reasoning + cache) / context.
+	totalTokens := session.LastInputTokens() + session.LastOutputTokens()
 	formattedUsage := t.Header.Percentage.Render(common.FormatContextUsage(totalTokens, contextWindow))
 	parts = append(parts, formattedUsage)
 

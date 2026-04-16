@@ -36,9 +36,7 @@ type ModelContextInfo struct {
 	OutputTokens int64
 	ModelContext int64
 	Cost         float64
-}
-
-// ModelInfo renders model information including name, provider, reasoning
+} // ModelInfo renders model information including name, provider, reasoning
 // settings, and optional context usage/cost.
 func ModelInfo(t *styles.Styles, modelName, providerName, reasoningInfo string, context *ModelContextInfo, width int) string {
 	modelIcon := t.Subtle.Render(styles.ModelIcon)
@@ -127,10 +125,11 @@ func formatTokensAndCost(t *styles.Styles, inputTokens, outputTokens, contextWin
 	if inputTokens < 0 {
 		inputTokens = 0
 	}
+	totalTokens := inputTokens + outputTokens
 	formattedCost := t.Muted.Render(fmt.Sprintf("$%.2f", cost))
-	formattedInput := t.Subtle.Render(fmt.Sprintf("%s in", FormatContextUsage(inputTokens, contextWindow)))
 	formattedOutput := t.Muted.Render(fmt.Sprintf("%s out", strings.ToLower(FormatTokenCount(outputTokens))))
-	return fmt.Sprintf("%s %s %s", formattedInput, formattedOutput, formattedCost)
+	formattedTotal := t.Subtle.Render(FormatContextUsage(totalTokens, contextWindow))
+	return fmt.Sprintf("%s %s %s", formattedTotal, formattedOutput, formattedCost)
 }
 
 // StatusOpts defines options for rendering a status line with icon, title,

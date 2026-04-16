@@ -1,6 +1,7 @@
 package message
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -47,12 +48,8 @@ func TestToAIMessage_ReasoningWithSignature(t *testing.T) {
 
 // TestToAIMessage_ReasoningWithoutSignature validates that when an
 // anthropic-compatible proxy returns thinking content but no signature and no
-// other provider metadata, ToAIMessage omits the reasoning part entirely.
-// Sending a redacted_thinking block is not viable because Kimi rejects it;
-// and without a signature, native Anthropic would also reject the request.
-// Since Kimi always returns a real signature in practice, this case should be
-// rare, and the safest behaviour is to omit the reasoning part rather than
-// send an invalid placeholder.
+// other provider metadata, ToAIMessage omits the reasoning part entirely for
+// plain assistant text responses.
 func TestToAIMessage_ReasoningWithoutSignature(t *testing.T) {
 	t.Parallel()
 
@@ -72,7 +69,7 @@ func TestToAIMessage_ReasoningWithoutSignature(t *testing.T) {
 
 	for _, part := range aiMsgs[0].Content {
 		_, isReasoning := fantasy.AsContentType[fantasy.ReasoningPart](part)
-		require.False(t, isReasoning, "reasoning part without any provider metadata must be omitted")
+		require.False(t, isReasoning, "reasoning part without any provider metadata must be omitted for non-tool turns")
 	}
 }
 
@@ -109,6 +106,42 @@ func TestToAIMessage_ReasoningBeforeText(t *testing.T) {
 // TestToAIMessage_ReasoningOnlyAffectsAnthropicWhenNoSignature ensures that
 // when reasoning has a ThoughtSignature (Google) or ResponsesData (OpenAI),
 // those provider options remain present regardless of the Anthropic signature.
+func TestToAIMessage_ReasoningWithToolCallWithoutSignatureUsesRedactedData(t *testing.T) {
+	t.Parallel()
+
+	msg := Message{
+		Role: Assistant,
+		Parts: []ContentPart{
+			ReasoningContent{
+				Thinking:  "my thoughts",
+				Signature: "",
+			},
+			ToolCall{ID: "call-1", Name: "view", Input: `{"file_path":"main.go"}`},
+		},
+	}
+
+	aiMsgs := msg.ToAIMessage()
+	require.Len(t, aiMsgs, 1)
+
+	var found bool
+	for _, part := range aiMsgs[0].Content {
+		rp, ok := fantasy.AsContentType[fantasy.ReasoningPart](part)
+		if !ok {
+			continue
+		}
+		found = true
+		meta, ok := rp.Options()[anthropic.Name].(*anthropic.ReasoningOptionMetadata)
+		require.True(t, ok, "expected anthropic reasoning metadata")
+		require.Empty(t, meta.Signature)
+		require.NotEmpty(t, meta.RedactedData)
+		decoded, err := base64.StdEncoding.DecodeString(meta.RedactedData)
+		require.NoError(t, err)
+		require.Equal(t, "my thoughts", string(decoded))
+		require.Empty(t, rp.Text)
+	}
+	require.True(t, found, "expected a ReasoningPart in tool-call turn")
+}
+
 func TestToAIMessage_ReasoningOtherProviderOptionsPreserved(t *testing.T) {
 	t.Parallel()
 

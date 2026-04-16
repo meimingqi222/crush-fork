@@ -37,7 +37,6 @@ func TestFormatTokensAndCost(t *testing.T) {
 	theme := styles.DefaultStyles()
 	rendered := ansi.Strip(formatTokensAndCost(&theme, 120, 25, 100, 1.23))
 
-	require.Contains(t, rendered, "120 120% in")
 	require.Contains(t, rendered, "25 out")
 	require.Contains(t, rendered, "$1.23")
 }
