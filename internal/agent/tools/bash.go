@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"fmt"
 	"html/template"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
