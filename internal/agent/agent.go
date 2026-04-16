@@ -1687,6 +1687,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			call.InitiatorType = copilot.InitiatorAgent
 			call.BypassQueuePause = true
 			a.enqueueQueuedCall(call.SessionID, call)
+		} else if compactionTrigger == sessionCompactionTriggerRecover {
+			// Context limit was reached after tools already ran; pause the queue
+			// so the user can manually re-run their request to continue safely
+			// without replaying completed tool calls.
+			a.PauseQueue(call.SessionID)
 		}
 	}
 
