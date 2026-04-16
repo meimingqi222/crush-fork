@@ -278,6 +278,25 @@ func (s *Shell) blockHandler() func(next interp.ExecHandlerFunc) interp.ExecHand
 	}
 }
 
+func (s *Shell) builtinHandler() func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			if len(args) == 0 {
+				return next(ctx, args)
+			}
+
+			// Builtins.
+			switch args[0] {
+			case "jq":
+				hc := interp.HandlerCtx(ctx)
+				return handleJQ(args, hc.Stdin, hc.Stdout, hc.Stderr)
+			default:
+				return next(ctx, args)
+			}
+		}
+	}
+}
+
 // newInterp creates a new interpreter with the current shell state
 func (s *Shell) newInterp(ctx context.Context, stdout, stderr io.Writer) (*interp.Runner, map[string]runtimeEnvOverride, error) {
 	env := slices.Clone(s.env)
@@ -570,6 +589,7 @@ func setLiteralWord(word *syntax.Word, value string) {
 
 func (s *Shell) execHandlers() []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	handlers := []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc{
+		s.builtinHandler(),
 		s.blockHandler(),
 	}
 	if useGoCoreUtils {
