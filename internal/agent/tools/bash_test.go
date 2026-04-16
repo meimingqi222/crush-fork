@@ -219,7 +219,7 @@ func newBashToolForTestWithHooks(workingDir string, hookMgr *hooks.Manager) fant
 func newBashToolForTestWithHooksAndOptions(workingDir string, hookMgr *hooks.Manager, opts ...BashToolOptions) fantasy.AgentTool {
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(permissions, workingDir, attribution, "test-model", hookMgr, opts...)
+	return NewBashToolWithSessions(nil, permissions, workingDir, attribution, "test-model", hookMgr, opts...)
 }
 
 func runBashTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params BashParams) fantasy.ToolResponse {

@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/toolruntime"
 )
@@ -72,84 +73,10 @@ type bashDescriptionData struct {
 	ModelName       string
 }
 
-var bannedCommands = []string{
-	// Network/Download tools
-	"alias",
-	"aria2c",
-	"axel",
-	"chrome",
-	"curl",
-	"curlie",
-	"firefox",
-	"http-prompt",
-	"httpie",
-	"links",
-	"lynx",
-	"nc",
-	"safari",
-	"scp",
-	"ssh",
-	"telnet",
-	"w3m",
-	"wget",
-	"xh",
-
-	// System administration
-	"doas",
-	"su",
-	"sudo",
-
-	// Package managers
-	"apk",
-	"apt",
-	"apt-cache",
-	"apt-get",
-	"dnf",
-	"dpkg",
-	"emerge",
-	"home-manager",
-	"makepkg",
-	"opkg",
-	"pacman",
-	"paru",
-	"pkg",
-	"pkg_add",
-	"pkg_delete",
-	"portage",
-	"rpm",
-	"yay",
-	"yum",
-	"zypper",
-
-	// System modification
-	"at",
-	"batch",
-	"chkconfig",
-	"crontab",
-	"fdisk",
-	"mkfs",
-	"mount",
-	"parted",
-	"service",
-	"systemctl",
-	"umount",
-
-	// Network configuration
-	"firewall-cmd",
-	"ifconfig",
-	"ip",
-	"iptables",
-	"netstat",
-	"pfctl",
-	"route",
-	"ufw",
-}
-
 func bashDescription(attribution *config.Attribution, modelName string) string {
-	bannedCommandsStr := strings.Join(bannedCommands, ", ")
 	var out bytes.Buffer
 	if err := bashDescriptionTpl.Execute(&out, bashDescriptionData{
-		BannedCommands:  bannedCommandsStr,
+		BannedCommands:  "",
 		MaxOutputLength: MaxOutputLength,
 		Attribution:     *attribution,
 		ModelName:       modelName,
@@ -159,33 +86,61 @@ func bashDescription(attribution *config.Attribution, modelName string) string {
 	return out.String()
 }
 
+// Pattern-based security check function similar to claude-code's approach.
+// In claude-code, security checks return allow/ask/deny. Since shell.BlockFunc
+// only supports block/allow, we only block patterns that should ALWAYS be denied
+// (control characters, Zsh dangerous commands). Patterns like $() and ${} that
+// claude-code maps to "ask" are handled by the permission system instead.
+func patternBlockFunc(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	command := strings.Join(args, " ")
+
+	// Check for Zsh-specific dangerous commands (from claude-code).
+	// These provide capabilities like loading kernel modules, raw file I/O,
+	// network access, and pseudo-terminal execution that circumvent normal
+	// permission checks.
+	zshDangerousCommands := []string{
+		"zmodload", "emulate", "sysopen", "sysread", "syswrite",
+		"sysseek", "zpty", "ztcp", "zsocket", "zf_rm", "zf_mv",
+		"zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp",
+	}
+
+	baseCommand := strings.ToLower(args[0])
+	for _, cmd := range zshDangerousCommands {
+		if baseCommand == cmd {
+			return true
+		}
+	}
+
+	// Check for control characters (non-printable).
+	// Null bytes and other non-printable chars are silently dropped by bash
+	// but confuse our validators, allowing metacharacters to slip through.
+	for _, r := range command {
+		if r < 32 && r != '\t' && r != '\n' && r != '\r' {
+			return true
+		}
+		if r == 127 {
+			return true
+		}
+	}
+
+	return false
+}
+
 func blockFuncs() []shell.BlockFunc {
 	return []shell.BlockFunc{
-		shell.CommandsBlocker(bannedCommands),
-		shell.ArgumentsBlocker("apk", []string{"add"}, nil),
-		shell.ArgumentsBlocker("apt", []string{"install"}, nil),
-		shell.ArgumentsBlocker("apt-get", []string{"install"}, nil),
-		shell.ArgumentsBlocker("dnf", []string{"install"}, nil),
-		shell.ArgumentsBlocker("pacman", nil, []string{"-S"}),
-		shell.ArgumentsBlocker("pkg", []string{"install"}, nil),
-		shell.ArgumentsBlocker("yum", []string{"install"}, nil),
-		shell.ArgumentsBlocker("zypper", []string{"install"}, nil),
-		shell.ArgumentsBlocker("brew", []string{"install"}, nil),
-		shell.ArgumentsBlocker("cargo", []string{"install"}, nil),
-		shell.ArgumentsBlocker("gem", []string{"install"}, nil),
-		shell.ArgumentsBlocker("go", []string{"install"}, nil),
-		shell.ArgumentsBlocker("npm", []string{"install"}, []string{"--global"}),
-		shell.ArgumentsBlocker("npm", []string{"install"}, []string{"-g"}),
-		shell.ArgumentsBlocker("pip", []string{"install"}, []string{"--user"}),
-		shell.ArgumentsBlocker("pip3", []string{"install"}, []string{"--user"}),
-		shell.ArgumentsBlocker("pnpm", []string{"add"}, []string{"--global"}),
-		shell.ArgumentsBlocker("pnpm", []string{"add"}, []string{"-g"}),
-		shell.ArgumentsBlocker("yarn", []string{"global", "add"}, nil),
-		shell.ArgumentsBlocker("go", []string{"test"}, []string{"-exec"}),
+		patternBlockFunc,
 	}
 }
 
 func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelName string, hookMgr *hooks.Manager, opts ...BashToolOptions) fantasy.AgentTool {
+	return NewBashToolWithSessions(nil, permissions, workingDir, attribution, modelName, hookMgr, opts...)
+}
+
+func NewBashToolWithSessions(sessions session.Service, permissions permission.Service, workingDir string, attribution *config.Attribution, modelName string, hookMgr *hooks.Manager, opts ...BashToolOptions) fantasy.AgentTool {
 	var toolOpts BashToolOptions
 	if len(opts) > 0 {
 		toolOpts = opts[0]
@@ -212,6 +167,15 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			execWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), params.WorkingDir, workingDir)
 			fallbackCommand := ""
 			sessionID := GetSessionFromContext(ctx)
+
+			// Determine block funcs based on permission mode
+			runningBlockFuncs := execBlockFuncs
+			if sessions != nil && sessionID != "" {
+				if sess, err := sessions.Get(ctx, sessionID); err == nil && sess.PermissionMode == session.PermissionModeYolo {
+					// In yolo mode, don't block any commands
+					runningBlockFuncs = nil
+				}
+			}
 
 			if hookMgr != nil {
 				hookResult, hookErr := hookMgr.RunPreToolUse(ctx, BashToolName, map[string]any{
@@ -307,14 +271,14 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			}
 
 			if params.RunInBackground {
-				return runBackgroundBash(ctx, call, params, execWorkingDir, execBlockFuncs, timeoutSeconds, deprecationNotes, isSafeReadOnly)
+				return runBackgroundBash(ctx, call, params, execWorkingDir, runningBlockFuncs, timeoutSeconds, deprecationNotes, isSafeReadOnly)
 			}
 
 			startTime := time.Now()
 			commandToRun := params.Command
 			attemptedFallback := false
 			for {
-				output, execErr, timedOut, runErr := runForegroundBashCommand(ctx, call.ID, execWorkingDir, execBlockFuncs, commandToRun, timeoutSeconds)
+				output, execErr, timedOut, runErr := runForegroundBashCommand(ctx, call.ID, execWorkingDir, runningBlockFuncs, commandToRun, timeoutSeconds)
 				if runErr != nil {
 					return fantasy.ToolResponse{}, runErr
 				}

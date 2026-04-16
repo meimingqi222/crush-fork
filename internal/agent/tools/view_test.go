@@ -131,12 +131,12 @@ func TestViewTool_AllowsLargeImageWithCompression(t *testing.T) {
 	require.NotContains(t, resp.Content, "File is too large")
 }
 
-func TestViewTool_RejectsLargeNonImageFiles(t *testing.T) {
+func TestViewTool_AllowsReadingLargeFilesWithLimit(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "large.txt")
-	largeText := bytes.Repeat([]byte("a"), MaxViewSize+1)
+	largeText := bytes.Repeat([]byte("a\n"), 10000) // 10000 lines
 	require.NoError(t, os.WriteFile(filePath, largeText, 0o644))
 
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
@@ -144,10 +144,11 @@ func TestViewTool_RejectsLargeNonImageFiles(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
-	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "large.txt"})
+	// Test that large files can be read with a limit parameter
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "large.txt", Limit: 10})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
-	require.Contains(t, resp.Content, "File is too large")
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "a") // Should contain some content
 }
 
 func TestViewTool_InvalidPathSyntaxReturnsToolErrorResponse(t *testing.T) {

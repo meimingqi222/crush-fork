@@ -167,13 +167,6 @@ func NewViewTool(
 
 			isSupportedImage, mimeType := getImageMimeType(filePath)
 
-			// Based on the specifications we should not limit the skills read.
-			// For images, we allow reading first so compression can be applied.
-			if !isSkillFile && !isSupportedImage && fileInfo.Size() > MaxViewSize {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("File is too large (%d bytes). Maximum size is %d bytes",
-					fileInfo.Size(), MaxViewSize)), nil
-			}
-
 			// Set default limit if not provided (no limit for SKILL.md files)
 			if params.Limit <= 0 {
 				if isSkillFile {
