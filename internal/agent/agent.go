@@ -710,6 +710,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	var completedStepsThisRun int
 	var runToolUses int
 	var runLastTool string
+	// stripRedactedThinking is flipped on when a proxy rejects the
+	// Anthropic `redacted_thinking` content block, so subsequent
+	// prepareStep invocations strip those blocks from the history.
+	var stripRedactedThinking bool
 	runStream := func(providerOptions fantasy.ProviderOptions, billFirstStepAsUser bool) (*fantasy.AgentResult, error) {
 		prefetchedRecallInjected := prefetchedRecallInSystemPrompt
 		currentAssistant = nil
@@ -741,10 +745,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			maxOutputTokens = &call.MaxOutputTokens
 		}
 
+		initialMessages := requestState.History
+		if stripRedactedThinking {
+			initialMessages, _ = stripRedactedThinkingParts(initialMessages)
+		}
+
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 			Files:            requestState.Files,
-			Messages:         requestState.History,
+			Messages:         initialMessages,
 			ProviderOptions:  providerOptions,
 			MaxOutputTokens:  maxOutputTokens,
 			TopP:             call.TopP,
@@ -791,6 +800,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				for i := range prepared.Messages {
 					prepared.Messages[i].ProviderOptions = nil
 				}
+				if stripRedactedThinking {
+					prepared.Messages, _ = stripRedactedThinkingParts(prepared.Messages)
+				}
 
 				if !a.isSubAgent && call.MemoryPrefetch != nil && !prefetchedRecallInjected {
 					if result, settled := call.MemoryPrefetch.GetSettled(); settled {
@@ -830,6 +842,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					} else if len(transformedMsgs.Messages) > 0 {
 						// Convert back to fantasy messages.
 						prepared.Messages, _ = a.preparePrompt(transformedMsgs.Messages)
+						if stripRedactedThinking {
+							prepared.Messages, _ = stripRedactedThinkingParts(prepared.Messages)
+						}
 
 						// Re-inject auto_recall if transform removed it.
 						if autoRecallContent != "" && !hasAutoRecallInMessages(prepared.Messages) {
@@ -1361,6 +1376,48 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			requestState = retryState
 		}
 		providerOptions, _ = disableAnthropicThinking(providerOptions)
+		result, err = runStream(providerOptions, false)
+	}
+
+	if shouldRetryWithoutRedactedThinking(err) {
+		slog.Warn(
+			"Retrying request after proxy rejected Anthropic redacted_thinking blocks",
+			"session_id", call.SessionID,
+			"model", largeModel.ModelCfg.Model,
+			"provider", largeModel.ModelCfg.Provider,
+			"completed_steps", completedStepsThisRun,
+			"error", err,
+		)
+		if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
+			return nil, cleanupErr
+		}
+		currentAssistant = nil
+		currentStepToolMessageIDs = nil
+		if completedStepsThisRun > 0 {
+			retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+			if getMsgsErr != nil {
+				return nil, getMsgsErr
+			}
+			retryMsgs = excludeCurrentUserMessage(retryMsgs, call.UserMessage)
+			retryState, buildErr := a.buildChatRequestState(genCtx, chatRequestStateInput{
+				SessionID:      call.SessionID,
+				Agent:          "session",
+				Model:          largeModel,
+				Provider:       providerCtx,
+				Purpose:        requestPurpose,
+				Messages:       retryMsgs,
+				Message:        userMessage,
+				Attachments:    call.Attachments,
+				SystemPrompt:   systemPrompt,
+				PromptPrefix:   promptPrefix,
+				PermissionMode: currentSession.PermissionMode,
+			})
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			requestState = retryState
+		}
+		stripRedactedThinking = true
 		result, err = runStream(providerOptions, false)
 	}
 
@@ -2324,6 +2381,93 @@ func disableAnthropicThinking(opts fantasy.ProviderOptions) (fantasy.ProviderOpt
 	sanitized.Thinking = nil
 	cloned[anthropic.Name] = &sanitized
 	return cloned, true
+}
+
+// stripRedactedThinkingParts removes Anthropic redacted_thinking reasoning
+// blocks from assistant messages. Some Anthropic-compatible proxies (e.g.
+// third-party OpenAI/Claude bridges) do not implement the
+// `redacted_thinking` content-block type and reject requests that contain
+// it with a 422 Unprocessable Entity. Stripping these blocks lets the
+// conversation continue; the signed/plaintext thinking blocks and all
+// other content are preserved.
+func stripRedactedThinkingParts(messages []fantasy.Message) ([]fantasy.Message, bool) {
+	changed := false
+	for i := range messages {
+		if messages[i].Role != fantasy.MessageRoleAssistant {
+			continue
+		}
+		src := messages[i].Content
+		if len(src) == 0 {
+			continue
+		}
+		filtered := make([]fantasy.MessagePart, 0, len(src))
+		stripped := false
+		for _, p := range src {
+			if rp, ok := p.(fantasy.ReasoningPart); ok && isAnthropicRedactedReasoning(rp) {
+				stripped = true
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		if stripped {
+			messages[i].Content = filtered
+			changed = true
+		}
+	}
+	return messages, changed
+}
+
+func isAnthropicRedactedReasoning(rp fantasy.ReasoningPart) bool {
+	if rp.ProviderOptions == nil {
+		return false
+	}
+	meta, ok := rp.ProviderOptions[anthropic.Name]
+	if !ok {
+		return false
+	}
+	m, ok := meta.(*anthropic.ReasoningOptionMetadata)
+	if !ok || m == nil {
+		return false
+	}
+	// A redacted block is one with opaque data and no signature. Signed
+	// thinking blocks are legitimate across all Anthropic-compatible
+	// endpoints and must not be stripped.
+	return m.Signature == "" && m.RedactedData != ""
+}
+
+// shouldRetryWithoutRedactedThinking detects proxies that reject the
+// Anthropic `redacted_thinking` content block. Typical signatures:
+//   - 422 Unprocessable Entity with Pydantic union validation listing
+//     only ClaudeContentBlockText/Image/ToolUse/ToolResult/Thinking.
+//   - Any error message explicitly mentioning "redacted_thinking".
+func shouldRetryWithoutRedactedThinking(err error) bool {
+	var providerErr *fantasy.ProviderError
+	if !errors.As(err, &providerErr) || providerErr == nil {
+		return false
+	}
+	if providerErr.StatusCode != 422 && providerErr.StatusCode != 400 {
+		return false
+	}
+	msg := strings.ToLower(providerErr.Message)
+	if msg == "" {
+		return false
+	}
+	if strings.Contains(msg, "redacted_thinking") {
+		return true
+	}
+	// Pydantic union-mismatch rejection: the proxy lists accepted Claude
+	// content block types (without a redacted variant) and complains the
+	// input is not one of them.
+	if strings.Contains(msg, "claudecontentblock") &&
+		strings.Contains(msg, "unprocessable entity") {
+		return true
+	}
+	if strings.Contains(msg, "claudecontentblock") &&
+		(strings.Contains(msg, "input should be") || strings.Contains(msg, "union")) &&
+		strings.Contains(msg, "thinking") {
+		return true
+	}
+	return false
 }
 
 func shouldRetryWithoutAnthropicThinking(err error, opts fantasy.ProviderOptions) bool {
