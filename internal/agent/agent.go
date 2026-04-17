@@ -1676,7 +1676,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			for _, prefix := range []string{autoResumePromptPrefix, contextWindowResumePromptPrefix} {
 				if strings.HasPrefix(call.Prompt, prefix) {
 					trimmed := strings.TrimPrefix(call.Prompt, prefix)
-					originalPrompt = strings.TrimSpace(strings.TrimSuffix(trimmed, "`"))
+					if end := strings.LastIndex(trimmed, "`"); end >= 0 {
+						originalPrompt = strings.TrimSpace(trimmed[:end])
+					}
 					break
 				}
 			}
@@ -2488,7 +2490,10 @@ func titleUserPromptFromCall(prompt string) string {
 			continue
 		}
 		trimmed := strings.TrimPrefix(prompt, prefix)
-		return strings.TrimSpace(strings.TrimSuffix(trimmed, "`"))
+		if end := strings.LastIndex(trimmed, "`"); end >= 0 {
+			trimmed = trimmed[:end]
+		}
+		return strings.TrimSpace(trimmed)
 	}
 	return prompt
 }
