@@ -1675,14 +1675,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			originalPrompt := call.Prompt
 			for _, prefix := range []string{autoResumePromptPrefix, contextWindowResumePromptPrefix} {
 				if strings.HasPrefix(call.Prompt, prefix) {
-					trimmed := strings.TrimPrefix(call.Prompt, prefix)
+				trimmed := strings.TrimPrefix(call.Prompt, prefix)
 					// Remove the trailing backtick added by the resume prefix wrapper.
-					// This handles user prompts that contain backticks internally by only
-					// removing the final backtick that closes the quoted section.
-					if strings.HasSuffix(trimmed, "`") {
-						trimmed = trimmed[:len(trimmed)-1]
+					// Use LastIndex to find the wrapper's closing backtick, which correctly
+					// handles user prompts that may themselves end with backticks.
+					if end := strings.LastIndex(trimmed, "`"); end >= 0 {
+						originalPrompt = strings.TrimSpace(trimmed[:end])
+					} else {
+						originalPrompt = trimmed
 					}
-					originalPrompt = strings.TrimSpace(trimmed)
 					break
 				}
 			}
