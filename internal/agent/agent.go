@@ -1670,7 +1670,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			if contextWindowExceeded {
 				resumePrefix = contextWindowResumePromptPrefix
 			}
-			call.Prompt = fmt.Sprintf(resumePrefix+"%s`", call.Prompt)
+			// If call.Prompt already has a resume prefix, extract the original prompt
+			// to avoid nested prefixes (e.g., from a prior auto-resume).
+			originalPrompt := call.Prompt
+			for _, prefix := range []string{autoResumePromptPrefix, contextWindowResumePromptPrefix} {
+				if strings.HasPrefix(call.Prompt, prefix) {
+					trimmed := strings.TrimPrefix(call.Prompt, prefix)
+					if end := strings.LastIndex(trimmed, "`"); end >= 0 {
+						originalPrompt = strings.TrimSpace(trimmed[:end])
+					}
+					break
+				}
+			}
+			call.Prompt = fmt.Sprintf(resumePrefix+"%s`", originalPrompt)
 			if compactionTrigger == sessionCompactionTriggerRecover {
 				call.Purpose = plugin.ChatTransformPurposeRecover
 			}
