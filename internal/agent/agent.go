@@ -702,7 +702,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	var shouldSummarize bool
 	var compactionTrigger sessionCompactionTrigger
 	var contextWindowExceeded bool
-	contextWindowAutoResumeAllowed := true
 	var currentAssistant *message.Message
 	var currentStepToolMessageIDs []string
 	var currentStepToolResultChars int
@@ -1388,13 +1387,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}
 	if contextWindowErr && !a.disableAutoSummarize && !alreadyRecoveringFromContextWindow {
-		contextWindowAutoResumeAllowed = completedStepsThisRun == 0
 		slog.Warn("Context window exceeded; forcing summarization to recover",
 			"session_id", call.SessionID,
 			"model", largeModel.ModelCfg.Model,
 			"provider", largeModel.ModelCfg.Provider,
 			"completed_steps", completedStepsThisRun,
-			"auto_resume_allowed", contextWindowAutoResumeAllowed,
 		)
 		if truncErr := a.truncateOversizedToolResults(ctx, call.SessionID); truncErr != nil {
 			slog.Warn("Failed to truncate oversized tool results", "error", truncErr)
@@ -1452,20 +1449,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return nil, createErr
 				}
 			}
-			finishDescription := "The conversation history reached this model's context window limit. Auto-summarizing the session to continue the task…"
-			if !contextWindowAutoResumeAllowed {
-				finishDescription = "The conversation history reached this model's context window limit after tools already ran. Auto-summarizing the session now; re-run your last request to continue safely without replaying completed tool calls."
-			}
 			currentAssistant.AddFinish(
 				message.FinishReasonError,
 				"Context limit reached",
-				finishDescription,
+				"The conversation history reached this model's context window limit. Auto-summarizing the session to continue the task…",
 			)
 			if updateErr := a.messages.Update(cleanupCtx, *currentAssistant); updateErr != nil {
 				slog.Warn("Failed to update failed assistant message after context-window error", "error", updateErr)
 			}
 		}
-		contextWindowExceeded = contextWindowAutoResumeAllowed
+		contextWindowExceeded = true
 		compactionTrigger = sessionCompactionTriggerRecover
 		shouldSummarize = true
 		err = nil
@@ -1671,10 +1664,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			return nil, summarizeErr
 		}
 		hasPendingToolCalls := currentAssistant != nil && len(currentAssistant.ToolCalls()) > 0
-		shouldAutoResume := hasPendingToolCalls
-		if compactionTrigger == sessionCompactionTriggerRecover {
-			shouldAutoResume = contextWindowAutoResumeAllowed
-		}
+		shouldAutoResume := hasPendingToolCalls || compactionTrigger == sessionCompactionTriggerRecover
 		if shouldAutoResume {
 			resumePrefix := autoResumePromptPrefix
 			if contextWindowExceeded {
@@ -1687,12 +1677,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			call.InitiatorType = copilot.InitiatorAgent
 			call.BypassQueuePause = true
 			a.enqueueQueuedCall(call.SessionID, call)
-		} else if compactionTrigger == sessionCompactionTriggerRecover && !a.isSubAgent {
-			// Context limit was reached after tools already ran; pause the queue
-			// for top-level sessions so the user can manually re-run their request
-			// to continue safely without replaying completed tool calls.
-			// (Sub-agent sessions are not paused since they have no user to re-run.)
-			a.PauseQueue(call.SessionID)
 		}
 	}
 
