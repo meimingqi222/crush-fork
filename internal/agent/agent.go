@@ -980,11 +980,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// double-count by passing call.Prompt/attachments. For the initial step,
 				// prepared.Messages does not yet contain the user prompt (it's added by
 				// the fantasy framework), so we need call.Prompt/attachments for estimation.
-				// We check whether prepared.Messages has grown beyond initialMessages to
-				// determine if the current user message has been added. This correctly
-				// handles retries (where length remains equal to initialMessages) and
-				// distinguishes from follow-up steps (where length is greater).
-				hasCurrentUserMessage := len(prepared.Messages) > len(initialMessages)
+				// We check whether options.Messages (from the fantasy framework, before any
+				// local modifications like auto_recall, PromptPrefix, or queued calls) has
+				// grown beyond initialMessages to determine if the current user message has
+				// been added. This correctly handles retries and distinguishes from follow-up
+				// steps without being affected by local message additions.
+				hasCurrentUserMessage := len(options.Messages) > len(initialMessages)
 				promptForEstimate := call.Prompt
 				attachmentsForEstimate := call.Attachments
 				if hasCurrentUserMessage {
