@@ -784,7 +784,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				} else {
 					callContext = copilot.ContextWithInitiatorType(callContext, copilot.InitiatorAgent)
 				}
-				isFirstStep := firstRequestStep
 				firstRequestStep = false
 
 				stepRuntimeConfig := runtimeConfig
@@ -981,9 +980,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// double-count by passing call.Prompt/attachments. For the initial step,
 				// prepared.Messages does not yet contain the user prompt (it's added by
 				// the fantasy framework), so we need call.Prompt/attachments for estimation.
+				// We check whether prepared.Messages contains a user message to determine
+				// this, rather than using isFirstStep, because isFirstStep is affected by
+				// retries and would be false for retries of the initial step.
+				hasUserMessage := false
+				for _, msg := range prepared.Messages {
+					if msg.Role == fantasy.MessageRoleUser {
+						hasUserMessage = true
+						break
+					}
+				}
 				promptForEstimate := call.Prompt
 				attachmentsForEstimate := call.Attachments
-				if !isFirstStep {
+				if hasUserMessage {
 					promptForEstimate = ""
 					attachmentsForEstimate = nil
 				}
