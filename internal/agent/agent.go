@@ -738,6 +738,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		runToolUses = 0
 		runLastTool = ""
 		firstRequestStep = billFirstStepAsUser
+		prepareStepCallCount := 0
 
 		if err := a.plugins().TriggerChatBeforeRequest(genCtx, plugin.ChatBeforeRequestInput{
 			SessionID: call.SessionID,
@@ -774,6 +775,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			TopK:             call.TopK,
 			FrequencyPenalty: call.FrequencyPenalty,
 			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+				prepareStepCallCount++
+				isFirstPrepareStepCall := prepareStepCallCount == 1
+
 				// Explicitly tag every LLM request with the correct X-Initiator value
 				// so GitHub Copilot billing is correct regardless of how the fantasy
 				// framework propagates the outer context. Only the first step of a
@@ -980,19 +984,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// double-count by passing call.Prompt/attachments. For the initial step,
 				// prepared.Messages does not yet contain the user prompt (it's added by
 				// the fantasy framework), so we need call.Prompt/attachments for estimation.
-				// We check whether prepared.Messages contains a user message to determine
-				// this, rather than using isFirstStep, because isFirstStep is affected by
-				// retries and would be false for retries of the initial step.
-				hasUserMessage := false
-				for _, msg := range prepared.Messages {
-					if msg.Role == fantasy.MessageRoleUser {
-						hasUserMessage = true
-						break
-					}
-				}
+				// We use a local counter to track whether this is the first PrepareStep call
+				// for this Stream invocation, which correctly handles retries and doesn't
+				// confuse historical user messages with the current request's user message.
 				promptForEstimate := call.Prompt
 				attachmentsForEstimate := call.Attachments
-				if hasUserMessage {
+				if !isFirstPrepareStepCall {
 					promptForEstimate = ""
 					attachmentsForEstimate = nil
 				}
