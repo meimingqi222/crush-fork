@@ -99,6 +99,7 @@ type autoSummarizeTestAgent struct {
 	summaryCalls            int
 	stepUsage               fantasy.Usage
 	stepUsages              []fantasy.Usage
+	afterPrepare            func()
 	afterStep               func()
 	runErr                  error
 	runErrs                 []error
@@ -118,6 +119,9 @@ func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentS
 	if call.PrepareStep != nil {
 		_, _, err := call.PrepareStep(ctx, fantasy.PrepareStepFunctionOptions{Messages: call.Messages})
 		require.NoError(a.t, err)
+	}
+	if a.afterPrepare != nil {
+		a.afterPrepare()
 	}
 
 	isSummary := call.OnStepFinish == nil
@@ -240,6 +244,179 @@ func newAutoSummarizeTestSessionAgent(_ *testing.T, env fakeEnv, fakeAgent fanta
 			return nil
 		},
 	})
+}
+
+func TestRunPrepareStepPublishesProvisionalAssistantUsage(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "prepare-step provisional usage")
+	require.NoError(t, err)
+
+	var provisional message.Usage
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		stepUsage: fantasy.Usage{
+			InputTokens:  120,
+			OutputTokens: 25,
+		},
+		afterPrepare: func() {
+			msgs, listErr := env.messages.List(t.Context(), testSession.ID)
+			require.NoError(t, listErr)
+
+			found := false
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role != message.Assistant {
+					continue
+				}
+				provisional = msgs[i].Usage
+				found = true
+				break
+			}
+			require.True(t, found)
+			require.Greater(t, provisional.InputTokens, int64(0))
+			require.Zero(t, provisional.OutputTokens)
+			require.Nil(t, msgs[len(msgs)-1].FinishPart())
+		},
+	}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 50_000)
+
+	result, err := agentUnderTest.Run(t.Context(), SessionAgentCall{
+		Prompt:          "Explain why the prompt was compacted.",
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 1_000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Greater(t, provisional.InputTokens, int64(0))
+}
+
+func TestRunFallbackEstimateIncludesSystemPromptAndUserPrompt(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "run estimate")
+	require.NoError(t, err)
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 50_000)
+	concrete := agentUnderTest.(*sessionAgent)
+
+	const (
+		systemPrompt = "You are a careful coding agent."
+		promptPrefix = "Follow the workspace instructions exactly."
+		userPrompt   = "Explain why this session hit the context limit."
+	)
+	concrete.SetSystemPrompt(systemPrompt)
+	concrete.SetSystemPromptPrefix(promptPrefix)
+
+	_, err = agentUnderTest.Run(t.Context(), SessionAgentCall{
+		Prompt:          userPrompt,
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 1_000,
+	})
+	require.NoError(t, err)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+
+	historyWithPrefix := []fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}
+	expected := concrete.estimateSessionPromptTokens(
+		historyWithPrefix,
+		userPrompt,
+		nil,
+		nil,
+		systemPrompt,
+		"",
+	)
+	require.Equal(t, expected, savedSession.LastPromptTokens)
+}
+
+func TestSummarizeFallbackEstimateIncludesFullSummaryRequest(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summary estimate")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "Summarize the long discussion about provider token accounting."}},
+	})
+	require.NoError(t, err)
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 50_000)
+	concrete := agentUnderTest.(*sessionAgent)
+
+	const promptPrefix = "Compact aggressively but keep key decisions."
+	concrete.SetSystemPromptPrefix(promptPrefix)
+
+	msgs, err := env.messages.List(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	aiMsgs, _ := concrete.preparePrompt(msgs)
+
+	expected := concrete.estimateSessionPromptTokens(
+		aiMsgs,
+		buildSessionCompactingPrompt(nil, nil, ""),
+		nil,
+		nil,
+		string(summaryPrompt),
+		promptPrefix,
+	)
+
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.Equal(t, expected, savedSession.LastPromptTokens)
+}
+
+func TestSummarizePublishesProvisionalSummaryUsage(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summary provisional usage")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("summarize this context ", 200)}},
+	})
+	require.NoError(t, err)
+
+	var provisional message.Usage
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		afterPrepare: func() {
+			msgs, listErr := env.messages.List(t.Context(), testSession.ID)
+			require.NoError(t, listErr)
+
+			found := false
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role != message.Assistant || !msgs[i].IsSummaryMessage {
+					continue
+				}
+				provisional = msgs[i].Usage
+				require.Greater(t, provisional.InputTokens, int64(0))
+				require.Zero(t, provisional.OutputTokens)
+				require.Nil(t, msgs[i].FinishPart())
+				found = true
+				break
+			}
+			require.True(t, found)
+		},
+	}
+
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 50_000)
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Greater(t, provisional.InputTokens, int64(0))
 }
 
 func TestRunPreflightAutoSummarizesBeforeRequest(t *testing.T) {

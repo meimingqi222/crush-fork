@@ -28,17 +28,19 @@ import (
 var viewDescription []byte
 
 type ViewParams struct {
-	FilePath string `json:"file_path" description:"The path to the file to read"`
-	Offset   int    `json:"offset,omitempty" description:"The line number to start reading from (0-based)"`
-	Limit    int    `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000)"`
-	Hashline bool   `json:"hashline,omitempty" description:"If true, include hashline anchors in the output for line-addressable editing"`
+	FilePath           string `json:"file_path" description:"The path to the file to read"`
+	Offset             int    `json:"offset,omitempty" description:"The line number to start reading from (0-based)"`
+	Limit              int    `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000)"`
+	Hashline           bool   `json:"hashline,omitempty" description:"If true, include hashline anchors in the output for line-addressable editing"`
+	WaitForDiagnostics *bool  `json:"wait_for_diagnostics,omitempty" description:"If true, wait for LSP diagnostics (default: true)"`
 }
 
 type ViewPermissionsParams struct {
-	FilePath string `json:"file_path"`
-	Offset   int    `json:"offset"`
-	Limit    int    `json:"limit"`
-	Hashline bool   `json:"hashline,omitempty"`
+	FilePath           string `json:"file_path"`
+	Offset             int    `json:"offset"`
+	Limit              int    `json:"limit"`
+	Hashline           bool   `json:"hashline,omitempty"`
+	WaitForDiagnostics *bool  `json:"wait_for_diagnostics,omitempty"`
 }
 
 type ViewResourceType string
@@ -216,7 +218,9 @@ func NewViewTool(
 			}
 
 			openInLSPs(ctx, lspManager, filePath)
-			waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
+			if shouldWaitForDiagnostics(params.WaitForDiagnostics) {
+				waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
+			}
 			output := "<file>\n"
 			if params.Hashline {
 				output += addHashlineLineNumbers(content, params.Offset+1)
@@ -250,6 +254,13 @@ func NewViewTool(
 				meta,
 			), nil
 		})
+}
+
+func shouldWaitForDiagnostics(wait *bool) bool {
+	if wait == nil {
+		return true
+	}
+	return *wait
 }
 
 func addLineNumbers(content string, startLine int) string {

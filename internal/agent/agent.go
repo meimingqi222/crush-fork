@@ -840,7 +840,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// Trigger messages.transform plugin on every step (including tool result steps).
 				// This allows plugins like morph_compact to compress messages after tool calls.
 				if len(prepared.Messages) > 0 {
-					originalTokens := estimatePromptTokens(prepared.Messages, nil)
+					originalTokens := a.estimateSessionPromptTokens(
+						prepared.Messages,
+						call.Prompt,
+						call.Attachments,
+						prepared.Tools,
+						requestState.SystemPrompt,
+						requestState.PromptPrefix,
+					)
 					internalMsgs := message.FromFantasyMessages(prepared.Messages)
 					transformedMsgs, transformErr := a.plugins().TriggerChatMessagesTransform(callContext, plugin.ChatMessagesTransformInput{
 						SessionID:      call.SessionID,
@@ -865,11 +872,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							slog.Debug("[PERF] sessionAgent: re-injected auto_recall after transform", "session_id", call.SessionID)
 						}
 
-						newTokens := estimatePromptTokens(prepared.Messages, nil)
-						// If morph compression reduced tokens significantly, update session's
-						// LastPromptTokens so UI and auto-summarize checks use the correct value.
-						// We only update the in-memory session here; the persisted value will
-						// be updated after the actual LLM call completes.
+						newTokens := a.estimateSessionPromptTokens(
+							prepared.Messages,
+							call.Prompt,
+							call.Attachments,
+							prepared.Tools,
+							requestState.SystemPrompt,
+							requestState.PromptPrefix,
+						)
+						// If morph compression reduced tokens significantly, update the local
+						// session copy so follow-up auto-summarize checks use the reduced
+						// prompt estimate for this in-flight request.
 						if newTokens < originalTokens {
 							slog.Debug("Messages transformed (compressed) in PrepareStep", "original_tokens", originalTokens, "new_tokens", newTokens, "session_id", call.SessionID)
 							sessionLock.Lock()
@@ -962,7 +975,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				currentStepToolResultChars = 0
 				allRunMessageIDs = append(allRunMessageIDs, assistantMsg.ID)
 
-				estimatedPromptTokens = estimatePromptTokens(prepared.Messages, prepared.Tools)
+				estimatedPromptTokens = a.estimateSessionPromptTokens(
+					prepared.Messages,
+					call.Prompt,
+					call.Attachments,
+					prepared.Tools,
+					requestState.SystemPrompt,
+					"",
+				)
+				if estimatedPromptTokens > 0 {
+					currentAssistant.SetUsage(message.Usage{InputTokens: estimatedPromptTokens})
+					if updateUsageErr := a.messages.Update(callContext, *currentAssistant); updateUsageErr != nil {
+						return callContext, prepared, updateUsageErr
+					}
+				}
 				return callContext, prepared, err
 			},
 			OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
@@ -1104,6 +1130,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				completedStepsThisRun++
 				currentSession = updatedSession
+				currentAssistant.SetUsage(normalizedMessageUsage(stepResult.Usage, usageProvider(largeModel), estimatedPromptTokens))
 				updateErr := a.messages.Update(genCtx, *currentAssistant)
 				if call.OnProgress != nil {
 					call.OnProgress(runToolUses, runLastTool)
@@ -2127,6 +2154,21 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
+	summarizeEstimatedPromptTokens := a.estimateSessionPromptTokens(
+		aiMsgs,
+		summaryPromptText,
+		nil,
+		nil,
+		string(summaryPrompt),
+		systemPromptPrefix,
+	)
+	if summarizeEstimatedPromptTokens > 0 {
+		summaryMessage.SetUsage(message.Usage{InputTokens: summarizeEstimatedPromptTokens})
+		if updateErr := a.messages.Update(genCtx, summaryMessage); updateErr != nil {
+			return updateErr
+		}
+	}
+
 	summaryStream := func() (*fantasy.AgentResult, error) {
 		return agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:          summaryPromptText,
@@ -2266,6 +2308,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
+	summaryMessage.SetUsage(normalizedMessageUsage(resp.TotalUsage, usageProvider(largeModel), summarizeEstimatedPromptTokens))
 	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
 	err = a.messages.Update(genCtx, summaryMessage)
 	if err != nil {
@@ -2284,9 +2327,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
-	// Compute an estimate so the fallback in updateSessionUsage can correct
-	// for proxies that under-report input tokens during summarization.
-	summarizeEstimatedPromptTokens := estimatePromptTokens(aiMsgs, nil)
 	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens)
 
 	currentSession.SummaryMessageID = summaryMessage.ID
@@ -2984,6 +3024,23 @@ func promptTokensForUsage(usage fantasy.Usage, providerID string) int64 {
 	return usage.InputTokens + usage.CacheCreationTokens
 }
 
+func normalizedMessageUsage(usage fantasy.Usage, providerID string, estimatedPromptTokens int64) message.Usage {
+	normalized := message.Usage{
+		OutputTokens:     usage.OutputTokens,
+		ReasoningTokens:  usage.ReasoningTokens,
+		CacheReadTokens:  usage.CacheReadTokens,
+		CacheWriteTokens: usage.CacheCreationTokens,
+	}
+
+	promptTokens := promptTokensForUsage(usage, providerID)
+	if estimatedPromptTokens > 0 && promptTokens < estimatedPromptTokens {
+		promptTokens = estimatedPromptTokens
+	}
+
+	normalized.InputTokens = max(0, promptTokens-normalized.CacheReadTokens-normalized.CacheWriteTokens)
+	return normalized
+}
+
 func totalTokensForUsage(usage fantasy.Usage, providerID string) int64 {
 	return promptTokensForUsage(usage, providerID) + usage.OutputTokens
 }
@@ -3266,23 +3323,13 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 		session.Cost += cost
 	}
 
-	promptTokens := promptTokensForUsage(usage, usageProvider(model))
-	// Some providers (e.g., Anthropic-compatible proxies) under-report or
-	// return stale input token counts in streaming mode — they may report
-	// only user-message tokens, omit system prompt and tool definitions, or
-	// return a constant value that does not grow across tool-call steps.
-	// Use the higher of the API-reported value and the byte-based estimate
-	// so the context-window display keeps pace with the actual conversation
-	// size. The estimate is rough (total bytes / 4) but directionally
-	// correct and guaranteed to grow as messages accumulate.
-	if estimatedPromptTokens > 0 && promptTokens < estimatedPromptTokens {
-		promptTokens = estimatedPromptTokens
-	}
+	normalizedUsage := normalizedMessageUsage(usage, usageProvider(model), estimatedPromptTokens)
+	promptTokens := normalizedUsage.PromptTokens()
 
 	session.CompletionTokens += usage.OutputTokens
 	session.PromptTokens += promptTokens
 	session.LastPromptTokens = promptTokens
-	session.LastCompletionTokens = usage.OutputTokens + usage.ReasoningTokens
+	session.LastCompletionTokens = normalizedUsage.CompletionTokens()
 }
 
 func (a *sessionAgent) Cancel(sessionID string) {

@@ -24,7 +24,7 @@ INSERT INTO messages (
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'), strftime('%s', 'now')
 )
-RETURNING id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+RETURNING id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 `
 
 type CreateMessageParams struct {
@@ -59,6 +59,11 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 		&i.FinishedAt,
 		&i.Provider,
 		&i.IsSummaryMessage,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.ReasoningTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
 	)
 	return i, err
 }
@@ -84,7 +89,7 @@ func (q *Queries) DeleteSessionMessages(ctx context.Context, sessionID string) e
 }
 
 const getMessage = `-- name: GetMessage :one
-SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE id = ? LIMIT 1
 `
@@ -103,12 +108,17 @@ func (q *Queries) GetMessage(ctx context.Context, id string) (Message, error) {
 		&i.FinishedAt,
 		&i.Provider,
 		&i.IsSummaryMessage,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.ReasoningTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
 	)
 	return i, err
 }
 
 const listAllUserMessages = `-- name: ListAllUserMessages :many
-SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE role = 'user'
 ORDER BY created_at DESC
@@ -134,6 +144,11 @@ func (q *Queries) ListAllUserMessages(ctx context.Context) ([]Message, error) {
 			&i.FinishedAt,
 			&i.Provider,
 			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -149,7 +164,7 @@ func (q *Queries) ListAllUserMessages(ctx context.Context) ([]Message, error) {
 }
 
 const listMessagesBySession = `-- name: ListMessagesBySession :many
-SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE session_id = ?
 ORDER BY created_at ASC
@@ -175,6 +190,11 @@ func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) (
 			&i.FinishedAt,
 			&i.Provider,
 			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -190,7 +210,7 @@ func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) (
 }
 
 const listUserMessagesBySession = `-- name: ListUserMessagesBySession :many
-SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE session_id = ? AND role = 'user'
 ORDER BY created_at DESC
@@ -216,6 +236,11 @@ func (q *Queries) ListUserMessagesBySession(ctx context.Context, sessionID strin
 			&i.FinishedAt,
 			&i.Provider,
 			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -231,7 +256,7 @@ func (q *Queries) ListUserMessagesBySession(ctx context.Context, sessionID strin
 }
 
 const searchMessages = `-- name: SearchMessages :many
-SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE (?1 = '' OR session_id = ?1)
   AND EXISTS (
@@ -270,6 +295,11 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 			&i.FinishedAt,
 			&i.Provider,
 			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -289,17 +319,36 @@ UPDATE messages
 SET
     parts = ?,
     finished_at = ?,
+    input_tokens = ?,
+    output_tokens = ?,
+    reasoning_tokens = ?,
+    cache_read_tokens = ?,
+    cache_write_tokens = ?,
     updated_at = strftime('%s', 'now')
 WHERE id = ?
 `
 
 type UpdateMessageParams struct {
-	Parts      string        `json:"parts"`
-	FinishedAt sql.NullInt64 `json:"finished_at"`
-	ID         string        `json:"id"`
+	Parts            string        `json:"parts"`
+	FinishedAt       sql.NullInt64 `json:"finished_at"`
+	InputTokens      int64         `json:"input_tokens"`
+	OutputTokens     int64         `json:"output_tokens"`
+	ReasoningTokens  int64         `json:"reasoning_tokens"`
+	CacheReadTokens  int64         `json:"cache_read_tokens"`
+	CacheWriteTokens int64         `json:"cache_write_tokens"`
+	ID               string        `json:"id"`
 }
 
 func (q *Queries) UpdateMessage(ctx context.Context, arg UpdateMessageParams) error {
-	_, err := q.exec(ctx, q.updateMessageStmt, updateMessage, arg.Parts, arg.FinishedAt, arg.ID)
+	_, err := q.exec(ctx, q.updateMessageStmt, updateMessage,
+		arg.Parts,
+		arg.FinishedAt,
+		arg.InputTokens,
+		arg.OutputTokens,
+		arg.ReasoningTokens,
+		arg.CacheReadTokens,
+		arg.CacheWriteTokens,
+		arg.ID,
+	)
 	return err
 }

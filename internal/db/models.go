@@ -41,6 +41,11 @@ type Message struct {
 	FinishedAt       sql.NullInt64  `json:"finished_at"`
 	Provider         sql.NullString `json:"provider"`
 	IsSummaryMessage int64          `json:"is_summary_message"`
+	InputTokens      int64          `json:"input_tokens"`
+	OutputTokens     int64          `json:"output_tokens"`
+	ReasoningTokens  int64          `json:"reasoning_tokens"`
+	CacheReadTokens  int64          `json:"cache_read_tokens"`
+	CacheWriteTokens int64          `json:"cache_write_tokens"`
 }
 
 type ReadFile struct {

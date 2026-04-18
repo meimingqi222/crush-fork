@@ -49,7 +49,7 @@ INSERT INTO sessions (
     null,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 `
 
 type CreateSessionParams struct {
@@ -111,6 +111,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }
@@ -126,7 +127,7 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 }
 
 const getLastSession = `-- name: GetLastSession :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 FROM sessions
 WHERE parent_session_id IS NULL
 ORDER BY updated_at DESC
@@ -158,12 +159,13 @@ func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 FROM sessions
 WHERE id = ? LIMIT 1
 `
@@ -193,12 +195,13 @@ func (q *Queries) GetSessionByID(ctx context.Context, id string) (Session, error
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 FROM sessions
 WHERE parent_session_id is NULL
 ORDER BY updated_at DESC
@@ -235,6 +238,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 			&i.HandoffDraftPrompt,
 			&i.HandoffRelevantFiles,
 			&i.PermissionMode,
+			&i.LastSummaryAt,
 		); err != nil {
 			return nil, err
 		}
@@ -250,7 +254,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 const listSessionsByParentID = `-- name: ListSessionsByParentID :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 FROM sessions
 WHERE parent_session_id = ?
 ORDER BY created_at DESC
@@ -287,6 +291,7 @@ func (q *Queries) ListSessionsByParentID(ctx context.Context, parentSessionID sq
 			&i.HandoffDraftPrompt,
 			&i.HandoffRelevantFiles,
 			&i.PermissionMode,
+			&i.LastSummaryAt,
 		); err != nil {
 			return nil, err
 		}
@@ -338,7 +343,7 @@ SET
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 `
 
 type UpdateSessionParams struct {
@@ -404,6 +409,7 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }
@@ -412,7 +418,7 @@ const updateSessionCollaborationMode = `-- name: UpdateSessionCollaborationMode 
 UPDATE sessions
 SET collaboration_mode = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 `
 
 type UpdateSessionCollaborationModeParams struct {
@@ -445,6 +451,7 @@ func (q *Queries) UpdateSessionCollaborationMode(ctx context.Context, arg Update
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }
@@ -453,7 +460,7 @@ const updateSessionPermissionMode = `-- name: UpdateSessionPermissionMode :one
 UPDATE sessions
 SET permission_mode = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 `
 
 type UpdateSessionPermissionModeParams struct {
@@ -486,6 +493,7 @@ func (q *Queries) UpdateSessionPermissionMode(ctx context.Context, arg UpdateSes
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }
@@ -499,7 +507,7 @@ SET
     cost = cost + ?,
     updated_at = strftime('%s', 'now')
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
 `
 
 type UpdateSessionTitleAndUsageParams struct {
@@ -541,6 +549,7 @@ func (q *Queries) UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSess
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
 		&i.PermissionMode,
+		&i.LastSummaryAt,
 	)
 	return i, err
 }

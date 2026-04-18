@@ -129,11 +129,46 @@ type Finish struct {
 
 func (Finish) isPart() {}
 
+type Usage struct {
+	InputTokens      int64 `json:"input_tokens,omitempty"`
+	OutputTokens     int64 `json:"output_tokens,omitempty"`
+	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
+}
+
+func UsageFromFantasy(usage fantasy.Usage) Usage {
+	return Usage{
+		InputTokens:      usage.InputTokens,
+		OutputTokens:     usage.OutputTokens,
+		ReasoningTokens:  usage.ReasoningTokens,
+		CacheReadTokens:  usage.CacheReadTokens,
+		CacheWriteTokens: usage.CacheCreationTokens,
+	}
+}
+
+func (u Usage) PromptTokens() int64 {
+	return u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+}
+
+func (u Usage) CompletionTokens() int64 {
+	return u.OutputTokens + u.ReasoningTokens
+}
+
+func (u Usage) TotalTokens() int64 {
+	return u.PromptTokens() + u.CompletionTokens()
+}
+
+func (u Usage) HasDisplayOutput() bool {
+	return u.OutputTokens > 0
+}
+
 type Message struct {
 	ID               string
 	Role             MessageRole
 	SessionID        string
 	Parts            []ContentPart
+	Usage            Usage
 	Model            string
 	Provider         string
 	CreatedAt        int64
@@ -404,6 +439,10 @@ func (m *Message) SetToolCalls(tc []ToolCall) {
 
 func (m *Message) AddToolResult(tr ToolResult) {
 	m.Parts = append(m.Parts, tr)
+}
+
+func (m *Message) SetUsage(usage Usage) {
+	m.Usage = usage
 }
 
 func (m *Message) SetToolResults(tr []ToolResult) {

@@ -34,6 +34,7 @@ func FormatReasoningEffort(effort string) string {
 type ModelContextInfo struct {
 	InputTokens  int64
 	OutputTokens int64
+	TotalTokens  int64
 	ModelContext int64
 	Cost         float64
 } // ModelInfo renders model information including name, provider, reasoning
@@ -72,7 +73,7 @@ func ModelInfo(t *styles.Styles, modelName, providerName, reasoningInfo string, 
 	}
 
 	if context != nil {
-		formattedInfo := formatTokensAndCost(t, context.InputTokens, context.OutputTokens, context.ModelContext, context.Cost)
+		formattedInfo := formatTokensAndCost(t, context.TotalTokens, context.OutputTokens, context.ModelContext, context.Cost)
 		parts = append(parts, lipgloss.NewStyle().PaddingLeft(2).Render(formattedInfo))
 	}
 
@@ -118,14 +119,13 @@ func FormatContextUsage(tokens, contextWindow int64) string {
 }
 
 // formatTokensAndCost formats cumulative context usage and cost.
-func formatTokensAndCost(t *styles.Styles, inputTokens, outputTokens, contextWindow int64, cost float64) string {
+func formatTokensAndCost(t *styles.Styles, totalTokens, outputTokens, contextWindow int64, cost float64) string {
 	if outputTokens < 0 {
 		outputTokens = 0
 	}
-	if inputTokens < 0 {
-		inputTokens = 0
+	if totalTokens < 0 {
+		totalTokens = 0
 	}
-	totalTokens := inputTokens + outputTokens
 	formattedCost := t.Muted.Render(fmt.Sprintf("$%.2f", cost))
 	formattedOutput := t.Muted.Render(fmt.Sprintf("%s out", strings.ToLower(FormatTokenCount(outputTokens))))
 	formattedTotal := t.Subtle.Render(FormatContextUsage(totalTokens, contextWindow))

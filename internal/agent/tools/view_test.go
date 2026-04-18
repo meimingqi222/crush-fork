@@ -169,6 +169,22 @@ func TestViewTool_InvalidPathSyntaxReturnsToolErrorResponse(t *testing.T) {
 	require.Contains(t, resp.Content, "error accessing file")
 }
 
+func TestShouldWaitForDiagnostics_DefaultsToTrue(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, shouldWaitForDiagnostics(nil))
+}
+
+func TestShouldWaitForDiagnostics_UsesExplicitValue(t *testing.T) {
+	t.Parallel()
+
+	wait := true
+	skip := false
+
+	require.True(t, shouldWaitForDiagnostics(&wait))
+	require.False(t, shouldWaitForDiagnostics(&skip))
+}
+
 func runViewTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params ViewParams) (fantasy.ToolResponse, error) {
 	t.Helper()
 

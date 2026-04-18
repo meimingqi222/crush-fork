@@ -30,6 +30,11 @@ UPDATE messages
 SET
     parts = ?,
     finished_at = ?,
+    input_tokens = ?,
+    output_tokens = ?,
+    reasoning_tokens = ?,
+    cache_read_tokens = ?,
+    cache_write_tokens = ?,
     updated_at = strftime('%s', 'now')
 WHERE id = ?;
 

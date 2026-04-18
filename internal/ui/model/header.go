@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -50,6 +49,7 @@ func (h *header) drawHeader(
 	scr uv.Screen,
 	area uv.Rectangle,
 	session *session.Session,
+	usage contextUsageSnapshot,
 	compact bool,
 	detailsOpen bool,
 	width int,
@@ -78,6 +78,7 @@ func (h *header) drawHeader(
 	details := renderHeaderDetails(
 		h.com,
 		session,
+		usage,
 		h.com.App.LSPManager.Clients(),
 		detailsOpen,
 		availDetailWidth,
@@ -108,6 +109,7 @@ func (h *header) drawHeader(
 func renderHeaderDetails(
 	com *common.Common,
 	session *session.Session,
+	usage contextUsageSnapshot,
 	lspClients *csync.Map[string, *lsp.Client],
 	detailsOpen bool,
 	availWidth int,
@@ -125,18 +127,7 @@ func renderHeaderDetails(
 		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, errorCount)))
 	}
 
-	agentCfg := com.Config().Agents[config.AgentCoder]
-	activeModel := com.App.AgentCoordinator.Model()
-	contextWindow := effectiveContextWindow(activeModel)
-	if contextWindow <= 0 {
-		if model := com.Config().GetModelByType(agentCfg.Model); model != nil {
-			contextWindow = model.ContextWindow
-		}
-	}
-	// Use total tokens (input + output) for context usage display, matching
-	// opencode's approach where usage = (input + output + reasoning + cache) / context.
-	totalTokens := session.LastInputTokens() + session.LastOutputTokens()
-	formattedUsage := t.Header.Percentage.Render(common.FormatContextUsage(totalTokens, contextWindow))
+	formattedUsage := t.Header.Percentage.Render(common.FormatContextUsage(usage.TotalTokens, usage.ContextWindow))
 	parts = append(parts, formattedUsage)
 
 	const keystroke = "ctrl+d"

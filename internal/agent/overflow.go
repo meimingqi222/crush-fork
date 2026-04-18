@@ -66,9 +66,9 @@ func autoSummarizeSafetyReserveTokens(contextWindow int64) int64 {
 func promptTokenBudgetForModel(model Model, maxOutputTokens int64) promptTokenBudget {
 	contextWindow := int64(model.CatwalkCfg.ContextWindow)
 	maxOutputTokens = effectiveAutoSummarizeMaxOutputTokens(model, maxOutputTokens)
+	reserved := autoSummarizeReservedTokens(maxOutputTokens)
 
 	if inputLimit, ok := effectivePromptInputLimit(model); ok {
-		reserved := autoSummarizeReservedTokens(maxOutputTokens)
 		return promptTokenBudget{
 			ContextWindow:          contextWindow,
 			InputLimit:             inputLimit,
@@ -84,10 +84,10 @@ func promptTokenBudgetForModel(model Model, maxOutputTokens int64) promptTokenBu
 	return promptTokenBudget{
 		ContextWindow:       contextWindow,
 		MaxOutputTokens:     maxOutputTokens,
-		ReservedInputTokens: maxOutputTokens,
+		ReservedInputTokens: reserved,
 		ToolReserveTokens:   toolReserve,
 		SafetyReserveTokens: safetyReserve,
-		UsableInputTokens:   contextWindow - maxOutputTokens - toolReserve - safetyReserve,
+		UsableInputTokens:   contextWindow - reserved - toolReserve - safetyReserve,
 	}
 }
 

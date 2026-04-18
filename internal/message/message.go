@@ -123,9 +123,14 @@ func (s *service) Update(ctx context.Context, message Message) error {
 		finishedAt.Valid = true
 	}
 	err = s.q.UpdateMessage(ctx, db.UpdateMessageParams{
-		ID:         message.ID,
-		Parts:      string(parts),
-		FinishedAt: finishedAt,
+		ID:               message.ID,
+		Parts:            string(parts),
+		FinishedAt:       finishedAt,
+		InputTokens:      message.Usage.InputTokens,
+		OutputTokens:     message.Usage.OutputTokens,
+		ReasoningTokens:  message.Usage.ReasoningTokens,
+		CacheReadTokens:  message.Usage.CacheReadTokens,
+		CacheWriteTokens: message.Usage.CacheWriteTokens,
 	})
 	if err != nil {
 		return err
@@ -199,10 +204,17 @@ func (s *service) fromDBItem(item db.Message) (Message, error) {
 		return Message{}, err
 	}
 	return Message{
-		ID:               item.ID,
-		SessionID:        item.SessionID,
-		Role:             MessageRole(item.Role),
-		Parts:            parts,
+		ID:        item.ID,
+		SessionID: item.SessionID,
+		Role:      MessageRole(item.Role),
+		Parts:     parts,
+		Usage: Usage{
+			InputTokens:      item.InputTokens,
+			OutputTokens:     item.OutputTokens,
+			ReasoningTokens:  item.ReasoningTokens,
+			CacheReadTokens:  item.CacheReadTokens,
+			CacheWriteTokens: item.CacheWriteTokens,
+		},
 		Model:            item.Model.String,
 		Provider:         item.Provider.String,
 		CreatedAt:        item.CreatedAt,

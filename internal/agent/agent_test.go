@@ -713,6 +713,45 @@ func TestPromptTokensForUsage_AnthropicCacheStyle(t *testing.T) {
 	require.Equal(t, int64(1320), promptTokensForUsage(usage, "openai"))
 }
 
+func TestNormalizedMessageUsage_PreservesCacheBreakdown(t *testing.T) {
+	t.Parallel()
+
+	usage := fantasy.Usage{
+		InputTokens:         120,
+		CacheCreationTokens: 300,
+		CacheReadTokens:     900,
+		OutputTokens:        45,
+		ReasoningTokens:     20,
+	}
+
+	normalized := normalizedMessageUsage(usage, "openai", 0)
+
+	require.Equal(t, message.Usage{
+		InputTokens:      120,
+		OutputTokens:     45,
+		ReasoningTokens:  20,
+		CacheReadTokens:  900,
+		CacheWriteTokens: 300,
+	}, normalized)
+	require.Equal(t, int64(1320), normalized.PromptTokens())
+	require.Equal(t, int64(1385), normalized.TotalTokens())
+}
+
+func TestNormalizedMessageUsage_PrefersEstimatedPromptFloor(t *testing.T) {
+	t.Parallel()
+
+	usage := fantasy.Usage{
+		InputTokens:  95,
+		OutputTokens: 200,
+	}
+
+	normalized := normalizedMessageUsage(usage, "anthropic", 18_500)
+
+	require.Equal(t, int64(18_500), normalized.InputTokens)
+	require.Equal(t, int64(200), normalized.OutputTokens)
+	require.Equal(t, int64(18_700), normalized.TotalTokens())
+}
+
 func TestShouldAutoSummarize(t *testing.T) {
 	t.Parallel()
 
@@ -724,23 +763,33 @@ func TestShouldAutoSummarize(t *testing.T) {
 		want            bool
 	}{
 		{
-			name: "fallback input budget keeps output, tool, and safety headroom",
+			name: "fallback input budget uses capped reserve plus tool and safety headroom",
 			model: Model{CatwalkCfg: catwalk.Model{
 				ContextWindow:    200_000,
 				DefaultMaxTokens: 50_000,
 			}},
-			contextUsed:     150_000,
+			contextUsed:     168_000,
 			maxOutputTokens: 50_000,
 			want:            true,
 		},
 		{
-			name: "fallback input budget stays below reserved headroom threshold",
+			name: "fallback input budget stays below capped reserve headroom threshold",
 			model: Model{CatwalkCfg: catwalk.Model{
 				ContextWindow:    200_000,
 				DefaultMaxTokens: 50_000,
 			}},
-			contextUsed:     137_999,
+			contextUsed:     167_999,
 			maxOutputTokens: 50_000,
+			want:            false,
+		},
+		{
+			name: "large default max output does not force premature summarize on 200k models",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    204_800,
+				DefaultMaxTokens: 131_072,
+			}},
+			contextUsed:     60_000,
+			maxOutputTokens: 0,
 			want:            false,
 		},
 		{

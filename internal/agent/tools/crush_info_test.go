@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/stretchr/testify/require"
 )
@@ -31,6 +32,9 @@ func loadCrushInfoTestStore(t *testing.T) *config.ConfigStore {
 	t.Setenv("CRUSH_GLOBAL_CONFIG", globalConfigRoot)
 	t.Setenv("CRUSH_GLOBAL_DATA", globalDataRoot)
 	t.Setenv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+	t.Cleanup(func() {
+		require.NoError(t, crushlog.ResetForTesting())
+	})
 
 	payload, err := json.Marshal(map[string]any{})
 	require.NoError(t, err)

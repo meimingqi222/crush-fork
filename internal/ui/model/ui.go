@@ -207,9 +207,10 @@ type (
 
 // UI represents the main user interface model.
 type UI struct {
-	com          *common.Common
-	session      *session.Session
-	sessionFiles []SessionFile
+	com             *common.Common
+	session         *session.Session
+	sessionMessages []message.Message
+	sessionFiles    []SessionFile
 
 	// childSessionInfoCache caches child session metadata to avoid
 	// DB I/O in the render path.
@@ -764,6 +765,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case pubsub.UpdatedEvent:
 			cmds = append(cmds, m.updateSessionMessage(msg.Payload))
 		case pubsub.DeletedEvent:
+			m.removeCurrentSessionMessage(msg.Payload.ID)
 			if msg.Payload.Role == message.Assistant {
 				m.removeToolItemsForMessage(msg.Payload.ID, nil)
 				m.chat.RemoveMessage(chat.AssistantInfoID(msg.Payload.ID))
@@ -1164,9 +1166,39 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *UI) setCurrentSessionMessages(msgs []message.Message) {
+	m.sessionMessages = slices.Clone(msgs)
+}
+
+func (m *UI) appendCurrentSessionMessage(msg message.Message) {
+	m.sessionMessages = append(m.sessionMessages, msg)
+}
+
+func (m *UI) updateCurrentSessionMessage(msg message.Message) {
+	for i := range m.sessionMessages {
+		if m.sessionMessages[i].ID != msg.ID {
+			continue
+		}
+		m.sessionMessages[i] = msg
+		return
+	}
+	m.sessionMessages = append(m.sessionMessages, msg)
+}
+
+func (m *UI) removeCurrentSessionMessage(messageID string) {
+	for i := range m.sessionMessages {
+		if m.sessionMessages[i].ID != messageID {
+			continue
+		}
+		m.sessionMessages = slices.Delete(m.sessionMessages, i, i+1)
+		return
+	}
+}
+
 // setSessionMessages sets the messages for the current session in the chat
 func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	var cmds []tea.Cmd
+	m.setCurrentSessionMessages(msgs)
 	// Build tool result map to link tool calls with their results
 	msgPtrs := make([]*message.Message, len(msgs))
 	for i := range msgs {
@@ -1493,6 +1525,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 		// message already exists, skip
 		return nil
 	}
+	m.appendCurrentSessionMessage(msg)
 
 	switch msg.Role {
 	case message.User:
@@ -1584,6 +1617,7 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 // that is why we need to handle creating/updating each tool call message too
 func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	var cmds []tea.Cmd
+	m.updateCurrentSessionMessage(msg)
 	existingItem := m.chat.MessageItem(msg.ID)
 	shouldRenderAssistant := chat.ShouldRenderAssistantMessage(&msg)
 	toolCallIDs := make(map[string]struct{}, len(msg.ToolCalls()))
@@ -3168,6 +3202,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		scr,
 		area,
 		m.session,
+		m.currentContextUsageSnapshot(),
 		m.isCompact,
 		m.detailsOpen,
 		area.Dx(),
