@@ -197,7 +197,7 @@ func TestSetupMessageSubscriber_TriggersMessageCreatedHook(t *testing.T) {
 
 	var wg sync.WaitGroup
 	outputCh := make(chan tea.Msg, 8)
-	setupMessageSubscriber(ctx, &wg, messages.Subscribe, outputCh)
+	setupMessageSubscriber(ctx, &wg, plugin.DefaultRuntime(), messages.Subscribe, outputCh)
 
 	testSession, err := sessions.Create(ctx, "message hook")
 	require.NoError(t, err)
@@ -213,6 +213,28 @@ func TestSetupMessageSubscriber_TriggersMessageCreatedHook(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+func TestNew_RestoresDefaultPluginRuntimeWhenInitCoderAgentFails(t *testing.T) {
+	originalRuntime := plugin.DefaultRuntime()
+	t.Cleanup(func() {
+		plugin.SetDefaultRuntime(originalRuntime)
+	})
+
+	conn, store := setupMessageSubscriberDependencies(t)
+	defer func() {
+		require.NoError(t, conn.Close())
+	}()
+
+	cfg := store.Config()
+	cfg.Models[config.SelectedModelTypeLarge] = config.SelectedModel{
+		Provider: "missing-provider",
+		Model:    "missing-model",
+	}
+
+	_, err := New(t.Context(), conn, store)
+	require.Error(t, err)
+	require.Same(t, originalRuntime, plugin.DefaultRuntime())
 }
 
 func setupMessageSubscriberDependencies(t *testing.T) (*sql.DB, *config.ConfigStore) {

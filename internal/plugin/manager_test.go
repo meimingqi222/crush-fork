@@ -678,11 +678,47 @@ func TestReset(t *testing.T) {
 	Register(&testPlugin{name: "plugin-1"})
 	Register(&testPlugin{name: "plugin-2"})
 
-	require.Len(t, plugins, 2)
+	require.Len(t, ListPlugins(), 2)
 
 	Reset()
 
-	require.Empty(t, plugins)
-	require.Empty(t, initializedHooks)
-	require.Empty(t, customTools)
+	require.Empty(t, ListPlugins())
+	require.Empty(t, GetCustomTools())
+	require.Nil(t, GetHooks().ShellEnv)
+}
+
+func TestRuntimeInstancesRemainIsolated(t *testing.T) {
+	rt1 := NewRuntime()
+	rt2 := NewRuntime()
+
+	rt1.Register(&testPlugin{
+		name: "runtime-1",
+		hooks: Hooks{
+			ShellEnv: func(ctx context.Context, input ShellEnvInput) map[string]string {
+				return map[string]string{"RUNTIME": "one"}
+			},
+		},
+	})
+	rt2.Register(&testPlugin{
+		name: "runtime-2",
+		hooks: Hooks{
+			ShellEnv: func(ctx context.Context, input ShellEnvInput) map[string]string {
+				return map[string]string{"RUNTIME": "two"}
+			},
+		},
+	})
+
+	require.NoError(t, rt1.Init(context.Background(), PluginInput{}))
+	require.NoError(t, rt2.Init(context.Background(), PluginInput{}))
+
+	env1 := rt1.TriggerShellEnv(context.Background(), ShellEnvInput{})
+	env2 := rt2.TriggerShellEnv(context.Background(), ShellEnvInput{})
+
+	require.Equal(t, "one", env1["RUNTIME"])
+	require.Equal(t, "two", env2["RUNTIME"])
+	require.Equal(t, []string{"runtime-1"}, rt1.ListPlugins())
+	require.Equal(t, []string{"runtime-2"}, rt2.ListPlugins())
+
+	rt1.Reset()
+	rt2.Reset()
 }

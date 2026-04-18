@@ -52,6 +52,7 @@ func isContextWindowExceededError(err error) bool {
 	msg := strings.ToLower(providerErr.Message)
 	return strings.Contains(msg, "context window") ||
 		strings.Contains(msg, "context length") ||
+		strings.Contains(msg, "model_context_window_exceeded") ||
 		strings.Contains(msg, "maximum context") ||
 		strings.Contains(msg, "input exceeds") ||
 		strings.Contains(msg, "input length should be") ||

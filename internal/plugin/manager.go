@@ -9,104 +9,148 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 )
 
-var (
+type Runtime struct {
+	mu               sync.RWMutex
 	plugins          []Plugin
 	initializedHooks []Hooks
 	customTools      map[string]ToolDefinition
-	mu               sync.RWMutex
+}
+
+var (
+	defaultRuntimeMu sync.RWMutex
+	defaultRuntime   = NewRuntime()
 )
 
-// Register adds a plugin to the registry.
-// Plugins should call this in their init() function.
-// Registered plugins will be initialized when Init is called.
-func Register(p Plugin) {
-	mu.Lock()
-	defer mu.Unlock()
-	plugins = append(plugins, p)
+func NewRuntime() *Runtime {
+	return &Runtime{
+		customTools: make(map[string]ToolDefinition),
+	}
+}
+
+func DefaultRuntime() *Runtime {
+	defaultRuntimeMu.RLock()
+	defer defaultRuntimeMu.RUnlock()
+	return defaultRuntime
+}
+
+func SetDefaultRuntime(runtime *Runtime) *Runtime {
+	if runtime == nil {
+		runtime = NewRuntime()
+	}
+	defaultRuntimeMu.Lock()
+	defer defaultRuntimeMu.Unlock()
+	previous := defaultRuntime
+	defaultRuntime = runtime
+	return previous
+}
+
+func (r *Runtime) ensureCustomToolsLocked() {
+	if r.customTools == nil {
+		r.customTools = make(map[string]ToolDefinition)
+	}
+}
+
+func (r *Runtime) snapshotInitializedHooks() []Hooks {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]Hooks(nil), r.initializedHooks...)
+}
+
+func (r *Runtime) snapshotPlugins() []Plugin {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]Plugin(nil), r.plugins...)
+}
+
+func triggerTransformHooks[Input any, Output any](
+	hooks []Hooks,
+	ctx context.Context,
+	name string,
+	input Input,
+	output Output,
+	resolve func(Hooks) func(context.Context, Input, *Output) error,
+) (Output, error) {
+	start := time.Now()
+
+	for i, hook := range hooks {
+		fn := resolve(hook)
+		if fn == nil {
+			continue
+		}
+		hookStart := time.Now()
+		if err := fn(ctx, input, &output); err != nil {
+			return output, err
+		}
+		slog.Debug("[PERF] Plugin transform hook completed", "trigger", name, "hook_index", i, "duration", time.Since(hookStart))
+	}
+
+	slog.Debug("[PERF] Plugin transform hooks done", "trigger", name, "total_duration", time.Since(start))
+	return output, nil
+}
+
+func (r *Runtime) Register(p Plugin) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.plugins = append(r.plugins, p)
 	slog.Debug("Plugin registered", "name", p.Name())
 }
 
-// Init initializes all registered plugins.
-// This should be called early in the application lifecycle,
-// after core services (config, sessions, messages) are available.
-// Plugins are initialized in registration order.
-// If a plugin fails to initialize, it is logged and skipped.
-func Init(ctx context.Context, input PluginInput) error {
-	mu.Lock()
-	initializedHooks = nil
-	customTools = make(map[string]ToolDefinition)
+func Register(p Plugin) {
+	DefaultRuntime().Register(p)
+}
 
-	// Snapshot plugins that were manually registered (via Register) before we clear.
-	// These need to be re-initialized after Close since they don't have config to recreate them.
-	manuallyRegistered := append([]Plugin(nil), plugins...)
-
-	// Close all existing plugins before clearing to prevent process leaks.
-	for _, p := range plugins {
+func (r *Runtime) Init(ctx context.Context, input PluginInput) error {
+	r.mu.Lock()
+	r.initializedHooks = nil
+	r.customTools = make(map[string]ToolDefinition)
+	manuallyRegistered := append([]Plugin(nil), r.plugins...)
+	for _, p := range r.plugins {
 		if err := p.Close(ctx); err != nil {
 			slog.Debug("Failed to close plugin during init", "name", p.Name(), "error", err)
 		}
 	}
-	plugins = nil
-	mu.Unlock()
+	r.plugins = nil
+	r.mu.Unlock()
 
 	configuredPlugins, err := newConfiguredPlugins(input)
 	if err != nil {
 		return err
 	}
-	// Register configured plugins so they appear in ListPlugins() and are
-	// properly closed by Close()/Reset(). This is safe because Reset() clears
-	// the plugins slice before tests that call Init() multiple times.
-	for _, p := range configuredPlugins {
-		Register(p)
-	}
+
+	r.mu.Lock()
+	r.plugins = append(append([]Plugin(nil), manuallyRegistered...), configuredPlugins...)
+	r.mu.Unlock()
+
 	toolSources := make(map[string]string)
-
-	// Initialize manually registered plugins first (they were closed above and need re-init).
-	for _, p := range manuallyRegistered {
+	initPlugin := func(p Plugin) {
 		slog.Info("Initializing plugin", "name", p.Name())
 		h, err := p.Init(ctx, input)
 		if err != nil {
 			slog.Error("Failed to initialize plugin", "name", p.Name(), "error", err)
-			continue
+			return
 		}
 
-		mu.Lock()
-		initializedHooks = append(initializedHooks, h)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.initializedHooks = append(r.initializedHooks, h)
+		r.ensureCustomToolsLocked()
 		for name, tool := range h.Tools {
 			source := "plugin:" + p.Name()
 			if existingSource, exists := toolSources[name]; exists {
 				slog.Warn("Custom tool registration collision", "tool", name, "existing_source", existingSource, "overriding_source", source)
 			}
-			customTools[name] = tool
+			r.customTools[name] = tool
 			toolSources[name] = source
 		}
-		mu.Unlock()
 
 		slog.Info("Plugin initialized", "name", p.Name(), "tools", len(h.Tools))
 	}
 
-	// Then initialize newly configured plugins (fresh instances, not previously closed).
+	for _, p := range manuallyRegistered {
+		initPlugin(p)
+	}
 	for _, p := range configuredPlugins {
-		slog.Info("Initializing plugin", "name", p.Name())
-		h, err := p.Init(ctx, input)
-		if err != nil {
-			slog.Error("Failed to initialize plugin", "name", p.Name(), "error", err)
-			continue
-		}
-
-		mu.Lock()
-		initializedHooks = append(initializedHooks, h)
-		for name, tool := range h.Tools {
-			source := "plugin:" + p.Name()
-			if existingSource, exists := toolSources[name]; exists {
-				slog.Warn("Custom tool registration collision", "tool", name, "existing_source", existingSource, "overriding_source", source)
-			}
-			customTools[name] = tool
-			toolSources[name] = source
-		}
-		mu.Unlock()
-
-		slog.Info("Plugin initialized", "name", p.Name(), "tools", len(h.Tools))
+		initPlugin(p)
 	}
 
 	localTools, err := DiscoverLocalTools(input.WorkingDir)
@@ -114,15 +158,16 @@ func Init(ctx context.Context, input PluginInput) error {
 		slog.Error("Failed to discover local tools", "error", err)
 		return err
 	}
-	mu.Lock()
+	r.mu.Lock()
+	r.ensureCustomToolsLocked()
 	for name, tool := range localTools {
 		if existingSource, exists := toolSources[name]; exists {
 			slog.Warn("Custom tool registration collision", "tool", name, "existing_source", existingSource, "overriding_source", "local")
 		}
-		customTools[name] = tool
+		r.customTools[name] = tool
 		toolSources[name] = "local"
 	}
-	mu.Unlock()
+	r.mu.Unlock()
 	if len(localTools) > 0 {
 		slog.Info("Local tools loaded", "count", len(localTools))
 	}
@@ -130,31 +175,34 @@ func Init(ctx context.Context, input PluginInput) error {
 	return nil
 }
 
-// GetHooks returns a copy of the merged hooks.
-// This is useful for checking if specific hooks are registered.
-func GetHooks() Hooks {
-	mu.RLock()
-	defer mu.RUnlock()
-	hooks := Hooks{Tools: make(map[string]ToolDefinition, len(customTools))}
-	for name, tool := range customTools {
+func Init(ctx context.Context, input PluginInput) error {
+	return DefaultRuntime().Init(ctx, input)
+}
+
+func (r *Runtime) GetHooks() Hooks {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	hooks := Hooks{Tools: make(map[string]ToolDefinition, len(r.customTools))}
+	for name, tool := range r.customTools {
 		hooks.Tools[name] = tool
 	}
-	for _, hook := range initializedHooks {
+	for _, hook := range r.initializedHooks {
 		if hook.ToolBeforeExecute != nil {
-			hooks.ToolBeforeExecute = TriggerToolBeforeExecute
+			hooks.ToolBeforeExecute = r.TriggerToolBeforeExecute
 		}
 		if hook.ToolAfterExecute != nil {
-			hooks.ToolAfterExecute = TriggerToolAfterExecute
+			hooks.ToolAfterExecute = r.TriggerToolAfterExecute
 		}
 		if hook.ChatBeforeRequest != nil {
-			hooks.ChatBeforeRequest = TriggerChatBeforeRequest
+			hooks.ChatBeforeRequest = r.TriggerChatBeforeRequest
 		}
 		if hook.ChatAfterResponse != nil {
-			hooks.ChatAfterResponse = TriggerChatAfterResponse
+			hooks.ChatAfterResponse = r.TriggerChatAfterResponse
 		}
 		if hook.ChatMessagesTransform != nil {
 			hooks.ChatMessagesTransform = func(ctx context.Context, input ChatMessagesTransformInput, output *ChatMessagesTransformOutput) error {
-				transformed, err := TriggerChatMessagesTransform(ctx, input, *output)
+				transformed, err := r.TriggerChatMessagesTransform(ctx, input, *output)
 				if err != nil {
 					return err
 				}
@@ -164,7 +212,7 @@ func GetHooks() Hooks {
 		}
 		if hook.ChatSystemTransform != nil {
 			hooks.ChatSystemTransform = func(ctx context.Context, input ChatSystemTransformInput, output *ChatSystemTransformOutput) error {
-				transformed, err := TriggerChatSystemTransform(ctx, input, *output)
+				transformed, err := r.TriggerChatSystemTransform(ctx, input, *output)
 				if err != nil {
 					return err
 				}
@@ -174,7 +222,7 @@ func GetHooks() Hooks {
 		}
 		if hook.SessionCompacting != nil {
 			hooks.SessionCompacting = func(ctx context.Context, input SessionCompactingInput, output *SessionCompactingOutput) error {
-				transformed, err := TriggerSessionCompacting(ctx, input, *output)
+				transformed, err := r.TriggerSessionCompacting(ctx, input, *output)
 				if err != nil {
 					return err
 				}
@@ -183,24 +231,24 @@ func GetHooks() Hooks {
 			}
 		}
 		if hook.PermissionAsk != nil {
-			hooks.PermissionAsk = TriggerPermissionAsk
+			hooks.PermissionAsk = r.TriggerPermissionAsk
 		}
 		if hook.ShellEnv != nil {
-			hooks.ShellEnv = TriggerShellEnv
+			hooks.ShellEnv = r.TriggerShellEnv
 		}
 		if hook.MessageCreated != nil {
-			hooks.MessageCreated = TriggerMessageCreated
+			hooks.MessageCreated = r.TriggerMessageCreated
 		}
 	}
 	return hooks
 }
 
-// TriggerToolBeforeExecute executes the ToolBeforeExecute hook if registered.
-// Returns nil, nil if no hook is registered.
-func TriggerToolBeforeExecute(ctx context.Context, input ToolBeforeExecuteInput) (*ToolBeforeExecuteOutput, error) {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func GetHooks() Hooks {
+	return DefaultRuntime().GetHooks()
+}
+
+func (r *Runtime) TriggerToolBeforeExecute(ctx context.Context, input ToolBeforeExecuteInput) (*ToolBeforeExecuteOutput, error) {
+	hooks := r.snapshotInitializedHooks()
 
 	currentArgs := input.Args
 	changed := false
@@ -234,12 +282,12 @@ func TriggerToolBeforeExecute(ctx context.Context, input ToolBeforeExecuteInput)
 	return &ToolBeforeExecuteOutput{Args: currentArgs}, nil
 }
 
-// TriggerToolAfterExecute executes the ToolAfterExecute hook if registered.
-// Returns nil, nil if no hook is registered.
-func TriggerToolAfterExecute(ctx context.Context, input ToolAfterExecuteInput) (*ToolAfterExecuteOutput, error) {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func TriggerToolBeforeExecute(ctx context.Context, input ToolBeforeExecuteInput) (*ToolBeforeExecuteOutput, error) {
+	return DefaultRuntime().TriggerToolBeforeExecute(ctx, input)
+}
+
+func (r *Runtime) TriggerToolAfterExecute(ctx context.Context, input ToolAfterExecuteInput) (*ToolAfterExecuteOutput, error) {
+	hooks := r.snapshotInitializedHooks()
 
 	currentResult := input.Result
 	currentMetadata := input.Metadata
@@ -277,11 +325,12 @@ func TriggerToolAfterExecute(ctx context.Context, input ToolAfterExecuteInput) (
 	return &ToolAfterExecuteOutput{Result: currentResult, ResultChanged: true, Metadata: currentMetadata}, nil
 }
 
-// TriggerChatBeforeRequest executes the ChatBeforeRequest hook if registered.
-func TriggerChatBeforeRequest(ctx context.Context, input ChatBeforeRequestInput) error {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func TriggerToolAfterExecute(ctx context.Context, input ToolAfterExecuteInput) (*ToolAfterExecuteOutput, error) {
+	return DefaultRuntime().TriggerToolAfterExecute(ctx, input)
+}
+
+func (r *Runtime) TriggerChatBeforeRequest(ctx context.Context, input ChatBeforeRequestInput) error {
+	hooks := r.snapshotInitializedHooks()
 
 	for _, hook := range hooks {
 		if hook.ChatBeforeRequest == nil {
@@ -294,11 +343,12 @@ func TriggerChatBeforeRequest(ctx context.Context, input ChatBeforeRequestInput)
 	return nil
 }
 
-// TriggerChatAfterResponse executes the ChatAfterResponse hook if registered.
-func TriggerChatAfterResponse(ctx context.Context, input ChatAfterResponseInput) error {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func TriggerChatBeforeRequest(ctx context.Context, input ChatBeforeRequestInput) error {
+	return DefaultRuntime().TriggerChatBeforeRequest(ctx, input)
+}
+
+func (r *Runtime) TriggerChatAfterResponse(ctx context.Context, input ChatAfterResponseInput) error {
+	hooks := r.snapshotInitializedHooks()
 
 	for _, hook := range hooks {
 		if hook.ChatAfterResponse == nil {
@@ -311,67 +361,47 @@ func TriggerChatAfterResponse(ctx context.Context, input ChatAfterResponseInput)
 	return nil
 }
 
-// TriggerChatMessagesTransform executes all registered ChatMessagesTransform hooks in order.
+func TriggerChatAfterResponse(ctx context.Context, input ChatAfterResponseInput) error {
+	return DefaultRuntime().TriggerChatAfterResponse(ctx, input)
+}
+
+func (r *Runtime) TriggerChatMessagesTransform(ctx context.Context, input ChatMessagesTransformInput, output ChatMessagesTransformOutput) (ChatMessagesTransformOutput, error) {
+	transformed, err := triggerTransformHooks(r.snapshotInitializedHooks(), ctx, "chat_messages_transform", input, output, func(hook Hooks) func(context.Context, ChatMessagesTransformInput, *ChatMessagesTransformOutput) error {
+		return hook.ChatMessagesTransform
+	})
+	if err != nil {
+		return transformed, err
+	}
+	slog.Debug("[PERF] ChatMessagesTransform all hooks done", "session_id", input.SessionID, "msg_count", len(transformed.Messages))
+	return transformed, nil
+}
+
 func TriggerChatMessagesTransform(ctx context.Context, input ChatMessagesTransformInput, output ChatMessagesTransformOutput) (ChatMessagesTransformOutput, error) {
-	start := time.Now()
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
-
-	for i, hook := range hooks {
-		if hook.ChatMessagesTransform == nil {
-			continue
-		}
-		hookStart := time.Now()
-		if err := hook.ChatMessagesTransform(ctx, input, &output); err != nil {
-			return output, err
-		}
-		slog.Debug("[PERF] ChatMessagesTransform hook completed", "hook_index", i, "duration", time.Since(hookStart), "session_id", input.SessionID)
-	}
-	slog.Debug("[PERF] ChatMessagesTransform all hooks done", "total_duration", time.Since(start), "session_id", input.SessionID, "msg_count", len(output.Messages))
-	return output, nil
+	return DefaultRuntime().TriggerChatMessagesTransform(ctx, input, output)
 }
 
-// TriggerChatSystemTransform executes all registered ChatSystemTransform hooks in order.
+func (r *Runtime) TriggerChatSystemTransform(ctx context.Context, input ChatSystemTransformInput, output ChatSystemTransformOutput) (ChatSystemTransformOutput, error) {
+	return triggerTransformHooks(r.snapshotInitializedHooks(), ctx, "chat_system_transform", input, output, func(hook Hooks) func(context.Context, ChatSystemTransformInput, *ChatSystemTransformOutput) error {
+		return hook.ChatSystemTransform
+	})
+}
+
 func TriggerChatSystemTransform(ctx context.Context, input ChatSystemTransformInput, output ChatSystemTransformOutput) (ChatSystemTransformOutput, error) {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
-
-	for _, hook := range hooks {
-		if hook.ChatSystemTransform == nil {
-			continue
-		}
-		if err := hook.ChatSystemTransform(ctx, input, &output); err != nil {
-			return output, err
-		}
-	}
-	return output, nil
+	return DefaultRuntime().TriggerChatSystemTransform(ctx, input, output)
 }
 
-// TriggerSessionCompacting executes all registered SessionCompacting hooks in order.
+func (r *Runtime) TriggerSessionCompacting(ctx context.Context, input SessionCompactingInput, output SessionCompactingOutput) (SessionCompactingOutput, error) {
+	return triggerTransformHooks(r.snapshotInitializedHooks(), ctx, "session_compacting", input, output, func(hook Hooks) func(context.Context, SessionCompactingInput, *SessionCompactingOutput) error {
+		return hook.SessionCompacting
+	})
+}
+
 func TriggerSessionCompacting(ctx context.Context, input SessionCompactingInput, output SessionCompactingOutput) (SessionCompactingOutput, error) {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
-
-	for _, hook := range hooks {
-		if hook.SessionCompacting == nil {
-			continue
-		}
-		if err := hook.SessionCompacting(ctx, input, &output); err != nil {
-			return output, err
-		}
-	}
-	return output, nil
+	return DefaultRuntime().TriggerSessionCompacting(ctx, input, output)
 }
 
-// TriggerPermissionAsk executes the PermissionAsk hook if registered.
-// Returns the action from the hook, or PermissionAsk if no hook is registered.
-func TriggerPermissionAsk(input PermissionAskInput) PermissionAskOutput {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func (r *Runtime) TriggerPermissionAsk(input PermissionAskInput) PermissionAskOutput {
+	hooks := r.snapshotInitializedHooks()
 
 	decision := PermissionAskOutput{Action: PermissionAsk}
 	for _, hook := range hooks {
@@ -386,12 +416,12 @@ func TriggerPermissionAsk(input PermissionAskInput) PermissionAskOutput {
 	return decision
 }
 
-// TriggerShellEnv executes the ShellEnv hook if registered.
-// Returns an empty map if no hook is registered.
-func TriggerShellEnv(ctx context.Context, input ShellEnvInput) map[string]string {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func TriggerPermissionAsk(input PermissionAskInput) PermissionAskOutput {
+	return DefaultRuntime().TriggerPermissionAsk(input)
+}
+
+func (r *Runtime) TriggerShellEnv(ctx context.Context, input ShellEnvInput) map[string]string {
+	hooks := r.snapshotInitializedHooks()
 
 	env := make(map[string]string)
 	for _, hook := range hooks {
@@ -409,11 +439,12 @@ func TriggerShellEnv(ctx context.Context, input ShellEnvInput) map[string]string
 	return env
 }
 
-// TriggerMessageCreated executes the MessageCreated hook if registered.
-func TriggerMessageCreated(ctx context.Context, msg message.Message) error {
-	mu.RLock()
-	hooks := append([]Hooks(nil), initializedHooks...)
-	mu.RUnlock()
+func TriggerShellEnv(ctx context.Context, input ShellEnvInput) map[string]string {
+	return DefaultRuntime().TriggerShellEnv(ctx, input)
+}
+
+func (r *Runtime) TriggerMessageCreated(ctx context.Context, msg message.Message) error {
+	hooks := r.snapshotInitializedHooks()
 
 	for _, hook := range hooks {
 		if hook.MessageCreated == nil {
@@ -426,26 +457,31 @@ func TriggerMessageCreated(ctx context.Context, msg message.Message) error {
 	return nil
 }
 
-// GetCustomTools returns all custom tools registered by plugins.
-func GetCustomTools() map[string]ToolDefinition {
-	mu.RLock()
-	defer mu.RUnlock()
+func TriggerMessageCreated(ctx context.Context, msg message.Message) error {
+	return DefaultRuntime().TriggerMessageCreated(ctx, msg)
+}
 
-	// Return a copy to prevent modification.
-	result := make(map[string]ToolDefinition, len(customTools))
-	for k, v := range customTools {
+func (r *Runtime) GetCustomTools() map[string]ToolDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make(map[string]ToolDefinition, len(r.customTools))
+	for k, v := range r.customTools {
 		result[k] = v
 	}
 	return result
 }
 
-// ListPlugins returns the names of all registered and configured plugins.
-func ListPlugins() []string {
-	mu.RLock()
-	defer mu.RUnlock()
+func GetCustomTools() map[string]ToolDefinition {
+	return DefaultRuntime().GetCustomTools()
+}
+
+func (r *Runtime) ListPlugins() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	seen := make(map[string]struct{})
-	for _, p := range plugins {
+	for _, p := range r.plugins {
 		seen[p.Name()] = struct{}{}
 	}
 
@@ -456,33 +492,38 @@ func ListPlugins() []string {
 	return names
 }
 
-// Reset clears all registered plugins and hooks.
-// This is primarily intended for testing.
-func Reset() {
-	mu.Lock()
-	defer mu.Unlock()
+func ListPlugins() []string {
+	return DefaultRuntime().ListPlugins()
+}
 
-	// Close all plugins before clearing to release resources (e.g. persistent processes).
-	for _, p := range plugins {
+func (r *Runtime) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, p := range r.plugins {
 		if err := p.Close(context.Background()); err != nil {
 			slog.Debug("Failed to close plugin during reset", "name", p.Name(), "error", err)
 		}
 	}
 
-	plugins = nil
-	initializedHooks = nil
-	customTools = make(map[string]ToolDefinition)
+	r.plugins = nil
+	r.initializedHooks = nil
+	r.customTools = make(map[string]ToolDefinition)
 }
 
-// Close shuts down all registered plugins that hold resources (e.g. persistent processes).
-func Close(ctx context.Context) {
-	mu.RLock()
-	registeredPlugins := append([]Plugin(nil), plugins...)
-	mu.RUnlock()
+func Reset() {
+	DefaultRuntime().Reset()
+}
 
+func (r *Runtime) Close(ctx context.Context) {
+	registeredPlugins := r.snapshotPlugins()
 	for _, p := range registeredPlugins {
 		if err := p.Close(ctx); err != nil {
 			slog.Error("Failed to close plugin", "name", p.Name(), "error", err)
 		}
 	}
+}
+
+func Close(ctx context.Context) {
+	DefaultRuntime().Close(ctx)
 }

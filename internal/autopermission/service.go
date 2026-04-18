@@ -86,6 +86,7 @@ type sessionClassifierState struct {
 type service struct {
 	base                        permission.Service
 	sessions                    session.Service
+	pluginRuntime               *plugin.Runtime
 	classifierFn                func() permission.Classifier
 	workingDir                  string
 	failClosedOnClassifierError bool
@@ -97,6 +98,7 @@ type service struct {
 func New(
 	base permission.Service,
 	sessions session.Service,
+	pluginRuntime *plugin.Runtime,
 	classifierFn func() permission.Classifier,
 	workingDir string,
 	failClosedOnClassifierError bool,
@@ -105,6 +107,7 @@ func New(
 	return &service{
 		base:                        base,
 		sessions:                    sessions,
+		pluginRuntime:               pluginRuntime,
 		classifierFn:                classifierFn,
 		workingDir:                  workingDir,
 		failClosedOnClassifierError: failClosedOnClassifierError,
@@ -200,7 +203,7 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 		}
 	}
 
-	switch classifyPluginDecision(eval.Permission) {
+	switch classifyPluginDecisionWithRuntime(s.pluginRuntime, eval.Permission) {
 	case permission.EvaluationDecisionAllow:
 		return true, nil
 	case permission.EvaluationDecisionDeny:
@@ -726,7 +729,14 @@ func isAlwaysManual(req permission.PermissionRequest, workingDir string) bool {
 }
 
 func classifyPluginDecision(req permission.PermissionRequest) permission.EvaluationDecision {
-	hookDecision := plugin.TriggerPermissionAsk(plugin.PermissionAskInput{
+	return classifyPluginDecisionWithRuntime(nil, req)
+}
+
+func classifyPluginDecisionWithRuntime(runtime *plugin.Runtime, req permission.PermissionRequest) permission.EvaluationDecision {
+	if runtime == nil {
+		runtime = plugin.DefaultRuntime()
+	}
+	hookDecision := runtime.TriggerPermissionAsk(plugin.PermissionAskInput{
 		Permission: plugin.PermissionRequest{
 			ID:          req.ID,
 			SessionID:   req.SessionID,

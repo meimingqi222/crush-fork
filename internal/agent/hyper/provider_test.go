@@ -49,3 +49,35 @@ func TestParseRetryAfter(t *testing.T) {
 		require.Equal(t, time.Duration(0), parseRetryAfter(nil))
 	})
 }
+
+func TestEmbeddedGPT5ModelsOverrideMaxPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	provider := Embedded()
+	modelIDs := []string{
+		"gpt-5.1-codex",
+		"gpt-5.1-codex-max",
+		"gpt-5.1-codex-mini",
+		"gpt-5.2",
+		"gpt-5.2-codex",
+		"gpt-5.3-codex",
+	}
+
+	for _, modelID := range modelIDs {
+		t.Run(modelID, func(t *testing.T) {
+			t.Parallel()
+
+			found := false
+			for _, model := range provider.Models {
+				if model.ID != modelID {
+					continue
+				}
+				found = true
+				require.EqualValues(t, 272000, model.Options.ProviderOptions["max_prompt_tokens"])
+				break
+			}
+
+			require.True(t, found, "model %q not found", modelID)
+		})
+	}
+}

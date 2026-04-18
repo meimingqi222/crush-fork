@@ -94,6 +94,11 @@ func TestIsContextWindowExceededError(t *testing.T) {
 			err:  &fantasy.ProviderError{StatusCode: 400, Message: `{"type":"error", "error":{"type":"api_error", "message": "Request body too large."}}`},
 			want: true,
 		},
+		{
+			name: "openai model context window exceeded code",
+			err:  &fantasy.ProviderError{StatusCode: 400, Message: `{"error":{"code":"model_context_window_exceeded","message":"The request exceeds the model's context window."}}`},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {

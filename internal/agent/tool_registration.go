@@ -141,7 +141,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		}
 	}
 
-	for _, customTool := range plugin.GetCustomTools() {
+	for _, customTool := range c.plugins().GetCustomTools() {
 		customAgentTool := plugin.NewCustomToolAgentTool(customTool, c.cfg.WorkingDir())
 		register(customAgentTool, "plugin", metadataFromPluginToolDefinition(customTool))
 	}

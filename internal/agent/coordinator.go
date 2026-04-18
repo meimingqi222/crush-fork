@@ -121,6 +121,7 @@ type coordinator struct {
 	hookManager    *hooks.Manager
 	checkpoint     checkpoint.Service
 	mailbox        mailbox.Service
+	pluginRuntime  *plugin.Runtime
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -155,6 +156,7 @@ func NewCoordinator(
 	notify pubsub.Publisher[notify.Notification],
 	toolRuntime toolruntime.Service,
 	timeline timeline.Service,
+	pluginRuntime *plugin.Runtime,
 ) (Coordinator, error) {
 	hookMgr, err := hooks.NewManager(cfg.Config().Hooks)
 	if err != nil {
@@ -174,6 +176,7 @@ func NewCoordinator(
 		longTermMemory:             longTermMemory,
 		filetracker:                filetracker,
 		checkpoint:                 checkpointSvc,
+		pluginRuntime:              pluginRuntime,
 		lspManager:                 lspManager,
 		notify:                     notify,
 		toolRuntime:                toolRuntime,
@@ -184,6 +187,9 @@ func NewCoordinator(
 		activatedDeferredBySession: make(map[string]map[string]struct{}),
 		backgroundAgents:           newBackgroundAgentRegistry(),
 		escalationBridge:           permission.NewEscalationBridge(),
+	}
+	if c.pluginRuntime == nil {
+		c.pluginRuntime = plugin.DefaultRuntime()
 	}
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
 	if !ok {
@@ -203,6 +209,13 @@ func NewCoordinator(
 	c.currentAgent = agent
 	c.agents[config.AgentCoder] = agent
 	return c, nil
+}
+
+func (c *coordinator) plugins() *plugin.Runtime {
+	if c != nil && c.pluginRuntime != nil {
+		return c.pluginRuntime
+	}
+	return plugin.DefaultRuntime()
 }
 
 // Run implements Coordinator.
@@ -708,11 +721,12 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		ReviewToolResult: func(callCtx context.Context, sessionID string, toolResult message.ToolResult, permissionMode session.PermissionMode) (message.ToolResult, error) {
 			return c.reviewToolResultForPromptInjection(callCtx, sessionID, toolResult, permissionMode)
 		},
-		Tools:       nil,
-		Notify:      c.notify,
-		HookManager: c.hookManager,
-		Filetracker: c.filetracker,
-		Checkpoint:  c.checkpoint,
+		Tools:         nil,
+		Notify:        c.notify,
+		HookManager:   c.hookManager,
+		Filetracker:   c.filetracker,
+		Checkpoint:    c.checkpoint,
+		PluginRuntime: c.pluginRuntime,
 	})
 
 	// Only use async initialization for the primary agent (not subagents).
@@ -910,7 +924,7 @@ func (c *coordinator) buildToolsWithContext(ctx context.Context, agent config.Ag
 	}
 
 	for i, tool := range filteredTools {
-		filteredTools[i] = plugin.WrapAgentTool(tool)
+		filteredTools[i] = plugin.WrapAgentToolWithRuntime(c.plugins(), tool)
 	}
 
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
@@ -1614,7 +1628,7 @@ func (c *coordinator) PrepareModelSwitch(ctx context.Context, sessionID string, 
 		if err != nil {
 			return fmt.Errorf("failed to estimate session size for target model: %w", err)
 		}
-		if !shouldAutoSummarize(estimatedInput, targetContextWindow, targetMaxOutputTokens) {
+		if !shouldAutoSummarize(targetModel, estimatedInput, targetMaxOutputTokens) {
 			return nil
 		}
 		if attempt == maxModelSwitchSummaries {

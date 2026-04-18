@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"time"
 
@@ -16,11 +17,13 @@ import (
 type sessionCompactingPurposeContextKey struct{}
 
 type chatRequestState struct {
-	Messages     []message.Message
-	History      []fantasy.Message
-	Files        []fantasy.FilePart
-	SystemPrompt string
-	PromptPrefix string
+	Messages         []message.Message
+	History          []fantasy.Message
+	Files            []fantasy.FilePart
+	SystemPrompt     string
+	PromptPrefix     string
+	TransformChanged bool
+	EstimateReduced  bool
 }
 
 type chatRequestStateInput struct {
@@ -29,6 +32,7 @@ type chatRequestStateInput struct {
 	Model          Model
 	Provider       plugin.ProviderContext
 	Purpose        plugin.ChatTransformPurpose
+	RequestPurpose plugin.ChatTransformPurpose
 	Messages       []message.Message
 	Message        message.Message
 	Attachments    []message.Attachment
@@ -99,14 +103,21 @@ func joinSystemSections(sections []string) string {
 	return strings.Join(filtered, "\n")
 }
 
+func estimatePromptStateTokens(history []fantasy.Message, systemPrompt, promptPrefix string) int64 {
+	return estimatePromptTokens(history, nil) +
+		estimateStringTokens(systemPrompt) +
+		estimateStringTokens(promptPrefix)
+}
+
 func (a *sessionAgent) transformSessionMessages(ctx context.Context, input chatRequestStateInput) ([]message.Message, error) {
-	transformed, err := plugin.TriggerChatMessagesTransform(ctx, plugin.ChatMessagesTransformInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     agentModelInfo(input.Model),
-		Provider:  input.Provider,
-		Purpose:   input.Purpose,
-		Message:   input.Message,
+	transformed, err := a.plugins().TriggerChatMessagesTransform(ctx, plugin.ChatMessagesTransformInput{
+		SessionID:      input.SessionID,
+		Agent:          input.Agent,
+		Model:          agentModelInfo(input.Model),
+		Provider:       input.Provider,
+		Purpose:        input.Purpose,
+		RequestPurpose: input.RequestPurpose,
+		Message:        input.Message,
 	}, plugin.ChatMessagesTransformOutput{Messages: cloneMessages(input.Messages)})
 	if err != nil {
 		return nil, err
@@ -115,13 +126,14 @@ func (a *sessionAgent) transformSessionMessages(ctx context.Context, input chatR
 }
 
 func (a *sessionAgent) transformSystemPrompt(ctx context.Context, input chatRequestStateInput) (string, string, error) {
-	transformed, err := plugin.TriggerChatSystemTransform(ctx, plugin.ChatSystemTransformInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     agentModelInfo(input.Model),
-		Provider:  input.Provider,
-		Purpose:   input.Purpose,
-		Message:   input.Message,
+	transformed, err := a.plugins().TriggerChatSystemTransform(ctx, plugin.ChatSystemTransformInput{
+		SessionID:      input.SessionID,
+		Agent:          input.Agent,
+		Model:          agentModelInfo(input.Model),
+		Provider:       input.Provider,
+		Purpose:        input.Purpose,
+		RequestPurpose: input.RequestPurpose,
+		Message:        input.Message,
 	}, plugin.ChatSystemTransformOutput{System: []string{input.SystemPrompt}, Prefix: input.PromptPrefix})
 	if err != nil {
 		return "", "", err
@@ -131,6 +143,8 @@ func (a *sessionAgent) transformSystemPrompt(ctx context.Context, input chatRequ
 
 func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequestStateInput) (chatRequestState, error) {
 	start := time.Now()
+	originalHistory, _ := a.preparePrompt(input.Messages)
+	originalEstimate := estimatePromptStateTokens(originalHistory, input.SystemPrompt, input.PromptPrefix)
 	transformedMessages, err := a.transformSessionMessages(ctx, input)
 	if err != nil {
 		return chatRequestState{}, err
@@ -145,6 +159,7 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		systemPrompt = joinSystemSections([]string{systemPrompt, autoModePrompt})
 	}
 	history, files := a.preparePrompt(transformedMessages, input.Attachments...)
+	transformedEstimate := estimatePromptStateTokens(history, systemPrompt, promptPrefix)
 	slog.Debug("[PERF] buildChatRequestState: preparePrompt done", "duration", time.Since(start), "session_id", input.SessionID)
 	return chatRequestState{
 		Messages:     transformedMessages,
@@ -152,6 +167,10 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		Files:        files,
 		SystemPrompt: systemPrompt,
 		PromptPrefix: promptPrefix,
+		TransformChanged: !reflect.DeepEqual(transformedMessages, input.Messages) ||
+			systemPrompt != input.SystemPrompt ||
+			promptPrefix != input.PromptPrefix,
+		EstimateReduced: transformedEstimate < originalEstimate,
 	}, nil
 }
 

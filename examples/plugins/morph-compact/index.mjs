@@ -283,8 +283,10 @@ async function handleChatMessagesTransform(id, input, output) {
     return writeResponse({ id, output });
   }
   const purpose = input.purpose || "request";
-  // Allow compaction for request, recover, AND summarize to prevent context overflow
-  const allowCompaction = purpose === "request" || purpose === "recover" || purpose === "summarize";
+  const requestPurpose = input.request_purpose || purpose;
+  // Use the eventual request purpose so preflight and next-step estimates can
+  // see the same compacted history as the real request.
+  const allowCompaction = requestPurpose === "request" || requestPurpose === "recover" || requestPurpose === "summarize";
   const messages = Array.isArray(output.messages) ? output.messages : [];
   if (messages.length <= compactPreserveRecent) {
     return writeResponse({ id, output });

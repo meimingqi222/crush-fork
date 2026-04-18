@@ -25,17 +25,25 @@ func getSessionID(ctx context.Context) string {
 }
 
 type toolWrapper struct {
-	inner fantasy.AgentTool
+	inner   fantasy.AgentTool
+	runtime *Runtime
 }
 
 func WrapAgentTool(tool fantasy.AgentTool) fantasy.AgentTool {
+	return WrapAgentToolWithRuntime(DefaultRuntime(), tool)
+}
+
+func WrapAgentToolWithRuntime(runtime *Runtime, tool fantasy.AgentTool) fantasy.AgentTool {
 	if tool == nil {
 		return nil
 	}
 	if wrapped, ok := tool.(*toolWrapper); ok {
 		return wrapped
 	}
-	return &toolWrapper{inner: tool}
+	if runtime == nil {
+		runtime = DefaultRuntime()
+	}
+	return &toolWrapper{inner: tool, runtime: runtime}
 }
 
 func (w *toolWrapper) Info() fantasy.ToolInfo {
@@ -53,7 +61,7 @@ func (w *toolWrapper) SetProviderOptions(opts fantasy.ProviderOptions) {
 func (w *toolWrapper) Run(ctx context.Context, params fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	args := decodeToolArgs(params.Input)
 	sessionID := getSessionID(ctx)
-	beforeOut, err := TriggerToolBeforeExecute(ctx, ToolBeforeExecuteInput{
+	beforeOut, err := w.runtime.TriggerToolBeforeExecute(ctx, ToolBeforeExecuteInput{
 		Tool:      w.Info().Name,
 		CallID:    params.ID,
 		Args:      args,
@@ -82,7 +90,7 @@ func (w *toolWrapper) Run(ctx context.Context, params fantasy.ToolCall) (fantasy
 	}
 
 	metadata := decodeMetadata(response.Metadata)
-	afterOut, err := TriggerToolAfterExecute(ctx, ToolAfterExecuteInput{
+	afterOut, err := w.runtime.TriggerToolAfterExecute(ctx, ToolAfterExecuteInput{
 		Tool:      w.Info().Name,
 		CallID:    params.ID,
 		Args:      args,

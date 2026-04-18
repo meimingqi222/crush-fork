@@ -59,12 +59,7 @@ const (
 	DefaultSessionName = "Untitled Session"
 
 	// Constants for auto-summarization thresholds
-	autoSummarizeReserveTokens        = 20_000
-	autoSummarizeToolReserveMax       = 8_000
-	autoSummarizeToolReserveMin       = 2_000
-	autoSummarizeSafetyReserveMin     = 2_000
-	autoSummarizeSoftLimitNumerator   = 9
-	autoSummarizeSoftLimitDenominator = 10
+	autoSummarizeReserveTokens = 20_000
 
 	joinActiveRunMaxInjectedCalls  = 2
 	joinActiveRunPromptCharsBudget = 1_600
@@ -80,7 +75,10 @@ var titlePrompt []byte
 var summaryPrompt []byte
 
 // Used to remove <think> tags from generated titles.
-var thinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
+var (
+	thinkTagRegex        = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	titleWhitespaceRegex = regexp.MustCompile(`\s+`)
+)
 
 var textualToolCallProtocolRegex = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?<\|tool_call_begin\|>.*?functions\.[a-zA-Z0-9_]+:\d+`)
 
@@ -106,8 +104,8 @@ func (t sessionCompactionTrigger) Purpose() plugin.ChatTransformPurpose {
 	}
 }
 
-func proactiveCompactionTrigger(contextUsed, contextWindow, maxOutputTokens int64) sessionCompactionTrigger {
-	if shouldAutoSummarize(contextUsed, contextWindow, maxOutputTokens) {
+func proactiveCompactionTrigger(model Model, contextUsed, maxOutputTokens int64) sessionCompactionTrigger {
+	if shouldAutoSummarize(model, contextUsed, maxOutputTokens) {
 		return sessionCompactionTriggerProactive
 	}
 	return sessionCompactionTriggerNone
@@ -332,6 +330,7 @@ type sessionAgent struct {
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
 	hookManager          *hooks.Manager
+	pluginRuntime        *plugin.Runtime
 	filetracker          filetracker.Service
 	checkpoint           checkpoint.Service
 	retryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
@@ -367,6 +366,7 @@ type SessionAgentOptions struct {
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
 	HookManager          *hooks.Manager
+	PluginRuntime        *plugin.Runtime
 	Filetracker          filetracker.Service
 	Checkpoint           checkpoint.Service
 	RetryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
@@ -426,6 +426,7 @@ func NewSessionAgent(
 		isYolo:               opts.IsYolo,
 		notify:               opts.Notify,
 		hookManager:          opts.HookManager,
+		pluginRuntime:        opts.PluginRuntime,
 		filetracker:          opts.Filetracker,
 		checkpoint:           opts.Checkpoint,
 		retryDelayFunc:       retryDelayFunc,
@@ -436,6 +437,13 @@ func NewSessionAgent(
 		pendingExtractions:   make(map[string][]context.CancelFunc),
 		extractionTurnCount:  make(map[string]int),
 	}
+}
+
+func (a *sessionAgent) plugins() *plugin.Runtime {
+	if a != nil && a.pluginRuntime != nil {
+		return a.pluginRuntime
+	}
+	return plugin.DefaultRuntime()
 }
 
 func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -595,6 +603,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		Model:          largeModel,
 		Provider:       providerCtx,
 		Purpose:        plugin.ChatTransformPurposePreflightEstimate,
+		RequestPurpose: requestPurpose,
 		Messages:       msgs,
 		Message:        transientUserMessage(call.SessionID, call.Prompt, call.Attachments),
 		Attachments:    call.Attachments,
@@ -611,8 +620,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// output token reservation internally, so we don't need to add maxOutputTokens here.
 		// This prevents double-counting the output reservation for large context models.
 		estimatedInput := a.estimateSessionPromptTokens(preflightState.History, call.Prompt, call.Attachments, agentTools, preflightState.SystemPrompt, preflightState.PromptPrefix)
-		estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
-		if trigger := proactiveCompactionTrigger(estimatedInput, effectiveContextWindow(largeModel), call.MaxOutputTokens); trigger != sessionCompactionTriggerNone {
+		if !preflightState.EstimateReduced {
+			estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
+		}
+		if trigger := proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens); trigger != sessionCompactionTriggerNone {
 			if truncErr := a.truncateOversizedToolResults(ctx, call.SessionID); truncErr != nil {
 				slog.Warn("Failed to truncate oversized tool results before preflight summarization", "error", truncErr, "session_id", call.SessionID)
 			}
@@ -674,6 +685,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		Model:          largeModel,
 		Provider:       providerCtx,
 		Purpose:        requestPurpose,
+		RequestPurpose: requestPurpose,
 		Messages:       msgs,
 		Message:        userMessage,
 		Attachments:    call.Attachments,
@@ -727,7 +739,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		runLastTool = ""
 		firstRequestStep = billFirstStepAsUser
 
-		if err := plugin.TriggerChatBeforeRequest(genCtx, plugin.ChatBeforeRequestInput{
+		if err := a.plugins().TriggerChatBeforeRequest(genCtx, plugin.ChatBeforeRequestInput{
 			SessionID: call.SessionID,
 			Agent:     "session",
 			Model: plugin.ModelInfo{
@@ -830,12 +842,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if len(prepared.Messages) > 0 {
 					originalTokens := estimatePromptTokens(prepared.Messages, nil)
 					internalMsgs := message.FromFantasyMessages(prepared.Messages)
-					transformedMsgs, transformErr := plugin.TriggerChatMessagesTransform(callContext, plugin.ChatMessagesTransformInput{
-						SessionID: call.SessionID,
-						Agent:     "session",
-						Model:     agentModelInfo(largeModel),
-						Provider:  providerCtx,
-						Purpose:   requestPurpose,
+					transformedMsgs, transformErr := a.plugins().TriggerChatMessagesTransform(callContext, plugin.ChatMessagesTransformInput{
+						SessionID:      call.SessionID,
+						Agent:          "session",
+						Model:          agentModelInfo(largeModel),
+						Provider:       providerCtx,
+						Purpose:        requestPurpose,
+						RequestPurpose: requestPurpose,
 					}, plugin.ChatMessagesTransformOutput{Messages: internalMsgs})
 					if transformErr != nil {
 						slog.Warn("Failed to transform messages in PrepareStep", "error", transformErr, "session_id", call.SessionID)
@@ -1099,7 +1112,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			},
 			StopWhen: []fantasy.StopCondition{
 				func(_ []fantasy.StepResult) bool {
-					projectedPromptTokens, estimateErr := a.estimateNextStepPromptTokens(genCtx, call.SessionID, agentTools, systemPrompt, promptPrefix, largeModel, providerCtx)
+					projectedPromptTokens, estimateReduced, estimateErr := a.estimateNextStepPromptTokens(genCtx, call.SessionID, agentTools, systemPrompt, promptPrefix, largeModel, providerCtx, requestPurpose)
 					if estimateErr != nil {
 						slog.Warn("Failed to estimate next-step prompt tokens", "error", estimateErr, "session_id", call.SessionID)
 						// Fallback: use the higher of LastInputTokens or the current step's estimatedPromptTokens.
@@ -1114,12 +1127,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						}
 						projectedPromptTokens = fallbackTokens
 					}
-					if !preflightSummarized {
+					if !preflightSummarized && !estimateReduced {
 						projectedPromptTokens = max(projectedPromptTokens, currentSession.LastInputTokens())
 					}
 					// Pass input-only estimate to shouldAutoSummarize. The function
 					// handles output token reservation internally to avoid double-counting.
-					if shouldAutoSummarize(projectedPromptTokens, effectiveContextWindow(largeModel), call.MaxOutputTokens) && !a.disableAutoSummarize {
+					if shouldAutoSummarize(largeModel, projectedPromptTokens, call.MaxOutputTokens) && !a.disableAutoSummarize {
 						shouldSummarize = true
 						return true
 					}
@@ -1133,7 +1146,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if err == nil {
 			hydrateAgentResultFromAssistantMessage(result, currentAssistant)
 		}
-		if hookErr := plugin.TriggerChatAfterResponse(genCtx, plugin.ChatAfterResponseInput{
+		if hookErr := a.plugins().TriggerChatAfterResponse(genCtx, plugin.ChatAfterResponseInput{
 			SessionID: call.SessionID,
 			Agent:     "session",
 			Model: plugin.ModelInfo{
@@ -1178,6 +1191,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					Model:          largeModel,
 					Provider:       providerCtx,
 					Purpose:        requestPurpose,
+					RequestPurpose: requestPurpose,
 					Messages:       retryMsgs,
 					Message:        userMessage,
 					Attachments:    call.Attachments,
@@ -1207,7 +1221,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 		if err != nil && isRetriableError(err) && !a.disableAutoSummarize {
 			observedPromptTokens := max(currentSession.LastInputTokens(), estimatedPromptTokens)
-			if shouldAutoSummarize(observedPromptTokens, effectiveContextWindow(largeModel), call.MaxOutputTokens) {
+			if shouldAutoSummarize(largeModel, observedPromptTokens, call.MaxOutputTokens) {
 				slog.Warn("Near context limit during transient failure; forcing summarization to recover",
 					"error", err,
 					"session_id", call.SessionID,
@@ -1266,6 +1280,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					Model:          largeModel,
 					Provider:       providerCtx,
 					Purpose:        requestPurpose,
+					RequestPurpose: requestPurpose,
 					Messages:       retryMsgs,
 					Message:        userMessage,
 					Attachments:    call.Attachments,
@@ -1363,6 +1378,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				Model:          largeModel,
 				Provider:       providerCtx,
 				Purpose:        requestPurpose,
+				RequestPurpose: requestPurpose,
 				Messages:       retryMsgs,
 				Message:        userMessage,
 				Attachments:    call.Attachments,
@@ -1405,6 +1421,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				Model:          largeModel,
 				Provider:       providerCtx,
 				Purpose:        requestPurpose,
+				RequestPurpose: requestPurpose,
 				Messages:       retryMsgs,
 				Message:        userMessage,
 				Attachments:    call.Attachments,
@@ -1745,6 +1762,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 			}
 			call.Prompt = fmt.Sprintf(resumePrefix+"%s`", originalPrompt)
+			resumedUserMessage := userMessage
+			call.UserMessage = &resumedUserMessage
 			if compactionTrigger == sessionCompactionTriggerRecover {
 				call.Purpose = plugin.ChatTransformPurposeRecover
 			}
@@ -2038,19 +2057,20 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	transformedMsgs, err := a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID: sessionID,
-		Agent:     "session",
-		Model:     largeModel,
-		Provider:  providerCtx,
-		Purpose:   compactingPurpose,
-		Messages:  msgs,
-		Message:   message.Message{SessionID: sessionID, Role: message.User},
+		SessionID:      sessionID,
+		Agent:          "session",
+		Model:          largeModel,
+		Provider:       providerCtx,
+		Purpose:        compactingPurpose,
+		RequestPurpose: compactingPurpose,
+		Messages:       msgs,
+		Message:        message.Message{SessionID: sessionID, Role: message.User},
 	})
 	if err != nil {
 		return err
 	}
 	aiMsgs, _ := a.preparePrompt(transformedMsgs)
-	compacting, err := plugin.TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
+	compacting, err := a.plugins().TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
 		SessionID: sessionID,
 		Agent:     "session",
 		Model:     agentModelInfo(largeModel),
@@ -2647,6 +2667,31 @@ func titleUserPromptFromCall(prompt string) string {
 	return prompt
 }
 
+func cleanGeneratedTitle(raw string) string {
+	raw = thinkTagRegex.ReplaceAllString(raw, "")
+	lines := strings.Split(raw, "\n")
+	title := ""
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		title = line
+		break
+	}
+	if title == "" {
+		title = strings.TrimSpace(raw)
+	}
+	title = strings.NewReplacer(`"`, "", `'`, "", ":", "").Replace(title)
+	title = titleWhitespaceRegex.ReplaceAllString(strings.TrimSpace(title), " ")
+	title = strings.Trim(title, " -\t\r\n")
+	if utf8.RuneCountInString(title) > 50 {
+		runes := []rune(title)
+		title = strings.TrimSpace(string(runes[:50]))
+	}
+	return cmp.Or(title, DefaultSessionName)
+}
+
 func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, userPrompt string, sessionLock *sync.Mutex) {
 	userPrompt = titleUserPromptFromCall(userPrompt)
 	if userPrompt == "" {
@@ -2740,13 +2785,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	if strings.TrimSpace(title) == "" {
 		title = resp.Response.Content.Text()
 	}
-	title = strings.ReplaceAll(title, "\n", " ")
-
-	// Remove thinking tags if present.
-	title = thinkTagRegex.ReplaceAllString(title, "")
-
-	title = strings.TrimSpace(title)
-	title = cmp.Or(title, DefaultSessionName)
+	title = cleanGeneratedTitle(title)
 
 	// Calculate usage and cost.
 	var openrouterCost *float64
@@ -2870,14 +2909,30 @@ func isAnthropicStyleUsageProvider(providerID string) bool {
 	}
 }
 
+func isOpenAIUsageProvider(providerID string) bool {
+	// All providers built on the OpenAI SDK (openai, azure, openai-compat)
+	// normalize InputTokens by subtracting CacheReadTokens, so prompt
+	// token accounting must add them back.
+	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	switch providerID {
+	case "openai", "azure", "openai-compat":
+		return true
+	default:
+		return false
+	}
+}
+
 func promptTokensForUsage(usage fantasy.Usage, providerID string) int64 {
 	// Anthropic and Bedrock report InputTokens WITHOUT cached tokens.
-	// OpenAI and other providers report InputTokens INCLUDING cached tokens.
-	// See: https://github.com/vercel/ai/issues/8794
 	if isAnthropicStyleUsageProvider(providerID) {
 		return usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	}
-	// For OpenAI, Google, etc., InputTokens already includes cached tokens.
+	// fantasy/providers/openai normalizes InputTokens by subtracting
+	// CacheReadTokens for both Chat Completions and Responses usage.
+	if isOpenAIUsageProvider(providerID) {
+		return usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
+	}
+	// Other providers generally report InputTokens INCLUDING cached tokens.
 	// Only add CacheCreationTokens (rare).
 	// Note: ReasoningTokens are output tokens (part of completion_tokens), not input tokens.
 	return usage.InputTokens + usage.CacheCreationTokens
@@ -2892,51 +2947,6 @@ func autoSummarizeReservedTokens(maxOutputTokens int64) int64 {
 		return autoSummarizeReserveTokens
 	}
 	return min(autoSummarizeReserveTokens, maxOutputTokens)
-}
-
-func autoSummarizeToolReserveTokens(contextWindow int64) int64 {
-	if contextWindow <= 0 {
-		return 0
-	}
-	return min(autoSummarizeToolReserveMax, max(autoSummarizeToolReserveMin, contextWindow/10))
-}
-
-func autoSummarizeSafetyReserveTokens(contextWindow int64) int64 {
-	if contextWindow <= 0 {
-		return 0
-	}
-	return max(autoSummarizeSafetyReserveMin, contextWindow/50)
-}
-
-func shouldAutoSummarize(contextUsed, contextWindow, maxOutputTokens int64) bool {
-	if contextWindow <= 0 {
-		slog.Warn("ShouldAutoSummarize: contextWindow <= 0, returning false", "contextWindow", contextWindow)
-		return false
-	}
-	reserved := autoSummarizeReservedTokens(maxOutputTokens)
-	toolReserve := autoSummarizeToolReserveTokens(contextWindow)
-	safetyReserve := autoSummarizeSafetyReserveTokens(contextWindow)
-	hardLimit := contextWindow - reserved - toolReserve - safetyReserve
-	softLimit := contextWindow * autoSummarizeSoftLimitNumerator / autoSummarizeSoftLimitDenominator
-	usable := min(hardLimit, softLimit)
-
-	slog.Info("ShouldAutoSummarize calculation",
-		"contextUsed", contextUsed,
-		"contextWindow", contextWindow,
-		"maxOutputTokens", maxOutputTokens,
-		"reserved", reserved,
-		"toolReserve", toolReserve,
-		"safetyReserve", safetyReserve,
-		"hardLimit", hardLimit,
-		"softLimit", softLimit,
-		"usable", usable,
-		"shouldSummarize", contextUsed >= usable)
-
-	if usable <= 0 {
-		slog.Warn("ShouldAutoSummarize: usable <= 0, forcing summarize", "usable", usable)
-		return true
-	}
-	return contextUsed >= usable
 }
 
 func estimateStringTokens(s string) int64 {
@@ -3048,14 +3058,14 @@ func (a *sessionAgent) estimateSessionPromptTokens(history []fantasy.Message, pr
 	return total
 }
 
-func (a *sessionAgent) estimateNextStepPromptTokens(ctx context.Context, sessionID string, tools []fantasy.AgentTool, systemPrompt string, promptPrefix string, model Model, provider plugin.ProviderContext) (int64, error) {
+func (a *sessionAgent) estimateNextStepPromptTokens(ctx context.Context, sessionID string, tools []fantasy.AgentTool, systemPrompt string, promptPrefix string, model Model, provider plugin.ProviderContext, requestPurpose plugin.ChatTransformPurpose) (int64, bool, error) {
 	currentSession, err := a.sessions.Get(ctx, sessionID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	msgs, err := a.getSessionMessages(ctx, currentSession)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	state, err := a.buildChatRequestState(ctx, chatRequestStateInput{
 		SessionID:      sessionID,
@@ -3063,6 +3073,7 @@ func (a *sessionAgent) estimateNextStepPromptTokens(ctx context.Context, session
 		Model:          model,
 		Provider:       provider,
 		Purpose:        plugin.ChatTransformPurposeNextStepEstimate,
+		RequestPurpose: requestPurpose,
 		Messages:       msgs,
 		Message:        message.Message{SessionID: sessionID, Role: message.User},
 		SystemPrompt:   systemPrompt,
@@ -3070,13 +3081,13 @@ func (a *sessionAgent) estimateNextStepPromptTokens(ctx context.Context, session
 		PermissionMode: currentSession.PermissionMode,
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return a.estimateSessionPromptTokens(state.History, "", nil, tools, state.SystemPrompt, state.PromptPrefix), nil
+	return a.estimateSessionPromptTokens(state.History, "", nil, tools, state.SystemPrompt, state.PromptPrefix), state.EstimateReduced, nil
 }
 
 func (a *sessionAgent) EstimateSessionPromptTokensForModel(ctx context.Context, sessionID string, model Model) (int64, error) {
-	return a.estimateNextStepPromptTokens(
+	tokens, _, err := a.estimateNextStepPromptTokens(
 		ctx,
 		sessionID,
 		a.tools.Copy(),
@@ -3084,7 +3095,9 @@ func (a *sessionAgent) EstimateSessionPromptTokensForModel(ctx context.Context, 
 		a.systemPromptPrefix.Get(),
 		model,
 		defaultProviderContext(),
+		plugin.ChatTransformPurposeRequest,
 	)
+	return tokens, err
 }
 
 func applyRuntimeConfig(call *SessionAgentCall, runtimeConfig sessionAgentRuntimeConfig) {

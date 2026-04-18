@@ -49,6 +49,48 @@ func initCompactingPurposePlugin(t *testing.T, env fakeEnv) *compactingPurposePl
 	return tracker
 }
 
+type requestPurposeCompactionPlugin struct{}
+
+func (p *requestPurposeCompactionPlugin) Name() string { return "request-purpose-compaction-plugin" }
+
+func (p *requestPurposeCompactionPlugin) Init(context.Context, plugin.PluginInput) (plugin.Hooks, error) {
+	return plugin.Hooks{
+		ChatMessagesTransform: func(_ context.Context, input plugin.ChatMessagesTransformInput, output *plugin.ChatMessagesTransformOutput) error {
+			if input.RequestPurpose != plugin.ChatTransformPurposeRequest {
+				return nil
+			}
+			output.Messages = []message.Message{{
+				SessionID: input.SessionID,
+				Role:      message.User,
+				Parts:     []message.ContentPart{message.TextContent{Text: "tiny"}},
+			}}
+			return nil
+		},
+	}, nil
+}
+
+func (p *requestPurposeCompactionPlugin) Close(context.Context) error { return nil }
+
+type requestPurposeSystemPrefixPlugin struct{}
+
+func (p *requestPurposeSystemPrefixPlugin) Name() string {
+	return "request-purpose-system-prefix-plugin"
+}
+
+func (p *requestPurposeSystemPrefixPlugin) Init(context.Context, plugin.PluginInput) (plugin.Hooks, error) {
+	return plugin.Hooks{
+		ChatSystemTransform: func(_ context.Context, input plugin.ChatSystemTransformInput, output *plugin.ChatSystemTransformOutput) error {
+			if input.RequestPurpose != plugin.ChatTransformPurposeRequest {
+				return nil
+			}
+			output.Prefix = output.Prefix + "\n# transformed"
+			return nil
+		},
+	}, nil
+}
+
+func (p *requestPurposeSystemPrefixPlugin) Close(context.Context) error { return nil }
+
 type autoSummarizeTestAgent struct {
 	t                       *testing.T
 	runCalls                int
@@ -205,7 +247,7 @@ func TestRunPreflightAutoSummarizesBeforeRequest(t *testing.T) {
 
 	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
 		Role:  message.User,
-		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("x", 30000)}},
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("x", 40000)}},
 	})
 	require.NoError(t, err)
 
@@ -267,6 +309,92 @@ func TestRunPreflightAutoSummarizesWhenLastInputTokensAlreadyNearThreshold(t *te
 	require.NotEmpty(t, savedSession.SummaryMessageID)
 }
 
+func TestRunPreflightEstimateTrustsPluginCompactionForRequestPurpose(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	plugin.Register(&requestPurposeCompactionPlugin{})
+	err := plugin.Init(context.Background(), plugin.PluginInput{
+		Sessions:   env.sessions,
+		Messages:   env.messages,
+		WorkingDir: env.workingDir,
+	})
+	require.NoError(t, err)
+
+	testSession, err := env.sessions.Create(t.Context(), "preflight plugin compaction")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("x", 30000)}},
+	})
+	require.NoError(t, err)
+
+	testSession.LastPromptTokens = 9_500
+	_, err = env.sessions.Save(t.Context(), testSession)
+	require.NoError(t, err)
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10_000)
+
+	result, err := sessionAgent.Run(t.Context(), SessionAgentCall{
+		Prompt:          "hello",
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 1000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 0, fakeAgent.summaryCalls)
+	require.Equal(t, 1, fakeAgent.runCalls)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.Empty(t, savedSession.SummaryMessageID)
+}
+
+func TestRunPreflightEstimateKeepsLastInputFallbackWhenTransformDoesNotReduceEstimate(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	plugin.Register(&requestPurposeSystemPrefixPlugin{})
+	err := plugin.Init(context.Background(), plugin.PluginInput{
+		Sessions:   env.sessions,
+		Messages:   env.messages,
+		WorkingDir: env.workingDir,
+	})
+	require.NoError(t, err)
+
+	testSession, err := env.sessions.Create(t.Context(), "preflight transform without reduction")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "small history"}},
+	})
+	require.NoError(t, err)
+
+	testSession.LastPromptTokens = 168_000
+	_, err = env.sessions.Save(t.Context(), testSession)
+	require.NoError(t, err)
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 200_000)
+
+	result, err := sessionAgent.Run(t.Context(), SessionAgentCall{
+		Prompt:          "hello",
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 50_000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, fakeAgent.summaryCalls)
+	require.Equal(t, 1, fakeAgent.runCalls)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, savedSession.SummaryMessageID)
+}
+
 func TestRunStepAutoSummarizesWhenEstimateFallbackExceedsThreshold(t *testing.T) {
 	plugin.Reset()
 	t.Cleanup(plugin.Reset)
@@ -280,7 +408,7 @@ func TestRunStepAutoSummarizesWhenEstimateFallbackExceedsThreshold(t *testing.T)
 	fakeAgent := &autoSummarizeTestAgent{
 		t: t,
 		stepUsage: fantasy.Usage{
-			InputTokens:  6000,
+			InputTokens:  9500,
 			OutputTokens: 10,
 		},
 		afterStep: messages.FailNextList,
@@ -337,6 +465,49 @@ func TestRunStepAutoSummarizeFallbackIgnoresOutputTokens(t *testing.T) {
 	require.Empty(t, savedSession.SummaryMessageID)
 	require.Equal(t, int64(4000), savedSession.LastInputTokens())
 	require.Equal(t, int64(9000), savedSession.LastOutputTokens())
+}
+
+func TestRunStepAutoSummarizeFallbackKeepsLastInputWhenTransformDoesNotReduceEstimate(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	plugin.Register(&requestPurposeSystemPrefixPlugin{})
+	err := plugin.Init(context.Background(), plugin.PluginInput{
+		Sessions:   env.sessions,
+		Messages:   env.messages,
+		WorkingDir: env.workingDir,
+	})
+	require.NoError(t, err)
+
+	testSession, err := env.sessions.Create(t.Context(), "step summarize transform without reduction")
+	require.NoError(t, err)
+	createSeedHistoryMessage(t, env, testSession.ID)
+
+	messages := &failOnceMessageService{Service: env.messages}
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		stepUsage: fantasy.Usage{
+			InputTokens:  9500,
+			OutputTokens: 10,
+		},
+		afterStep: messages.FailNextList,
+	}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, messages, 10000)
+
+	result, err := sessionAgent.Run(t.Context(), SessionAgentCall{
+		Prompt:          "hello",
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 1000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, fakeAgent.runCalls)
+	require.Equal(t, 1, fakeAgent.summaryCalls)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, savedSession.SummaryMessageID)
 }
 
 func TestRunTransientRetryNearContextLimitSummarizesInsteadOfRetrying(t *testing.T) {
@@ -533,7 +704,7 @@ func TestRunNormalSummarizeUsesSummarizePurpose(t *testing.T) {
 	require.NotEmpty(t, savedSession.SummaryMessageID)
 }
 
-func TestRunContextWindowErrorAfterCompletedStepSummarizesWithoutAutoResume(t *testing.T) {
+func TestRunContextWindowErrorAfterCompletedStepSummarizesAndAutoResumes(t *testing.T) {
 	plugin.Reset()
 	t.Cleanup(plugin.Reset)
 
@@ -547,7 +718,7 @@ func TestRunContextWindowErrorAfterCompletedStepSummarizesWithoutAutoResume(t *t
 	}
 	fakeAgent := &autoSummarizeTestAgent{
 		t:            t,
-		runErr:       contextWindowErr,
+		runErrs:      []error{contextWindowErr, nil},
 		errAfterStep: true,
 	}
 	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 200_000)
@@ -558,8 +729,64 @@ func TestRunContextWindowErrorAfterCompletedStepSummarizesWithoutAutoResume(t *t
 		MaxOutputTokens: 50_000,
 	})
 	require.NoError(t, err)
-	require.Equal(t, 1, fakeAgent.runCalls)
+	require.Equal(t, 2, fakeAgent.runCalls)
 	require.Equal(t, 1, fakeAgent.summaryCalls)
+}
+
+func TestRunAfterPriorSummaryKeepsOriginalPromptAcrossRecoverResume(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "switch then recover")
+	require.NoError(t, err)
+	createSeedHistoryMessage(t, env, testSession.ID)
+
+	contextWindowErr := &fantasy.ProviderError{
+		StatusCode: 400,
+		Message:    "Your input exceeds the context window of this model.",
+	}
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 1_000_000)
+
+	err = sessionAgent.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeAgent.summaryCalls)
+
+	smallModel := Model{
+		CatwalkCfg: catwalk.Model{
+			ContextWindow:    200_000,
+			DefaultMaxTokens: 50_000,
+		},
+	}
+	sessionAgent.SetModels(smallModel, smallModel)
+	fakeAgent.runErrs = []error{contextWindowErr, nil}
+	fakeAgent.errAfterStep = true
+
+	const prompt = "continue after model switch"
+	result, err := sessionAgent.Run(t.Context(), SessionAgentCall{
+		Prompt:          prompt,
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 50_000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 2, fakeAgent.runCalls)
+	require.Equal(t, 2, fakeAgent.summaryCalls)
+
+	msgs, err := env.messages.List(t.Context(), testSession.ID)
+	require.NoError(t, err)
+
+	var promptCount int
+	for _, msg := range msgs {
+		if msg.Role != message.User {
+			continue
+		}
+		if msg.Content().Text == prompt {
+			promptCount++
+		}
+	}
+	require.Equal(t, 1, promptCount)
 }
 
 func TestSummarizeSkipsAutoCompactForTinyHistory(t *testing.T) {

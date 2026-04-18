@@ -43,10 +43,9 @@ const (
 	commandPluginModePersistent        = "persistent"
 )
 
-var supportedCommandPluginHooks = []string{
-	commandPluginHookMessages,
-	commandPluginHookSystem,
-	commandPluginHookCompacting,
+type commandPluginHookDescriptor interface {
+	name() string
+	attach(hooks *Hooks, invoker commandPluginInvoker)
 }
 
 type resolvedCommandPluginConfig struct {
@@ -62,6 +61,10 @@ type resolvedCommandPluginConfig struct {
 
 type commandPlugin struct {
 	cfg resolvedCommandPluginConfig
+}
+
+type commandPluginInvoker interface {
+	invoke(ctx context.Context, event string, input any, output any, responseOutput any) error
 }
 
 type commandPluginRequest struct {
@@ -94,12 +97,13 @@ type commandPluginPart struct {
 }
 
 type commandPluginChatMessagesTransformInput struct {
-	SessionID string               `json:"session_id"`
-	Agent     string               `json:"agent"`
-	Model     ModelInfo            `json:"model"`
-	Provider  ProviderContext      `json:"provider"`
-	Purpose   string               `json:"purpose"`
-	Message   commandPluginMessage `json:"message"`
+	SessionID      string               `json:"session_id"`
+	Agent          string               `json:"agent"`
+	Model          ModelInfo            `json:"model"`
+	Provider       ProviderContext      `json:"provider"`
+	Purpose        string               `json:"purpose"`
+	RequestPurpose string               `json:"request_purpose,omitempty"`
+	Message        commandPluginMessage `json:"message"`
 }
 
 type commandPluginChatMessagesTransformOutput struct {
@@ -107,12 +111,13 @@ type commandPluginChatMessagesTransformOutput struct {
 }
 
 type commandPluginChatSystemTransformInput struct {
-	SessionID string               `json:"session_id"`
-	Agent     string               `json:"agent"`
-	Model     ModelInfo            `json:"model"`
-	Provider  ProviderContext      `json:"provider"`
-	Purpose   string               `json:"purpose"`
-	Message   commandPluginMessage `json:"message"`
+	SessionID      string               `json:"session_id"`
+	Agent          string               `json:"agent"`
+	Model          ModelInfo            `json:"model"`
+	Provider       ProviderContext      `json:"provider"`
+	Purpose        string               `json:"purpose"`
+	RequestPurpose string               `json:"request_purpose,omitempty"`
+	Message        commandPluginMessage `json:"message"`
 }
 
 type commandPluginChatSystemTransformOutput struct {
@@ -130,6 +135,150 @@ type commandPluginSessionCompactingInput struct {
 type commandPluginSessionCompactingOutput struct {
 	Context []string `json:"context,omitempty"`
 	Prompt  string   `json:"prompt,omitempty"`
+}
+
+type chatMessagesTransformHookDescriptor struct{}
+
+func (chatMessagesTransformHookDescriptor) name() string {
+	return commandPluginHookMessages
+}
+
+func (chatMessagesTransformHookDescriptor) attach(hooks *Hooks, invoker commandPluginInvoker) {
+	hooks.ChatMessagesTransform = func(ctx context.Context, input ChatMessagesTransformInput, output *ChatMessagesTransformOutput) error {
+		return invokeCommandPluginHook(
+			ctx,
+			invoker,
+			commandPluginHookMessages,
+			input,
+			output,
+			func(input ChatMessagesTransformInput) commandPluginChatMessagesTransformInput {
+				return commandPluginChatMessagesTransformInput{
+					SessionID:      input.SessionID,
+					Agent:          input.Agent,
+					Model:          input.Model,
+					Provider:       input.Provider,
+					Purpose:        string(input.Purpose),
+					RequestPurpose: string(input.RequestPurpose),
+					Message:        toCommandPluginMessage(input.Message),
+				}
+			},
+			func(output *ChatMessagesTransformOutput) commandPluginChatMessagesTransformOutput {
+				return commandPluginChatMessagesTransformOutput{
+					Messages: toCommandPluginMessages(output.Messages),
+				}
+			},
+			func(output *ChatMessagesTransformOutput, response commandPluginChatMessagesTransformOutput) error {
+				if response.Messages == nil {
+					return nil
+				}
+				messages, err := fromCommandPluginMessages(response.Messages)
+				if err != nil {
+					return err
+				}
+				output.Messages = messages
+				return nil
+			},
+		)
+	}
+}
+
+type chatSystemTransformHookDescriptor struct{}
+
+func (chatSystemTransformHookDescriptor) name() string {
+	return commandPluginHookSystem
+}
+
+func (chatSystemTransformHookDescriptor) attach(hooks *Hooks, invoker commandPluginInvoker) {
+	hooks.ChatSystemTransform = func(ctx context.Context, input ChatSystemTransformInput, output *ChatSystemTransformOutput) error {
+		return invokeCommandPluginHook(
+			ctx,
+			invoker,
+			commandPluginHookSystem,
+			input,
+			output,
+			func(input ChatSystemTransformInput) commandPluginChatSystemTransformInput {
+				return commandPluginChatSystemTransformInput{
+					SessionID:      input.SessionID,
+					Agent:          input.Agent,
+					Model:          input.Model,
+					Provider:       input.Provider,
+					Purpose:        string(input.Purpose),
+					RequestPurpose: string(input.RequestPurpose),
+					Message:        toCommandPluginMessage(input.Message),
+				}
+			},
+			func(output *ChatSystemTransformOutput) commandPluginChatSystemTransformOutput {
+				return commandPluginChatSystemTransformOutput{
+					System: append([]string(nil), output.System...),
+					Prefix: output.Prefix,
+				}
+			},
+			func(output *ChatSystemTransformOutput, response commandPluginChatSystemTransformOutput) error {
+				if response.System != nil {
+					output.System = response.System
+				}
+				if response.Prefix != "" {
+					output.Prefix = response.Prefix
+				}
+				return nil
+			},
+		)
+	}
+}
+
+type sessionCompactingHookDescriptor struct{}
+
+func (sessionCompactingHookDescriptor) name() string {
+	return commandPluginHookCompacting
+}
+
+func (sessionCompactingHookDescriptor) attach(hooks *Hooks, invoker commandPluginInvoker) {
+	hooks.SessionCompacting = func(ctx context.Context, input SessionCompactingInput, output *SessionCompactingOutput) error {
+		return invokeCommandPluginHook(
+			ctx,
+			invoker,
+			commandPluginHookCompacting,
+			input,
+			output,
+			func(input SessionCompactingInput) commandPluginSessionCompactingInput {
+				return commandPluginSessionCompactingInput{
+					SessionID: input.SessionID,
+					Agent:     input.Agent,
+					Model:     input.Model,
+					Purpose:   string(input.Purpose),
+				}
+			},
+			func(output *SessionCompactingOutput) commandPluginSessionCompactingOutput {
+				return commandPluginSessionCompactingOutput{
+					Context: append([]string(nil), output.Context...),
+					Prompt:  output.Prompt,
+				}
+			},
+			func(output *SessionCompactingOutput, response commandPluginSessionCompactingOutput) error {
+				if response.Context != nil {
+					output.Context = response.Context
+				}
+				if response.Prompt != "" {
+					output.Prompt = response.Prompt
+				}
+				return nil
+			},
+		)
+	}
+}
+
+var commandPluginHookDescriptors = []commandPluginHookDescriptor{
+	chatMessagesTransformHookDescriptor{},
+	chatSystemTransformHookDescriptor{},
+	sessionCompactingHookDescriptor{},
+}
+
+func supportedCommandPluginHooks() []string {
+	names := make([]string, 0, len(commandPluginHookDescriptors))
+	for _, descriptor := range commandPluginHookDescriptors {
+		names = append(names, descriptor.name())
+	}
+	return names
 }
 
 type boundedBuffer struct {
@@ -339,12 +488,13 @@ func resolvePluginValue(store *config.ConfigStore, value string) (string, error)
 }
 
 func normalizeCommandPluginHooks(name string, hooks []string) ([]string, error) {
+	supportedHooks := supportedCommandPluginHooks()
 	if len(hooks) == 0 {
-		return append([]string(nil), supportedCommandPluginHooks...), nil
+		return supportedHooks, nil
 	}
 	normalized := make([]string, 0, len(hooks))
 	for _, hook := range hooks {
-		if !slices.Contains(supportedCommandPluginHooks, hook) {
+		if !slices.Contains(supportedHooks, hook) {
 			return nil, fmt.Errorf("plugin %q hook %q is unsupported", name, hook)
 		}
 		if !slices.Contains(normalized, hook) {
@@ -365,93 +515,38 @@ func (p *commandPlugin) Close(_ context.Context) error {
 func (p *commandPlugin) Init(ctx context.Context, input PluginInput) (Hooks, error) {
 	_ = ctx
 	_ = input
+	return buildCommandPluginHooks(p.cfg.hooks, p), nil
+}
+
+func buildCommandPluginHooks(
+	configuredHooks []string,
+	invoker commandPluginInvoker,
+) Hooks {
 	var hooks Hooks
-	if slices.Contains(p.cfg.hooks, commandPluginHookMessages) {
-		hooks.ChatMessagesTransform = p.chatMessagesTransform
-	}
-	if slices.Contains(p.cfg.hooks, commandPluginHookSystem) {
-		hooks.ChatSystemTransform = p.chatSystemTransform
-	}
-	if slices.Contains(p.cfg.hooks, commandPluginHookCompacting) {
-		hooks.SessionCompacting = p.sessionCompacting
-	}
-	return hooks, nil
-}
-
-func (p *commandPlugin) chatMessagesTransform(ctx context.Context, input ChatMessagesTransformInput, output *ChatMessagesTransformOutput) error {
-	requestInput := commandPluginChatMessagesTransformInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     input.Model,
-		Provider:  input.Provider,
-		Purpose:   string(input.Purpose),
-		Message:   toCommandPluginMessage(input.Message),
-	}
-	requestOutput := commandPluginChatMessagesTransformOutput{
-		Messages: toCommandPluginMessages(output.Messages),
-	}
-	var response commandPluginChatMessagesTransformOutput
-	if err := p.invoke(ctx, commandPluginHookMessages, requestInput, requestOutput, &response); err != nil {
-		return err
-	}
-	if response.Messages != nil {
-		messages, err := fromCommandPluginMessages(response.Messages)
-		if err != nil {
-			return err
+	for _, descriptor := range commandPluginHookDescriptors {
+		if !slices.Contains(configuredHooks, descriptor.name()) {
+			continue
 		}
-		output.Messages = messages
+		descriptor.attach(&hooks, invoker)
 	}
-	return nil
+	return hooks
 }
 
-func (p *commandPlugin) chatSystemTransform(ctx context.Context, input ChatSystemTransformInput, output *ChatSystemTransformOutput) error {
-	requestInput := commandPluginChatSystemTransformInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     input.Model,
-		Provider:  input.Provider,
-		Purpose:   string(input.Purpose),
-		Message:   toCommandPluginMessage(input.Message),
-	}
-	requestOutput := commandPluginChatSystemTransformOutput{
-		System: append([]string(nil), output.System...),
-		Prefix: output.Prefix,
-	}
-	var response commandPluginChatSystemTransformOutput
-	if err := p.invoke(ctx, commandPluginHookSystem, requestInput, requestOutput, &response); err != nil {
+func invokeCommandPluginHook[Input any, Output any, RequestInput any, RequestOutput any](
+	ctx context.Context,
+	invoker commandPluginInvoker,
+	event string,
+	input Input,
+	output *Output,
+	buildRequestInput func(Input) RequestInput,
+	buildRequestOutput func(*Output) RequestOutput,
+	applyResponse func(*Output, RequestOutput) error,
+) error {
+	var response RequestOutput
+	if err := invoker.invoke(ctx, event, buildRequestInput(input), buildRequestOutput(output), &response); err != nil {
 		return err
 	}
-	if response.System != nil {
-		output.System = response.System
-	}
-	if response.Prefix != "" {
-		output.Prefix = response.Prefix
-	}
-	return nil
-}
-
-func (p *commandPlugin) sessionCompacting(ctx context.Context, input SessionCompactingInput, output *SessionCompactingOutput) error {
-	requestInput := commandPluginSessionCompactingInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     input.Model,
-		Purpose:   string(input.Purpose),
-	}
-	requestOutput := commandPluginSessionCompactingOutput{
-		Context: append([]string(nil), output.Context...),
-		Prompt:  output.Prompt,
-	}
-	var response commandPluginSessionCompactingOutput
-	if err := p.invoke(ctx, commandPluginHookCompacting, requestInput, requestOutput, &response); err != nil {
-		return err
-	}
-	if response.Context != nil {
-		output.Context = response.Context
-	}
-	if response.Prompt != "" {
-		output.Prompt = response.Prompt
-	}
-	return nil
+	return applyResponse(output, response)
 }
 
 func (p *commandPlugin) invoke(ctx context.Context, event string, input any, output any, responseOutput any) error {
@@ -567,17 +662,7 @@ func (p *persistentPlugin) Init(ctx context.Context, input PluginInput) (Hooks, 
 		return Hooks{}, fmt.Errorf("persistent plugin %q failed to start: %w", p.cfg.name, err)
 	}
 	p.mgr = mgr
-	var hooks Hooks
-	if slices.Contains(p.cfg.hooks, commandPluginHookMessages) {
-		hooks.ChatMessagesTransform = p.chatMessagesTransform
-	}
-	if slices.Contains(p.cfg.hooks, commandPluginHookSystem) {
-		hooks.ChatSystemTransform = p.chatSystemTransform
-	}
-	if slices.Contains(p.cfg.hooks, commandPluginHookCompacting) {
-		hooks.SessionCompacting = p.sessionCompacting
-	}
-	return hooks, nil
+	return buildCommandPluginHooks(p.cfg.hooks, p.mgr), nil
 }
 
 func (p *persistentPlugin) Close(ctx context.Context) error {
@@ -585,82 +670,6 @@ func (p *persistentPlugin) Close(ctx context.Context) error {
 		return nil
 	}
 	return p.mgr.shutdown(ctx)
-}
-
-func (p *persistentPlugin) chatMessagesTransform(ctx context.Context, input ChatMessagesTransformInput, output *ChatMessagesTransformOutput) error {
-	requestInput := commandPluginChatMessagesTransformInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     input.Model,
-		Provider:  input.Provider,
-		Purpose:   string(input.Purpose),
-		Message:   toCommandPluginMessage(input.Message),
-	}
-	requestOutput := commandPluginChatMessagesTransformOutput{
-		Messages: toCommandPluginMessages(output.Messages),
-	}
-	var response commandPluginChatMessagesTransformOutput
-	if err := p.mgr.invoke(ctx, commandPluginHookMessages, requestInput, requestOutput, &response); err != nil {
-		return err
-	}
-	if response.Messages != nil {
-		messages, err := fromCommandPluginMessages(response.Messages)
-		if err != nil {
-			return err
-		}
-		output.Messages = messages
-	}
-	return nil
-}
-
-func (p *persistentPlugin) chatSystemTransform(ctx context.Context, input ChatSystemTransformInput, output *ChatSystemTransformOutput) error {
-	requestInput := commandPluginChatSystemTransformInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     input.Model,
-		Provider:  input.Provider,
-		Purpose:   string(input.Purpose),
-		Message:   toCommandPluginMessage(input.Message),
-	}
-	requestOutput := commandPluginChatSystemTransformOutput{
-		System: append([]string(nil), output.System...),
-		Prefix: output.Prefix,
-	}
-	var response commandPluginChatSystemTransformOutput
-	if err := p.mgr.invoke(ctx, commandPluginHookSystem, requestInput, requestOutput, &response); err != nil {
-		return err
-	}
-	if response.System != nil {
-		output.System = response.System
-	}
-	if response.Prefix != "" {
-		output.Prefix = response.Prefix
-	}
-	return nil
-}
-
-func (p *persistentPlugin) sessionCompacting(ctx context.Context, input SessionCompactingInput, output *SessionCompactingOutput) error {
-	requestInput := commandPluginSessionCompactingInput{
-		SessionID: input.SessionID,
-		Agent:     input.Agent,
-		Model:     input.Model,
-		Purpose:   string(input.Purpose),
-	}
-	requestOutput := commandPluginSessionCompactingOutput{
-		Context: append([]string(nil), output.Context...),
-		Prompt:  output.Prompt,
-	}
-	var response commandPluginSessionCompactingOutput
-	if err := p.mgr.invoke(ctx, commandPluginHookCompacting, requestInput, requestOutput, &response); err != nil {
-		return err
-	}
-	if response.Context != nil {
-		output.Context = response.Context
-	}
-	if response.Prompt != "" {
-		output.Prompt = response.Prompt
-	}
-	return nil
 }
 
 func newPersistentPluginManager(ctx context.Context, cfg resolvedCommandPluginConfig) (*persistentPluginManager, error) {

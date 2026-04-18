@@ -162,7 +162,12 @@ type ChatMessagesTransformInput struct {
 	Model     ModelInfo
 	Provider  ProviderContext
 	Purpose   ChatTransformPurpose
-	Message   message.Message
+	// RequestPurpose identifies the eventual request purpose when the current
+	// hook invocation is only estimating a later send (for example preflight or
+	// next-step checks). Plugins can use this to apply the same compaction logic
+	// they would use for the real request without losing the original phase.
+	RequestPurpose ChatTransformPurpose
+	Message        message.Message
 }
 
 // ChatMessagesTransformOutput is the output for ChatMessagesTransform hook.
@@ -172,12 +177,13 @@ type ChatMessagesTransformOutput struct {
 
 // ChatSystemTransformInput is the input for ChatSystemTransform hook.
 type ChatSystemTransformInput struct {
-	SessionID string
-	Agent     string
-	Model     ModelInfo
-	Provider  ProviderContext
-	Purpose   ChatTransformPurpose
-	Message   message.Message
+	SessionID      string
+	Agent          string
+	Model          ModelInfo
+	Provider       ProviderContext
+	Purpose        ChatTransformPurpose
+	RequestPurpose ChatTransformPurpose
+	Message        message.Message
 }
 
 // ChatSystemTransformOutput is the output for ChatSystemTransform hook.

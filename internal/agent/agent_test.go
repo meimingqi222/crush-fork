@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -675,12 +676,20 @@ func TestPromptTokensForUsage_OpenAIStyle(t *testing.T) {
 	t.Parallel()
 
 	usage := fantasy.Usage{
-		InputTokens:  120,
-		OutputTokens: 45,
+		InputTokens:     120,
+		CacheReadTokens: 900,
+		OutputTokens:    45,
 	}
 
-	require.Equal(t, int64(120), promptTokensForUsage(usage, "openai"))
-	require.Equal(t, int64(165), totalTokensForUsage(usage, "openai"))
+	// All providers built on the OpenAI SDK normalize InputTokens by
+	// subtracting CacheReadTokens, so promptTokensForUsage must add them back.
+	for _, providerID := range []string{"openai", "azure", "openai-compat"} {
+		t.Run(providerID, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, int64(1020), promptTokensForUsage(usage, providerID))
+			require.Equal(t, int64(1065), totalTokensForUsage(usage, providerID))
+		})
+	}
 }
 
 func TestPromptTokensForUsage_AnthropicCacheStyle(t *testing.T) {
@@ -699,9 +708,9 @@ func TestPromptTokensForUsage_AnthropicCacheStyle(t *testing.T) {
 	require.Equal(t, int64(1365), totalTokensForUsage(usage, "@ai-sdk/anthropic"))
 	require.Equal(t, int64(1365), totalTokensForUsage(usage, "@ai-sdk/google-vertex/anthropic"))
 
-	// OpenAI-style: InputTokens ALREADY includes cached tokens
-	// So we don't add CacheReadTokens again (would be double-counting)
-	require.Equal(t, int64(420), promptTokensForUsage(usage, "openai")) // 120 + 300 (CacheCreation) + 0 (Reasoning)
+	// OpenAI-style in fantasy/providers/openai: InputTokens excludes cached
+	// prompt reuse, so CacheReadTokens must be added back for display.
+	require.Equal(t, int64(1320), promptTokensForUsage(usage, "openai"))
 }
 
 func TestShouldAutoSummarize(t *testing.T) {
@@ -709,24 +718,80 @@ func TestShouldAutoSummarize(t *testing.T) {
 
 	tests := []struct {
 		name            string
+		model           Model
 		contextUsed     int64
-		contextWindow   int64
 		maxOutputTokens int64
 		want            bool
 	}{
-		{name: "large window uses hard reserve threshold", contextUsed: 168_000, contextWindow: 200_000, maxOutputTokens: 50_000, want: true},
-		{name: "large window below hard reserve threshold", contextUsed: 167_999, contextWindow: 200_000, maxOutputTokens: 50_000, want: false},
-		{name: "small window reserves output tool and safety budget", contextUsed: 18_800, contextWindow: 32_000, maxOutputTokens: 8_000, want: true},
-		{name: "small window below mixed threshold", contextUsed: 18_799, contextWindow: 32_000, maxOutputTokens: 8_000, want: false},
-		{name: "soft limit caps very large windows at ninety percent", contextUsed: 450_000, contextWindow: 500_000, maxOutputTokens: 1_000, want: true},
-		{name: "soft limit still leaves headroom below ninety percent", contextUsed: 449_999, contextWindow: 500_000, maxOutputTokens: 1_000, want: false},
-		{name: "invalid context window", contextUsed: 1, contextWindow: 0, maxOutputTokens: 8_000, want: false},
+		{
+			name: "fallback input budget keeps output, tool, and safety headroom",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    200_000,
+				DefaultMaxTokens: 50_000,
+			}},
+			contextUsed:     150_000,
+			maxOutputTokens: 50_000,
+			want:            true,
+		},
+		{
+			name: "fallback input budget stays below reserved headroom threshold",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    200_000,
+				DefaultMaxTokens: 50_000,
+			}},
+			contextUsed:     137_999,
+			maxOutputTokens: 50_000,
+			want:            false,
+		},
+		{
+			name: "explicit max prompt tokens uses reserved buffer instead of full output reservation",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    400_000,
+				DefaultMaxTokens: 128_000,
+				Options: catwalk.ModelOptions{
+					ProviderOptions: map[string]any{"max_prompt_tokens": 272_000},
+				},
+			}},
+			contextUsed:     252_000,
+			maxOutputTokens: 128_000,
+			want:            true,
+		},
+		{
+			name: "explicit max prompt tokens leaves room below reserved buffer threshold",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    400_000,
+				DefaultMaxTokens: 128_000,
+				Options: catwalk.ModelOptions{
+					ProviderOptions: map[string]any{"max_prompt_tokens": 272_000},
+				},
+			}},
+			contextUsed:     251_999,
+			maxOutputTokens: 128_000,
+			want:            false,
+		},
+		{
+			name: "uses model default max output when request does not specify one",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    100_000,
+				DefaultMaxTokens: 8_000,
+			}},
+			contextUsed:     92_000,
+			maxOutputTokens: 0,
+			want:            true,
+		},
+		{
+			name:            "invalid context window",
+			model:           Model{CatwalkCfg: catwalk.Model{}},
+			contextUsed:     1,
+			maxOutputTokens: 8_000,
+			want:            false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, shouldAutoSummarize(tt.contextUsed, tt.contextWindow, tt.maxOutputTokens))
+			require.Equal(t, tt.want, shouldAutoSummarize(tt.model, tt.contextUsed, tt.maxOutputTokens))
 		})
 	}
 }
@@ -882,6 +947,30 @@ func TestUpdateSessionUsage_AccumulatesTotals_AnthropicSDKProviderName(t *testin
 	require.Equal(t, int64(1320), sess.PromptTokens)
 	require.Equal(t, int64(1320), sess.LastPromptTokens)
 	require.Equal(t, int64(45), sess.CompletionTokens)
+}
+
+func TestUpdateSessionUsage_AccumulatesTotals_OpenAI(t *testing.T) {
+	t.Parallel()
+
+	agent := &sessionAgent{}
+	model := Model{CatwalkCfg: catwalk.Model{}, ModelCfg: config.SelectedModel{Provider: "openai"}}
+	sess := session.Session{
+		PromptTokens:     1000,
+		CompletionTokens: 400,
+	}
+
+	usage := fantasy.Usage{
+		InputTokens:         120,
+		CacheCreationTokens: 300,
+		CacheReadTokens:     900,
+		OutputTokens:        45,
+	}
+
+	agent.updateSessionUsage(model, &sess, usage, nil, 0)
+
+	require.Equal(t, int64(2320), sess.PromptTokens)
+	require.Equal(t, int64(445), sess.CompletionTokens)
+	require.Equal(t, int64(1320), sess.LastPromptTokens)
 }
 
 func TestUpdateSessionUsage_LastPromptTokensIsSetNotAccumulated(t *testing.T) {
@@ -1238,6 +1327,34 @@ func TestTitleUserPromptFromCall(t *testing.T) {
 	})
 }
 
+func TestCleanGeneratedTitle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("uses first non-empty line after think removal", func(t *testing.T) {
+		t.Parallel()
+		raw := "<think>hidden</think>\n\nUseful title\nSecond line"
+		require.Equal(t, "Useful title", cleanGeneratedTitle(raw))
+	})
+
+	t.Run("removes quotes colons and normalizes whitespace", func(t *testing.T) {
+		t.Parallel()
+		raw := ` "Fix: parser bug"  `
+		require.Equal(t, "Fix parser bug", cleanGeneratedTitle(raw))
+	})
+
+	t.Run("truncates to fifty runes", func(t *testing.T) {
+		t.Parallel()
+		raw := strings.Repeat("a", 60)
+		require.Equal(t, strings.Repeat("a", 50), cleanGeneratedTitle(raw))
+	})
+
+	t.Run("falls back to default session name", func(t *testing.T) {
+		t.Parallel()
+		raw := `<think>only hidden</think>`
+		require.Equal(t, DefaultSessionName, cleanGeneratedTitle(raw))
+	})
+}
+
 func TestShouldGenerateSessionTitle(t *testing.T) {
 	t.Parallel()
 
@@ -1336,6 +1453,60 @@ func TestGenerateTitleResetsStreamedTitleOnModelFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "clean-title", after.Title)
 	require.Equal(t, 2, streamCalls)
+}
+
+func TestGenerateTitleCleansAndTruncatesOutput(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "New Session")
+	require.NoError(t, err)
+
+	rawTitle := "\"Fix: parser bug in auth flow with very long suffix text\"\nextra line"
+	titleModel := stubLanguageModel{
+		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
+			return func(yield func(fantasy.StreamPart) bool) {
+				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
+					return
+				}
+				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: rawTitle}) {
+					return
+				}
+				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+			}, nil
+		},
+	}
+
+	model := Model{
+		Model: titleModel,
+		CatwalkCfg: catwalk.Model{
+			ContextWindow:    200000,
+			DefaultMaxTokens: 1000,
+		},
+		ModelCfg: config.SelectedModel{
+			Model:    "claude-sonnet-4",
+			Provider: "anthropic",
+		},
+	}
+
+	a := NewSessionAgent(SessionAgentOptions{
+		LargeModel:   model,
+		SmallModel:   model,
+		SystemPrompt: "",
+		WorkingDir:   env.workingDir,
+		IsYolo:       true,
+		Sessions:     env.sessions,
+		Messages:     env.messages,
+	})
+
+	a.(*sessionAgent).generateTitle(t.Context(), testSession.ID, "user prompt", nil)
+
+	after, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.Equal(t, "Fix parser bug in auth flow with very long suffix", after.Title)
+	require.LessOrEqual(t, utf8.RuneCountInString(after.Title), 50)
+	require.NotContains(t, after.Title, "\"")
+	require.NotContains(t, after.Title, ":")
 }
 
 func TestGenerateTitleDoesNotOverwriteSessionUsage(t *testing.T) {

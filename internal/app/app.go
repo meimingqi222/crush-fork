@@ -68,6 +68,7 @@ type App struct {
 	Checkpoint     checkpoint.Service
 	ToolRuntime    toolruntime.Service
 	Timeline       timeline.Service
+	PluginRuntime  *plugin.Runtime
 
 	AgentCoordinator agent.Coordinator
 
@@ -84,6 +85,7 @@ type App struct {
 	globalCtx          context.Context
 	cleanupFuncs       []func(context.Context) error
 	agentNotifications *pubsub.Broker[notify.Notification]
+	previousPluginRT   *plugin.Runtime
 }
 
 // New initializes a new application instance.
@@ -111,6 +113,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		allowedTools = cfg.Permissions.AllowedTools
 	}
 	basePermissions := permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, nil)
+	pluginRuntime := plugin.NewRuntime()
 
 	var app *App
 	app = &App{
@@ -119,7 +122,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		History:        files,
 		LongTermMemory: longTermMemory,
 		UserInput:      userinput.NewService(),
-		Permissions: autopermission.New(basePermissions, sessions, func() permission.Classifier {
+		Permissions: autopermission.New(basePermissions, sessions, pluginRuntime, func() permission.Classifier {
 			if app == nil || app.AgentCoordinator == nil {
 				return nil
 			}
@@ -129,11 +132,12 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			}
 			return classifier
 		}, store.WorkingDir(), cfg.Permissions != nil && cfg.Permissions.FailClosedOnClassifierError, allowedTools),
-		FileTracker: filetracker.NewService(q),
-		Checkpoint:  checkpointSvc,
-		ToolRuntime: runtimeService,
-		Timeline:    timelineService,
-		LSPManager:  lsp.NewManager(store),
+		FileTracker:   filetracker.NewService(q),
+		Checkpoint:    checkpointSvc,
+		ToolRuntime:   runtimeService,
+		Timeline:      timelineService,
+		PluginRuntime: pluginRuntime,
+		LSPManager:    lsp.NewManager(store),
 
 		globalCtx: ctx,
 
@@ -145,7 +149,21 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
 	}
 
-	if err := plugin.Init(ctx, plugin.PluginInput{
+	app.previousPluginRT = plugin.SetDefaultRuntime(app.PluginRuntime)
+	cleanupPluginRuntimeOnError := true
+	defer func() {
+		if !cleanupPluginRuntimeOnError {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if app != nil && app.PluginRuntime != nil {
+			app.PluginRuntime.Close(shutdownCtx)
+		}
+		plugin.SetDefaultRuntime(app.previousPluginRT)
+	}()
+
+	if err := app.PluginRuntime.Init(ctx, plugin.PluginInput{
 		Config:     store,
 		Sessions:   sessions,
 		Messages:   messages,
@@ -173,6 +191,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	// TODO: remove the concept of agent config, most likely.
 	if !cfg.IsConfigured() {
 		slog.Warn("No agent configuration found")
+		cleanupPluginRuntimeOnError = false
 		return app, nil
 	}
 	if err := app.InitCoderAgent(ctx); err != nil {
@@ -190,6 +209,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	})
 	go app.LSPManager.TrackConfigured()
 
+	cleanupPluginRuntimeOnError = false
 	return app, nil
 }
 
@@ -543,7 +563,7 @@ func (app *App) setupEvents() {
 	app.eventsCtx = ctx
 	app.setupTimeline(ctx)
 	setupSubscriber(ctx, app.serviceEventsWG, "sessions", app.Sessions.Subscribe, app.events)
-	setupMessageSubscriber(ctx, app.serviceEventsWG, app.Messages.Subscribe, app.events)
+	setupMessageSubscriber(ctx, app.serviceEventsWG, app.PluginRuntime, app.Messages.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "user-input", app.UserInput.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "permissions", app.Permissions.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "permissions-notifications", app.Permissions.SubscribeNotifications, app.events)
@@ -559,6 +579,9 @@ func (app *App) setupEvents() {
 			app.Timeline.Shutdown()
 		}
 		app.serviceEventsWG.Wait()
+		if app.PluginRuntime != nil {
+			plugin.SetDefaultRuntime(app.previousPluginRT)
+		}
 		return nil
 	}
 	app.cleanupFuncs = append(app.cleanupFuncs, cleanupFunc)
@@ -614,10 +637,14 @@ func setupSubscriber[T any](
 func setupMessageSubscriber(
 	ctx context.Context,
 	wg *sync.WaitGroup,
+	runtime *plugin.Runtime,
 	subscriber func(context.Context) <-chan pubsub.Event[message.Message],
 	outputCh chan<- tea.Msg,
 ) {
 	wg.Go(func() {
+		if runtime == nil {
+			runtime = plugin.DefaultRuntime()
+		}
 		subCh := subscriber(ctx)
 		sendTimer := time.NewTimer(0)
 		<-sendTimer.C
@@ -631,7 +658,7 @@ func setupMessageSubscriber(
 					return
 				}
 				if event.Type == pubsub.CreatedEvent {
-					if err := plugin.TriggerMessageCreated(ctx, event.Payload); err != nil {
+					if err := runtime.TriggerMessageCreated(ctx, event.Payload); err != nil {
 						slog.Error("Plugin message created hook failed", "error", err, "message_id", event.Payload.ID)
 					}
 				}
@@ -681,6 +708,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.agentNotifications,
 		app.ToolRuntime,
 		app.Timeline,
+		app.PluginRuntime,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
@@ -756,6 +784,10 @@ func (app *App) Shutdown() {
 
 	// Shutdown all persistent plugins.
 	wg.Go(func() {
+		if app.PluginRuntime != nil {
+			app.PluginRuntime.Close(shutdownCtx)
+			return
+		}
 		plugin.Close(shutdownCtx)
 	})
 
