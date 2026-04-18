@@ -784,6 +784,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				} else {
 					callContext = copilot.ContextWithInitiatorType(callContext, copilot.InitiatorAgent)
 				}
+				isFirstStep := firstRequestStep
 				firstRequestStep = false
 
 				stepRuntimeConfig := runtimeConfig
@@ -975,10 +976,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				currentStepToolResultChars = 0
 				allRunMessageIDs = append(allRunMessageIDs, assistantMsg.ID)
 
+				// For follow-up steps (e.g., tool result steps), prepared.Messages already
+				// contains the user message from the initial request, so we should not
+				// double-count by passing call.Prompt/attachments. For the initial step,
+				// prepared.Messages does not yet contain the user prompt (it's added by
+				// the fantasy framework), so we need call.Prompt/attachments for estimation.
+				promptForEstimate := call.Prompt
+				attachmentsForEstimate := call.Attachments
+				if !isFirstStep {
+					promptForEstimate = ""
+					attachmentsForEstimate = nil
+				}
+
 				estimatedPromptTokens = a.estimateSessionPromptTokens(
 					prepared.Messages,
-					call.Prompt,
-					call.Attachments,
+					promptForEstimate,
+					attachmentsForEstimate,
 					prepared.Tools,
 					requestState.SystemPrompt,
 					"",
