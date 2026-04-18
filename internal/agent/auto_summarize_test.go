@@ -993,8 +993,9 @@ func TestSummarizeRetriesWithoutAnthropicThinkingOnUnsignedReasoningError(t *tes
 			nil,
 		},
 		onSummary: func(call fantasy.AgentStreamCall) {
-			anthropicOpts, _ := call.ProviderOptions[anthropic.Name].(*anthropic.ProviderOptions)
-			thinkingStates = append(thinkingStates, anthropicOpts != nil && anthropicOpts.Thinking != nil)
+			anthropicOpts, ok := call.ProviderOptions[anthropic.Name].(*anthropic.ProviderOptions)
+			hasThinking := ok && anthropicOpts != nil && anthropicOpts.Thinking != nil
+			thinkingStates = append(thinkingStates, hasThinking)
 		},
 	}
 	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
