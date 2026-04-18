@@ -2161,13 +2161,61 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	var (
-		resp         *fantasy.AgentResult
-		summaryRetry int
+		resp                    *fantasy.AgentResult
+		summaryRetry            int
+		summaryThinkingDisabled bool
+		summaryRedactedStripped bool
 	)
+	resetSummaryMessage := func() error {
+		summaryMessage.Parts = nil
+		if resetErr := a.messages.Update(genCtx, summaryMessage); resetErr != nil {
+			slog.Warn("Failed to reset summary message before retry", "error", resetErr, "session_id", sessionID, "message_id", summaryMessage.ID)
+			return resetErr
+		}
+		return nil
+	}
 	for {
 		resp, err = summaryStream()
 		if err == nil {
 			break
+		}
+
+		if !summaryThinkingDisabled && shouldRetryWithoutAnthropicThinking(err, opts) {
+			slog.Warn(
+				"Retrying summarization without Anthropic thinking after provider rejected unsigned reasoning content",
+				"session_id", sessionID,
+				"model", largeModel.ModelCfg.Model,
+				"provider", largeModel.ModelCfg.Provider,
+				"error", err,
+			)
+			var changed bool
+			opts, changed = disableAnthropicThinking(opts)
+			if changed {
+				summaryThinkingDisabled = true
+				if resetErr := resetSummaryMessage(); resetErr != nil {
+					return resetErr
+				}
+				continue
+			}
+		}
+
+		if !summaryRedactedStripped && shouldRetryWithoutRedactedThinking(err) {
+			slog.Warn(
+				"Retrying summarization after proxy rejected Anthropic redacted_thinking blocks",
+				"session_id", sessionID,
+				"model", largeModel.ModelCfg.Model,
+				"provider", largeModel.ModelCfg.Provider,
+				"error", err,
+			)
+			var changed bool
+			aiMsgs, changed = stripRedactedThinkingParts(aiMsgs)
+			if changed {
+				summaryRedactedStripped = true
+				if resetErr := resetSummaryMessage(); resetErr != nil {
+					return resetErr
+				}
+				continue
+			}
 		}
 
 		isCancelErr := errors.Is(err, context.Canceled)
@@ -2210,9 +2258,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			"delay", delay,
 			"session_id", sessionID,
 		)
-		summaryMessage.Parts = nil
-		if resetErr := a.messages.Update(genCtx, summaryMessage); resetErr != nil {
-			slog.Warn("Failed to reset summary message before retry", "error", resetErr, "session_id", sessionID, "message_id", summaryMessage.ID)
+		if resetErr := resetSummaryMessage(); resetErr != nil {
 			return resetErr
 		}
 		if waitErr := a.retryWaitFunc(genCtx, delay); waitErr != nil {

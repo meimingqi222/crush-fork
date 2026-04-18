@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/stretchr/testify/require"
@@ -101,6 +103,7 @@ type autoSummarizeTestAgent struct {
 	runErr                  error
 	runErrs                 []error
 	summaryErrs             []error
+	onSummary               func(fantasy.AgentStreamCall)
 	errAfterStep            bool
 	startToolBeforeRunError bool
 	toolCallID              string
@@ -120,6 +123,9 @@ func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentS
 	isSummary := call.OnStepFinish == nil
 	if isSummary {
 		a.summaryCalls++
+		if a.onSummary != nil {
+			a.onSummary(call)
+		}
 		if len(a.summaryErrs) > 0 {
 			summaryErr := a.summaryErrs[0]
 			a.summaryErrs = a.summaryErrs[1:]
@@ -891,4 +897,114 @@ func TestSummarizeRetryableErrorExhaustedMarksFailure(t *testing.T) {
 	require.Equal(t, message.FinishReasonError, summaryMsg.FinishReason())
 	require.Equal(t, "Summarization failed", summaryMsg.FinishPart().Message)
 	require.Contains(t, summaryMsg.FinishPart().Details, "Retried")
+}
+
+func TestSummarizeRetriesWithoutRedactedThinkingOnAnthropicProxyError(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summarize redacted thinking retry")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "use the view tool"}},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "tool reasoning"},
+			message.ToolCall{ID: "call-1", Name: "view", Input: `{"file_path":"README.md","offset":0,"limit":120}`},
+		},
+	})
+	require.NoError(t, err)
+
+	sawRedacted := make([]bool, 0, 2)
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		summaryErrs: []error{
+			&fantasy.ProviderError{
+				StatusCode: 422,
+				Message:    `'redacted_thinking' is not a valid content block type`,
+			},
+			nil,
+		},
+		onSummary: func(call fantasy.AgentStreamCall) {
+			redacted := false
+			for _, msg := range call.Messages {
+				for _, part := range msg.Content {
+					rp, ok := part.(fantasy.ReasoningPart)
+					if !ok {
+						continue
+					}
+					if isAnthropicRedactedReasoning(rp) {
+						redacted = true
+					}
+				}
+			}
+			sawRedacted = append(sawRedacted, redacted)
+		},
+	}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
+
+	err = sessionAgent.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, fakeAgent.summaryCalls)
+	require.Equal(t, []bool{true, false}, sawRedacted)
+}
+
+func TestSummarizeRetriesWithoutAnthropicThinkingOnUnsignedReasoningError(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summarize anthropic thinking retry")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "open the file"}},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{
+				Thinking:  "signed reasoning",
+				Signature: base64.StdEncoding.EncodeToString([]byte("sig")),
+			},
+			message.ToolCall{ID: "call-2", Name: "view", Input: `{"file_path":"README.md","offset":0,"limit":120}`},
+		},
+	})
+	require.NoError(t, err)
+
+	thinkingStates := make([]bool, 0, 2)
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		summaryErrs: []error{
+			&fantasy.ProviderError{
+				StatusCode: 400,
+				Message:    "thinking is enabled but reasoning_content is missing in assistant tool call message at index 1",
+			},
+			nil,
+		},
+		onSummary: func(call fantasy.AgentStreamCall) {
+			anthropicOpts, _ := call.ProviderOptions[anthropic.Name].(*anthropic.ProviderOptions)
+			thinkingStates = append(thinkingStates, anthropicOpts != nil && anthropicOpts.Thinking != nil)
+		},
+	}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
+
+	err = sessionAgent.Summarize(t.Context(), testSession.ID, fantasy.ProviderOptions{
+		anthropic.Name: &anthropic.ProviderOptions{
+			Thinking: &anthropic.ThinkingProviderOption{BudgetTokens: 2000},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, fakeAgent.summaryCalls)
+	require.Equal(t, []bool{true, false}, thinkingStates)
 }
