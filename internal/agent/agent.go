@@ -944,6 +944,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 
 				prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
+				if !largeModel.CatwalkCfg.SupportsImages {
+					prepared.Messages = stripImagePartsFromFantasyMessages(prepared.Messages)
+				}
 
 				lastSystemRoleInx := 0
 				systemMessageUpdated := false
@@ -3857,6 +3860,53 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 	return convertedMessages
 }
 
+
+// stripImagePartsFromFantasyMessages removes all image content from fantasy
+// messages for models that do not support image inputs. This prevents
+// "invalid content type" errors when conversation history contains images
+// recorded during a previous session with a vision-capable model.
+//
+// It strips FilePart entries from user messages and replaces media tool
+// results with a text placeholder. Empty user messages are dropped entirely.
+func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Message {
+	result := make([]fantasy.Message, 0, len(messages))
+	for _, msg := range messages {
+		switch msg.Role {
+		case fantasy.MessageRoleUser:
+			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
+			for _, part := range msg.Content {
+				if _, ok := part.(fantasy.FilePart); !ok {
+					filtered = append(filtered, part)
+				}
+			}
+			if len(filtered) == 0 {
+				continue
+			}
+			msg.Content = filtered
+			result = append(result, msg)
+		case fantasy.MessageRoleTool:
+			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
+			for _, part := range msg.Content {
+				tr, ok := part.(fantasy.ToolResultPart)
+				if !ok {
+					filtered = append(filtered, part)
+					continue
+				}
+				if _, isMedia := tr.Output.(fantasy.ToolResultOutputContentMedia); isMedia {
+					tr.Output = fantasy.ToolResultOutputContentText{
+						Text: "[Image/media content not supported by current model]",
+					}
+				}
+				filtered = append(filtered, tr)
+			}
+			msg.Content = filtered
+			result = append(result, msg)
+		default:
+			result = append(result, msg)
+		}
+	}
+	return result
+}
 // buildSummaryPrompt constructs the prompt text for session summarization.
 func buildSummaryPrompt(todos []session.Todo) string {
 	var sb strings.Builder

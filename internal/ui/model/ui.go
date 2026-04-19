@@ -2932,10 +2932,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 
 			case key.Matches(msg, m.keyMap.Editor.PasteImage):
-				m.lastClipboardPasteShortcut = time.Now()
-				// Pass an empty PasteMsg for keyboard shortcut - fallback is not needed
-				// since there's no text content to paste anyway.
-				cmds = append(cmds, m.pasteImageFromClipboard(tea.PasteMsg{}))
+				if m.modelSupportsImages() {
+					m.lastClipboardPasteShortcut = time.Now()
+					// Pass an empty PasteMsg for keyboard shortcut - fallback is not needed
+					// since there's no text content to paste anyway.
+					cmds = append(cmds, m.pasteImageFromClipboard(tea.PasteMsg{}))
+				}
 
 			case m.attachments.HasAny() && m.textarea.Value() == "" && key.Matches(msg, m.keyMap.Editor.RemoveLastAttachment):
 				if m.attachments.DeleteLast() {
@@ -4749,6 +4751,22 @@ func (m *UI) openSessionsDialog() tea.Cmd {
 	return nil
 }
 
+
+// modelSupportsImages returns whether the currently configured coder model
+// supports image inputs. Defaults to true when the configuration is
+// unavailable to avoid blocking users unexpectedly.
+func (m *UI) modelSupportsImages() bool {
+	cfg := m.com.Config()
+	if cfg == nil {
+		return true
+	}
+	agentCfg, ok := cfg.Agents[config.AgentCoder]
+	if !ok {
+		return true
+	}
+	model := cfg.GetModelByType(agentCfg.Model)
+	return model == nil || model.SupportsImages
+}
 // openFilesDialog opens the file picker dialog.
 func (m *UI) openFilesDialog() tea.Cmd {
 	if m.dialog.ContainsDialog(dialog.FilePickerID) {
@@ -4888,8 +4906,11 @@ func (m *UI) handlePasteMsg(msg tea.PasteMsg) tea.Cmd {
 		return m.handleClipboardFallback(clipboardFallbackMsg{pasteMsg: msg})
 	}
 
+	// Only attempt image paste when the current model supports images.
+	if !m.modelSupportsImages() {
+		return m.handleClipboardFallback(clipboardFallbackMsg{pasteMsg: msg})
+	}
 	// Try to paste image/file from clipboard first.
-	// If clipboard has no image/file content, it will fall back to text paste.
 	return m.pasteImageFromClipboard(msg)
 }
 
