@@ -3860,7 +3860,6 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 	return convertedMessages
 }
 
-
 // stripImagePartsFromFantasyMessages removes all image content from fantasy
 // messages for models that do not support image inputs. This prevents
 // "invalid content type" errors when conversation history contains images
@@ -3875,7 +3874,14 @@ func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Me
 		case fantasy.MessageRoleUser:
 			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
 			for _, part := range msg.Content {
-				if _, ok := part.(fantasy.FilePart); !ok {
+				// Check for both value and pointer types of FilePart
+				var isFilePart bool
+				if _, ok := part.(fantasy.FilePart); ok {
+					isFilePart = true
+				} else if _, ok := part.(*fantasy.FilePart); ok {
+					isFilePart = true
+				}
+				if !isFilePart {
 					filtered = append(filtered, part)
 				}
 			}
@@ -3907,6 +3913,7 @@ func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Me
 	}
 	return result
 }
+
 // buildSummaryPrompt constructs the prompt text for session summarization.
 func buildSummaryPrompt(todos []session.Todo) string {
 	var sb strings.Builder
