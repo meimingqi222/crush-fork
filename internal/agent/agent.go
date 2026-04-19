@@ -1185,8 +1185,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						projectedPromptTokens = max(projectedPromptTokens, currentSession.LastInputTokens())
 					}
 					// Pass input-only estimate to shouldAutoSummarize. The function
-					// handles output token reservation internally to avoid double-counting.
-					if shouldAutoSummarize(largeModel, projectedPromptTokens, call.MaxOutputTokens) && !a.disableAutoSummarize {
+					// handles output token reservation internally to avoid
+					// double-counting. Skip when preflight already summarized to
+					// prevent double summarization in the same Run call.
+					// Context-window-exceeded errors are handled separately and
+					// will still trigger recovery summarization.
+					if shouldAutoSummarize(largeModel, projectedPromptTokens, call.MaxOutputTokens) && !a.disableAutoSummarize && !preflightSummarized {
 						shouldSummarize = true
 						return true
 					}
