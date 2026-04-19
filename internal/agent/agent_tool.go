@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"unicode"
@@ -35,6 +37,56 @@ type AgentParams struct {
 	SubagentType    string            `json:"subagent_type,omitempty" description:"The subagent type to use: general, explore, or a configured subagent name"`
 	Tasks           []AgentTaskParams `json:"tasks,omitempty" description:"Optional task graph with dependency-aware delegation"`
 	RunInBackground bool              `json:"run_in_background,omitempty" description:"Run the agent in the background and return immediately with an agent ID"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshalling for AgentParams.
+// It handles the case where the LLM incorrectly sends the "tasks" field as a
+// JSON-encoded string instead of an array (e.g. `"tasks": "[...]"` instead
+// of `"tasks": [...]`).
+func (p *AgentParams) UnmarshalJSON(data []byte) error {
+	type plain AgentParams
+	if err := json.Unmarshal(data, (*plain)(p)); err == nil {
+		return nil
+	}
+
+	// Fallback: try to recover tasks from a JSON-encoded string.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	tasksRaw, hasTasks := raw["tasks"]
+	if !hasTasks {
+		// No tasks field at all; re-run the normal unmarshal to get the
+		// original error.
+		return json.Unmarshal(data, (*plain)(p))
+	}
+
+	// Check if tasks is a string containing a JSON array.
+	var tasksStr string
+	if err := json.Unmarshal(tasksRaw, &tasksStr); err != nil {
+		// Not a string – return the original typed unmarshal error.
+		return json.Unmarshal(data, (*plain)(p))
+	}
+
+	var tasks []AgentTaskParams
+	if err := json.Unmarshal([]byte(tasksStr), &tasks); err != nil {
+		return fmt.Errorf("failed to parse tasks string as JSON array: %w", err)
+	}
+
+	slog.Warn("Recovered AgentParams.Tasks from JSON string (LLM sent string instead of array)")
+
+	// Remove tasks from raw so the rest can be unmarshalled normally.
+	delete(raw, "tasks")
+	patched, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(patched, (*plain)(p)); err != nil {
+		return err
+	}
+	p.Tasks = tasks
+	return nil
 }
 
 const (

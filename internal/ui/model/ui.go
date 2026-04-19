@@ -1320,9 +1320,21 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 		// Get the agent tool session ID.
 		agentSessionID := m.com.App.Sessions.CreateAgentToolSessionID(messageID, tc.ID)
 
-		// Fetch nested messages.
-		nestedMsgs, err := m.com.App.Messages.List(context.Background(), agentSessionID)
-		if err != nil || len(nestedMsgs) == 0 {
+		// Fetch nested messages from the base session and any child sessions
+		// with :: suffix (e.g. task graph sessions like "msg$$tc::task").
+		var nestedMsgs []message.Message
+		parentSessionID := ""
+		if m.session != nil {
+			parentSessionID = m.session.ID
+		}
+		for _, sessionID := range m.taskNodeChildSessionIDs(parentSessionID, agentSessionID) {
+			msgs, err := m.com.App.Messages.List(context.Background(), sessionID)
+			if err != nil {
+				continue
+			}
+			nestedMsgs = append(nestedMsgs, msgs...)
+		}
+		if len(nestedMsgs) == 0 {
 			continue
 		}
 

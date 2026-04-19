@@ -17,6 +17,8 @@ const morphApiUrl = process.env.MORPH_API_URL || "https://api.morphllm.com";
 const compactTimeout = Number.parseInt(process.env.MORPH_COMPACT_TIMEOUT || "60000", 10);
 const statsEnabled = process.env.MORPH_COMPACT_STATS !== "false";
 const saveCompactionText = process.env.MORPH_COMPACT_SAVE_TEXT === "true";
+const minNewCharsToCompact = Number.parseInt(process.env.MORPH_COMPACT_MIN_NEW_CHARS || "10000", 10);
+const minCompactIntervalMs = Number.parseInt(process.env.MORPH_COMPACT_MIN_INTERVAL_MS || "30000", 10);
 
 // 统计文件路径 - 全局存储在用户目录下
 const homeDir = os.homedir();
@@ -34,6 +36,7 @@ const compactClient = morphApiKey
 
 // 内存状态存储
 const stateMap = new Map();
+const lastCompactTime = new Map();
 
 // 压缩统计
 const stats = {
@@ -412,9 +415,10 @@ async function compactMessages(sessionId, messages) {
       frozenMessages: frozen,
       frozenChars,
     });
+    lastCompactTime.set(sessionId, Date.now());
 
-    const messagesBefore = saveCompactionText ? toCompact : undefined;
-    const messagesAfter = saveCompactionText ? frozen : undefined;
+    const messagesBefore = saveCompactionText ? messages : undefined;
+    const messagesAfter = saveCompactionText ? [...frozen, ...recent] : undefined;
 
     recordCompaction(sessionId, charsBefore, frozenChars, ms, toCompact.length, frozen.length, recent.length, result, messagesBefore, messagesAfter);
 
@@ -449,6 +453,18 @@ async function compactNewMessages(sessionId, existingFrozen, existingFrozenChars
       frozenChars: existingFrozenChars,
     });
     return returned;
+  }
+
+  // Skip compaction if the new delta is too small to be worth an API call.
+  const newCharsToCompact = estimateTotalChars(newMessages.slice(0, -compactPreserveRecent));
+  if (newCharsToCompact < minNewCharsToCompact) {
+    return [...existingFrozen, ...newMessages];
+  }
+
+  // Skip compaction if we recently compacted this session (cooldown).
+  const lastTime = lastCompactTime.get(sessionId) || 0;
+  if (Date.now() - lastTime < minCompactIntervalMs) {
+    return [...existingFrozen, ...newMessages];
   }
 
   // Compact new messages
@@ -501,9 +517,10 @@ async function compactNewMessages(sessionId, existingFrozen, existingFrozenChars
       frozenMessages: combinedFrozen,
       frozenChars: existingFrozenChars + newFrozenChars,
     });
+    lastCompactTime.set(sessionId, Date.now());
 
-    const messagesBefore = saveCompactionText ? toCompact : undefined;
-    const messagesAfter = saveCompactionText ? newFrozen : undefined;
+    const messagesBefore = saveCompactionText ? [...existingFrozen, ...newMessages] : undefined;
+    const messagesAfter = saveCompactionText ? returnedMessages : undefined;
 
     recordCompaction(sessionId, charsBefore, newFrozenChars, ms, toCompact.length, newFrozen.length, recent.length, result, messagesBefore, messagesAfter);
 
