@@ -491,7 +491,11 @@ func TestSessionAgentRunAppliesChatTransforms(t *testing.T) {
 		}
 	}
 	require.True(t, foundTransformedMessage)
-	require.Contains(t, purposes, plugin.ChatTransformPurposeMicroCompact)
+	// micro_compact and collapse no longer call the plugin (builtin-only);
+	// verify the plugin is still invoked for preflight_estimate and request.
+	require.NotContains(t, purposes, plugin.ChatTransformPurposeMicroCompact)
+	require.Contains(t, purposes, plugin.ChatTransformPurposePreflightEstimate)
+	require.Contains(t, purposes, plugin.ChatTransformPurposeRequest)
 	require.NotEmpty(t, fakeAgent.prepared)
 	first := fakeAgent.prepared[0]
 	require.Equal(t, fantasy.MessageRoleSystem, first.Role)

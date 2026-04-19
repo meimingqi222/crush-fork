@@ -44,6 +44,72 @@ func TestParseHandoffDraftRejectsMalformedOutput(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParseHandoffDraftWithUnescapedBackslashes(t *testing.T) {
+	t.Parallel()
+
+	candidates := []string{
+		"internal/agent/coordinator.go",
+	}
+
+	// Simulate LLM output with Windows-style unescaped backslashes.
+	raw := `{
+		"title": "Fix path handling",
+		"prompt": "The file D:\code\copilot-refs\crush\internal\agent\coordinator.go needs fixing.",
+		"relevant_files": [
+			"internal/agent/coordinator.go"
+		]
+	}`
+
+	draft, err := parseHandoffDraft(raw, candidates)
+	require.NoError(t, err)
+	require.Equal(t, "Fix path handling", draft.Title)
+	require.Contains(t, draft.Prompt, `D:\code\copilot-refs\crush`)
+	require.Equal(t, []string{"internal/agent/coordinator.go"}, draft.RelevantFiles)
+}
+
+func TestSanitizeHandoffJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		valid bool
+	}{
+		{
+			name:  "already_valid_json",
+			input: `{"title": "ok", "prompt": "hello"}`,
+			valid: true,
+		},
+		{
+			name:  "windows_path_unescaped",
+			input: `{"title": "fix", "prompt": "D:\code\project\file.go"}`,
+			valid: true,
+		},
+		{
+			name:  "valid_escape_sequences_preserved",
+			input: `{"title": "fix", "prompt": "line1\nline2\ttab"}`,
+			valid: true,
+		},
+		{
+			name:  "mixed_valid_and_invalid_escapes",
+			input: `{"title": "fix", "prompt": "D:\code\new\test"}`,
+			valid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sanitized := sanitizeHandoffJSON(tt.input)
+			var m map[string]any
+			err := json.Unmarshal([]byte(sanitized), &m)
+			if tt.valid {
+				require.NoError(t, err, "sanitized JSON should be valid: %s", sanitized)
+			}
+		})
+	}
+}
+
 func TestCollectHandoffCandidateFilesIsStableAndDeduped(t *testing.T) {
 	t.Parallel()
 

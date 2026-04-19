@@ -273,7 +273,7 @@ async function handleRequest(raw) {
       return handleChatMessagesTransform(id, input, output);
     }
     if (request.event === "session_compacting") {
-      return handleSessionCompacting(id, output);
+      return handleSessionCompacting(id, input, output);
     }
     return writeResponse({ id, output });
   } catch (error) {
@@ -536,7 +536,15 @@ async function compactNewMessages(sessionId, existingFrozen, existingFrozenChars
   }
 }
 
-async function handleSessionCompacting(id, output) {
+async function handleSessionCompacting(id, input, output) {
+  // Clear frozen compaction state for this session so it doesn't become
+  // stale after summarization replaces the conversation history.
+  const sessionId = input.session_id || input.sessionId || "default";
+  if (stateMap.has(sessionId)) {
+    stateMap.delete(sessionId);
+    lastCompactTime.delete(sessionId);
+  }
+
   const context = Array.isArray(output.context) ? [...output.context] : [];
   context.push("Note: Morph compact plugin is active. Older messages may already be compressed.");
   return writeResponse({ id, output: { ...output, context } });

@@ -146,32 +146,23 @@ func shouldAutoCompactMessages(purpose plugin.ChatTransformPurpose, msgs []messa
 	}
 }
 
-func (a *sessionAgent) microCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
-	result, err := a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID: sessionID,
-		Agent:     "session",
-		Model:     model,
-		Provider:  providerCtx,
-		Purpose:   plugin.ChatTransformPurposeMicroCompact,
-		Messages:  msgs,
-		Message:   message.Message{SessionID: sessionID, Role: message.User},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return builtinMicroCompactMessages(result), nil
+func (a *sessionAgent) microCompactSessionMessages(_ context.Context, _ string, _ Model, _ plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
+	// Only apply the builtin transform (strip reasoning/binary from older
+	// turns). The plugin call was removed because micro_compact purpose
+	// does not trigger Morph API compression — it only does
+	// frozen-message replacement which will happen again in the
+	// subsequent buildChatRequestState call with purpose "request".
+	// Eliminating it avoids a full JSON serialization round-trip per
+	// session restore.
+	return builtinMicroCompactMessages(msgs), nil
 }
 
-func (a *sessionAgent) collapseSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
-	return a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID: sessionID,
-		Agent:     "session",
-		Model:     model,
-		Provider:  providerCtx,
-		Purpose:   plugin.ChatTransformPurposeCollapse,
-		Messages:  msgs,
-		Message:   message.Message{SessionID: sessionID, Role: message.User},
-	})
+func (a *sessionAgent) collapseSessionMessages(_ context.Context, _ string, _ Model, _ plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
+	// Plugin call removed — collapse purpose does not trigger Morph API
+	// compression and has no builtin post-processing. The plugin will
+	// apply its frozen-message replacement in the subsequent
+	// buildChatRequestState call with purpose "request".
+	return msgs, nil
 }
 
 func (a *sessionAgent) reactiveCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
@@ -580,6 +571,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	slog.Debug("[PERF] sessionAgent: got session messages", "duration", time.Since(start), "count", len(msgs), "session_id", call.SessionID)
 	promptPrefix = buildDelegationPromptPrefix(promptPrefix, agentTools, a.isSubAgent)
 	if len(msgs) > 0 {
+		// Prune old tool results before sending to plugins. This is a
+		// pure in-memory operation that clears oversized tool output from
+		// older messages, preventing the stdin/stdout JSON payload from
+		// exceeding plugin buffer limits on session restore.
+		msgs = builtinPruneToolResults(msgs)
 		microCompacted, compactErr := a.microCompactSessionMessages(ctx, call.SessionID, largeModel, providerCtx, msgs)
 		if compactErr != nil {
 			return nil, compactErr
@@ -834,6 +830,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if prefetchedRecallInjected && call.MemoryPrefetch != nil {
 					if result, settled := call.MemoryPrefetch.GetSettled(); settled && result != "" {
 						autoRecallContent = result
+					}
+				}
+
+				// Prune old tool results before sending to plugins in each step.
+				// Only attempt the expensive fantasy↔internal conversion when the
+				// message count suggests pruning might be worthwhile.
+				if len(prepared.Messages) > builtinPruneRecentTurns*3 {
+					internalForPrune := message.FromFantasyMessages(prepared.Messages)
+					pruned := builtinPruneToolResults(internalForPrune)
+					// builtinPruneToolResults returns the same slice pointer when
+					// nothing was pruned — only reconvert if it actually changed.
+					if len(pruned) > 0 && &pruned[0] != &internalForPrune[0] {
+						prepared.Messages, _ = a.preparePrompt(pruned)
 					}
 				}
 
@@ -2059,6 +2068,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		a.hookManager.RunPreCompact(ctx, sessionID)
 	}
 
+	// Prune old tool results before sending to plugins during
+	// summarization. Without this, the full unpruned payload sent
+	// to microCompact/collapse (which call plugins) can exceed
+	// plugin buffer limits on large sessions.
+	msgs = builtinPruneToolResults(msgs)
+
 	microCompacted, err := a.microCompactSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
 	if err != nil {
 		return err
@@ -2112,7 +2127,13 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		Message:        message.Message{SessionID: sessionID, Role: message.User},
 	})
 	if err != nil {
-		return err
+		// If the plugin transform fails (e.g., morph-compact API error or
+		// timeout), fall back to the original messages instead of aborting
+		// summarization entirely. This ensures the built-in summarization
+		// can still produce a summary as a safety net.
+		slog.Warn("Plugin transform failed during summarization, proceeding with original messages",
+			"error", err, "session_id", sessionID)
+		transformedMsgs = msgs
 	}
 	aiMsgs, _ := a.preparePrompt(transformedMsgs)
 	compacting, err := a.plugins().TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
@@ -2225,6 +2246,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		summaryRetry            int
 		summaryThinkingDisabled bool
 		summaryRedactedStripped bool
+		forceTruncated          bool
 	)
 	resetSummaryMessage := func() error {
 		summaryMessage.Parts = nil
@@ -2280,6 +2302,30 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 		isCancelErr := errors.Is(err, context.Canceled)
 		isContextLengthErr := isContextLengthError(err)
+
+		// On context length error, try one more time with aggressive
+		// truncation before giving up. This handles the case where
+		// plugins (e.g., morph-compact) produce messages that are still
+		// too large, or where the initial token estimation was too
+		// optimistic compared to the provider's actual limit.
+		if isContextLengthErr && !forceTruncated {
+			forceTruncated = true
+			aggressiveMax := contextWindow / 4
+			if aggressiveMax < 2000 {
+				aggressiveMax = 2000
+			}
+			slog.Warn("Retrying summarization with aggressive truncation after context length error",
+				"session_id", sessionID,
+				"aggressive_max_tokens", aggressiveMax,
+				"context_window", contextWindow,
+				"original_error", err)
+			aiMsgs = truncateMessagesToFit(aiMsgs, aggressiveMax)
+			if resetErr := resetSummaryMessage(); resetErr != nil {
+				return resetErr
+			}
+			continue
+		}
+
 		if isCancelErr || isContextLengthErr {
 			deleteErr := a.messages.Delete(ctx, summaryMessage.ID)
 			if isContextLengthErr {

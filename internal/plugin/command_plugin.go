@@ -28,7 +28,7 @@ const (
 	commandPluginHookSystem            = "chat_system_transform"
 	commandPluginHookCompacting        = "session_compacting"
 	commandPluginProtocolVersion       = 1
-	commandPluginDefaultOutputMaxBytes = 8 << 20
+	commandPluginDefaultOutputMaxBytes = 32 << 20
 	commandPluginMaxOutputMaxBytes     = 64 << 20
 	commandPluginPartReasoning         = "reasoning"
 	commandPluginPartText              = "text"
@@ -738,7 +738,11 @@ func (mgr *persistentPluginManager) readLoop(r io.Reader) {
 	}
 	// Process ended — wake up any remaining waiters with an error.
 	if err := scanner.Err(); err != nil {
-		slog.Warn("Persistent plugin read loop error", "name", mgr.cfg.name, "error", err)
+		slog.Error("Persistent plugin read loop error",
+			"name", mgr.cfg.name,
+			"error", err,
+			"buffer_limit_bytes", outputMaxBytes,
+			"hint", "If 'token too long', increase CRUSH_PLUGIN_OUTPUT_MAX_BYTES or reduce session size")
 	}
 	mgr.mu.Lock()
 	for id, pending := range mgr.pending {

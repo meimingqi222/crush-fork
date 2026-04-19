@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -51,6 +52,28 @@ func (c *coordinator) GenerateHandoff(ctx context.Context, sourceSessionID, goal
 		return HandoffDraft{}, fmt.Errorf("failed to load source messages: %w", err)
 	}
 
+	// Apply SummaryMessageID truncation to avoid loading full uncompacted
+	// history. Without this, sessions that went through morph-compact or
+	// built-in summarization would feed the entire pre-summary transcript
+	// to the background model, easily exceeding its context window.
+	if currentSession.SummaryMessageID != "" {
+		summaryMsgIndex := -1
+		for i, msg := range msgs {
+			if msg.ID == currentSession.SummaryMessageID {
+				summaryMsgIndex = i
+				break
+			}
+		}
+		if summaryMsgIndex != -1 {
+			slog.Debug("Handoff: truncating messages to summary point",
+				"session_id", sourceSessionID,
+				"summary_message_id", currentSession.SummaryMessageID,
+				"original_count", len(msgs),
+				"new_count", len(msgs)-summaryMsgIndex)
+			msgs = msgs[summaryMsgIndex:]
+		}
+	}
+
 	candidateFiles, err := c.collectHandoffCandidateFiles(ctx, sourceSessionID)
 	if err != nil {
 		return HandoffDraft{}, err
@@ -65,6 +88,11 @@ func (c *coordinator) GenerateHandoff(ctx context.Context, sourceSessionID, goal
 	if model.CatwalkCfg.DefaultMaxTokens > 0 && model.CatwalkCfg.DefaultMaxTokens < maxOutputTokens {
 		maxOutputTokens = model.CatwalkCfg.DefaultMaxTokens
 	}
+
+	// Truncate messages to fit the background model's context window.
+	// The handoff prompt is serialized as a single user message, so we
+	// estimate character counts to avoid exceeding the model's input limit.
+	msgs = truncateHandoffMessages(msgs, model.CatwalkCfg, maxOutputTokens)
 
 	agent := fantasy.NewAgent(
 		model.Model,
@@ -354,7 +382,12 @@ func parseHandoffDraft(raw string, candidateFiles []string) (HandoffDraft, error
 
 	var payload handoffResponse
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return HandoffDraft{}, fmt.Errorf("failed to parse handoff response: %w", err)
+		// LLMs often emit unescaped backslashes (e.g., Windows paths like
+		// D:\code\project) inside JSON string values. Fix them and retry.
+		sanitized := sanitizeHandoffJSON(raw)
+		if sanitizeErr := json.Unmarshal([]byte(sanitized), &payload); sanitizeErr != nil {
+			return HandoffDraft{}, fmt.Errorf("failed to parse handoff response: %w", err)
+		}
 	}
 
 	title := strings.TrimSpace(payload.Title)
@@ -395,10 +428,132 @@ func parseHandoffDraft(raw string, candidateFiles []string) (HandoffDraft, error
 	}, nil
 }
 
+// sanitizeHandoffJSON fixes unescaped backslashes inside JSON string values.
+// LLMs frequently emit Windows-style paths (D:\code\project) or LaTeX-like
+// sequences without properly escaping the backslashes. This function walks the
+// raw JSON, and inside string literals it doubles any backslash that is not
+// already part of a valid JSON escape sequence (\", \\, \/, \b, \f, \n, \r,
+// \t, \uXXXX).
+func sanitizeHandoffJSON(raw string) string {
+	var sb strings.Builder
+	sb.Grow(len(raw) + 64)
+
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		if !inString {
+			sb.WriteByte(ch)
+			if ch == '"' {
+				inString = true
+			}
+			continue
+		}
+
+		// Inside a JSON string.
+		if ch == '"' {
+			sb.WriteByte(ch)
+			inString = false
+			continue
+		}
+
+		if ch != '\\' {
+			sb.WriteByte(ch)
+			continue
+		}
+
+		// ch == '\\': check whether next char forms a valid JSON escape.
+		if i+1 < len(raw) {
+			next := raw[i+1]
+			switch next {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				sb.WriteByte('\\')
+				sb.WriteByte(next)
+				i++
+				continue
+			case 'u':
+				// \uXXXX — check if exactly 4 hex digits follow.
+				if i+5 < len(raw) && isHex(raw[i+2]) && isHex(raw[i+3]) && isHex(raw[i+4]) && isHex(raw[i+5]) {
+					sb.WriteString(raw[i : i+6])
+					i += 5
+					continue
+				}
+			}
+		}
+
+		// Not a valid escape: double the backslash so it becomes \\
+		// which json.Unmarshal will decode to a single \.
+		sb.WriteString("\\\\")
+	}
+
+	return sb.String()
+}
+
+func isHex(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
 func normalizeDraftFilePath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
 	return filepath.ToSlash(filepath.Clean(path))
+}
+
+// truncateHandoffMessages removes older messages so the serialized handoff
+// transcript fits within the background model's context window. We use a
+// conservative char-per-token ratio of 3 to estimate token counts from the
+// text-serialized transcript without expensive tokenization.
+func truncateHandoffMessages(msgs []message.Message, modelCfg catwalk.Model, maxOutputTokens int64) []message.Message {
+	contextWindow := int64(modelCfg.ContextWindow)
+	if contextWindow <= 0 || len(msgs) <= 2 {
+		return msgs
+	}
+
+	// Reserve tokens for: system prompt (~500), output, and safety margin.
+	maxTranscriptTokens := contextWindow - maxOutputTokens - 2000
+	if maxTranscriptTokens < 1000 {
+		maxTranscriptTokens = contextWindow / 2
+	}
+	// Approximate 3 characters per token.
+	maxTranscriptChars := maxTranscriptTokens * 3
+
+	// Estimate total character count of the transcript.
+	var totalChars int64
+	for _, msg := range msgs {
+		totalChars += estimateHandoffMessageChars(msg)
+	}
+
+	if totalChars <= maxTranscriptChars {
+		return msgs
+	}
+
+	// Remove from the oldest messages first, keep at least 2.
+	startIdx := 0
+	for totalChars > maxTranscriptChars && startIdx < len(msgs)-2 {
+		totalChars -= estimateHandoffMessageChars(msgs[startIdx])
+		startIdx++
+	}
+
+	slog.Info("Truncated handoff messages to fit context window",
+		"original_count", len(msgs),
+		"new_count", len(msgs)-startIdx,
+		"context_window", contextWindow,
+		"max_transcript_tokens", maxTranscriptTokens)
+	return msgs[startIdx:]
+}
+
+func estimateHandoffMessageChars(msg message.Message) int64 {
+	var chars int64
+	for _, part := range msg.Parts {
+		switch p := part.(type) {
+		case message.TextContent:
+			chars += int64(len(p.Text))
+		case message.ToolCall:
+			chars += int64(len(p.Name) + len(p.Input) + 40)
+		case message.ToolResult:
+			chars += int64(len(p.Name) + len(p.ModelSafeContent()) + 40)
+		}
+	}
+	return chars
 }

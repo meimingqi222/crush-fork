@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/charmbracelet/crush/internal/message"
 )
@@ -20,6 +21,20 @@ const (
 	// builtinAutoCompactToolResultMaxChars is the maximum number of characters
 	// kept per tool-result during auto-compaction of older turns.
 	builtinAutoCompactToolResultMaxChars = 1_000
+
+	// builtinPruneProtectChars is the character budget for recent tool results
+	// that are protected from pruning. Tool results within this budget
+	// (counting backwards from newest) are kept intact.
+	builtinPruneProtectChars = 120_000
+
+	// builtinPruneMinChars is the minimum number of characters that must be
+	// prunable before we bother running the prune pass. Avoids churning
+	// through messages for negligible savings.
+	builtinPruneMinChars = 60_000
+
+	// builtinPruneRecentTurns is the number of recent assistant turns whose
+	// tool results are unconditionally protected from pruning.
+	builtinPruneRecentTurns = 2
 )
 
 // builtinMicroCompactMessages strips reasoning content and binary attachments
@@ -117,4 +132,85 @@ func assistantTurnCutoff(msgs []message.Message, n int) int {
 		}
 	}
 	return 0
+}
+
+// builtinPruneToolResults clears oversized tool result content from older
+// messages to reduce the payload sent to plugins and the LLM. It works
+// similarly to OpenCode's prune mechanism:
+//
+//  1. Walk messages backwards, skip the most recent builtinPruneRecentTurns
+//     assistant turns unconditionally.
+//  2. Accumulate tool result character counts. While the running total is
+//     within builtinPruneProtectChars, keep the results intact.
+//  3. Once the protect budget is exhausted, replace remaining (older) tool
+//     result content with a short placeholder.
+//  4. Only apply the prune if the total prunable content exceeds
+//     builtinPruneMinChars.
+func builtinPruneToolResults(msgs []message.Message) []message.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+
+	// Phase 1: Identify the protect boundary — skip recent turns entirely.
+	protectCutoff := assistantTurnCutoff(msgs, builtinPruneRecentTurns)
+
+	// Phase 2: Walk backwards from the protect boundary, accumulate tool
+	// result chars. Once the protect budget is exhausted, mark older
+	// tool results for pruning.
+	type pruneTarget struct {
+		msgIdx  int
+		partIdx int
+		chars   int
+	}
+
+	var (
+		protectedChars int64
+		targets        []pruneTarget
+		totalPrunable  int64
+	)
+
+	for i := protectCutoff - 1; i >= 0; i-- {
+		if msgs[i].Role != message.Tool {
+			continue
+		}
+		for j, part := range msgs[i].Parts {
+			tr, ok := part.(message.ToolResult)
+			if !ok || tr.IsError || tr.Content == "" {
+				continue
+			}
+			charCount := len([]rune(tr.Content))
+			if protectedChars < int64(builtinPruneProtectChars) {
+				protectedChars += int64(charCount)
+				continue
+			}
+			// Beyond protect budget — candidate for pruning.
+			targets = append(targets, pruneTarget{msgIdx: i, partIdx: j, chars: charCount})
+			totalPrunable += int64(charCount)
+		}
+	}
+
+	if totalPrunable < builtinPruneMinChars || len(targets) == 0 {
+		return msgs
+	}
+
+	// Phase 3: Apply pruning.
+	result := make([]message.Message, len(msgs))
+	copy(result, msgs)
+	modifiedMsgs := make(map[int]bool)
+
+	for _, t := range targets {
+		if !modifiedMsgs[t.msgIdx] {
+			result[t.msgIdx] = msgs[t.msgIdx].Clone()
+			modifiedMsgs[t.msgIdx] = true
+		}
+		tr := result[t.msgIdx].Parts[t.partIdx].(message.ToolResult)
+		tr.Content = fmt.Sprintf("[Old tool result content cleared to reduce context size. %d characters omitted.]", t.chars)
+		result[t.msgIdx].Parts[t.partIdx] = tr
+	}
+
+	slog.Info("Pruned old tool results before plugin transform",
+		"pruned_results", len(targets),
+		"pruned_chars", totalPrunable,
+		"protected_chars", protectedChars)
+	return result
 }
