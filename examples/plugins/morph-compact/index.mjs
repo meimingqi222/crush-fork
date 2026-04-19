@@ -17,8 +17,8 @@ const morphApiUrl = process.env.MORPH_API_URL || "https://api.morphllm.com";
 const compactTimeout = Number.parseInt(process.env.MORPH_COMPACT_TIMEOUT || "60000", 10);
 const statsEnabled = process.env.MORPH_COMPACT_STATS !== "false";
 const saveCompactionText = process.env.MORPH_COMPACT_SAVE_TEXT === "true";
-const minNewCharsToCompact = Number.parseInt(process.env.MORPH_COMPACT_MIN_NEW_CHARS || "10000", 10);
-const minCompactIntervalMs = Number.parseInt(process.env.MORPH_COMPACT_MIN_INTERVAL_MS || "30000", 10);
+const minNewCharsToCompact = Number.isNaN(Number.parseInt(process.env.MORPH_COMPACT_MIN_NEW_CHARS, 10)) ? 10000 : Number.parseInt(process.env.MORPH_COMPACT_MIN_NEW_CHARS || "10000", 10);
+const minCompactIntervalMs = Number.isNaN(Number.parseInt(process.env.MORPH_COMPACT_MIN_INTERVAL_MS, 10)) ? 30000 : Number.parseInt(process.env.MORPH_COMPACT_MIN_INTERVAL_MS || "30000", 10);
 
 // 统计文件路径 - 全局存储在用户目录下
 const homeDir = os.homedir();
