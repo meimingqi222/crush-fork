@@ -386,7 +386,7 @@ func parseHandoffDraft(raw string, candidateFiles []string) (HandoffDraft, error
 		// D:\code\project) inside JSON string values. Fix them and retry.
 		sanitized := sanitizeHandoffJSON(raw)
 		if sanitizeErr := json.Unmarshal([]byte(sanitized), &payload); sanitizeErr != nil {
-			return HandoffDraft{}, fmt.Errorf("failed to parse handoff response: %w", err)
+			return HandoffDraft{}, fmt.Errorf("failed to parse handoff response: %w", sanitizeErr)
 		}
 	}
 
