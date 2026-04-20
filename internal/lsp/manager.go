@@ -170,12 +170,10 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 
 	if !isUserConfigured {
 		if _, err := exec.LookPath(server.Command); err != nil {
-			slog.Debug("LSP server not installed, skipping", "name", name, "command", server.Command)
 			unavailable.Set(name, struct{}{})
 			return
 		}
 		if skipAutoStartCommands[server.Command] {
-			slog.Debug("LSP command too generic for auto-start, skipping", "name", name, "command", server.Command)
 			return
 		}
 	}

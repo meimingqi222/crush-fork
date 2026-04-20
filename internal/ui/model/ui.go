@@ -2686,10 +2686,6 @@ func (m *UI) refreshEditorPlaceholder() {
 		m.textarea.Placeholder = "Plan Mode: explore, clarify, and propose a plan"
 		return
 	}
-	if strings.TrimSpace(m.memoryFreshnessNote) != "" {
-		m.textarea.Placeholder = m.memoryFreshnessNote
-		return
-	}
 	switch m.currentExecutionMode() {
 	case executionModeAuto:
 		m.textarea.Placeholder = "Auto Mode: work autonomously with guarded approvals"
@@ -4270,14 +4266,32 @@ func (m *UI) renderSubagentBanner(width int) string {
 	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(line)
 }
 
+func (m *UI) renderMemoryFreshnessNote(width int) string {
+	if m.isAgentBusy() {
+		return ""
+	}
+	if m.session != nil && m.session.CollaborationMode == session.CollaborationModePlan {
+		return ""
+	}
+	note := strings.TrimSpace(m.memoryFreshnessNote)
+	if note == "" {
+		return ""
+	}
+	icon := m.com.Styles.Base.Foreground(m.com.Styles.Warning).Render("! ")
+	text := m.com.Styles.HalfMuted.Render(note)
+	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(icon + text)
+}
+
 // renderEditorView renders the editor view with attachments if any.
 func (m *UI) renderEditorView(width int) string {
 	var attachmentsView string
 	if len(m.attachments.List()) > 0 {
 		attachmentsView = m.attachments.Render(width)
 	}
+	memoryFreshnessView := m.renderMemoryFreshnessNote(width)
 	return strings.Join([]string{
 		attachmentsView,
+		memoryFreshnessView,
 		m.textarea.View(),
 		"", // margin at bottom of editor
 	}, "\n")
@@ -4751,7 +4765,6 @@ func (m *UI) openSessionsDialog() tea.Cmd {
 	return nil
 }
 
-
 // modelSupportsImages returns whether the currently configured coder model
 // supports image inputs. Defaults to true when the configuration is
 // unavailable to avoid blocking users unexpectedly.
@@ -4767,6 +4780,7 @@ func (m *UI) modelSupportsImages() bool {
 	model := cfg.GetModelByType(agentCfg.Model)
 	return model == nil || model.SupportsImages
 }
+
 // openFilesDialog opens the file picker dialog.
 func (m *UI) openFilesDialog() tea.Cmd {
 	if m.dialog.ContainsDialog(dialog.FilePickerID) {

@@ -44,11 +44,14 @@ func TestRefreshEditorPlaceholderUsesMemoryFreshness(t *testing.T) {
 	ui.refreshMemoryFreshnessNote()
 	ui.refreshEditorPlaceholder()
 
-	require.Equal(t, coord.status.Warning, ui.textarea.Placeholder)
+	require.Equal(t, ui.readyPlaceholder, ui.textarea.Placeholder)
+	require.NotEqual(t, coord.status.Warning, ui.textarea.Placeholder)
+	require.Contains(t, ui.renderEditorView(120), coord.status.Warning)
 
 	coord.busy = true
 	ui.refreshEditorPlaceholder()
 	require.Equal(t, ui.workingPlaceholder, ui.textarea.Placeholder)
+	require.NotContains(t, ui.renderEditorView(120), coord.status.Warning)
 }
 
 func TestHandleAgentNotificationMemoryDreamLifecycle(t *testing.T) {

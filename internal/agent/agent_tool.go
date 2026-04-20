@@ -2,8 +2,8 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -108,6 +108,14 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 				return fantasy.ToolResponse{}, errors.New("agent message id missing from context")
 			}
 
+			slog.Info("Agent tool invoked",
+				"has_prompt", params.Prompt != "",
+				"has_description", params.Description != "",
+				"task_count", len(params.Tasks),
+				"subagent_type", params.SubagentType,
+				"run_in_background", params.RunInBackground,
+			)
+
 			// Unified path: construct task graph and delegate to runTaskGraph
 			var tasks []taskGraphTask
 			if len(params.Tasks) > 0 {
@@ -116,7 +124,17 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 						return fantasy.NewTextErrorResponse("task id is required"), nil
 					}
 					if strings.TrimSpace(task.Prompt) == "" {
-						return fantasy.NewTextErrorResponse(fmt.Sprintf("task %q prompt is required", task.ID)), nil
+						slog.Warn("Agent task missing prompt",
+							"task_id", task.ID,
+							"description", task.Description,
+						)
+						return fantasy.NewTextErrorResponse(fmt.Sprintf(
+							"task %q is missing the required \"prompt\" field. "+
+								"The \"prompt\" field must contain the full task instructions. "+
+								"The \"description\" field (currently %q) is only a short display label. "+
+								"Please retry with a \"prompt\" field containing the detailed task instructions.",
+							task.ID, task.Description,
+						)), nil
 					}
 					tasks = append(tasks, taskGraphTask{
 						ID:              strings.TrimSpace(task.ID),
@@ -130,7 +148,15 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 			} else {
 				// Single-task case: convert to single-node task graph
 				if params.Prompt == "" {
-					return fantasy.NewTextErrorResponse("prompt is required"), nil
+					slog.Warn("Agent tool missing prompt",
+						"description", params.Description,
+					)
+					return fantasy.NewTextErrorResponse(
+						"The \"prompt\" field is required but was not provided. " +
+							"The \"prompt\" field must contain the full task instructions for the subagent. " +
+							"The \"description\" field is only a short display label shown in the UI. " +
+							"Please retry with a \"prompt\" field containing the detailed task instructions.",
+					), nil
 				}
 				description := strings.TrimSpace(params.Description)
 				if description == "" {
