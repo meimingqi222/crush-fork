@@ -656,8 +656,8 @@ func requiresAdaptiveThinking(modelID string) bool {
 	}
 
 	// Match patterns like claude-{variant}-4.N or claude-{variant}-4-N where N >= 6
-	for _, variant := range []string{"sonnet-4", "opus-4", "haiku-4"} {
-		prefix := "claude-" + variant
+	for _, variant := range []string{"sonnet", "opus", "haiku"} {
+		prefix := "claude-" + variant + "-4"
 		// Check for prefix match (e.g., claude-sonnet-4.6)
 		if strings.HasPrefix(baseID, prefix+".") {
 			minor := baseID[len(prefix)+1:]
