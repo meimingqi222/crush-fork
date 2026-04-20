@@ -4267,6 +4267,9 @@ func (m *UI) renderSubagentBanner(width int) string {
 }
 
 func (m *UI) renderMemoryFreshnessNote(width int) string {
+	if m.com == nil {
+		return ""
+	}
 	if m.isAgentBusy() {
 		return ""
 	}
