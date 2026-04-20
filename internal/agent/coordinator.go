@@ -649,17 +649,19 @@ func requiresAdaptiveThinking(modelID string) bool {
 	id := strings.ToLower(modelID)
 
 	// Match patterns like claude-{variant}-4.N or claude-{variant}-4-N where N >= 6
-	for _, variant := range []string{"claude-sonnet-4", "claude-opus-4"} {
-		// Check dot separator: claude-opus-4.7
-		if idx := strings.Index(id, variant+"."); idx != -1 {
-			minor := id[idx+len(variant)+1:]
+	// Use prefix matching to avoid false positives with model IDs like claude-3-5-sonnet-4-20250219
+	for _, variant := range []string{"sonnet-4", "opus-4", "haiku-4"} {
+		prefix := "claude-" + variant
+		// Check for exact prefix match (e.g., claude-sonnet-4.6)
+		if strings.HasPrefix(id, prefix+".") {
+			minor := id[len(prefix)+1:]
 			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
 				return true
 			}
 		}
-		// Check dash separator: claude-opus-4-7
-		if idx := strings.Index(id, variant+"-"); idx != -1 {
-			minor := id[idx+len(variant)+1:]
+		// Check for exact prefix match with dash (e.g., claude-sonnet-4-6)
+		if strings.HasPrefix(id, prefix+"-") {
+			minor := id[len(prefix)+1:]
 			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
 				return true
 			}
