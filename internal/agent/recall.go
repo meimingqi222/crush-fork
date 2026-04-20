@@ -3,8 +3,13 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -20,14 +25,12 @@ const (
 	autoRecallQueryMaxWords    = 12
 )
 
-// recallFilePattern matches file references like foo.go, bar/baz.ts, etc.
 var recallFilePattern = regexp.MustCompile(`\b[\w/.-]+\.(?:go|ts|tsx|js|jsx|py|rs|rb|java|kt|swift|md|json|yaml|yml|toml|sql|sh|bash)\b`)
-
-// recallIdentPattern matches CamelCase identifiers (likely function/type names).
 var recallIdentPattern = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]{3,}\b`)
+var recallAbsolutePathPattern = regexp.MustCompile(`(?i)(?:[A-Z]:[\\/]|/)[^\s"'` + "`" + `<>()\[\]{}]+`)
+var recallRelativePathWithExtPattern = regexp.MustCompile(`(?:\.\.?[\\/])?[\w.-]+(?:[\\/][\w.-]+)*\.[A-Za-z0-9]{1,16}`)
+var recallSeparatedPathPattern = regexp.MustCompile(`(?:\.\.?[\\/])?[\w.-]+[\\/][\w./\\-]+`)
 
-// buildAutoRecall returns a closure that, given a session and prompt, retrieves
-// relevant long-term memories and session history to inject into the system prompt.
 func buildAutoRecall(historySvc history.Service, memorySvc memory.Service, bgModel *backgroundModel) func(context.Context, string, string) string {
 	if historySvc == nil && memorySvc == nil {
 		return nil
@@ -37,8 +40,6 @@ func buildAutoRecall(historySvc history.Service, memorySvc memory.Service, bgMod
 	}
 }
 
-// backgroundModel holds the resolved model and provider config for background tasks
-// like memory relevance selection.
 type backgroundModel struct {
 	model    Model
 	provider config.ProviderConfig
@@ -55,22 +56,9 @@ func buildAutoRecallBlock(ctx context.Context, historySvc history.Service, memor
 	if memorySvc != nil {
 		scope, includeMemory := autoRecallMemoryScope(ctx)
 		if includeMemory {
-			var entries []memory.Entry
-			if bgModel != nil {
-				entries = selectRelevantMemories(ctx, memorySvc, bgModel.model, bgModel.provider, query, scope)
-			} else {
-				search := memory.SearchParams{Query: query, Limit: autoRecallMemoryLimit}
-				if scope != "" {
-					search.Scope = scope
-				}
-				var err error
-				entries, err = memorySvc.Search(ctx, search)
-				if err != nil {
-					entries = nil
-				}
-			}
+			entries := recallEntriesForSession(ctx, memorySvc, bgModel, sessionID, query, scope)
 			if len(entries) > 0 {
-				sections = append(sections, formatAutoRecallMemory(entries))
+				sections = append(sections, formatAutoRecallMemory(ctx, entries))
 			}
 		}
 	}
@@ -92,9 +80,6 @@ func buildAutoRecallBlock(ctx context.Context, historySvc history.Service, memor
 	return strings.Join(sections, "\n\n")
 }
 
-// extractRecallQuery distills a prompt into a short, focused search query.
-// It extracts file references and CamelCase identifiers first (most precise),
-// then falls back to the first autoRecallQueryMaxWords words of the prompt.
 func extractRecallQuery(prompt string) string {
 	trimmed := strings.TrimSpace(prompt)
 	if trimmed == "" {
@@ -131,14 +116,200 @@ func extractRecallQuery(prompt string) string {
 	return strings.Join(words, " ")
 }
 
-func formatAutoRecallMemory(entries []memory.Entry) string {
-	lines := make([]string, 0, len(entries)+1)
+func recallEntriesForSession(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, query, scope string) []memory.Entry {
+	entries := make([]memory.Entry, 0, autoRecallMemoryLimit)
+	seen := make(map[string]bool)
+
+	if shouldInjectSessionMemory(scope) && strings.TrimSpace(sessionID) != "" {
+		if entry, err := memorySvc.Get(ctx, sessionMemoryKey(sessionID)); err == nil {
+			entries = append(entries, entry)
+			seen[entry.Key] = true
+		}
+	}
+
+	var matched []memory.Entry
+	if bgModel != nil {
+		matched = selectRelevantMemories(ctx, memorySvc, bgModel.model, bgModel.provider, query, scope)
+	} else {
+		search := memory.SearchParams{Query: query, Limit: autoRecallMemoryLimit}
+		if scope != "" {
+			search.Scope = scope
+		}
+		var err error
+		matched, err = memorySvc.Search(ctx, search)
+		if err != nil {
+			matched = nil
+		}
+	}
+
+	for _, entry := range matched {
+		if seen[entry.Key] {
+			continue
+		}
+		entries = append(entries, entry)
+		seen[entry.Key] = true
+		if len(entries) >= autoRecallMemoryLimit {
+			break
+		}
+	}
+
+	return entries
+}
+
+func shouldInjectSessionMemory(scope string) bool {
+	scope = strings.TrimSpace(scope)
+	return scope == "" || strings.EqualFold(scope, "session")
+}
+
+func formatAutoRecallMemory(ctx context.Context, entries []memory.Entry) string {
+	lines := make([]string, 0, len(entries)+2)
 	lines = append(lines, "Relevant long-term memory:")
+	lines = append(lines, "Verify remembered file paths, symbols, and commands before relying on them; memories can drift over time.")
 	for _, entry := range entries {
 		value := truncateRecallText(strings.TrimSpace(entry.Value), autoRecallSectionCharLimit)
-		lines = append(lines, fmt.Sprintf("- %s: %s", formatAutoRecallMemoryLabel(entry), value))
+		line := fmt.Sprintf("- %s: %s", formatAutoRecallMemoryLabel(entry), value)
+		if pathChecks := formatRecallPathChecks(ctx, entry.Value); pathChecks != "" {
+			line += fmt.Sprintf("\n  Path checks: %s", pathChecks)
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatRecallPathChecks(ctx context.Context, text string) string {
+	checks := collectRecallPathChecks(ctx, text)
+	if len(checks) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(checks))
+	for _, check := range checks {
+		parts = append(parts, fmt.Sprintf("%s (%s)", check.Path, check.Status))
+	}
+	return strings.Join(parts, ", ")
+}
+
+type recallPathCheck struct {
+	Path   string
+	Status string
+}
+
+func collectRecallPathChecks(ctx context.Context, text string) []recallPathCheck {
+	candidates := extractRecallPathCandidates(text)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	workingDir := strings.TrimSpace(tools.GetWorkingDirFromContext(ctx))
+	checks := make([]recallPathCheck, 0, len(candidates))
+	for _, candidate := range candidates {
+		checks = append(checks, recallPathCheck{
+			Path:   candidate,
+			Status: validateRecallPathCandidate(workingDir, candidate),
+		})
+	}
+	return checks
+}
+
+func extractRecallPathCandidates(text string) []string {
+	patterns := []*regexp.Regexp{
+		recallAbsolutePathPattern,
+		recallRelativePathWithExtPattern,
+		recallSeparatedPathPattern,
+	}
+
+	seen := make(map[string]bool)
+	candidates := make([]string, 0)
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllString(text, -1) {
+			candidate := normalizeRecallPathCandidate(match)
+			if candidate == "" || seen[candidate] || !isRecallPathCandidate(candidate) {
+				continue
+			}
+			seen[candidate] = true
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func normalizeRecallPathCandidate(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	candidate = strings.TrimRightFunc(candidate, func(r rune) bool {
+		switch r {
+		case '.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '`':
+			return true
+		default:
+			return unicode.IsSpace(r)
+		}
+	})
+	candidate = strings.TrimLeft(candidate, "\"'`")
+	return strings.TrimSpace(candidate)
+}
+
+func isRecallPathCandidate(candidate string) bool {
+	if candidate == "" || strings.Contains(candidate, "://") {
+		return false
+	}
+	if isAbsoluteRecallPath(candidate) {
+		return true
+	}
+	if strings.ContainsAny(candidate, `/\\`) {
+		return true
+	}
+	return filepath.Ext(candidate) != ""
+}
+
+func validateRecallPathCandidate(workingDir, candidate string) string {
+	resolved, certainty := resolveRecallPathCandidate(workingDir, candidate)
+	if resolved == "" {
+		return "unverified"
+	}
+	_, err := os.Stat(resolved)
+	if err == nil {
+		return "verified"
+	}
+	if os.IsNotExist(err) {
+		if certainty == "strong" {
+			return "missing"
+		}
+		return "unverified"
+	}
+	return "unverified"
+}
+
+func resolveRecallPathCandidate(workingDir, candidate string) (string, string) {
+	if isWindowsAbsPath(candidate) {
+		if runtime.GOOS != "windows" {
+			return "", "weak"
+		}
+		return filepath.Clean(candidate), "strong"
+	}
+	if filepath.IsAbs(candidate) || strings.HasPrefix(candidate, "/") {
+		return filepath.Clean(candidate), "strong"
+	}
+	if workingDir == "" {
+		return "", recallPathCertainty(candidate)
+	}
+	return filepath.Join(workingDir, filepath.FromSlash(candidate)), recallPathCertainty(candidate)
+}
+
+func recallPathCertainty(candidate string) string {
+	if filepath.Ext(candidate) != "" || strings.HasPrefix(candidate, "./") || strings.HasPrefix(candidate, "../") || strings.HasPrefix(candidate, ".\\") || strings.HasPrefix(candidate, "..\\") {
+		return "strong"
+	}
+	return "weak"
+}
+
+func isAbsoluteRecallPath(candidate string) bool {
+	return filepath.IsAbs(candidate) || strings.HasPrefix(candidate, "/") || isWindowsAbsPath(candidate)
+}
+
+func isWindowsAbsPath(candidate string) bool {
+	if len(candidate) < 3 {
+		return false
+	}
+	return ((candidate[0] >= 'A' && candidate[0] <= 'Z') || (candidate[0] >= 'a' && candidate[0] <= 'z')) && candidate[1] == ':' && (candidate[2] == '\\' || candidate[2] == '/')
 }
 
 func formatAutoRecallMemoryLabel(entry memory.Entry) string {
@@ -168,6 +339,10 @@ func formatAutoRecallMemoryLabel(entry memory.Entry) string {
 		}
 	}
 
+	if entry.UpdatedAt > 0 {
+		qualifiers = append(qualifiers, fmt.Sprintf("updated %s", time.Unix(0, entry.UpdatedAt).UTC().Format(time.RFC3339)))
+	}
+
 	if len(qualifiers) == 0 {
 		return label
 	}
@@ -184,8 +359,6 @@ func formatAutoRecallHistory(results []history.MessageSearchResult) string {
 	return strings.Join(lines, "\n")
 }
 
-// autoRecallMemoryScope determines the scope for memory retrieval based on the
-// context's memory and isolation policies.
 func autoRecallMemoryScope(ctx context.Context) (string, bool) {
 	memoryPolicy := strings.ToLower(strings.TrimSpace(tools.GetAgentMemoryFromContext(ctx)))
 	isolationPolicy := strings.ToLower(strings.TrimSpace(tools.GetAgentIsolationFromContext(ctx)))

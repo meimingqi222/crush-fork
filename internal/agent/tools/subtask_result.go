@@ -17,7 +17,7 @@ var subtaskResultDescription []byte
 const SubtaskResultToolName = "subtask_result"
 
 type SubtaskResultParams struct {
-	SessionID string `json:"session_id,omitempty" description:"The child session ID from a previous Agent tool call"`
+	SessionID string `json:"session_id,omitempty" description:"Optional child session ID from a previous Agent tool call. Omit to use the most recent child session in the current conversation."`
 	AgentID   string `json:"agent_id,omitempty" description:"The agent ID from a background agent (alternative to session_id)"`
 	Offset    int    `json:"offset,omitempty" description:"Line offset to start from (0-based, for paginating long outputs)"`
 	Limit     int    `json:"limit,omitempty" description:"Maximum number of characters to return (default 16000)"`
@@ -93,11 +93,16 @@ func NewSubtaskResultTool(messages message.Service) fantasy.AgentTool {
 
 			// Fall back to session-based lookup.
 			sessionID := strings.TrimSpace(params.SessionID)
-			if sessionID == "" {
-				return fantasy.NewTextErrorResponse("session_id or agent_id is required"), nil
-			}
 			if messages == nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("message service is not configured")
+			}
+			if sessionID == "" || isUnresolvedSubtaskSessionPlaceholder(sessionID) {
+				if inferredSessionID, ok := inferLatestChildSessionID(ctx, messages); ok {
+					sessionID = inferredSessionID
+				}
+			}
+			if sessionID == "" {
+				return fantasy.NewTextErrorResponse("session_id or agent_id is required, and no child session could be inferred from the current conversation"), nil
 			}
 
 			msgs, err := messages.List(ctx, sessionID)
@@ -151,4 +156,44 @@ func NewSubtaskResultTool(messages message.Service) fantasy.AgentTool {
 			return fantasy.NewTextResponse(result), nil
 		},
 	)
+}
+
+func isUnresolvedSubtaskSessionPlaceholder(sessionID string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(sessionID))
+	if normalized == "messageid$$toolcallid" {
+		return true
+	}
+	return strings.Contains(normalized, "messageid") && strings.Contains(normalized, "toolcallid") && strings.Contains(normalized, "$$")
+}
+
+func inferLatestChildSessionID(ctx context.Context, messages message.Service) (string, bool) {
+	if messages == nil {
+		return "", false
+	}
+
+	currentSessionID := strings.TrimSpace(GetSessionFromContext(ctx))
+	if currentSessionID == "" {
+		return "", false
+	}
+
+	msgs, err := messages.List(ctx, currentSessionID)
+	if err != nil {
+		return "", false
+	}
+
+	for i := len(msgs) - 1; i >= 0; i-- {
+		toolResults := msgs[i].ToolResults()
+		for j := len(toolResults) - 1; j >= 0; j-- {
+			subtask, ok := toolResults[j].SubtaskResult()
+			if !ok {
+				continue
+			}
+			childSessionID := strings.TrimSpace(subtask.ChildSessionID)
+			if childSessionID != "" {
+				return childSessionID, true
+			}
+		}
+	}
+
+	return "", false
 }

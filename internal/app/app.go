@@ -94,7 +94,16 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	cfg := store.Config()
 	runtimeService := toolruntime.NewService()
 	timelineService := timeline.NewService()
-	sessions := session.NewServiceWithDeleteCallback(q, conn, runtimeService.DeleteSession, session.CollaborationModeDefault)
+	longTermMemory, err := memory.NewService(cfg.Options.DataDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
+	}
+	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
+		runtimeService.DeleteSession(sessionID)
+		if deleteErr := longTermMemory.Delete(context.Background(), "session/"+sessionID+"/current"); deleteErr != nil && !errors.Is(deleteErr, memory.ErrNotFound) {
+			slog.Warn("Failed to delete session memory", "session_id", sessionID, "error", deleteErr)
+		}
+	}, session.CollaborationModeDefault)
 	preferredPermissionMode := session.NormalizePermissionMode(cfg.Options.PreferredPermissionMode)
 	if skip := cfg.Permissions != nil && cfg.Permissions.SkipRequests; skip {
 		preferredPermissionMode = session.PermissionModeYolo
@@ -103,10 +112,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
 	checkpointSvc := checkpoint.NewService(q, conn, files, store.WorkingDir())
-	longTermMemory, err := memory.NewService(cfg.Options.DataDirectory)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
-	}
 	skipPermissionsRequests := cfg.Permissions != nil && cfg.Permissions.SkipRequests
 	var allowedTools []string
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {

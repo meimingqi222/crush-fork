@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,15 +53,13 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 		return nil
 	}
 
-	if scope != "" {
-		filtered := make([]memory.MemoryFileInfo, 0, len(infos))
-		for _, info := range infos {
-			if strings.EqualFold(info.Scope, scope) {
-				filtered = append(filtered, info)
-			}
+	filteredInfos := make([]memory.MemoryFileInfo, 0, len(infos))
+	for _, info := range infos {
+		if matchesRequestedMemoryScope(info.Scope, scope) {
+			filteredInfos = append(filteredInfos, info)
 		}
-		infos = filtered
 	}
+	infos = filteredInfos
 
 	if len(infos) == 0 {
 		return nil
@@ -114,10 +111,8 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 	entries := make([]memory.Entry, 0, len(selectedKeys))
 	for _, key := range selectedKeys {
 		entry, err := memorySvc.Get(ctx, key)
-		if err == nil {
-			if scope == "" || strings.EqualFold(entry.Scope, scope) {
-				entries = append(entries, entry)
-			}
+		if err == nil && matchesRequestedMemoryScope(entry.Scope, scope) {
+			entries = append(entries, entry)
 		}
 	}
 
@@ -128,10 +123,32 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 	return entries
 }
 
+func matchesRequestedMemoryScope(entryScope, requestedScope string) bool {
+	entryScope = strings.TrimSpace(entryScope)
+	requestedScope = strings.TrimSpace(requestedScope)
+
+	switch {
+	case requestedScope == "":
+		return !strings.EqualFold(entryScope, "session")
+	case strings.EqualFold(requestedScope, "session"):
+		return strings.EqualFold(entryScope, "session")
+	default:
+		return strings.EqualFold(entryScope, requestedScope)
+	}
+}
+
 func buildMemoryManifest(infos []memory.MemoryFileInfo) string {
 	var sb strings.Builder
 	for i, info := range infos {
-		fmt.Fprintf(&sb, "%d. [%s] %s — %s", i+1, info.Type, info.Key, info.Description)
+		updatedAt := time.Unix(0, info.UpdatedAt).UTC().Format(time.RFC3339)
+		fmt.Fprintf(&sb, "%d. [%s] %s — %s (updated %s", i+1, info.Type, info.Key, info.Description, updatedAt)
+		if info.Scope != "" {
+			fmt.Fprintf(&sb, "; scope=%s", info.Scope)
+		}
+		if info.Category != "" {
+			fmt.Fprintf(&sb, "; category=%s", info.Category)
+		}
+		sb.WriteString(")")
 		if len(info.Tags) > 0 {
 			fmt.Fprintf(&sb, " (#%s)", strings.Join(info.Tags, " #"))
 		}
@@ -189,38 +206,29 @@ func fallbackMemorySearch(ctx context.Context, memorySvc memory.Service, query, 
 	return entries
 }
 
-const memoryExtractMaxTurns = 5
-
 const memoryExtractionThrottleTurns = 1
 
 var memoryStoreActionPattern = regexp.MustCompile(`(?i)(^|[^a-z0-9_])["']?action["']?\s*[:=]\s*["']?store["']?([^a-z0-9_]|$)`)
 
-const memoryExtractPrompt = `You are a memory extraction agent. Analyze the conversation transcript and extract durable knowledge that should be remembered for future sessions.
+const memoryExtractPrompt = `You are a memory extraction agent. Analyze the conversation transcript and maintain long-term memory files for future sessions.
+
+Memory types:
+- user: persistent user preferences, identity, constraints, working style.
+- feedback: corrections about how the assistant should work.
+- project: durable project context, architecture, repeated workflows, key decisions.
+- reference: pointers to external systems or resources that are costly to rediscover.
 
 Rules:
-- Extract user preferences, project context, coding patterns, important decisions
-- Do NOT extract transient information (file contents, temporary state)
-- Format each memory as a markdown file with YAML frontmatter
-- Create new memory files only when genuinely useful information is found
-- Return JSON with array of memories: [{"key": "...", "description": "...", "content": "..."}]
-- Return empty array [] if nothing worth remembering
+- Extract only durable knowledge. Prefer stable preferences, project context, commands that were confirmed to work, and repeated decisions.
+- Do NOT save transient task state, one-off logs, temporary file contents, or information already obvious in the codebase.
+- Before creating a new key, prefer updating an existing durable memory when the idea matches.
+- If an existing memory is now stale, contradicted, or superseded, you may delete it instead of creating another overlapping memory.
+- Return JSON with array entries shaped like {"action":"store|update|delete|noop","key":"...","description":"...","content":"...","type":"user|feedback|project|reference","scope":"project|session"}.
+- store/update require key + description + content. delete requires key only. noop is optional and will be ignored.
+- Return [] if nothing should change.
 
 Example output:
-[{"key": "user/preferred-style", "description": "User prefers concise code", "content": "# User Preferred Style\\n\\nThe user prefers..."}]`
-
-type extractedMemory struct {
-	Key         string `json:"key"`
-	Description string `json:"description"`
-	Content     string `json:"content"`
-	Type        string `json:"type,omitempty"`
-	Scope       string `json:"scope,omitempty"`
-}
-
-type memoryExtractionState struct {
-	turnsSinceLastExtraction int
-	inProgress               bool
-	pendingHistory           []string
-}
+[{"action":"update","key":"user/preferred-style","description":"User prefers concise code","content":"The user prefers concise code and short explanations.","type":"user"},{"action":"delete","key":"project/old-workflow"}]`
 
 func shouldExtractMemories(turnsSinceLastExtraction int) bool {
 	return turnsSinceLastExtraction >= memoryExtractionThrottleTurns
@@ -317,38 +325,9 @@ func extractMemories(ctx context.Context, memorySvc memory.Service, bgModel *bac
 		return
 	}
 
-	for _, mem := range memories {
-		fullContent := fmt.Sprintf("# %s\n\n%s", mem.Description, mem.Content)
-		params := memory.StoreParams{
-			Key:   mem.Key,
-			Value: fullContent,
-			Type:  cmp.Or(mem.Type, "general"),
-		}
-		if mem.Scope != "" {
-			params.Scope = mem.Scope
-		}
-		if err := memorySvc.Store(ctx, params); err != nil {
-			slog.Warn("Failed to store extracted memory", "error", err, "key", mem.Key)
-		} else {
-			slog.Info("Stored extracted memory", "key", mem.Key, "session_id", sessionID)
-		}
+	if err := applyExtractedMemories(ctx, memorySvc, memories, "session_id", sessionID); err != nil {
+		slog.Warn("Failed to apply extracted memories", "error", err, "session_id", sessionID)
 	}
-}
-
-func drainPendingExtractions(pendingExtractions *map[string][]context.CancelFunc, timeout time.Duration) {
-	allCancels := make([]context.CancelFunc, 0)
-	for _, cancels := range *pendingExtractions {
-		allCancels = append(allCancels, cancels...)
-	}
-	if len(allCancels) == 0 {
-		return
-	}
-
-	time.AfterFunc(timeout, func() {
-		for _, cancel := range allCancels {
-			cancel()
-		}
-	})
 }
 
 func parseExtractedMemories(content string) []extractedMemory {
@@ -366,18 +345,5 @@ func parseExtractedMemories(content string) []extractedMemory {
 		return nil
 	}
 
-	result := make([]extractedMemory, 0, len(memories))
-	for _, mem := range memories {
-		if mem.Key == "" || mem.Content == "" {
-			continue
-		}
-		mem.Key = strings.TrimSpace(mem.Key)
-		mem.Description = strings.TrimSpace(mem.Description)
-		if mem.Description == "" {
-			mem.Description = "Extracted from conversation"
-		}
-		result = append(result, mem)
-	}
-
-	return result
+	return sanitizeExtractedMemories(memories)
 }

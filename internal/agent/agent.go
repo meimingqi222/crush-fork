@@ -84,6 +84,11 @@ var textualToolCallProtocolRegex = regexp.MustCompile(`(?is)<\|tool_calls_sectio
 
 const autoResumePromptPrefix = "The previous session was interrupted because it got too long, the initial user request was: `"
 
+type pendingExtraction struct {
+	id     uint64
+	cancel context.CancelFunc
+}
+
 type sessionCompactionTrigger string
 
 const (
@@ -332,9 +337,12 @@ type sessionAgent struct {
 	activeRequests *csync.Map[string, context.CancelFunc]
 	pausedQueues   *csync.Map[string, bool]
 
-	extractionMu        sync.Mutex
-	pendingExtractions  map[string][]context.CancelFunc
-	extractionTurnCount map[string]int
+	extractionMu         sync.Mutex
+	pendingExtractions   map[string][]pendingExtraction
+	nextExtractionID     uint64
+	extractionTurnCount  map[string]int
+	sessionMemoryTurns   map[string]int
+	sessionMemoryEnabled bool
 }
 
 type SessionAgentOptions struct {
@@ -361,6 +369,7 @@ type SessionAgentOptions struct {
 	Filetracker          filetracker.Service
 	Checkpoint           checkpoint.Service
 	RetryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
+	EnableSessionMemory  bool
 	RetryWaitFunc        func(context.Context, time.Duration) error
 }
 
@@ -425,8 +434,10 @@ func NewSessionAgent(
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
 		pausedQueues:         csync.NewMap[string, bool](),
-		pendingExtractions:   make(map[string][]context.CancelFunc),
+		pendingExtractions:   make(map[string][]pendingExtraction),
 		extractionTurnCount:  make(map[string]int),
+		sessionMemoryTurns:   make(map[string]int),
+		sessionMemoryEnabled: opts.EnableSessionMemory,
 	}
 }
 
@@ -1838,22 +1849,30 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.activeRequests.Del(call.SessionID)
 	cancel()
 	wg.Wait()
-
 	if !a.isSubAgent && a.memory != nil && a.backgroundModel != nil && !a.disableAutoMemory && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
+		historyForExtraction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
 		a.extractionMu.Lock()
 		a.extractionTurnCount[call.SessionID]++
-		turns := a.extractionTurnCount[call.SessionID]
-		if shouldExtractMemories(turns) {
+		extractionTurns := a.extractionTurnCount[call.SessionID]
+		a.sessionMemoryTurns[call.SessionID]++
+		sessionMemoryTurns := a.sessionMemoryTurns[call.SessionID]
+		if shouldExtractMemories(extractionTurns) {
 			a.extractionTurnCount[call.SessionID] = 0
-			historyForExtraction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
-			// Track pending extraction for graceful shutdown
-			a.pendingExtractions[call.SessionID] = append(a.pendingExtractions[call.SessionID], cancel)
-			go func() {
-				extractMemories(context.Background(), a.memory, a.backgroundModel, call.SessionID, call.Prompt, historyForExtraction)
-				a.extractionMu.Lock()
-				delete(a.pendingExtractions, call.SessionID)
-				a.extractionMu.Unlock()
-			}()
+			extractionCtx, extractionCancel := context.WithCancel(context.Background())
+			extractionID := a.trackPendingExtractionLocked(call.SessionID, extractionCancel)
+			go func(history []string, pendingID uint64) {
+				defer a.finishPendingExtraction(call.SessionID, pendingID)
+				extractMemories(extractionCtx, a.memory, a.backgroundModel, call.SessionID, call.Prompt, history)
+			}(historyForExtraction, extractionID)
+		}
+		if a.enableSessionMemory() && shouldExtractMemories(sessionMemoryTurns) {
+			a.sessionMemoryTurns[call.SessionID] = 0
+			sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
+			sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
+			go func(history []string, pendingID uint64) {
+				defer a.finishPendingExtraction(call.SessionID, pendingID)
+				updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
+			}(historyForExtraction, sessionMemoryID)
 		}
 		a.extractionMu.Unlock()
 	}
@@ -2776,6 +2795,38 @@ func (a *sessionAgent) getHistoryForMemoryExtraction(ctx context.Context, sessio
 		}
 	}
 	return history
+}
+
+func (a *sessionAgent) trackPendingExtractionLocked(sessionID string, cancel context.CancelFunc) uint64 {
+	a.nextExtractionID++
+	pendingID := a.nextExtractionID
+	a.pendingExtractions[sessionID] = append(a.pendingExtractions[sessionID], pendingExtraction{
+		id:     pendingID,
+		cancel: cancel,
+	})
+	return pendingID
+}
+
+func (a *sessionAgent) finishPendingExtraction(sessionID string, pendingID uint64) {
+	a.extractionMu.Lock()
+	defer a.extractionMu.Unlock()
+	pending := a.pendingExtractions[sessionID]
+	filtered := make([]pendingExtraction, 0, len(pending))
+	for _, candidate := range pending {
+		if candidate.id == pendingID {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	if len(filtered) == 0 {
+		delete(a.pendingExtractions, sessionID)
+		return
+	}
+	a.pendingExtractions[sessionID] = filtered
+}
+
+func (a *sessionAgent) enableSessionMemory() bool {
+	return a.sessionMemoryEnabled && a.memory != nil && a.backgroundModel != nil
 }
 
 func shouldGenerateSessionTitle(title string) bool {

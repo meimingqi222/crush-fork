@@ -58,7 +58,7 @@ func TestLatestAssistantUsageSnapshotUsesLastAssistantUsageModel(t *testing.T) {
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 }
 
-func TestLatestAssistantUsageSnapshotIncludesZeroOutputAndUsesSelectedContextWindow(t *testing.T) {
+func TestLatestAssistantUsageSnapshotSkipsZeroOutputMessagesAndUsesSelectedContextWindow(t *testing.T) {
 	t.Parallel()
 
 	selected := &agent.Model{
@@ -97,8 +97,8 @@ func TestLatestAssistantUsageSnapshotIncludesZeroOutputAndUsesSelectedContextWin
 		},
 	}, nil, selected)
 	require.True(t, ok)
-	require.Equal(t, int64(85), snapshot.TotalTokens)
-	require.Equal(t, int64(0), snapshot.OutputTokens)
+	require.Equal(t, int64(660), snapshot.TotalTokens)
+	require.Equal(t, int64(60), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 }
 
@@ -138,7 +138,7 @@ func TestApplySessionUsageFloorSkipsProvisionalSnapshot(t *testing.T) {
 	require.True(t, snapshot.Provisional)
 }
 
-func TestResolveContextUsageSnapshotPrefersFinishedSummaryOverSmallerProvisional(t *testing.T) {
+func TestResolveContextUsageSnapshotPrefersFinishedAssistantOverSmallerProvisional(t *testing.T) {
 	t.Parallel()
 
 	selected := &agent.Model{
@@ -151,13 +151,12 @@ func TestResolveContextUsageSnapshotPrefersFinishedSummaryOverSmallerProvisional
 		LastCompletionTokens: 600,
 	}, []message.Message{
 		{
-			ID:               "summary",
-			Role:             message.Assistant,
-			Provider:         "anthropic",
-			Model:            "claude-sonnet-4-5",
-			IsSummaryMessage: true,
+			ID:       "finished",
+			Role:     message.Assistant,
+			Provider: "anthropic",
+			Model:    "claude-sonnet-4-5",
 			Parts: []message.ContentPart{
-				message.TextContent{Text: "summary"},
+				message.TextContent{Text: "done"},
 				message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
 			},
 			Usage: message.Usage{
@@ -173,7 +172,8 @@ func TestResolveContextUsageSnapshotPrefersFinishedSummaryOverSmallerProvisional
 			Provider: "anthropic",
 			Model:    "claude-sonnet-4-5",
 			Usage: message.Usage{
-				InputTokens:      2_000,
+				InputTokens:      2_500,
+				OutputTokens:     20,
 				CacheReadTokens:  500,
 				CacheWriteTokens: 250,
 			},
@@ -184,7 +184,7 @@ func TestResolveContextUsageSnapshotPrefersFinishedSummaryOverSmallerProvisional
 	require.Equal(t, int64(600), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 	require.False(t, snapshot.Provisional)
-	require.True(t, snapshot.Summary)
+	require.False(t, snapshot.Summary)
 }
 
 func TestDisplayContextWindowFallsBackToMaxPromptTokens(t *testing.T) {

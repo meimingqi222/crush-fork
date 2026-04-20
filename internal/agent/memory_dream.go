@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/notify"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -35,12 +33,20 @@ var memoryDreamLastSessionScanUnix int64
 
 const memoryDreamPrompt = `You are a memory consolidation agent. Review existing long-term memories and recent session transcripts, then synthesize durable knowledge that future sessions should retain.
 
+Memory types:
+- user: persistent user preferences, identity, constraints, working style.
+- feedback: corrections about how the assistant should work.
+- project: durable project context, architecture, repeated workflows, and repeated decisions.
+- reference: external systems, commands, URLs, or resources that are costly to rediscover.
+
 Rules:
 - Prefer updating or strengthening durable project knowledge over copying transcripts.
 - Capture user preferences, stable workflows, project context, and repeated decisions.
 - Avoid transient implementation details, temporary file state, and one-off logs.
 - Reuse existing keys when refining the same memory; create new keys only when needed.
-- Return JSON with array of memories: [{"key":"...","description":"...","content":"...","type":"...","scope":"..."}]
+- If an existing memory is stale, contradicted, or superseded, delete it instead of leaving overlapping entries behind.
+- Return JSON with array entries shaped like {"action":"store|update|delete|noop","key":"...","description":"...","content":"...","type":"user|feedback|project|reference","scope":"project|session"}.
+- store/update require key + description + content. delete requires key only. noop is optional and will be ignored.
 - Return [] when there is nothing worth saving.`
 
 type memoryDreamDecision struct {
@@ -304,19 +310,8 @@ func (c *coordinator) executeMemoryDream(ctx context.Context, decision memoryDre
 	}
 
 	memories := parseExtractedMemories(resp.Response.Content.Text())
-	for _, mem := range memories {
-		fullContent := fmt.Sprintf("# %s\n\n%s", mem.Description, mem.Content)
-		params := memory.StoreParams{
-			Key:   mem.Key,
-			Value: fullContent,
-			Type:  cmp.Or(mem.Type, "general"),
-		}
-		if mem.Scope != "" {
-			params.Scope = mem.Scope
-		}
-		if err := c.longTermMemory.Store(ctx, params); err != nil {
-			return fmt.Errorf("storing consolidated memory %q: %w", mem.Key, err)
-		}
+	if err := applyExtractedMemories(ctx, c.longTermMemory, memories, "source", "dream"); err != nil {
+		return fmt.Errorf("applying consolidated memories: %w", err)
 	}
 
 	if err := c.longTermMemory.WriteLastConsolidatedAt(time.Now()); err != nil {

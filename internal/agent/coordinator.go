@@ -768,7 +768,8 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		HookManager:   c.hookManager,
 		Filetracker:   c.filetracker,
 		Checkpoint:    c.checkpoint,
-		PluginRuntime: c.pluginRuntime,
+		PluginRuntime:       c.pluginRuntime,
+		EnableSessionMemory: !c.cfg.Config().Options.DisableAutoMemory,
 	})
 
 	// Only use async initialization for the primary agent (not subagents).

@@ -37,8 +37,8 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 
 	if usage, ok := latestAssistantUsageSnapshot(messages, cfg, selected); ok {
 		if usage.Provisional {
-			if summary, ok := latestFinishedSummaryUsageSnapshot(messages, cfg, selected); ok && summary.TotalTokens > usage.TotalTokens {
-				return applySessionUsageFloor(summary, sess)
+			if finished, ok := latestFinishedAssistantUsageSnapshot(messages, cfg, selected); ok && finished.TotalTokens > usage.TotalTokens {
+				return applySessionUsageFloor(finished, sess)
 			}
 		}
 		return applySessionUsageFloor(usage, sess)
@@ -62,7 +62,7 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 func latestAssistantUsageSnapshot(messages []message.Message, cfg *config.Config, selected *agent.Model) (contextUsageSnapshot, bool) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		if msg.Role != message.Assistant {
+		if !shouldDisplayUsageMessage(msg) {
 			continue
 		}
 		total := msg.Usage.TotalTokens()
@@ -80,10 +80,10 @@ func latestAssistantUsageSnapshot(messages []message.Message, cfg *config.Config
 	return contextUsageSnapshot{}, false
 }
 
-func latestFinishedSummaryUsageSnapshot(messages []message.Message, cfg *config.Config, selected *agent.Model) (contextUsageSnapshot, bool) {
+func latestFinishedAssistantUsageSnapshot(messages []message.Message, cfg *config.Config, selected *agent.Model) (contextUsageSnapshot, bool) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		if msg.Role != message.Assistant || !msg.IsSummaryMessage || !msg.IsFinished() {
+		if !shouldDisplayUsageMessage(msg) || !msg.IsFinished() {
 			continue
 		}
 		total := msg.Usage.TotalTokens()
@@ -94,10 +94,14 @@ func latestFinishedSummaryUsageSnapshot(messages []message.Message, cfg *config.
 			TotalTokens:   total,
 			OutputTokens:  msg.Usage.CompletionTokens(),
 			ContextWindow: contextWindowForUsageMessage(msg, cfg, selected),
-			Summary:       true,
+			Summary:       msg.IsSummaryMessage,
 		}, true
 	}
 	return contextUsageSnapshot{}, false
+}
+
+func shouldDisplayUsageMessage(msg message.Message) bool {
+	return msg.Role == message.Assistant && msg.Usage.HasDisplayOutput()
 }
 
 func contextWindowForUsageMessage(msg message.Message, cfg *config.Config, selected *agent.Model) int64 {

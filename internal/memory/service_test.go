@@ -49,9 +49,13 @@ func TestMemoryServiceSearchAndList(t *testing.T) {
 
 	searchResults, err := service.Search(context.Background(), SearchParams{Query: "beta", Limit: 10})
 	require.NoError(t, err)
-	require.Len(t, searchResults, 2)
-	require.Equal(t, "session-note", searchResults[0].Key)
-	require.Equal(t, "beta", searchResults[1].Key)
+	require.Len(t, searchResults, 1)
+	require.Equal(t, "beta", searchResults[0].Key)
+
+	sessionOnly, err := service.Search(context.Background(), SearchParams{Query: "beta", Scope: "session", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, sessionOnly, 1)
+	require.Equal(t, "session-note", sessionOnly[0].Key)
 
 	metadataSearch, err := service.Search(context.Background(), SearchParams{Query: "workflow", Type: "workflow", Tags: []string{"golang"}, Limit: 10})
 	require.NoError(t, err)
@@ -71,8 +75,12 @@ func TestMemoryServiceSearchAndList(t *testing.T) {
 
 	tagFiltered, err := service.List(context.Background(), ListParams{Category: "notes", Tags: []string{"beta"}, Limit: 10})
 	require.NoError(t, err)
-	require.Len(t, tagFiltered, 1)
-	require.Equal(t, "session-note", tagFiltered[0].Key)
+	require.Empty(t, tagFiltered)
+
+	sessionList, err := service.List(context.Background(), ListParams{Scope: "session", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, sessionList, 1)
+	require.Equal(t, "session-note", sessionList[0].Key)
 }
 
 func TestMemoryServiceStoresAsMarkdownFiles(t *testing.T) {
@@ -113,11 +121,13 @@ func TestMemoryServiceRebuildsIndex(t *testing.T) {
 
 	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "entry-one", Value: "first value"}))
 	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "entry-two", Value: "second value"}))
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "session/current", Value: "volatile", Scope: "session"}))
 
 	indexContent, err := service.ReadIndex()
 	require.NoError(t, err)
 	require.Contains(t, indexContent, "entry-one")
 	require.Contains(t, indexContent, "entry-two")
+	require.NotContains(t, indexContent, "session/current")
 
 	require.NoError(t, service.Delete(context.Background(), "entry-one"))
 

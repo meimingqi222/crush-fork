@@ -1469,10 +1469,16 @@ func (m *UI) loadTaskNodeNestedTools(items []chat.MessageItem) {
 		}
 
 		var nestedTools []chat.ToolMessageItem
+		var restoredStatus message.ToolResultSubtaskStatus
+		var hasRestoredStatus bool
 		for _, sessionID := range m.taskNodeChildSessionIDs(parentSessionID, childSessionID) {
 			nestedMsgs, err := m.com.App.Messages.List(context.Background(), sessionID)
 			if err != nil || len(nestedMsgs) == 0 {
 				continue
+			}
+			if status, ok := taskNodeCompletionStatusFromMessages(nestedMsgs); ok {
+				restoredStatus = status
+				hasRestoredStatus = true
 			}
 
 			nestedMsgPtrs := make([]*message.Message, len(nestedMsgs))
@@ -1497,7 +1503,31 @@ func (m *UI) loadTaskNodeNestedTools(items []chat.MessageItem) {
 		if len(nestedTools) > 0 {
 			taskNode.SetNestedTools(nestedTools)
 		}
+		if taskNode.CompletionStatus() == "" && hasRestoredStatus {
+			taskNode.SetCompletionStatus(restoredStatus)
+		}
 	}
+}
+
+func taskNodeCompletionStatusFromMessages(msgs []message.Message) (message.ToolResultSubtaskStatus, bool) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != message.Assistant {
+			continue
+		}
+		finish := msgs[i].FinishPart()
+		if finish == nil {
+			continue
+		}
+		switch finish.Reason {
+		case message.FinishReasonEndTurn:
+			return message.ToolResultSubtaskStatusCompleted, true
+		case message.FinishReasonError:
+			return message.ToolResultSubtaskStatusFailed, true
+		case message.FinishReasonCanceled:
+			return message.ToolResultSubtaskStatusCanceled, true
+		}
+	}
+	return "", false
 }
 
 func (m *UI) taskNodeChildSessionIDs(parentSessionID, childSessionID string) []string {

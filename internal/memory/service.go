@@ -25,6 +25,7 @@ const (
 	indexFilename             = "MEMORY.md"
 	consolidatedAtFilename    = ".last_consolidated_at"
 	consolidationLockFilename = ".consolidation.lock"
+	sessionScope              = "session"
 )
 
 var ErrNotFound = errors.New("memory key not found")
@@ -223,6 +224,9 @@ func (s *service) Search(ctx context.Context, params SearchParams) ([]Entry, err
 
 	results := make([]Entry, 0, len(entries))
 	for _, entry := range entries {
+		if !shouldIncludeEntry(entry, filters.Scope) {
+			continue
+		}
 		if !matchesEntryFilters(entry, filters) {
 			continue
 		}
@@ -255,6 +259,9 @@ func (s *service) List(ctx context.Context, params ListParams) ([]Entry, error) 
 
 	results := make([]Entry, 0, len(entries))
 	for _, entry := range entries {
+		if !shouldIncludeEntry(entry, filters.Scope) {
+			continue
+		}
 		if !matchesEntryFilters(entry, filters) {
 			continue
 		}
@@ -381,6 +388,9 @@ func (s *service) rebuildIndexLocked() error {
 	sb.WriteString("# Memory Index\n\n")
 	sb.WriteString("Auto-generated index of memory entries. Do not edit manually.\n\n")
 	for _, entry := range entries {
+		if strings.EqualFold(strings.TrimSpace(entry.Scope), sessionScope) {
+			continue
+		}
 		desc := truncateForDescription(entry.Value)
 		fileName := sanitizeFilename(entry.Key) + ".md"
 		fmt.Fprintf(&sb, "- [%s](%s) — %s\n", entry.Key, fileName, desc)
@@ -498,6 +508,15 @@ type entryFilters struct {
 	Category string
 	Type     string
 	Tags     []string
+}
+
+func shouldIncludeEntry(entry Entry, requestedScope string) bool {
+	entryScope := strings.TrimSpace(entry.Scope)
+	requestedScope = strings.TrimSpace(requestedScope)
+	if strings.EqualFold(requestedScope, sessionScope) {
+		return strings.EqualFold(entryScope, sessionScope)
+	}
+	return !strings.EqualFold(entryScope, sessionScope)
 }
 
 func matchesEntryFilters(entry Entry, filters entryFilters) bool {

@@ -536,6 +536,70 @@ func TestSetSessionMessagesLoadsTaskNodeNestedToolsFromRetrySessions(t *testing.
 	require.Len(t, taskNode.NestedTools(), 2)
 }
 
+func TestSetSessionMessagesRestoresTaskNodeCompletionFromChildSession(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(context.Background(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	messages := message.NewService(q)
+	fileTracker := filetracker.NewService(q)
+	historyService := history.NewService(q, conn)
+
+	parent, err := sessions.Create(context.Background(), "Parent")
+	require.NoError(t, err)
+
+	assistantMsg, err := messages.Create(context.Background(), parent.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ToolCall{
+				ID:   "call-general",
+				Name: agent.AgentToolName,
+				Input: `{"tasks":[{"id":"task-a","description":"Search references","prompt":"Find usages","subagent_type":"explore"},` +
+					`{"id":"task-b","description":"Apply patch","prompt":"Implement fix","subagent_type":"general"}]}`,
+				Finished: true,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	taskSessionID := sessions.CreateAgentToolSessionID(assistantMsg.ID, "call-general::task-a")
+	taskSession, err := sessions.CreateTaskSession(context.Background(), taskSessionID, parent.ID, "Task A")
+	require.NoError(t, err)
+
+	_, err = messages.Create(context.Background(), taskSession.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "done"},
+			message.Finish{Reason: message.FinishReasonEndTurn},
+		},
+	})
+	require.NoError(t, err)
+
+	theme := styles.DefaultStyles()
+	com := &common.Common{
+		App:    &app.App{Sessions: sessions, Messages: messages, History: historyService, FileTracker: fileTracker},
+		Styles: &theme,
+	}
+	ui := &UI{
+		com:     com,
+		chat:    NewChat(com),
+		session: &parent,
+	}
+
+	_ = ui.setSessionMessages([]message.Message{assistantMsg})
+
+	taskNodeID := chat.TaskNodeItemID("call-general", "task-a")
+	taskNode, ok := ui.chat.MessageItem(taskNodeID).(*chat.TaskNodeItem)
+	require.True(t, ok)
+	require.Equal(t, message.ToolResultSubtaskStatusCompleted, taskNode.CompletionStatus())
+}
+
 func TestUpdateLatestProposedPlanRequiresPlanModeAndPlanExit(t *testing.T) {
 	t.Parallel()
 
