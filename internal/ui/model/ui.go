@@ -99,8 +99,8 @@ const sessionDetailsMaxHeight = 20
 const TextareaMaxHeight = 15
 
 // editorHeightMargin is the vertical margin added to the textarea height to
-// account for the attachments row and bottom spacing.
-const editorHeightMargin = 2
+// account for the attachments row, memory freshness row, and bottom spacing.
+const editorHeightMargin = 3
 
 // TextareaMinHeight is the minimum height of the prompt textarea.
 const TextareaMinHeight = 3
@@ -3304,7 +3304,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			x = screenW - w
 		}
 		x = max(0, x)
-		y = max(0, y+1) // Offset for attachments row
+		y = max(0, y+2) // Offset for attachments and memory freshness rows
 
 		completionsView := uv.NewStyledString(m.completions.Render())
 		completionsView.Draw(scr, image.Rectangle{
@@ -3344,7 +3344,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		if m.textarea.Focused() {
 			cur := m.textarea.Cursor()
 			cur.X++                            // Adjust for app margins
-			cur.Y += m.layout.editor.Min.Y + 1 // Offset for attachments row
+			cur.Y += m.layout.editor.Min.Y + 2 // Offset for attachments and memory freshness rows
 			return cur
 		}
 	}
