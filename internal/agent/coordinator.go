@@ -477,9 +477,9 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	case anthropic.Name:
 		// Map reasoning effort to Anthropic parameters.
 		//
-		// Claude 4.6+ (claude-sonnet-4.6, claude-opus-4.6) supports the "effort"
-		// parameter which enables adaptive thinking. The fantasy SDK converts
-		// effort → thinking: {type: "adaptive"} automatically.
+		// Claude 4.6+ (claude-sonnet-4.6, claude-opus-4.6, claude-opus-4-7, etc.)
+		// supports the "effort" parameter which enables adaptive thinking. The
+		// fantasy SDK converts effort → thinking: {type: "adaptive"} automatically.
 		//
 		// Older Claude models use the legacy thinking: {type: "enabled", budget_tokens}.
 		//
@@ -494,7 +494,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			_, hasEffort := mergedOptions["effort"]
 			_, hasThinking := mergedOptions["thinking"]
 			if !hasEffort && !hasThinking && model.CatwalkCfg.CanReason {
-				isClaude46 := isClaude46Model(model.CatwalkCfg.ID)
+				isClaude46 := requiresAdaptiveThinking(model.CatwalkCfg.ID)
 				switch {
 				case reasoningEffort != "":
 					if isClaude46 {
@@ -642,12 +642,46 @@ func effortToBudgetTokens(effort string) int {
 	return budget
 }
 
-func isClaude46Model(modelID string) bool {
+// requiresAdaptiveThinking returns true for Claude models version 4.6 and above which
+// require the "effort" parameter (adaptive thinking) instead of the legacy
+// thinking: {type: "enabled", budget_tokens: N}.
+func requiresAdaptiveThinking(modelID string) bool {
 	id := strings.ToLower(modelID)
-	return strings.Contains(id, "claude-sonnet-4.6") ||
-		strings.Contains(id, "claude-sonnet-4-6") ||
-		strings.Contains(id, "claude-opus-4.6") ||
-		strings.Contains(id, "claude-opus-4-6")
+
+	// Match patterns like claude-{variant}-4.N or claude-{variant}-4-N where N >= 6
+	for _, variant := range []string{"claude-sonnet-4", "claude-opus-4"} {
+		// Check dot separator: claude-opus-4.7
+		if idx := strings.Index(id, variant+"."); idx != -1 {
+			minor := id[idx+len(variant)+1:]
+			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
+				return true
+			}
+		}
+		// Check dash separator: claude-opus-4-7
+		if idx := strings.Index(id, variant+"-"); idx != -1 {
+			minor := id[idx+len(variant)+1:]
+			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseLeadingInt parses the leading integer from a string (stops at first non-digit).
+func parseLeadingInt(s string) (int, error) {
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, fmt.Errorf("no digits")
+	}
+	n := 0
+	for i := 0; i < end; i++ {
+		n = n*10 + int(s[i]-'0')
+	}
+	return n, nil
 }
 
 func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {

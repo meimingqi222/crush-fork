@@ -1134,6 +1134,45 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		require.Nil(t, anthropicOpts.Thinking)
 	})
 
+	t.Run("claude opus 4-7 uses effort without budget thinking", func(t *testing.T) {
+		model := Model{
+			CatwalkCfg: catwalk.Model{
+				ID:                     "claude-opus-4-7",
+				CanReason:              true,
+				DefaultReasoningEffort: "high",
+			},
+		}
+		cfg := config.ProviderConfig{
+			Type: anthropic.Name,
+		}
+
+		options, _, _, _, _, _ := mergeCallOptions(model, cfg)
+		anthropicOpts, ok := options[anthropic.Name].(*anthropic.ProviderOptions)
+		require.True(t, ok)
+		require.NotNil(t, anthropicOpts)
+		require.Equal(t, anthropic.Effort("high"), *anthropicOpts.Effort)
+		require.Nil(t, anthropicOpts.Thinking)
+	})
+
+	t.Run("claude opus 4.7 canReason enables effort by default", func(t *testing.T) {
+		model := Model{
+			CatwalkCfg: catwalk.Model{
+				ID:        "claude-opus-4.7",
+				CanReason: true,
+			},
+		}
+		cfg := config.ProviderConfig{
+			Type: anthropic.Name,
+		}
+
+		options, _, _, _, _, _ := mergeCallOptions(model, cfg)
+		anthropicOpts, ok := options[anthropic.Name].(*anthropic.ProviderOptions)
+		require.True(t, ok)
+		require.NotNil(t, anthropicOpts)
+		require.Equal(t, anthropic.Effort("high"), *anthropicOpts.Effort)
+		require.Nil(t, anthropicOpts.Thinking)
+	})
+
 	t.Run("claude opus 4.6 with think flag uses high effort", func(t *testing.T) {
 		think := true
 		model := Model{
