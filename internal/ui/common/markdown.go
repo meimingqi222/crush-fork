@@ -1,11 +1,14 @@
 package common
 
 import (
+	"image/color"
 	"reflect"
 	"sync"
 
 	"charm.land/glamour/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/crush/internal/ui/xchroma"
 )
 
 type rendererCacheKey struct {
@@ -20,6 +23,15 @@ var (
 	rendererCache   = make(map[rendererCacheKey]*glamour.TermRenderer)
 	rendererCacheMu sync.RWMutex
 )
+
+const formatterName = "crush"
+
+func init() {
+	// NOTE: Glamour does not offer us an option to pass the formatter
+	// implementation directly. We need to register and use by name.
+	var zero color.Color
+	formatters.Register(formatterName, xchroma.Formatter(zero, nil))
+}
 
 func getCachedRenderer(plain bool, sty *styles.Styles, width int) *glamour.TermRenderer {
 	key := rendererCacheKey{
@@ -47,11 +59,13 @@ func getCachedRenderer(plain bool, sty *styles.Styles, width int) *glamour.TermR
 		r, err = glamour.NewTermRenderer(
 			glamour.WithStyles(sty.PlainMarkdown),
 			glamour.WithWordWrap(width),
+			glamour.WithChromaFormatter(formatterName),
 		)
 	} else {
 		r, err = glamour.NewTermRenderer(
 			glamour.WithStyles(sty.Markdown),
 			glamour.WithWordWrap(width),
+			glamour.WithChromaFormatter(formatterName),
 		)
 	}
 	if err != nil {
