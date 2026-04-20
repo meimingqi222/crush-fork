@@ -648,20 +648,26 @@ func effortToBudgetTokens(effort string) int {
 func requiresAdaptiveThinking(modelID string) bool {
 	id := strings.ToLower(modelID)
 
+	// For provider-prefixed model IDs (e.g., "anthropic/claude-sonnet-4.6"),
+	// extract the base model ID by finding the last occurrence of "claude-"
+	baseID := id
+	if idx := strings.LastIndex(id, "claude-"); idx != -1 && idx > 0 {
+		baseID = id[idx:]
+	}
+
 	// Match patterns like claude-{variant}-4.N or claude-{variant}-4-N where N >= 6
-	// Use prefix matching to avoid false positives with model IDs like claude-3-5-sonnet-4-20250219
 	for _, variant := range []string{"sonnet-4", "opus-4", "haiku-4"} {
-		prefix := "claude-" + variant
-		// Check for exact prefix match (e.g., claude-sonnet-4.6)
-		if strings.HasPrefix(id, prefix+".") {
-			minor := id[len(prefix)+1:]
+		prefix := variant
+		// Check for prefix match (e.g., claude-sonnet-4.6)
+		if strings.HasPrefix(baseID, prefix+".") {
+			minor := baseID[len(prefix)+1:]
 			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
 				return true
 			}
 		}
-		// Check for exact prefix match with dash (e.g., claude-sonnet-4-6)
-		if strings.HasPrefix(id, prefix+"-") {
-			minor := id[len(prefix)+1:]
+		// Check for prefix match with dash (e.g., claude-sonnet-4-6)
+		if strings.HasPrefix(baseID, prefix+"-") {
+			minor := baseID[len(prefix)+1:]
 			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
 				return true
 			}
