@@ -128,7 +128,7 @@ func NewSourcegraphTool(client *http.Client) fantasy.AgentTool {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to unmarshal response: %w", err)
 			}
 
-			formattedResults, err := formatSourcegraphResults(result, params.ContextWindow)
+			formattedResults, err := formatSourcegraphResults(result, params.ContextWindow, params.Count)
 			if err != nil {
 				return fantasy.NewTextErrorResponse("Failed to format results: " + err.Error()), nil
 			}
@@ -137,7 +137,7 @@ func NewSourcegraphTool(client *http.Client) fantasy.AgentTool {
 		})
 }
 
-func formatSourcegraphResults(result map[string]any, contextWindow int) (string, error) {
+func formatSourcegraphResults(result map[string]any, contextWindow int, maxResults int) (string, error) {
 	var buffer strings.Builder
 
 	if errors, ok := result["errors"].([]any); ok && len(errors) > 0 {
@@ -186,29 +186,39 @@ func formatSourcegraphResults(result map[string]any, contextWindow int) (string,
 		return buffer.String(), nil
 	}
 
-	maxResults := 10
-	if len(results) > maxResults {
-		results = results[:maxResults]
-	}
-
-	for i, res := range results {
+	fileMatches := make([]map[string]any, 0, len(results))
+	for _, res := range results {
 		fileMatch, ok := res.(map[string]any)
 		if !ok {
 			continue
 		}
-
 		typeName, _ := fileMatch["__typename"].(string)
 		if typeName != "FileMatch" {
 			continue
 		}
-
 		repo, _ := fileMatch["repository"].(map[string]any)
 		file, _ := fileMatch["file"].(map[string]any)
-		lineMatches, _ := fileMatch["lineMatches"].([]any)
-
 		if repo == nil || file == nil {
 			continue
 		}
+		fileMatches = append(fileMatches, fileMatch)
+	}
+	if len(fileMatches) == 0 {
+		buffer.WriteString("No results found. Try a different query.\n")
+		return buffer.String(), nil
+	}
+
+	if maxResults <= 0 {
+		maxResults = 10
+	}
+	if len(fileMatches) > maxResults {
+		fileMatches = fileMatches[:maxResults]
+	}
+
+	for i, fileMatch := range fileMatches {
+		repo, _ := fileMatch["repository"].(map[string]any)
+		file, _ := fileMatch["file"].(map[string]any)
+		lineMatches, _ := fileMatch["lineMatches"].([]any)
 
 		repoName, _ := repo["name"].(string)
 		filePath, _ := file["path"].(string)

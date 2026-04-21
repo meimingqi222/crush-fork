@@ -96,8 +96,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.TaskStopToolName:            toolRiskWrite,
 	tools.ViewToolName:                toolRiskRead,
 	tools.WriteToolName:               toolRiskWrite,
-	tools.ListMCPResourcesToolName:    toolRiskNetwork,
-	tools.ReadMCPResourceToolName:     toolRiskNetwork,
 	tools.DiagnosticsToolName:         toolRiskRead,
 	tools.ReferencesToolName:          toolRiskRead,
 	tools.LSPDeclarationToolName:      toolRiskRead,

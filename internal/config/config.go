@@ -740,8 +740,6 @@ func allToolNames() []string {
 		"subtask_result",
 		"view",
 		"write",
-		"list_mcp_resources",
-		"read_mcp_resource",
 	}
 }
 

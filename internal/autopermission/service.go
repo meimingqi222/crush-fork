@@ -531,9 +531,9 @@ func (s *service) isExplicitlyAllowed(opts permission.CreatePermissionRequest, r
 
 func isAutoModeAllowlistedRequest(req permission.PermissionRequest) bool {
 	switch req.ToolName {
-	case tools.ViewToolName, tools.ReadMCPResourceToolName:
+	case tools.ViewToolName:
 		return req.Action == "read"
-	case tools.LSToolName, tools.ListMCPResourcesToolName:
+	case tools.LSToolName:
 		return req.Action == "list"
 	default:
 		return false

@@ -115,8 +115,6 @@ func isFantasyToolParallelSafe(tool fantasy.AgentTool) bool {
 		agenttools.LSPHoverToolName,
 		agenttools.LSPDocumentSymbolsToolName,
 		agenttools.LSPWorkspaceSymbolsToolName,
-		agenttools.ListMCPResourcesToolName,
-		agenttools.ReadMCPResourceToolName,
 		agenttools.ToolSearchToolName:
 		return true
 	default:

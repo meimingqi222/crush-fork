@@ -113,6 +113,16 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 		lspManager:  lsp.NewManager(cfg),
 	}
 
+	coderTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentCoder], session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	coderNames := make([]string, 0, len(coderTools))
+	for _, tool := range coderTools {
+		coderNames = append(coderNames, tool.Info().Name)
+	}
+	assert.Contains(t, coderNames, "request_user_input")
+	assert.NotContains(t, coderNames, "plan_exit")
+
 	generalTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentGeneral], session.CollaborationModeDefault)
 	require.NoError(t, err)
 
@@ -191,8 +201,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	assert.NotContains(t, planNames, "fetch")
 	assert.NotContains(t, planNames, "sourcegraph")
 	assert.NotContains(t, planNames, "tool_search")
-	assert.NotContains(t, planNames, "list_mcp_resources")
-	assert.NotContains(t, planNames, "read_mcp_resource")
 	assert.NotContains(t, planNames, "edit")
 	assert.NotContains(t, planNames, tools.HashlineEditToolName)
 	assert.NotContains(t, planNames, tools.LongTermMemoryToolName)

@@ -29,7 +29,7 @@ DO NOT use this tool when you need to:
 </features>
 
 <limitations>
-- Max response size: 5MB
+- Max response size: 1MB
 - Only supports HTTP and HTTPS protocols
 - Cannot handle authentication or cookies
 - Some websites may block automated requests

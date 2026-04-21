@@ -48,8 +48,6 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "apply language-server powered workspace edits", SearchTags: []string{"lsp", "code-intelligence", "edit"}}
 	case tools.LSPRestartToolName:
 		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "restart language-server clients", SearchTags: []string{"lsp", "lifecycle"}}
-	case tools.ListMCPResourcesToolName, tools.ReadMCPResourceToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "inspect MCP server resources", SearchTags: []string{"mcp", "resource"}, Direct: true}
 	case tools.RequestUserInputToolName, tools.PlanExitToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan", "interaction"}, Direct: true}
 	default:

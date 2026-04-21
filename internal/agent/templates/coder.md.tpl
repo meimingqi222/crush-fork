@@ -398,7 +398,7 @@ Diagnostics (lint/typecheck) included in tool output.
 
 <skills_usage>
 Skills are reusable workflow packages that extend your capabilities. Each skill has:
-- name: The skill identifier (use with the Skill tool)
+- name: The skill identifier
 - description: What the skill does
 - when_to_use: Scenarios when this skill should be used (if present)
 - allowed_tools: Tools the skill is pre-authorized to use (if present)
@@ -408,7 +408,7 @@ Skills are reusable workflow packages that extend your capabilities. Each skill 
 To use a skill:
 1. Match the skill's `when_to_use` or `description` to the user's task
 2. Read the skill's SKILL.md file at the location path to get full instructions
-3. Optionally use the Skill tool to invoke the skill with arguments
+3. Follow the skill instructions directly, substituting arguments when needed
 
 Skill argument substitution:
 - $ARGUMENTS: Full arguments string

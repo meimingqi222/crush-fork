@@ -105,7 +105,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewSubtaskResultTool(c.messages),
 		agenttools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
-		agenttools.NewSkillTool(c.cfg.Config().Options.SkillsPaths),
 	}
 	for _, tool := range builtin {
 		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))
@@ -128,15 +127,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 			agenttools.NewLSPRestartTool(c.lspManager),
 		}
 		for _, tool := range lspTools {
-			register(tool, "builtin", builtinToolMetadata(tool.Info().Name))
-		}
-	}
-
-	if len(c.cfg.Config().MCP) > 0 {
-		for _, tool := range []fantasy.AgentTool{
-			agenttools.NewListMCPResourcesTool(c.cfg, c.permissions),
-			agenttools.NewReadMCPResourceTool(c.cfg, c.permissions),
-		} {
 			register(tool, "builtin", builtinToolMetadata(tool.Info().Name))
 		}
 	}

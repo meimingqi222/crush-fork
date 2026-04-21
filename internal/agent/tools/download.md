@@ -15,7 +15,7 @@ Downloads binary data from URL and saves to local file.
 </features>
 
 <limitations>
-- Max file size: 100MB
+- No explicit file size limit beyond request timeout and local disk space
 - Only supports HTTP and HTTPS protocols
 - Cannot handle authentication or cookies
 - Some websites may block automated requests

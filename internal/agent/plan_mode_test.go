@@ -136,8 +136,6 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.LSPHoverToolName,
 		tools.LSPDocumentSymbolsToolName,
 		tools.LSPWorkspaceSymbolsToolName,
-		tools.ListMCPResourcesToolName,
-		tools.ReadMCPResourceToolName,
 		tools.SourcegraphToolName,
 	}
 
@@ -163,8 +161,6 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.LSPHoverToolName,
 		tools.LSPDocumentSymbolsToolName,
 		tools.LSPWorkspaceSymbolsToolName,
-		tools.ListMCPResourcesToolName,
-		tools.ReadMCPResourceToolName,
 		tools.SourcegraphToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModeDefault))
 
