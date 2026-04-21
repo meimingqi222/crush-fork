@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
@@ -107,6 +108,64 @@ func TestReadTextFileTruncatesLongLines(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, hasMore)
 	require.Equal(t, strings.Repeat("a", MaxLineLength)+"...", content)
+}
+
+func TestReadTextFileLinesPreservesRawLongLinesForHashline(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "longline.txt")
+
+	longLine := strings.Repeat("a", MaxLineLength+10)
+	require.NoError(t, os.WriteFile(filePath, []byte(longLine), 0o644))
+
+	lines, hasMore, err := readTextFileLines(filePath, 0, 1)
+	require.NoError(t, err)
+	require.False(t, hasMore)
+	require.Len(t, lines, 1)
+	require.Equal(t, longLine, lines[0].Raw)
+	require.Equal(t, strings.Repeat("a", MaxLineLength)+"...", lines[0].Display)
+}
+
+func TestViewHashlineSupportsEditingTruncatedLongLines(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "main.txt")
+	longLine := strings.Repeat("a", MaxLineLength+10)
+	require.NoError(t, os.WriteFile(filePath, []byte(longLine+"\n"), 0o644))
+
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tracker := newHashlineEditFileTracker()
+	viewTool := NewViewTool(nil, permissions, tracker, workingDir)
+	hashlineTool := NewHashlineEditTool(nil, permissions, &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}, tracker, workingDir)
+
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	viewResp, err := runViewTool(t, viewTool, ctx, ViewParams{FilePath: "main.txt", Hashline: true})
+	require.NoError(t, err)
+	require.False(t, viewResp.IsError)
+	require.Contains(t, viewResp.Content, strings.Repeat("a", MaxLineLength)+"...")
+
+	lineRef := formatHashlineReference(1, longLine)
+	require.Contains(t, viewResp.Content, lineRef)
+
+	editResp, err := runHashlineEditTool(t, hashlineTool, ctx, HashlineEditParams{
+		FilePath: filePath,
+		Operations: []HashlineEditOperation{
+			{
+				Operation: hashlineEditOpReplaceLine,
+				Line:      lineRef,
+				Content:   "short line",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, editResp.IsError, editResp.Content)
+
+	updated, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	require.Equal(t, "short line\n", string(updated))
 }
 
 func TestViewTool_AllowsLargeImageWithCompression(t *testing.T) {

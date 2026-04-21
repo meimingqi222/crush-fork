@@ -58,8 +58,9 @@ If some edits fail:
 1. Check the response metadata for the list of failed edits with their error messages.
 2. View the file again to see the current state after successful edits.
 3. Adjust the failed edits based on the new file content.
-4. Retry the failed edits with corrected old_string values.
-5. Consider breaking complex batches into smaller, independent operations.
+4. If exact matching is getting brittle, re-read with `view(hashline=true)` and continue with `hashline_edit`.
+5. Retry the failed edits with corrected old_string values.
+6. Consider breaking complex batches into smaller, independent operations.
 </recovery_steps>
 
 <best_practices>
@@ -67,6 +68,7 @@ If some edits fail:
 - Use absolute file paths (starting with /).
 - Use replace_all only when you're certain; otherwise provide unique context.
 - Match existing style exactly (spaces, tabs, blank lines).
+- Switch to `hashline_edit` when repeated snippets, escaping, or formatting churn make old_string matching unstable.
 - Review failed edits in the response and retry with corrections.
 </best_practices>
 

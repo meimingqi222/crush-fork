@@ -83,7 +83,8 @@ If you get "old_string not found in file":
    - Look for blank lines
    - Check for trailing spaces
 4. **Verify character-by-character** that your old_string matches
-5. **Never guess** - always View the file to get exact text
+5. If the target contains heavy escaping, repeated text, or special characters, switch to `view(hashline=true)` + `hashline_edit`
+6. **Never guess** - always View the file to get exact text
    </recovery_steps>
 
 <best_practices>
@@ -94,6 +95,7 @@ If you get "old_string not found in file":
 - Use forward slashes (/) for cross-platform compatibility
 - Multiple edits to same file: send all in single message with multiple tool calls
 - **When in doubt, include MORE context rather than less**
+- Use `hashline_edit` instead when line-anchored edits are safer than copying brittle old text
 - Match the existing code style exactly (spaces, tabs, blank lines)
   </best_practices>
 

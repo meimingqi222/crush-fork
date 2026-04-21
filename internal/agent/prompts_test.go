@@ -105,6 +105,27 @@ func TestPromptForAgentBuildIncludesConfiguredRolePrompt(t *testing.T) {
 	assert.Contains(t, built, "Verify before handoff.")
 }
 
+func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Options.ContextPaths = nil
+
+	promptBuilder, err := promptForAgent(config.Agent{
+		ID:           config.AgentGeneral,
+		AllowedTools: []string{"view", "edit", "multiedit", "hashline_edit", "write"},
+	}, true)
+	require.NoError(t, err)
+
+	built, err := promptBuilder.Build(t.Context(), "", "", cfg)
+	require.NoError(t, err)
+	assert.Contains(t, built, "`hashline_edit`")
+	assert.Contains(t, built, "`view(hashline=true)`")
+	assert.Contains(t, built, "exact-match retries are failing")
+}
+
 func TestPromptForAgentBuildIncludesLifecyclePolicyAndInitialPrompt(t *testing.T) {
 	t.Parallel()
 

@@ -1,6 +1,7 @@
 Apply line-addressable edits using hashline references from `view(hashline=true)`.
 
 Use this tool when text matching is brittle and you want edits anchored to specific lines with staleness protection.
+Prefer it after an `edit`/`multiedit` exact-match failure, or when the target contains heavy escaping, repeated snippets, or special characters that are easy to copy incorrectly.
 
 <workflow>
 1. Read file with `view` and set `hashline=true`

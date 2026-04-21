@@ -36,5 +36,6 @@ Reads and displays file contents with line numbers for examining code, logs, or 
 - Use with Glob to find files first
 - For code exploration: Grep to find relevant files, then View to examine
 - For large files: use offset parameter for specific sections
+- Set `hashline=true` when preparing line-addressable edits or when exact text matching looks brittle
 - View tool automatically detects and renders image files
 </tips>

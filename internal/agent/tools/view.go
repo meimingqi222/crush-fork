@@ -66,6 +66,11 @@ const (
 	MaxLineLength    = 2000
 )
 
+type textViewLine struct {
+	Raw     string
+	Display string
+}
+
 var errViewOffsetBeyondEOF = errors.New("offset is beyond end of file")
 
 func NewViewTool(
@@ -206,13 +211,14 @@ func NewViewTool(
 			}
 
 			// Read the file content.
-			content, hasMore, err := readTextFile(filePath, params.Offset, params.Limit)
+			lines, hasMore, err := readTextFileLines(filePath, params.Offset, params.Limit)
 			if err != nil {
 				if errors.Is(err, errViewOffsetBeyondEOF) {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Offset %d is beyond end of file", params.Offset)), nil
 				}
 				return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
 			}
+			content := joinDisplayLines(lines)
 			if !utf8.ValidString(content) {
 				return fantasy.NewTextErrorResponse("File content is not valid UTF-8"), nil
 			}
@@ -223,9 +229,9 @@ func NewViewTool(
 			}
 			output := "<file>\n"
 			if params.Hashline {
-				output += addHashlineLineNumbers(content, params.Offset+1)
+				output += addHashlineLineNumbers(lines, params.Offset+1)
 			} else {
-				output += addLineNumbers(content, params.Offset+1)
+				output += addLineNumbers(lines, params.Offset+1)
 			}
 
 			if hasMore {
@@ -263,51 +269,67 @@ func shouldWaitForDiagnostics(wait *bool) bool {
 	return *wait
 }
 
-func addLineNumbers(content string, startLine int) string {
-	if content == "" {
+func addLineNumbers(lines []textViewLine, startLine int) string {
+	if len(lines) == 0 {
 		return ""
 	}
 
-	lines := strings.Split(content, "\n")
-
 	var result []string
 	for i, line := range lines {
-		line = strings.TrimSuffix(line, "\r")
-
 		lineNum := i + startLine
 		numStr := fmt.Sprintf("%d", lineNum)
 
 		if len(numStr) >= 6 {
-			result = append(result, fmt.Sprintf("%s|%s", numStr, line))
+			result = append(result, fmt.Sprintf("%s|%s", numStr, line.Display))
 		} else {
 			paddedNum := fmt.Sprintf("%6s", numStr)
-			result = append(result, fmt.Sprintf("%s|%s", paddedNum, line))
+			result = append(result, fmt.Sprintf("%s|%s", paddedNum, line.Display))
 		}
 	}
 
 	return strings.Join(result, "\n")
 }
 
-func addHashlineLineNumbers(content string, startLine int) string {
-	if content == "" {
+func addHashlineLineNumbers(lines []textViewLine, startLine int) string {
+	if len(lines) == 0 {
 		return ""
 	}
 
-	lines := strings.Split(content, "\n")
 	result := make([]string, 0, len(lines))
 	for i, line := range lines {
-		line = strings.TrimSuffix(line, "\r")
 		lineNum := i + startLine
-		result = append(result, fmt.Sprintf("%6s#%s|%s", fmt.Sprintf("%d", lineNum), computeHashlineID(lineNum, line), line))
+		result = append(result, fmt.Sprintf("%6s#%s|%s", fmt.Sprintf("%d", lineNum), computeHashlineID(lineNum, line.Raw), line.Display))
 	}
 
 	return strings.Join(result, "\n")
 }
 
+func joinDisplayLines(lines []textViewLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	displayLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		displayLines = append(displayLines, line.Display)
+	}
+
+	return strings.Join(displayLines, "\n")
+}
+
 func readTextFile(filePath string, offset, limit int) (string, bool, error) {
-	file, err := os.Open(filePath)
+	lines, hasMore, err := readTextFileLines(filePath, offset, limit)
 	if err != nil {
 		return "", false, err
+	}
+
+	return joinDisplayLines(lines), hasMore, nil
+}
+
+func readTextFileLines(filePath string, offset, limit int) ([]textViewLine, bool, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, false, err
 	}
 	defer file.Close()
 
@@ -318,32 +340,36 @@ func readTextFile(filePath string, offset, limit int) (string, bool, error) {
 			skipped++
 		}
 		if err = scanner.Err(); err != nil {
-			return "", false, err
+			return nil, false, err
 		}
 		if skipped < offset {
-			return "", false, errViewOffsetBeyondEOF
+			return nil, false, errViewOffsetBeyondEOF
 		}
 	}
 
 	// Pre-allocate slice with expected capacity.
-	lines := make([]string, 0, limit)
+	lines := make([]textViewLine, 0, limit)
 
 	for len(lines) < limit && scanner.Scan() {
-		lineText := scanner.Text()
-		if len(lineText) > MaxLineLength {
-			lineText = lineText[:MaxLineLength] + "..."
+		rawLine := scanner.Text()
+		displayLine := rawLine
+		if len(displayLine) > MaxLineLength {
+			displayLine = displayLine[:MaxLineLength] + "..."
 		}
-		lines = append(lines, lineText)
+		lines = append(lines, textViewLine{
+			Raw:     rawLine,
+			Display: displayLine,
+		})
 	}
 
 	// Peek one more line only when we filled the limit.
 	hasMore := len(lines) == limit && scanner.Scan()
 
 	if err := scanner.Err(); err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 
-	return strings.Join(lines, "\n"), hasMore, nil
+	return lines, hasMore, nil
 }
 
 func getImageMimeType(filePath string) (bool, string) {
