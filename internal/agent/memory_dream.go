@@ -21,7 +21,6 @@ import (
 
 const (
 	memoryDreamMinHours            = 24
-	memoryDreamMinSessions         = 5
 	memoryDreamStaleLockWindow     = time.Hour
 	memoryDreamMaxSessions         = 8
 	memoryDreamMaxChars            = 24000
@@ -69,7 +68,7 @@ func shouldRunMemoryDream(now, lastAt time.Time, candidateCount int, force bool)
 	if !lastAt.IsZero() && now.Sub(lastAt) < time.Duration(memoryDreamMinHours)*time.Hour {
 		return false
 	}
-	return candidateCount >= memoryDreamMinSessions
+	return candidateCount > 0
 }
 
 func selectDreamCandidateSessions(sessions []session.Session, lastAt time.Time, currentSessionID string) []session.Session {

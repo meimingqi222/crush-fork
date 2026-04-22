@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/agent"
 	agentnotify "github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
@@ -18,7 +17,6 @@ import (
 
 type memoryDreamCoordinator struct {
 	mockQueueCoordinator
-	status  agent.MemoryFreshnessStatus
 	dreamed []string
 	forced  []bool
 }
@@ -29,29 +27,12 @@ func (m *memoryDreamCoordinator) Dream(_ context.Context, sessionID string, forc
 	return nil
 }
 
-func (m *memoryDreamCoordinator) MemoryFreshness(context.Context) (agent.MemoryFreshnessStatus, error) {
-	return m.status, nil
-}
-
-func TestRefreshEditorPlaceholderUsesMemoryFreshness(t *testing.T) {
-
+func TestRenderEditorViewDoesNotShowMemoryFreshnessBanner(t *testing.T) {
 	ui := testExecutionModeUI(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
-	coord := &memoryDreamCoordinator{}
-	coord.status.Warning = "Memory stale: last consolidated 47 days ago — run /dream"
-	ui.com.App.AgentCoordinator = coord
-	ui.session = &session.Session{ID: "s1", CollaborationMode: session.CollaborationModeDefault}
 
-	ui.refreshMemoryFreshnessNote()
-	ui.refreshEditorPlaceholder()
-
-	require.Equal(t, ui.readyPlaceholder, ui.textarea.Placeholder)
-	require.NotEqual(t, coord.status.Warning, ui.textarea.Placeholder)
-	require.Contains(t, ui.renderEditorView(120), coord.status.Warning)
-
-	coord.busy = true
-	ui.refreshEditorPlaceholder()
-	require.Equal(t, ui.workingPlaceholder, ui.textarea.Placeholder)
-	require.NotContains(t, ui.renderEditorView(120), coord.status.Warning)
+	rendered := ui.renderEditorView(120)
+	require.NotContains(t, rendered, "Memory stale")
+	require.NotContains(t, rendered, "run /dream")
 }
 
 func TestHandleAgentNotificationMemoryDreamLifecycle(t *testing.T) {

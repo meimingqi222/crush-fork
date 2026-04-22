@@ -19,10 +19,10 @@ func TestShouldRunMemoryDream(t *testing.T) {
 	recent := now.Add(-2 * time.Hour).Unix()
 	old := now.Add(-48 * time.Hour).Unix()
 
-	t.Run("time and sessions gate", func(t *testing.T) {
-		require.True(t, shouldRunMemoryDream(now, lastAt, 5, false))
+	t.Run("time gate with any candidate session", func(t *testing.T) {
+		require.True(t, shouldRunMemoryDream(now, lastAt, 1, false))
 		require.False(t, shouldRunMemoryDream(now, now.Add(-2*time.Hour), 10, false))
-		require.False(t, shouldRunMemoryDream(now, lastAt, 4, false))
+		require.False(t, shouldRunMemoryDream(now, lastAt, 0, false))
 	})
 
 	t.Run("force bypasses gates", func(t *testing.T) {

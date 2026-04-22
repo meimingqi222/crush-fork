@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
 )
@@ -37,15 +40,26 @@ func newTestUI() *UI {
 	ta.Focus()
 
 	return &UI{
-		com:      com,
-		status:   NewStatus(com, nil),
-		chat:     NewChat(com),
-		textarea: ta,
-		state:    uiChat,
-		focus:    uiFocusEditor,
-		width:    140,
-		height:   45,
+		com:         com,
+		status:      NewStatus(com, nil),
+		chat:        NewChat(com),
+		textarea:    ta,
+		attachments: newTestAttachments(),
+		state:       uiChat,
+		focus:       uiFocusEditor,
+		width:       140,
+		height:      45,
 	}
+}
+
+func newTestAttachments() *attachments.Attachments {
+	renderer := attachments.NewRenderer(
+		lipgloss.NewStyle(),
+		lipgloss.NewStyle(),
+		lipgloss.NewStyle(),
+		lipgloss.NewStyle(),
+	)
+	return attachments.New(renderer, attachments.Keymap{})
 }
 
 func TestUpdateLayoutAndSize_EditorGrowthShrinksChat(t *testing.T) {
@@ -100,5 +114,53 @@ func TestHandleTextareaHeightChange_FollowModeStaysAtBottom(t *testing.T) {
 	}
 	if !u.chat.AtBottom() {
 		t.Fatal("expected chat to remain at bottom after editor resize in follow mode")
+	}
+}
+
+func TestGenerateLayoutEditorHeightWithoutAttachmentsUsesSingleBottomMargin(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUI()
+	u.updateLayoutAndSize()
+
+	want := u.textarea.Height() + editorBottomMargin
+	if got := u.layout.editor.Dy(); got != want {
+		t.Fatalf("expected editor height %d without attachments, got %d", want, got)
+	}
+}
+
+func TestGenerateLayoutEditorHeightWithAttachmentsAddsOneTopRow(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUI()
+	u.attachments.Update(message.Attachment{FileName: "note.txt", MimeType: "text/plain"})
+	u.updateLayoutAndSize()
+
+	want := u.textarea.Height() + editorBottomMargin + 1
+	if got := u.layout.editor.Dy(); got != want {
+		t.Fatalf("expected editor height %d with attachments, got %d", want, got)
+	}
+}
+
+func TestCursorYOffsetTracksAttachmentRowOffset(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUI()
+	u.updateLayoutAndSize()
+
+	cur := u.textarea.Cursor()
+	cur.Y += u.layout.editor.Min.Y + u.editorTopMarginRows()
+	wantWithoutAttachments := u.layout.editor.Min.Y
+	if cur.Y != wantWithoutAttachments {
+		t.Fatalf("expected cursor Y %d without attachments, got %d", wantWithoutAttachments, cur.Y)
+	}
+
+	u.attachments.Update(message.Attachment{FileName: "note.txt", MimeType: "text/plain"})
+	u.updateLayoutAndSize()
+	cur = u.textarea.Cursor()
+	cur.Y += u.layout.editor.Min.Y + u.editorTopMarginRows()
+	wantWithAttachments := u.layout.editor.Min.Y + 1
+	if cur.Y != wantWithAttachments {
+		t.Fatalf("expected cursor Y %d with attachments, got %d", wantWithAttachments, cur.Y)
 	}
 }

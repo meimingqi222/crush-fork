@@ -98,9 +98,8 @@ const sessionDetailsMaxHeight = 20
 // TextareaMaxHeight is the maximum height of the prompt textarea.
 const TextareaMaxHeight = 15
 
-// editorHeightMargin is the vertical margin added to the textarea height to
-// account for the attachments row, memory freshness row, and bottom spacing.
-const editorHeightMargin = 3
+// editorBottomMargin is the blank line reserved below the textarea.
+const editorBottomMargin = 1
 
 // TextareaMinHeight is the minimum height of the prompt textarea.
 const TextareaMinHeight = 3
@@ -160,10 +159,6 @@ type (
 	}
 	memoryDreamStartedMsg struct {
 		SessionID string
-	}
-	memoryDreamRefreshMsg       struct{}
-	memoryFreshnessRefreshedMsg struct {
-		Warning string
 	}
 
 	// closeDialogMsg is sent to close the current dialog.
@@ -228,7 +223,6 @@ type UI struct {
 	lastUserMessageTime int64
 	latestProposedPlan  string
 	lastPromptedPlanMsg string
-	memoryFreshnessNote string
 
 	// The width and height of the terminal in cells.
 	width  int
@@ -598,9 +592,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(uiChat, initialFocus)
 		m.isCanceling = false
 		m.todoIsSpinning = false
-		m.memoryFreshnessNote = ""
 		m.session = msg.session
-		cmds = append(cmds, m.refreshMemoryFreshnessNoteCmd())
 		m.sessionFiles = msg.files
 		m.childSessionInfoCache = msg.childSessionInfo
 		m.timelineEvents = nil
@@ -655,21 +647,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionUsageRefreshedMsg:
 		if msg.session != nil && m.session != nil && msg.session.ID == m.session.ID {
 			m.session = msg.session
-			cmds = append(cmds, m.refreshMemoryFreshnessNoteCmd())
 		}
 
 	case memoryDreamStartedMsg:
 		if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
 			cmds = append(cmds, m.loadSession(msg.SessionID))
-		} else {
-			cmds = append(cmds, m.refreshMemoryFreshnessNoteCmd())
 		}
-
-	case memoryDreamRefreshMsg:
-		cmds = append(cmds, m.refreshMemoryFreshnessNoteCmd())
-
-	case memoryFreshnessRefreshedMsg:
-		m.memoryFreshnessNote = msg.Warning
 
 	case sendMessageMsg:
 		cmds = append(cmds, m.sendMessage(msg.Content, msg.Attachments...))
@@ -3334,7 +3317,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			x = screenW - w
 		}
 		x = max(0, x)
-		y = max(0, y+2) // Offset for attachments and memory freshness rows
+		y = max(0, y+m.editorTopMarginRows()) // Offset for attachments row when present
 
 		completionsView := uv.NewStyledString(m.completions.Render())
 		completionsView.Draw(scr, image.Rectangle{
@@ -3373,8 +3356,8 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 		if m.textarea.Focused() {
 			cur := m.textarea.Cursor()
-			cur.X++                            // Adjust for app margins
-			cur.Y += m.layout.editor.Min.Y + 2 // Offset for attachments and memory freshness rows
+			cur.X++ // Adjust for app margins
+			cur.Y += m.layout.editor.Min.Y + m.editorTopMarginRows()
 			return cur
 		}
 	}
@@ -3731,8 +3714,9 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 
 	// The help height
 	helpHeight := 1
-	// The editor height includes the dynamic textarea plus editor margins.
-	editorHeight := m.textarea.Height() + editorHeightMargin
+	// The editor height includes the dynamic textarea, optional attachments row,
+	// and bottom spacing.
+	editorHeight := m.textarea.Height() + editorBottomMargin + m.editorTopMarginRows()
 	// The sidebar width
 	sidebarWidth := 30
 	// The header height
@@ -4184,43 +4168,11 @@ func (m *UI) stopStaleLoadingIndicators() {
 	m.setLoadingStateVisible(m.chat.MessageItems(), false)
 }
 
-func (m *UI) refreshMemoryFreshnessNoteCmd() tea.Cmd {
-	return func() tea.Msg {
-		if m.com == nil || m.com.App == nil || m.com.App.AgentCoordinator == nil {
-			return memoryFreshnessRefreshedMsg{}
-		}
-		fresher, ok := m.com.App.AgentCoordinator.(interface {
-			MemoryFreshness(context.Context) (agent.MemoryFreshnessStatus, error)
-		})
-		if !ok {
-			return memoryFreshnessRefreshedMsg{}
-		}
-		status, err := fresher.MemoryFreshness(context.Background())
-		if err != nil {
-			slog.Debug("Failed to refresh memory freshness", "error", err)
-			return memoryFreshnessRefreshedMsg{}
-		}
-		return memoryFreshnessRefreshedMsg{Warning: strings.TrimSpace(status.Warning)}
+func (m *UI) editorTopMarginRows() int {
+	if m.attachments != nil && len(m.attachments.List()) > 0 {
+		return 1
 	}
-}
-
-func (m *UI) refreshMemoryFreshnessNote() {
-	m.memoryFreshnessNote = ""
-	if m.com == nil || m.com.App == nil || m.com.App.AgentCoordinator == nil {
-		return
-	}
-	fresher, ok := m.com.App.AgentCoordinator.(interface {
-		MemoryFreshness(context.Context) (agent.MemoryFreshnessStatus, error)
-	})
-	if !ok {
-		return
-	}
-	status, err := fresher.MemoryFreshness(context.Background())
-	if err != nil {
-		slog.Debug("Failed to refresh memory freshness", "error", err)
-		return
-	}
-	m.memoryFreshnessNote = strings.TrimSpace(status.Warning)
+	return 0
 }
 
 // hasSession returns true if there is an active session with a valid ID.
@@ -4296,38 +4248,14 @@ func (m *UI) renderSubagentBanner(width int) string {
 	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(line)
 }
 
-func (m *UI) renderMemoryFreshnessNote(width int) string {
-	if m.com == nil {
-		return ""
-	}
-	if m.isAgentBusy() {
-		return ""
-	}
-	if m.session != nil && m.session.CollaborationMode == session.CollaborationModePlan {
-		return ""
-	}
-	note := strings.TrimSpace(m.memoryFreshnessNote)
-	if note == "" {
-		return ""
-	}
-	icon := m.com.Styles.Base.Foreground(m.com.Styles.Warning).Render("! ")
-	text := m.com.Styles.HalfMuted.Render(note)
-	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(icon + text)
-}
-
 // renderEditorView renders the editor view with attachments if any.
 func (m *UI) renderEditorView(width int) string {
-	var attachmentsView string
-	if len(m.attachments.List()) > 0 {
-		attachmentsView = m.attachments.Render(width)
+	parts := make([]string, 0, 3)
+	if m.attachments != nil && len(m.attachments.List()) > 0 {
+		parts = append(parts, m.attachments.Render(width))
 	}
-	memoryFreshnessView := m.renderMemoryFreshnessNote(width)
-	return strings.Join([]string{
-		attachmentsView,
-		memoryFreshnessView,
-		m.textarea.View(),
-		"", // margin at bottom of editor
-	}, "\n")
+	parts = append(parts, m.textarea.View(), "") // margin at bottom of editor
+	return strings.Join(parts, "\n")
 }
 
 // cacheSidebarLogo renders and caches the sidebar logo at the specified width.
@@ -4882,7 +4810,6 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	case notify.TypeMemoryDreamFinished:
 		return tea.Batch(
 			util.ReportInfo("Memory dream finished"),
-			util.CmdHandler(memoryDreamRefreshMsg{}),
 			m.sendNotification(notification.Notification{
 				Title:   "Memory dream finished",
 				Message: fmt.Sprintf("Consolidated memories for \"%s\"", n.SessionTitle),
@@ -4891,7 +4818,6 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	case notify.TypeMemoryDreamFailed:
 		return tea.Batch(
 			util.ReportWarn("Memory dream failed"),
-			util.CmdHandler(memoryDreamRefreshMsg{}),
 			m.sendNotification(notification.Notification{
 				Title:   "Memory dream failed",
 				Message: fmt.Sprintf("Could not consolidate memories for \"%s\"", n.SessionTitle),
