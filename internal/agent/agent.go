@@ -2461,8 +2461,76 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
+const canceledPromptBranchSystemNote = "Previous assistant work before this point was canceled before completion. Ignore unfinished tool activity from that attempt. Treat the next user message as the active instruction, and use earlier user messages only as background context."
+
+func syntheticCanceledPromptBoundary(index int) message.Message {
+	return message.Message{
+		ID:   fmt.Sprintf("synthetic-canceled-prompt-boundary-%d", index),
+		Role: message.System,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: canceledPromptBranchSystemNote},
+		},
+	}
+}
+
+func trimCanceledPromptBranches(msgs []message.Message) []message.Message {
+	hasLaterUser := false
+	laterUserIndex := -1
+	keep := make([]bool, len(msgs))
+	insertBoundaryBefore := make(map[int]bool)
+	removed := false
+	for i := range keep {
+		keep[i] = true
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if msg.Role == message.User {
+			hasLaterUser = true
+			laterUserIndex = i
+			continue
+		}
+		if !hasLaterUser {
+			continue
+		}
+		if msg.Role != message.Assistant || msg.FinishReason() != message.FinishReasonCanceled {
+			continue
+		}
+		if keep[i] {
+			keep[i] = false
+			removed = true
+		}
+		if laterUserIndex >= 0 {
+			insertBoundaryBefore[laterUserIndex] = true
+		}
+		for j := i - 1; j >= 0; j-- {
+			if msgs[j].Role != message.Assistant && msgs[j].Role != message.Tool {
+				break
+			}
+			if keep[j] {
+				keep[j] = false
+				removed = true
+			}
+		}
+	}
+	if !removed {
+		return msgs
+	}
+	filtered := make([]message.Message, 0, len(msgs))
+	for i, msg := range msgs {
+		if insertBoundaryBefore[i] {
+			filtered = append(filtered, syntheticCanceledPromptBoundary(i))
+		}
+		if !keep[i] {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	return filtered
+}
+
 func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
+	msgs = trimCanceledPromptBranches(msgs)
 
 	// Build sets of tool-call and tool-result IDs so we can reconcile stale
 	// history before it reaches the provider.

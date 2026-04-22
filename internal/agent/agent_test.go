@@ -2051,3 +2051,168 @@ func TestPreparePromptInjectsSyntheticToolResultForMissingToolCallResult(t *test
 	}
 	require.True(t, foundSynthetic)
 }
+
+func TestPreparePromptDropsCanceledAssistantToolBranchBeforeNextUser(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{
+			ID:   "user-1",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "investigate bug"},
+			},
+		},
+		{
+			ID:   "assistant-1",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "checking files"},
+				message.ToolCall{ID: "call-1", Name: agenttools.ViewToolName, Input: `{"file_path":"main.go"}`, Finished: true},
+				message.Finish{Reason: message.FinishReasonToolUse},
+			},
+		},
+		{
+			ID:   "tool-1",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{ToolCallID: "call-1", Name: agenttools.ViewToolName, Content: "ok"},
+			},
+		},
+		{
+			ID:   "assistant-canceled",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.Finish{Reason: message.FinishReasonCanceled},
+			},
+		},
+		{
+			ID:   "user-2",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "actually check repo B"},
+			},
+		},
+	})
+
+	var userTexts []string
+	var systemTexts []string
+	var toolCallIDs []string
+	var toolResultIDs []string
+	for _, msg := range history {
+		switch msg.Role {
+		case fantasy.MessageRoleUser:
+			for _, part := range msg.Content {
+				textPart, ok := part.(fantasy.TextPart)
+				if !ok {
+					continue
+				}
+				userTexts = append(userTexts, textPart.Text)
+			}
+		case fantasy.MessageRoleSystem:
+			for _, part := range msg.Content {
+				textPart, ok := part.(fantasy.TextPart)
+				if !ok {
+					continue
+				}
+				systemTexts = append(systemTexts, textPart.Text)
+			}
+		case fantasy.MessageRoleAssistant:
+			for _, part := range msg.Content {
+				toolCallPart, ok := part.(fantasy.ToolCallPart)
+				if !ok {
+					continue
+				}
+				toolCallIDs = append(toolCallIDs, toolCallPart.ToolCallID)
+			}
+		case fantasy.MessageRoleTool:
+			for _, part := range msg.Content {
+				toolResultPart, ok := part.(fantasy.ToolResultPart)
+				if !ok {
+					continue
+				}
+				toolResultIDs = append(toolResultIDs, toolResultPart.ToolCallID)
+			}
+		}
+	}
+
+	require.Equal(t, []string{"investigate bug", "actually check repo B"}, userTexts)
+	require.Contains(t, systemTexts, canceledPromptBranchSystemNote)
+	require.NotContains(t, toolCallIDs, "call-1")
+	require.NotContains(t, toolResultIDs, "call-1")
+}
+
+func TestPreparePromptKeepsLatestCanceledBranchWithoutLaterUser(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{
+			ID:   "user-1",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "investigate bug"},
+			},
+		},
+		{
+			ID:   "assistant-1",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "checking files"},
+				message.ToolCall{ID: "call-1", Name: agenttools.ViewToolName, Input: `{"file_path":"main.go"}`, Finished: true},
+				message.Finish{Reason: message.FinishReasonToolUse},
+			},
+		},
+		{
+			ID:   "tool-1",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{ToolCallID: "call-1", Name: agenttools.ViewToolName, Content: "ok"},
+			},
+		},
+		{
+			ID:   "assistant-canceled",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.Finish{Reason: message.FinishReasonCanceled},
+			},
+		},
+	})
+
+	var toolCallIDs []string
+	var toolResultIDs []string
+	var systemTexts []string
+	for _, msg := range history {
+		switch msg.Role {
+		case fantasy.MessageRoleSystem:
+			for _, part := range msg.Content {
+				textPart, ok := part.(fantasy.TextPart)
+				if !ok {
+					continue
+				}
+				systemTexts = append(systemTexts, textPart.Text)
+			}
+		case fantasy.MessageRoleAssistant:
+			for _, part := range msg.Content {
+				toolCallPart, ok := part.(fantasy.ToolCallPart)
+				if !ok {
+					continue
+				}
+				toolCallIDs = append(toolCallIDs, toolCallPart.ToolCallID)
+			}
+		case fantasy.MessageRoleTool:
+			for _, part := range msg.Content {
+				toolResultPart, ok := part.(fantasy.ToolResultPart)
+				if !ok {
+					continue
+				}
+				toolResultIDs = append(toolResultIDs, toolResultPart.ToolCallID)
+			}
+		}
+	}
+
+	require.Contains(t, toolCallIDs, "call-1")
+	require.Contains(t, toolResultIDs, "call-1")
+	require.NotContains(t, systemTexts, canceledPromptBranchSystemNote)
+}
