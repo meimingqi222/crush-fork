@@ -14,11 +14,12 @@ import (
 )
 
 type CreateMessageParams struct {
-	Role             MessageRole
-	Parts            []ContentPart
-	Model            string
-	Provider         string
-	IsSummaryMessage bool
+	Role                   MessageRole
+	Parts                  []ContentPart
+	Model                  string
+	Provider               string
+	IsSummaryMessage       bool
+	ActivatedDeferredTools []string
 }
 
 type Service interface {
@@ -66,7 +67,8 @@ func (s *service) Create(ctx context.Context, sessionID string, params CreateMes
 			Reason: "stop",
 		})
 	}
-	partsJSON, err := marshalParts(params.Parts)
+	activatedDeferredTools := normalizeDeferredToolNames(params.ActivatedDeferredTools)
+	partsJSON, err := marshalParts(params.Parts, activatedDeferredTools)
 	if err != nil {
 		return Message{}, err
 	}
@@ -90,6 +92,7 @@ func (s *service) Create(ctx context.Context, sessionID string, params CreateMes
 	if err != nil {
 		return Message{}, err
 	}
+	message.ActivatedDeferredTools = activatedDeferredTools
 	// Clone the message before publishing to avoid race conditions with
 	// concurrent modifications to the Parts slice.
 	s.Publish(pubsub.CreatedEvent, message.Clone())
@@ -113,7 +116,8 @@ func (s *service) DeleteSessionMessages(ctx context.Context, sessionID string) e
 }
 
 func (s *service) Update(ctx context.Context, message Message) error {
-	parts, err := marshalParts(message.Parts)
+	message.ActivatedDeferredTools = normalizeDeferredToolNames(message.ActivatedDeferredTools)
+	parts, err := marshalParts(message.Parts, message.ActivatedDeferredTools)
 	if err != nil {
 		return err
 	}
@@ -199,11 +203,11 @@ func (s *service) ListAllUserMessages(ctx context.Context) ([]Message, error) {
 }
 
 func (s *service) fromDBItem(item db.Message) (Message, error) {
-	parts, err := unmarshalParts([]byte(item.Parts))
+	parts, activatedDeferredTools, err := unmarshalParts([]byte(item.Parts))
 	if err != nil {
 		return Message{}, err
 	}
-	return Message{
+	msg := Message{
 		ID:        item.ID,
 		SessionID: item.SessionID,
 		Role:      MessageRole(item.Role),
@@ -220,7 +224,9 @@ func (s *service) fromDBItem(item db.Message) (Message, error) {
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 		IsSummaryMessage: item.IsSummaryMessage != 0,
-	}, nil
+	}
+	msg.ActivatedDeferredTools = activatedDeferredTools
+	return msg, nil
 }
 
 type partType string
@@ -236,11 +242,13 @@ const (
 )
 
 type partWrapper struct {
-	Type partType    `json:"type"`
-	Data ContentPart `json:"data"`
+	Type                   partType    `json:"type"`
+	Data                   ContentPart `json:"data"`
+	ActivatedDeferredTools []string    `json:"activated_deferred_tools,omitempty"`
 }
 
-func marshalParts(parts []ContentPart) ([]byte, error) {
+func marshalParts(parts []ContentPart, activatedDeferredTools []string) ([]byte, error) {
+	activatedDeferredTools = normalizeDeferredToolNames(activatedDeferredTools)
 	wrappedParts := make([]partWrapper, len(parts))
 
 	for i, part := range parts {
@@ -266,79 +274,85 @@ func marshalParts(parts []ContentPart) ([]byte, error) {
 		}
 
 		wrappedParts[i] = partWrapper{
-			Type: typ,
-			Data: part,
+			Type:                   typ,
+			Data:                   part,
+			ActivatedDeferredTools: activatedDeferredTools,
 		}
 	}
 	return json.Marshal(wrappedParts)
 }
 
-func unmarshalParts(data []byte) ([]ContentPart, error) {
+func unmarshalParts(data []byte) ([]ContentPart, []string, error) {
 	temp := []json.RawMessage{}
 
 	if err := json.Unmarshal(data, &temp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	parts := make([]ContentPart, 0)
+	var activatedDeferredTools []string
 
 	for _, rawPart := range temp {
 		var wrapper struct {
-			Type partType        `json:"type"`
-			Data json.RawMessage `json:"data"`
+			Type                   partType        `json:"type"`
+			Data                   json.RawMessage `json:"data"`
+			ActivatedDeferredTools []string        `json:"activated_deferred_tools,omitempty"`
 		}
 
 		if err := json.Unmarshal(rawPart, &wrapper); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if len(activatedDeferredTools) == 0 {
+			activatedDeferredTools = normalizeDeferredToolNames(wrapper.ActivatedDeferredTools)
 		}
 
 		switch wrapper.Type {
 		case reasoningType:
 			part := ReasoningContent{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		case textType:
 			part := TextContent{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		case imageURLType:
 			part := ImageURLContent{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		case binaryType:
 			part := BinaryContent{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		case toolCallType:
 			part := ToolCall{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		case toolResultType:
 			part := ToolResult{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		case finishType:
 			part := Finish{}
 			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parts = append(parts, part)
 		default:
-			return nil, fmt.Errorf("unknown part type: %s", wrapper.Type)
+			return nil, nil, fmt.Errorf("unknown part type: %s", wrapper.Type)
 		}
 	}
 
-	return parts, nil
+	return parts, activatedDeferredTools, nil
 }

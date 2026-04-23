@@ -152,7 +152,7 @@ func (u Usage) PromptTokens() int64 {
 }
 
 func (u Usage) CompletionTokens() int64 {
-	return u.OutputTokens + u.ReasoningTokens
+	return u.OutputTokens
 }
 
 func (u Usage) TotalTokens() int64 {
@@ -164,16 +164,17 @@ func (u Usage) HasDisplayOutput() bool {
 }
 
 type Message struct {
-	ID               string
-	Role             MessageRole
-	SessionID        string
-	Parts            []ContentPart
-	Usage            Usage
-	Model            string
-	Provider         string
-	CreatedAt        int64
-	UpdatedAt        int64
-	IsSummaryMessage bool
+	ID                     string
+	Role                   MessageRole
+	SessionID              string
+	Parts                  []ContentPart
+	Usage                  Usage
+	Model                  string
+	Provider               string
+	CreatedAt              int64
+	UpdatedAt              int64
+	IsSummaryMessage       bool
+	ActivatedDeferredTools []string
 }
 
 func (m *Message) Content() TextContent {
@@ -457,6 +458,7 @@ func (m *Message) Clone() Message {
 	clone := *m
 	clone.Parts = make([]ContentPart, len(m.Parts))
 	copy(clone.Parts, m.Parts)
+	clone.ActivatedDeferredTools = append([]string(nil), m.ActivatedDeferredTools...)
 	return clone
 }
 

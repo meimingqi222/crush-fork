@@ -119,6 +119,10 @@ func TestToolSearchSelectActivatesDeferredTools(t *testing.T) {
 	require.Equal(t, "view", results[1].Name)
 	require.True(t, results[1].Selected)
 	require.False(t, results[1].Activated)
+
+	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: "select:sourcegraph,missing,view"})
+	require.Equal(t, []string{"sourcegraph"}, response.ActivatedDeferredTools)
+	require.Contains(t, response.ActivationHint, "sourcegraph")
 }
 
 func TestToolSearchSelectSkipsUnexposedNonDeferredTools(t *testing.T) {

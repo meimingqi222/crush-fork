@@ -111,7 +111,19 @@ type ToolRenderOpts struct {
 // IsPending returns true if the tool call is still pending (not finished and
 // not canceled).
 func (o *ToolRenderOpts) IsPending() bool {
-	return o.IsSpinning && !o.IsCanceled()
+	if o.IsSpinning && !o.IsCanceled() {
+		return true
+	}
+	// Defensive: when loading-state UI is suppressed (e.g. when viewing a
+	// subagent detail whose activity is tracked by a child SessionAgent the
+	// parent coordinator does not consult), a tool call whose Input has not
+	// finished streaming would otherwise fall through to renderers that
+	// json.Unmarshal an empty string and flash "Invalid parameters". Treat
+	// unfinished, empty-input tool calls as pending in that case.
+	if !o.ToolCall.Finished && strings.TrimSpace(o.ToolCall.Input) == "" && !o.IsCanceled() {
+		return true
+	}
+	return false
 }
 
 // IsCanceled returns true if the tool status is canceled.

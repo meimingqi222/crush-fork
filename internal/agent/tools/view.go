@@ -57,6 +57,10 @@ type ViewResponseMetadata struct {
 	ResourceType        ViewResourceType `json:"resource_type,omitempty"`
 	ResourceName        string           `json:"resource_name,omitempty"`
 	ResourceDescription string           `json:"resource_description,omitempty"`
+	RecoveredBy         string           `json:"recovered_by,omitempty"`
+	RecoveryAction      string           `json:"recovery_action,omitempty"`
+	FallbackTool        string           `json:"fallback_tool,omitempty"`
+	FallbackToolQuery   string           `json:"fallback_tool_query,omitempty"`
 }
 
 const (
@@ -139,30 +143,16 @@ func NewViewTool(
 			fileInfo, err := os.Stat(filePath)
 			if err != nil {
 				if os.IsNotExist(err) {
-					// Try to offer suggestions for similarly named files
-					dir := filepath.Dir(filePath)
-					base := filepath.Base(filePath)
-
-					dirEntries, dirErr := os.ReadDir(dir)
-					if dirErr == nil {
-						var suggestions []string
-						for _, entry := range dirEntries {
-							if strings.Contains(strings.ToLower(entry.Name()), strings.ToLower(base)) ||
-								strings.Contains(strings.ToLower(base), strings.ToLower(entry.Name())) {
-								suggestions = append(suggestions, filepath.Join(dir, entry.Name()))
-								if len(suggestions) >= 3 {
-									break
-								}
-							}
-						}
-
-						if len(suggestions) > 0 {
-							return fantasy.NewTextErrorResponse(fmt.Sprintf("File not found: %s\n\nDid you mean one of these?\n%s",
-								filePath, strings.Join(suggestions, "\n"))), nil
-						}
+					suggestions := findViewSuggestions(filePath)
+					message := fmt.Sprintf("File not found: %s", filePath)
+					if len(suggestions) > 0 {
+						message += fmt.Sprintf("\n\nDid you mean one of these?\n%s", strings.Join(suggestions, "\n"))
 					}
-
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("File not found: %s", filePath)), nil
+					message += "\n\nUse glob to find the exact path before calling view again."
+					return fantasy.WithResponseMetadata(
+						fantasy.NewTextErrorResponse(message),
+						newMissingViewMetadata(filePath),
+					), nil
 				}
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error accessing file: %v", err)), nil
 			}
@@ -260,6 +250,36 @@ func NewViewTool(
 				meta,
 			), nil
 		})
+}
+
+func newMissingViewMetadata(filePath string) ViewResponseMetadata {
+	return ViewResponseMetadata{
+		FilePath:          filePath,
+		RecoveredBy:       "file_not_found_recovery",
+		RecoveryAction:    fmt.Sprintf("File %q was not found. Use glob to discover the correct path, then call view again with that exact path.", filePath),
+		FallbackTool:      GlobToolName,
+		FallbackToolQuery: filepath.Base(filePath),
+	}
+}
+
+func findViewSuggestions(filePath string) []string {
+	dir := filepath.Dir(filePath)
+	base := filepath.Base(filePath)
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var suggestions []string
+	for _, entry := range dirEntries {
+		if strings.Contains(strings.ToLower(entry.Name()), strings.ToLower(base)) ||
+			strings.Contains(strings.ToLower(base), strings.ToLower(entry.Name())) {
+			suggestions = append(suggestions, filepath.Join(dir, entry.Name()))
+			if len(suggestions) >= 3 {
+				break
+			}
+		}
+	}
+	return suggestions
 }
 
 func shouldWaitForDiagnostics(wait *bool) bool {

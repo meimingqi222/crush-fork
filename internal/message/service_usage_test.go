@@ -45,5 +45,34 @@ func TestServiceUpdatePersistsUsage(t *testing.T) {
 	reloaded, err := messages.Get(t.Context(), msg.ID)
 	require.NoError(t, err)
 	require.Equal(t, msg.Usage, reloaded.Usage)
-	require.Equal(t, int64(10400), reloaded.Usage.TotalTokens())
+	require.Equal(t, int64(10320), reloaded.Usage.TotalTokens())
+}
+
+func TestServicePersistsActivatedDeferredTools(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(context.Background(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	messages := NewService(q)
+
+	sess, err := sessions.Create(t.Context(), "deferred-tools")
+	require.NoError(t, err)
+
+	msg, err := messages.Create(t.Context(), sess.ID, CreateMessageParams{
+		Role:                   Assistant,
+		Parts:                  []ContentPart{TextContent{Text: "hello"}},
+		ActivatedDeferredTools: []string{"sourcegraph", "mcp_acemcp_search_context"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"sourcegraph", "mcp_acemcp_search_context"}, msg.ActivatedDeferredTools)
+
+	reloaded, err := messages.Get(t.Context(), msg.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"sourcegraph", "mcp_acemcp_search_context"}, reloaded.ActivatedDeferredTools)
 }

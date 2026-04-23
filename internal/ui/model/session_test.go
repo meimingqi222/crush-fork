@@ -74,6 +74,15 @@ func TestSessionRoleLabelUsesSubagentType(t *testing.T) {
 	require.Equal(t, "Fetch", ui.sessionRoleLabel(fetchChild))
 }
 
+func TestSessionRoleLabelReturnsEmptyWhenCacheMissing(t *testing.T) {
+	t.Parallel()
+
+	ui, _, generalChild, _, _, _ := testSessionUI(t)
+	// Intentionally leave childSessionInfoCache nil to simulate a cache miss.
+	require.Empty(t, ui.childSessionInfoCache)
+	require.Equal(t, "", ui.sessionRoleLabel(generalChild))
+}
+
 func TestOpenSelectedChildSessionUsesCurrentSelection(t *testing.T) {
 	t.Parallel()
 

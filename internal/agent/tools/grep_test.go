@@ -42,11 +42,11 @@ func TestGlobIncludePattern(t *testing.T) {
 
 	// Create test files with different extensions
 	for path, content := range map[string]string{
-		"file1.go":         "package main",
-		"file2.js":         "console.log",
-		"file3.ts":         "const x",
-		"src/app.go":       "package main",
-		"src/lib.js":       "export default",
+		"file1.go":   "package main",
+		"file2.js":   "console.log",
+		"file3.ts":   "const x",
+		"src/app.go": "package main",
+		"src/lib.js": "export default",
 	} {
 		fullPath := filepath.Join(tempDir, path)
 		require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0o755))
@@ -75,6 +75,32 @@ func TestGlobIncludePattern(t *testing.T) {
 			require.Len(t, matches, tt.want, "include pattern %q should match %d files", tt.include, tt.want)
 		})
 	}
+}
+
+func TestRunGrepSearchFallsBackToLiteralTextOnInvalidRegex(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "sample.txt"), []byte("[]fantasy.AgentTool\n"), 0o644))
+
+	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "[]fantasy.AgentTool"}, tempDir, 100)
+	require.NoError(t, err)
+	require.Len(t, result.matches, 1)
+	require.True(t, result.metadata.LiteralText)
+	require.Equal(t, "literal_text_fallback", result.metadata.RecoveredBy)
+	require.Equal(t, []string{"literal_text"}, result.metadata.RecoveredParameters)
+}
+
+func TestRunGrepSearchReportsMissingSearchPath(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	missingDir := filepath.Join(tempDir, "missing")
+
+	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "hello"}, missingDir, 100)
+	require.NoError(t, err)
+	require.Empty(t, result.matches)
+	require.Equal(t, "path_validation", result.metadata.RecoveredBy)
+	require.Equal(t, ViewToolName, result.metadata.FallbackTool)
+	require.Equal(t, []string{"path"}, result.metadata.RecoveredParameters)
 }
 
 func TestGrepWithIgnoreFiles(t *testing.T) {

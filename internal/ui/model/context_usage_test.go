@@ -53,12 +53,12 @@ func TestLatestAssistantUsageSnapshotUsesLastAssistantUsageModel(t *testing.T) {
 		},
 	}, cfg, selected)
 	require.True(t, ok)
-	require.Equal(t, int64(1395), snapshot.TotalTokens)
-	require.Equal(t, int64(75), snapshot.OutputTokens)
+	require.Equal(t, int64(1365), snapshot.TotalTokens)
+	require.Equal(t, int64(45), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 }
 
-func TestLatestAssistantUsageSnapshotSkipsZeroOutputMessagesAndUsesSelectedContextWindow(t *testing.T) {
+func TestLatestAssistantUsageSnapshotReturnsLastAssistantWithPositiveTokens(t *testing.T) {
 	t.Parallel()
 
 	selected := &agent.Model{
@@ -97,48 +97,12 @@ func TestLatestAssistantUsageSnapshotSkipsZeroOutputMessagesAndUsesSelectedConte
 		},
 	}, nil, selected)
 	require.True(t, ok)
-	require.Equal(t, int64(660), snapshot.TotalTokens)
-	require.Equal(t, int64(60), snapshot.OutputTokens)
-	require.Equal(t, int64(200_000), snapshot.ContextWindow)
-}
-
-func TestApplySessionUsageFloorUsesHigherSessionUsage(t *testing.T) {
-	t.Parallel()
-
-	snapshot := applySessionUsageFloor(contextUsageSnapshot{
-		TotalTokens:   295,
-		OutputTokens:  45,
-		ContextWindow: 200_000,
-	}, &session.Session{
-		LastPromptTokens:     18_500,
-		LastCompletionTokens: 200,
-	})
-
-	require.Equal(t, int64(18_700), snapshot.TotalTokens)
-	require.Equal(t, int64(200), snapshot.OutputTokens)
-	require.Equal(t, int64(200_000), snapshot.ContextWindow)
-}
-
-func TestApplySessionUsageFloorSkipsProvisionalSnapshot(t *testing.T) {
-	t.Parallel()
-
-	snapshot := applySessionUsageFloor(contextUsageSnapshot{
-		TotalTokens:   1_200,
-		OutputTokens:  0,
-		ContextWindow: 200_000,
-		Provisional:   true,
-	}, &session.Session{
-		LastPromptTokens:     18_500,
-		LastCompletionTokens: 200,
-	})
-
-	require.Equal(t, int64(1_200), snapshot.TotalTokens)
+	require.Equal(t, int64(85), snapshot.TotalTokens)
 	require.Equal(t, int64(0), snapshot.OutputTokens)
-	require.Equal(t, int64(200_000), snapshot.ContextWindow)
-	require.True(t, snapshot.Provisional)
+	require.Equal(t, int64(150_000), snapshot.ContextWindow)
 }
 
-func TestResolveContextUsageSnapshotPrefersFinishedAssistantOverSmallerProvisional(t *testing.T) {
+func TestResolveContextUsageSnapshotReturnsProvisionalDirectly(t *testing.T) {
 	t.Parallel()
 
 	selected := &agent.Model{
@@ -181,22 +145,69 @@ func TestResolveContextUsageSnapshotPrefersFinishedAssistantOverSmallerProvision
 	}, nil, selected)
 
 	require.Equal(t, int64(110_600), snapshot.TotalTokens)
-	require.Equal(t, int64(600), snapshot.OutputTokens)
+	require.Equal(t, int64(20), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
-	require.False(t, snapshot.Provisional)
+	require.True(t, snapshot.Provisional)
 	require.False(t, snapshot.Summary)
+}
+
+func TestDisplayContextWindowUsesMinOfWindowAndMaxPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	window := agent.EffectiveContextWindow(catwalk.Model{
+		ContextWindow: 400_000,
+		Options: catwalk.ModelOptions{
+			ProviderOptions: map[string]any{"max_prompt_tokens": 150_000},
+		},
+	})
+
+	require.Equal(t, int64(150_000), window)
 }
 
 func TestDisplayContextWindowFallsBackToMaxPromptTokens(t *testing.T) {
 	t.Parallel()
 
-	window := displayContextWindow(agent.Model{
-		CatwalkCfg: catwalk.Model{
-			Options: catwalk.ModelOptions{
-				ProviderOptions: map[string]any{"max_prompt_tokens": 150_000},
-			},
+	window := agent.EffectiveContextWindow(catwalk.Model{
+		Options: catwalk.ModelOptions{
+			ProviderOptions: map[string]any{"max_prompt_tokens": 150_000},
 		},
 	})
 
 	require.Equal(t, int64(150_000), window)
+}
+
+func TestResolveContextUsageSnapshotFloorsProvisionalToSessionHistory(t *testing.T) {
+	t.Parallel()
+
+	selected := &agent.Model{
+		CatwalkCfg: catwalk.Model{ContextWindow: 200_000},
+		ModelCfg:   config.SelectedModel{Provider: "anthropic", Model: "claude-sonnet-4-5"},
+	}
+
+	// Only a provisional assistant message exists and no finished message
+	// is available. The snapshot must be floored to the session's last
+	// confirmed totals so the display does not drop below known history.
+	snapshot := resolveContextUsageSnapshot(&session.Session{
+		LastPromptTokens:     50_000,
+		LastCompletionTokens: 500,
+	}, []message.Message{
+		{
+			ID:       "current",
+			Role:     message.Assistant,
+			Provider: "anthropic",
+			Model:    "claude-sonnet-4-5",
+			Usage: message.Usage{
+				InputTokens:      0,
+				OutputTokens:     1_200,
+				CacheReadTokens:  0,
+				CacheWriteTokens: 0,
+			},
+		},
+	}, nil, selected)
+
+	require.Equal(t, int64(50_500), snapshot.TotalTokens)
+	require.Equal(t, int64(1_200), snapshot.OutputTokens)
+	require.Equal(t, int64(200_000), snapshot.ContextWindow)
+	require.True(t, snapshot.Provisional)
+	require.False(t, snapshot.Summary)
 }

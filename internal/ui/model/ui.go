@@ -4242,7 +4242,11 @@ func (m *UI) randomizePlaceholders() {
 func (m *UI) renderSubagentBanner(width int) string {
 	t := m.com.Styles
 	roleLabel := strings.ToUpper(m.sessionRoleLabel(m.session))
-	tag := t.Tool.SubagentBanner.Render("SUBAGENT " + roleLabel)
+	bannerText := "SUBAGENT"
+	if roleLabel != "" {
+		bannerText += " " + roleLabel
+	}
+	tag := t.Tool.SubagentBanner.Render(bannerText)
 	hint := t.Muted.Render("  read-only  [ back")
 	line := lipgloss.JoinHorizontal(lipgloss.Left, tag, hint)
 	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(line)

@@ -32,12 +32,13 @@ type ToolSearchResult struct {
 }
 
 type ToolSearchResponse struct {
-	Query             string             `json:"query"`
-	Matches           []string           `json:"matches"`
-	Results           []ToolSearchResult `json:"results,omitempty"`
-	TotalDeferred     int                `json:"total_deferred_tools"`
-	PendingMCPServers []string           `json:"pending_mcp_servers,omitempty"`
-	ActivationHint    string             `json:"activation_hint,omitempty"`
+	Query                  string             `json:"query"`
+	Matches                []string           `json:"matches"`
+	Results                []ToolSearchResult `json:"results,omitempty"`
+	TotalDeferred          int                `json:"total_deferred_tools"`
+	PendingMCPServers      []string           `json:"pending_mcp_servers,omitempty"`
+	ActivationHint         string             `json:"activation_hint,omitempty"`
+	ActivatedDeferredTools []string           `json:"activated_deferred_tools,omitempty"`
 }
 
 type (
@@ -626,6 +627,7 @@ func buildToolSearchResponse(query string, results []ToolSearchResult, totalDefe
 		response.PendingMCPServers = append([]string(nil), pendingMCP...)
 	}
 	if len(activatedTools) > 0 {
+		response.ActivatedDeferredTools = append([]string(nil), activatedTools...)
 		response.ActivationHint = fmt.Sprintf("Deferred tools activated: %s. These tools are now available for use in your NEXT response.", strings.Join(activatedTools, ", "))
 	}
 	return response

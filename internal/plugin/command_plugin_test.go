@@ -123,6 +123,26 @@ func TestCommandPluginHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestCommandPluginMessageRoundTripPreservesActivatedDeferredTools(t *testing.T) {
+	t.Parallel()
+
+	messages, err := fromCommandPluginMessages([]commandPluginMessage{{
+		ID:                     "assistant-1",
+		Role:                   string(message.Assistant),
+		SessionID:              "session-1",
+		ActivatedDeferredTools: []string{"sourcegraph", "mcp_acemcp_search_context"},
+		Parts: []commandPluginPart{{
+			Type: commandPluginPartText,
+			Data: mustJSON(message.TextContent{Text: "hello"}),
+		}},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"sourcegraph", "mcp_acemcp_search_context"}, messages[0].ActivatedDeferredTools)
+
+	roundTrip := toCommandPluginMessages(messages)
+	require.Equal(t, []string{"sourcegraph", "mcp_acemcp_search_context"}, roundTrip[0].ActivatedDeferredTools)
+}
+
 func TestBoundedBuffer(t *testing.T) {
 	t.Run("within_limit", func(t *testing.T) {
 		buf := newBoundedBuffer(8)

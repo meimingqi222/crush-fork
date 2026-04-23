@@ -397,7 +397,7 @@ func (m *UI) sessionRoleLabel(sess *session.Session) string {
 		}
 	}
 
-	return "Subagent"
+	return ""
 }
 
 func titleCase(value string) string {

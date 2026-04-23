@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -172,25 +173,27 @@ func (a *sessionAgent) collapseSessionMessages(_ context.Context, _ string, _ Mo
 
 func (a *sessionAgent) reactiveCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
 	return a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID: sessionID,
-		Agent:     "session",
-		Model:     model,
-		Provider:  providerCtx,
-		Purpose:   plugin.ChatTransformPurposeReactiveCompact,
-		Messages:  msgs,
-		Message:   message.Message{SessionID: sessionID, Role: message.User},
+		SessionID:             sessionID,
+		Agent:                 "session",
+		Model:                 model,
+		Provider:              providerCtx,
+		Purpose:               plugin.ChatTransformPurposeReactiveCompact,
+		Messages:              msgs,
+		Message:               message.Message{SessionID: sessionID, Role: message.User},
+		EstimatedPromptTokens: a.estimatePromptForMessages(msgs),
 	})
 }
 
 func (a *sessionAgent) autoCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
 	result, err := a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID: sessionID,
-		Agent:     "session",
-		Model:     model,
-		Provider:  providerCtx,
-		Purpose:   plugin.ChatTransformPurposeAutoCompact,
-		Messages:  msgs,
-		Message:   message.Message{SessionID: sessionID, Role: message.User},
+		SessionID:             sessionID,
+		Agent:                 "session",
+		Model:                 model,
+		Provider:              providerCtx,
+		Purpose:               plugin.ChatTransformPurposeAutoCompact,
+		Messages:              msgs,
+		Message:               message.Message{SessionID: sessionID, Role: message.User},
+		EstimatedPromptTokens: a.estimatePromptForMessages(msgs),
 	})
 	if err != nil {
 		return nil, err
@@ -200,13 +203,14 @@ func (a *sessionAgent) autoCompactSessionMessages(ctx context.Context, sessionID
 
 func (a *sessionAgent) postCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
 	return a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID: sessionID,
-		Agent:     "session",
-		Model:     model,
-		Provider:  providerCtx,
-		Purpose:   plugin.ChatTransformPurposePostCompact,
-		Messages:  msgs,
-		Message:   message.Message{SessionID: sessionID, Role: message.User},
+		SessionID:             sessionID,
+		Agent:                 "session",
+		Model:                 model,
+		Provider:              providerCtx,
+		Purpose:               plugin.ChatTransformPurposePostCompact,
+		Messages:              msgs,
+		Message:               message.Message{SessionID: sessionID, Role: message.User},
+		EstimatedPromptTokens: a.estimatePromptForMessages(msgs),
 	})
 }
 
@@ -305,6 +309,11 @@ type Model struct {
 	ModelCfg   config.SelectedModel
 }
 
+type deferredToolRuntime interface {
+	activateDeferredToolsForSession(sessionID string, toolNames []string) []string
+	activatedDeferredToolsForSession(sessionID string) map[string]struct{}
+}
+
 type sessionAgent struct {
 	largeModel         *csync.Value[Model]
 	smallModel         *csync.Value[Model]
@@ -315,6 +324,7 @@ type sessionAgent struct {
 	agentFactory       func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
 
 	refreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
+	deferredToolRuntime  deferredToolRuntime
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
@@ -353,6 +363,7 @@ type SessionAgentOptions struct {
 	WorkingDir           string
 	AgentFactory         func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
 	RefreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
+	DeferredToolRuntime  deferredToolRuntime
 	IsSubAgent           bool
 	DisableAutoSummarize bool
 	DisableAutoMemory    bool
@@ -414,6 +425,7 @@ func NewSessionAgent(
 		workingDir:           opts.WorkingDir,
 		agentFactory:         agentFactory,
 		refreshCallConfig:    opts.RefreshCallConfig,
+		deferredToolRuntime:  opts.DeferredToolRuntime,
 		isSubAgent:           opts.IsSubAgent,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
@@ -876,6 +888,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						Provider:       providerCtx,
 						Purpose:        requestPurpose,
 						RequestPurpose: requestPurpose,
+						Usage:          usageSnapshotFromMessages(internalMsgs, originalTokens),
 					}, plugin.ChatMessagesTransformOutput{Messages: internalMsgs})
 					if transformErr != nil {
 						slog.Warn("Failed to transform messages in PrepareStep", "error", transformErr, "session_id", call.SessionID)
@@ -981,10 +994,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 				var assistantMsg message.Message
 				assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
-					Role:     message.Assistant,
-					Parts:    []message.ContentPart{},
-					Model:    largeModel.ModelCfg.Model,
-					Provider: largeModel.ModelCfg.Provider,
+					Role:                   message.Assistant,
+					Parts:                  []message.ContentPart{},
+					Model:                  largeModel.ModelCfg.Model,
+					Provider:               largeModel.ModelCfg.Provider,
+					ActivatedDeferredTools: a.currentActivatedDeferredTools(call.SessionID),
 				})
 				if err != nil {
 					return callContext, prepared, err
@@ -1108,6 +1122,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			},
 			OnToolResult: func(result fantasy.ToolResultContent) error {
 				toolResult := a.convertToToolResult(result)
+				if toolResult.Name == tools.ToolSearchToolName {
+					if state, ok := deferredToolStateFromToolSearchResult(toolResult.Content); ok {
+						toolResult = toolResult.WithDeferredToolState(state)
+					}
+				}
 				toolResult, additionalMedia := a.extractAdditionalMCPMedia(toolResult)
 				if runtimeConfig != nil {
 					toolResult = a.applyToolResultReview(genCtx, currentAssistant.SessionID, toolResult, runtimeConfig.PermissionMode)
@@ -1117,10 +1136,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					toolResult = truncatedResult
 				}
 				toolMsg, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
-					Role: message.Tool,
-					Parts: []message.ContentPart{
-						toolResult,
-					},
+					Role:                   message.Tool,
+					Parts:                  []message.ContentPart{toolResult},
+					ActivatedDeferredTools: a.currentActivatedDeferredTools(currentAssistant.SessionID),
 				})
 				if createMsgErr != nil {
 					return createMsgErr
@@ -1135,8 +1153,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						parts = append(parts, mediaPart)
 					}
 					additionalMsg, additionalErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
-						Role:  message.User,
-						Parts: parts,
+						Role:                   message.User,
+						Parts:                  parts,
+						ActivatedDeferredTools: a.currentActivatedDeferredTools(currentAssistant.SessionID),
 					})
 					if additionalErr != nil {
 						return additionalErr
@@ -2143,14 +2162,15 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	transformedMsgs, err := a.transformSessionMessages(ctx, chatRequestStateInput{
-		SessionID:      sessionID,
-		Agent:          "session",
-		Model:          largeModel,
-		Provider:       providerCtx,
-		Purpose:        compactingPurpose,
-		RequestPurpose: compactingPurpose,
-		Messages:       msgs,
-		Message:        message.Message{SessionID: sessionID, Role: message.User},
+		SessionID:             sessionID,
+		Agent:                 "session",
+		Model:                 largeModel,
+		Provider:              providerCtx,
+		Purpose:               compactingPurpose,
+		RequestPurpose:        compactingPurpose,
+		Messages:              msgs,
+		Message:               message.Message{SessionID: sessionID, Role: message.User},
+		EstimatedPromptTokens: a.estimatePromptForMessages(msgs),
 	})
 	if err != nil {
 		// If the plugin transform fails (e.g., morph-compact API error or
@@ -2162,11 +2182,13 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		transformedMsgs = msgs
 	}
 	aiMsgs, _ := a.preparePrompt(transformedMsgs)
+	compactUsage := usageSnapshotFromMessages(msgs, a.estimatePromptForMessages(msgs))
 	compacting, err := a.plugins().TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
 		SessionID: sessionID,
 		Agent:     "session",
 		Model:     agentModelInfo(largeModel),
 		Purpose:   compactingPurpose,
+		Usage:     compactUsage,
 	}, plugin.SessionCompactingOutput{})
 	if err != nil {
 		return err
@@ -2528,9 +2550,111 @@ func trimCanceledPromptBranches(msgs []message.Message) []message.Message {
 	return filtered
 }
 
+func (a *sessionAgent) restoreDeferredToolProtocolState(sessionID string, msgs []message.Message) []string {
+	if a == nil || a.deferredToolRuntime == nil || sessionID == "" {
+		return nil
+	}
+	activated := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, m := range msgs {
+		for _, name := range m.ActivatedDeferredTools {
+			trimmed := strings.TrimSpace(name)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			activated = append(activated, trimmed)
+		}
+		if m.Role != message.Tool {
+			continue
+		}
+		for _, tr := range m.ToolResults() {
+			if state, ok := tr.DeferredToolState(); ok {
+				for _, name := range state.ActivatedTools {
+					trimmed := strings.TrimSpace(name)
+					if trimmed == "" {
+						continue
+					}
+					if _, ok := seen[trimmed]; ok {
+						continue
+					}
+					seen[trimmed] = struct{}{}
+					activated = append(activated, trimmed)
+				}
+			}
+		}
+	}
+	if len(activated) == 0 {
+		return nil
+	}
+	return a.deferredToolRuntime.activateDeferredToolsForSession(sessionID, activated)
+}
+
+func (a *sessionAgent) currentActivatedDeferredTools(sessionID string) []string {
+	if a == nil || a.deferredToolRuntime == nil || sessionID == "" {
+		return nil
+	}
+	set := a.deferredToolRuntime.activatedDeferredToolsForSession(sessionID)
+	if len(set) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(set))
+	for name := range set {
+		result = append(result, name)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func (a *sessionAgent) deferredToolProtocolState(sessionID string, recoveredTool string, recoveryAction string) message.ToolResultDeferredToolState {
+	return message.ToolResultDeferredToolState{
+		ActivatedTools: a.currentActivatedDeferredTools(sessionID),
+		RecoveredTool:  strings.TrimSpace(recoveredTool),
+		RecoveryAction: strings.TrimSpace(recoveryAction),
+	}
+}
+
+func protocolStateFromRecoveryMetadata(recoveredToolFallback string, metadata string) message.ToolResultDeferredToolState {
+	var payload struct {
+		RecoveredBy       string   `json:"recovered_by"`
+		RecoveryAction    string   `json:"recovery_action"`
+		FallbackTool      string   `json:"fallback_tool"`
+		FallbackToolQuery string   `json:"fallback_tool_query"`
+		RecoveredParams   []string `json:"recovered_parameters"`
+		Tool              string   `json:"tool"`
+	}
+	if strings.TrimSpace(metadata) == "" {
+		return message.ToolResultDeferredToolState{}
+	}
+	if err := json.Unmarshal([]byte(metadata), &payload); err != nil {
+		return message.ToolResultDeferredToolState{}
+	}
+	if strings.TrimSpace(payload.RecoveredBy) == "" && strings.TrimSpace(payload.RecoveryAction) == "" {
+		return message.ToolResultDeferredToolState{}
+	}
+	recoveredTool := strings.TrimSpace(payload.Tool)
+	if recoveredTool == "" {
+		recoveredTool = strings.TrimSpace(recoveredToolFallback)
+	}
+	return message.ToolResultDeferredToolState{
+		ActivatedTools:      nil,
+		RecoveredTool:       recoveredTool,
+		RecoveryAction:      strings.TrimSpace(payload.RecoveryAction),
+		FallbackTool:        strings.TrimSpace(payload.FallbackTool),
+		FallbackToolQuery:   strings.TrimSpace(payload.FallbackToolQuery),
+		RecoveredParameters: payload.RecoveredParams,
+	}
+}
+
 func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 	msgs = trimCanceledPromptBranches(msgs)
+	if len(msgs) > 0 {
+		a.restoreDeferredToolProtocolState(msgs[0].SessionID, msgs)
+	}
 
 	// Build sets of tool-call and tool-result IDs so we can reconcile stale
 	// history before it reaches the provider.
@@ -3126,50 +3250,11 @@ func usageProvider(model Model) string {
 }
 
 func effectiveContextWindow(model Model) int64 {
-	window := int64(model.CatwalkCfg.ContextWindow)
-	options := model.CatwalkCfg.Options.ProviderOptions
-	if options == nil {
-		return window
-	}
-	value, ok := options["max_prompt_tokens"]
-	if !ok {
-		return window
-	}
-	maxPromptTokens, ok := int64ProviderOptionValue(value)
-	if !ok || maxPromptTokens <= 0 {
-		return window
-	}
-	if window <= 0 {
-		return maxPromptTokens
-	}
-	return min(window, maxPromptTokens)
+	return EffectiveContextWindow(model.CatwalkCfg)
 }
 
 func int64ProviderOptionValue(value any) (int64, bool) {
-	switch v := value.(type) {
-	case int:
-		return int64(v), true
-	case int64:
-		return v, true
-	case int32:
-		return int64(v), true
-	case float64:
-		return int64(v), true
-	case float32:
-		return int64(v), true
-	case json.Number:
-		parsed, err := v.Int64()
-		if err == nil {
-			return parsed, true
-		}
-		f, ferr := v.Float64()
-		if ferr != nil {
-			return 0, false
-		}
-		return int64(f), true
-	default:
-		return 0, false
-	}
+	return contextWindowInt64(value)
 }
 
 func isAnthropicStyleUsageProvider(providerID string) bool {
@@ -3791,6 +3876,66 @@ func (a *sessionAgent) Model() Model {
 }
 
 // convertToToolResult converts a fantasy tool result to a message tool result.
+func deferredToolStateFromToolSearchResult(content string) (message.ToolResultDeferredToolState, bool) {
+	var payload tools.ToolSearchResponse
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return message.ToolResultDeferredToolState{}, false
+	}
+	state := message.ToolResultDeferredToolState{
+		ActivatedTools: payload.ActivatedDeferredTools,
+		RecoveryAction: strings.TrimSpace(payload.ActivationHint),
+	}
+	if state.ActivatedTools == nil && strings.TrimSpace(state.RecoveryAction) == "" {
+		return message.ToolResultDeferredToolState{}, false
+	}
+	return state, true
+}
+
+func deferredToolStateFromToolError(content string, metadata string) (message.ToolResultDeferredToolState, bool) {
+	for _, candidate := range []string{metadata, content} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		var payload struct {
+			Error               string   `json:"error"`
+			RecoveredBy         string   `json:"recovered_by"`
+			Tool                string   `json:"tool"`
+			RecoveryAction      string   `json:"recovery_action"`
+			SuggestedToolSearch string   `json:"suggested_tool_search"`
+			FallbackTool        string   `json:"fallback_tool"`
+			FallbackToolQuery   string   `json:"fallback_tool_query"`
+			RecoveredParameters []string `json:"recovered_parameters"`
+		}
+		if err := json.Unmarshal([]byte(candidate), &payload); err != nil {
+			continue
+		}
+		if payload.Error != "deferred_tool_not_activated" && payload.RecoveredBy != "deferred_tool_not_activated" {
+			continue
+		}
+		state := message.ToolResultDeferredToolState{
+			RecoveredTool:       strings.TrimSpace(payload.Tool),
+			RecoveryAction:      strings.TrimSpace(payload.RecoveryAction),
+			SuggestedTool:       strings.TrimSpace(payload.Tool),
+			SuggestedToolQuery:  strings.TrimSpace(payload.SuggestedToolSearch),
+			FallbackTool:        strings.TrimSpace(payload.FallbackTool),
+			FallbackToolQuery:   strings.TrimSpace(payload.FallbackToolQuery),
+			RecoveredParameters: payload.RecoveredParameters,
+		}
+		if state.SuggestedToolQuery == "" {
+			state.SuggestedToolQuery = state.FallbackToolQuery
+		}
+		if state.SuggestedTool == "" {
+			state.SuggestedTool = state.FallbackTool
+		}
+		if state.RecoveredTool == "" && state.RecoveryAction == "" && state.FallbackTool == "" {
+			continue
+		}
+		return state, true
+	}
+	return message.ToolResultDeferredToolState{}, false
+}
+
 func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) message.ToolResult {
 	baseResult := message.ToolResult{
 		ToolCallID: result.ToolCallID,
@@ -3802,11 +3947,17 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 	case fantasy.ToolResultContentTypeText:
 		if r, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](result.Result); ok {
 			baseResult.Content = r.Text
+			if state := protocolStateFromRecoveryMetadata("", baseResult.Metadata); state.RecoveryAction != "" || state.FallbackTool != "" || state.FallbackToolQuery != "" || len(state.RecoveredParameters) > 0 {
+				baseResult = baseResult.WithDeferredToolState(state)
+			}
 		}
 	case fantasy.ToolResultContentTypeError:
 		if r, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](result.Result); ok {
 			baseResult.Content = r.Error.Error()
 			baseResult.IsError = true
+			if state, ok := deferredToolStateFromToolError(baseResult.Content, baseResult.Metadata); ok {
+				baseResult = baseResult.WithDeferredToolState(state)
+			}
 		}
 	case fantasy.ToolResultContentTypeMedia:
 		if r, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](result.Result); ok {

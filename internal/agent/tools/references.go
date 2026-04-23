@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -48,10 +47,11 @@ func NewReferencesTool(lspManager *lsp.Manager) fantasy.AgentTool {
 
 			workingDir := cmp.Or(params.Path, ".")
 
-			matches, _, err := searchFiles(ctx, regexp.QuoteMeta(params.Symbol), workingDir, "", 100)
+			result, err := runGrepSearch(ctx, GrepParams{Pattern: params.Symbol, LiteralText: true}, workingDir, 100)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to search for symbol: %s", err)), nil
 			}
+			matches := result.matches
 
 			if len(matches) == 0 {
 				return fantasy.NewTextResponse(fmt.Sprintf("Symbol '%s' not found", params.Symbol)), nil

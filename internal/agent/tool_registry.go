@@ -51,8 +51,26 @@ func (r *toolRegistry) Resolve(name string) (agenttools.RegistryEntry, bool) {
 }
 
 func (r *toolRegistry) Invoke(ctx context.Context, name string, args map[string]any, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	invoker, ok := r.invokers[strings.TrimSpace(name)]
+	trimmedName := strings.TrimSpace(name)
+	invoker, ok := r.invokers[trimmedName]
 	if !ok {
+		entry, exists := r.entries[trimmedName]
+		if exists && entry.Metadata.Exposure == agenttools.ToolExposureDeferred {
+			payload, err := json.Marshal(map[string]any{
+				"recovered_by":         "deferred_tool_not_activated",
+				"recovery_action":      "Run tool_search with query \"select:" + trimmedName + "\" before using this tool.",
+				"fallback_tool":        "tool_search",
+				"fallback_tool_query":  "select:" + trimmedName,
+				"recovered_parameters": []string{"query"},
+				"tool":                 trimmedName,
+			})
+			if err != nil {
+				return fantasy.NewTextErrorResponse("tool is deferred and not activated; run tool_search before using it"), nil
+			}
+			resp := fantasy.NewTextErrorResponse(string(payload))
+			resp.Metadata = string(payload)
+			return resp, nil
+		}
 		return fantasy.NewTextErrorResponse("tool is not invokable from registry"), nil
 	}
 	return invoker(ctx, args, call)

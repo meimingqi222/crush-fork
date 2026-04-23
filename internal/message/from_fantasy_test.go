@@ -248,10 +248,11 @@ func TestFromFantasyMessages_RoundTripPreservesMetadata(t *testing.T) {
 					Input: `{"command": "ls"}`,
 				},
 			},
-			Model:     "gpt-5.4",
-			Provider:  "openai",
-			CreatedAt: 120,
-			UpdatedAt: 130,
+			Model:                  "gpt-5.4",
+			Provider:               "openai",
+			CreatedAt:              120,
+			UpdatedAt:              130,
+			ActivatedDeferredTools: []string{"sourcegraph", "mcp_acemcp_search_context"},
 		},
 		{
 			ID:        "tool-1",
@@ -287,6 +288,7 @@ func TestFromFantasyMessages_RoundTripPreservesMetadata(t *testing.T) {
 		require.Equal(t, original[i].CreatedAt, result[i].CreatedAt)
 		require.Equal(t, original[i].UpdatedAt, result[i].UpdatedAt)
 		require.Equal(t, original[i].IsSummaryMessage, result[i].IsSummaryMessage)
+		require.Equal(t, original[i].ActivatedDeferredTools, result[i].ActivatedDeferredTools)
 	}
 }
 

@@ -20,23 +20,11 @@ const (
 )
 
 func effectivePromptInputLimit(model Model) (int64, bool) {
-	window := int64(model.CatwalkCfg.ContextWindow)
-	options := model.CatwalkCfg.Options.ProviderOptions
-	if options == nil {
+	limits := ContextWindowLimitsFor(model.CatwalkCfg)
+	if limits.MaxPromptTokens <= 0 {
 		return 0, false
 	}
-	value, ok := options["max_prompt_tokens"]
-	if !ok {
-		return 0, false
-	}
-	maxPromptTokens, ok := int64ProviderOptionValue(value)
-	if !ok || maxPromptTokens <= 0 {
-		return 0, false
-	}
-	if window <= 0 {
-		return maxPromptTokens, true
-	}
-	return min(window, maxPromptTokens), true
+	return limits.EffectiveContextWindow, true
 }
 
 func effectiveAutoSummarizeMaxOutputTokens(model Model, maxOutputTokens int64) int64 {

@@ -75,8 +75,21 @@ type grepMatch struct {
 }
 
 type GrepResponseMetadata struct {
-	NumberOfMatches int  `json:"number_of_matches"`
-	Truncated       bool `json:"truncated"`
+	NumberOfMatches     int      `json:"number_of_matches"`
+	Truncated           bool     `json:"truncated"`
+	Pattern             string   `json:"pattern,omitempty"`
+	LiteralText         bool     `json:"literal_text,omitempty"`
+	RecoveredBy         string   `json:"recovered_by,omitempty"`
+	RecoveryAction      string   `json:"recovery_action,omitempty"`
+	FallbackTool        string   `json:"fallback_tool,omitempty"`
+	FallbackToolQuery   string   `json:"fallback_tool_query,omitempty"`
+	RecoveredParameters []string `json:"recovered_parameters,omitempty"`
+}
+
+type grepExecutionResult struct {
+	matches   []grepMatch
+	truncated bool
+	metadata  GrepResponseMetadata
 }
 
 const (
@@ -108,11 +121,6 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("pattern is required"), nil
 			}
 
-			searchPattern := params.Pattern
-			if params.LiteralText {
-				searchPattern = escapeRegexPattern(params.Pattern)
-			}
-
 			// Use session-specific working directory from context if available.
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 			searchPath := cmp.Or(params.Path, effectiveWorkingDir)
@@ -120,19 +128,19 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 			searchCtx, cancel := context.WithTimeout(ctx, config.GetTimeout())
 			defer cancel()
 
-			matches, truncated, err := searchFiles(searchCtx, searchPattern, searchPath, params.Include, 100)
+			result, err := runGrepSearch(searchCtx, params, searchPath, 100)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error searching files: %v", err)), nil
 			}
 
 			var output strings.Builder
-			if len(matches) == 0 {
+			if len(result.matches) == 0 {
 				output.WriteString("No files found")
 			} else {
-				fmt.Fprintf(&output, "Found %d matches\n", len(matches))
+				fmt.Fprintf(&output, "Found %d matches\n", len(result.matches))
 
 				currentFile := ""
-				for _, match := range matches {
+				for _, match := range result.matches {
 					if currentFile != match.path {
 						if currentFile != "" {
 							output.WriteString("\n")
@@ -155,27 +163,45 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 					}
 				}
 
-				if truncated {
+				if result.truncated {
 					output.WriteString("\n(Results are truncated. Consider using a more specific path or pattern.)")
 				}
 			}
 
+			result.metadata.NumberOfMatches = len(result.matches)
+			result.metadata.Truncated = result.truncated
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextResponse(output.String()),
-				GrepResponseMetadata{
-					NumberOfMatches: len(matches),
-					Truncated:       truncated,
-				},
+				result.metadata,
 			), nil
 		})
 }
 
-func searchFiles(ctx context.Context, pattern, rootPath, include string, limit int) ([]grepMatch, bool, error) {
-	matches, err := searchWithRipgrep(ctx, pattern, rootPath, include)
+func runGrepSearch(ctx context.Context, params GrepParams, rootPath string, limit int) (grepExecutionResult, error) {
+	metadata := GrepResponseMetadata{
+		Pattern:     params.Pattern,
+		LiteralText: params.LiteralText,
+	}
+	resolvedRootPath, err := validateGrepPath(rootPath)
 	if err != nil {
-		matches, err = searchFilesWithRegex(pattern, rootPath, include)
+		metadata.RecoveredBy = "path_validation"
+		metadata.RecoveryAction = err.Error()
+		metadata.FallbackTool = ViewToolName
+		metadata.FallbackToolQuery = cmp.Or(params.Path, rootPath)
+		metadata.RecoveredParameters = []string{"path"}
+		return grepExecutionResult{metadata: metadata}, nil
+	}
+
+	searchPattern := params.Pattern
+	if params.LiteralText {
+		searchPattern = escapeRegexPattern(params.Pattern)
+	}
+
+	matches, err := searchWithRipgrep(ctx, searchPattern, resolvedRootPath, params.Include)
+	if err != nil {
+		matches, metadata, err = recoverGrepMatches(ctx, params, resolvedRootPath, metadata)
 		if err != nil {
-			return nil, false, err
+			return grepExecutionResult{}, err
 		}
 	}
 
@@ -188,18 +214,67 @@ func searchFiles(ctx context.Context, pattern, rootPath, include string, limit i
 		matches = matches[:limit]
 	}
 
-	return matches, truncated, nil
+	return grepExecutionResult{matches: matches, truncated: truncated, metadata: metadata}, nil
 }
 
-func searchWithRipgrep(ctx context.Context, pattern, path, include string) ([]grepMatch, error) {
-	cmd := getRgSearchCmd(ctx, pattern, path, include)
+func validateGrepPath(rootPath string) (string, error) {
+	resolved := filepath.Clean(rootPath)
+	info, err := os.Stat(resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("Search path does not exist: %s. Verify the path first or use glob/view to inspect nearby files.", resolved)
+		}
+		return "", fmt.Errorf("error accessing search path: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("Search path is not a directory: %s. Use view for files or provide a directory path.", resolved)
+	}
+	return resolved, nil
+}
+
+func recoverGrepMatches(ctx context.Context, params GrepParams, rootPath string, metadata GrepResponseMetadata) ([]grepMatch, GrepResponseMetadata, error) {
+	matches, regexErr := searchFilesWithRegex(params.Pattern, rootPath, params.Include)
+	if regexErr == nil {
+		return matches, metadata, nil
+	}
+	if params.LiteralText || !looksLikeRegexSyntaxError(regexErr) {
+		return nil, metadata, regexErr
+	}
+
+	literalPattern := escapeRegexPattern(params.Pattern)
+	matches, err := searchWithRipgrep(ctx, literalPattern, rootPath, params.Include)
+	if err != nil {
+		matches, err = searchFilesWithRegex(literalPattern, rootPath, params.Include)
+		if err != nil {
+			return nil, metadata, regexErr
+		}
+	}
+	metadata.LiteralText = true
+	metadata.RecoveredBy = "literal_text_fallback"
+	metadata.RecoveryAction = fmt.Sprintf("Pattern %q was not valid regex syntax. Treated it as literal text instead.", params.Pattern)
+	metadata.FallbackTool = GrepToolName
+	metadata.FallbackToolQuery = params.Pattern
+	metadata.RecoveredParameters = []string{"literal_text"}
+	return matches, metadata, nil
+}
+
+func looksLikeRegexSyntaxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid regex pattern") || strings.Contains(msg, "error parsing regexp") || strings.Contains(msg, "missing closing") || strings.Contains(msg, "unexpected")
+}
+
+func searchWithRipgrep(ctx context.Context, pattern, rootPath, include string) ([]grepMatch, error) {
+	cmd := getRgSearchCmd(ctx, pattern, rootPath, include)
 	if cmd == nil {
 		return nil, fmt.Errorf("ripgrep not found in $PATH")
 	}
 
 	// Only add ignore files if they exist
 	for _, ignoreFile := range []string{".gitignore", ".crushignore"} {
-		ignorePath := filepath.Join(path, ignoreFile)
+		ignorePath := filepath.Join(rootPath, ignoreFile)
 		if _, err := os.Stat(ignorePath); err == nil {
 			cmd.Args = append(cmd.Args, "--ignore-file", ignorePath)
 		}

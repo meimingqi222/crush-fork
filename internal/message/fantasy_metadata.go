@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/json"
+	"strings"
 
 	"charm.land/fantasy"
 )
@@ -19,34 +20,38 @@ func init() {
 }
 
 type fantasyMessageMetadata struct {
-	ID               string `json:"id,omitempty"`
-	SessionID        string `json:"session_id,omitempty"`
-	Model            string `json:"model,omitempty"`
-	Provider         string `json:"provider,omitempty"`
-	CreatedAt        int64  `json:"created_at,omitempty"`
-	UpdatedAt        int64  `json:"updated_at,omitempty"`
-	IsSummaryMessage bool   `json:"is_summary_message,omitempty"`
+	ID                     string   `json:"id,omitempty"`
+	SessionID              string   `json:"session_id,omitempty"`
+	Model                  string   `json:"model,omitempty"`
+	Provider               string   `json:"provider,omitempty"`
+	CreatedAt              int64    `json:"created_at,omitempty"`
+	UpdatedAt              int64    `json:"updated_at,omitempty"`
+	IsSummaryMessage       bool     `json:"is_summary_message,omitempty"`
+	ActivatedDeferredTools []string `json:"activated_deferred_tools,omitempty"`
 }
 
 func newFantasyMessageMetadata(msg Message) *fantasyMessageMetadata {
+	activatedDeferredTools := normalizeDeferredToolNames(msg.ActivatedDeferredTools)
 	if msg.ID == "" &&
 		msg.SessionID == "" &&
 		msg.Model == "" &&
 		msg.Provider == "" &&
 		msg.CreatedAt == 0 &&
 		msg.UpdatedAt == 0 &&
-		!msg.IsSummaryMessage {
+		!msg.IsSummaryMessage &&
+		len(activatedDeferredTools) == 0 {
 		return nil
 	}
 
 	return &fantasyMessageMetadata{
-		ID:               msg.ID,
-		SessionID:        msg.SessionID,
-		Model:            msg.Model,
-		Provider:         msg.Provider,
-		CreatedAt:        msg.CreatedAt,
-		UpdatedAt:        msg.UpdatedAt,
-		IsSummaryMessage: msg.IsSummaryMessage,
+		ID:                     msg.ID,
+		SessionID:              msg.SessionID,
+		Model:                  msg.Model,
+		Provider:               msg.Provider,
+		CreatedAt:              msg.CreatedAt,
+		UpdatedAt:              msg.UpdatedAt,
+		IsSummaryMessage:       msg.IsSummaryMessage,
+		ActivatedDeferredTools: activatedDeferredTools,
 	}
 }
 
@@ -64,6 +69,7 @@ func (m *fantasyMessageMetadata) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = fantasyMessageMetadata(p)
+	m.ActivatedDeferredTools = normalizeDeferredToolNames(m.ActivatedDeferredTools)
 	return nil
 }
 
@@ -79,6 +85,7 @@ func applyFantasyMessageMetadata(msg *Message, metadata *fantasyMessageMetadata)
 	msg.CreatedAt = metadata.CreatedAt
 	msg.UpdatedAt = metadata.UpdatedAt
 	msg.IsSummaryMessage = metadata.IsSummaryMessage
+	msg.ActivatedDeferredTools = normalizeDeferredToolNames(metadata.ActivatedDeferredTools)
 }
 
 func fantasyMessageMetadataFromMessage(msg fantasy.Message) (*fantasyMessageMetadata, bool) {
@@ -149,4 +156,27 @@ func mergeFantasyProviderOptions(opts fantasy.ProviderOptions, metadata *fantasy
 	}
 	merged[fantasyMessageMetadataType] = metadata
 	return merged
+}
+
+func normalizeDeferredToolNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	normalized := make([]string, 0, len(names))
+	for _, name := range names {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }

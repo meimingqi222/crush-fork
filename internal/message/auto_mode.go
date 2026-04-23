@@ -74,7 +74,30 @@ func (r ToolResultReducer) isEmpty() bool {
 const (
 	toolResultSubtaskResultMetadataKey = "subtask_result"
 	toolResultReducerMetadataKey       = "reducer"
+	toolResultDeferredToolStateKey     = "deferred_tool_state"
 )
+
+type ToolResultDeferredToolState struct {
+	ActivatedTools      []string `json:"activated_tools,omitempty"`
+	RecoveredTool       string   `json:"recovered_tool,omitempty"`
+	RecoveryAction      string   `json:"recovery_action,omitempty"`
+	SuggestedTool       string   `json:"suggested_tool,omitempty"`
+	SuggestedToolQuery  string   `json:"suggested_tool_query,omitempty"`
+	FallbackTool        string   `json:"fallback_tool,omitempty"`
+	FallbackToolQuery   string   `json:"fallback_tool_query,omitempty"`
+	RecoveredParameters []string `json:"recovered_parameters,omitempty"`
+}
+
+func (s ToolResultDeferredToolState) isEmpty() bool {
+	return len(normalizeDeferredToolNames(s.ActivatedTools)) == 0 &&
+		strings.TrimSpace(s.RecoveredTool) == "" &&
+		strings.TrimSpace(s.RecoveryAction) == "" &&
+		strings.TrimSpace(s.SuggestedTool) == "" &&
+		strings.TrimSpace(s.SuggestedToolQuery) == "" &&
+		strings.TrimSpace(s.FallbackTool) == "" &&
+		strings.TrimSpace(s.FallbackToolQuery) == "" &&
+		len(s.RecoveredParameters) == 0
+}
 
 func ParseToolResultAutoReview(metadata string) (ToolResultAutoReview, bool) {
 	var review ToolResultAutoReview
@@ -256,6 +279,64 @@ func (t ToolResult) WithReducer(reducer ToolResultReducer) ToolResult {
 		payload = map[string]json.RawMessage{}
 	}
 	payload[toolResultReducerMetadataKey] = reducerData
+
+	merged, err := json.Marshal(payload)
+	if err != nil {
+		return t
+	}
+	t.Metadata = string(merged)
+	return t
+}
+
+func ParseToolResultDeferredToolState(metadata string) (ToolResultDeferredToolState, bool) {
+	var state ToolResultDeferredToolState
+	if strings.TrimSpace(metadata) == "" {
+		return state, false
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(metadata), &payload); err != nil {
+		return ToolResultDeferredToolState{}, false
+	}
+
+	raw, ok := payload[toolResultDeferredToolStateKey]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return ToolResultDeferredToolState{}, false
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return ToolResultDeferredToolState{}, false
+	}
+	state.ActivatedTools = normalizeDeferredToolNames(state.ActivatedTools)
+	if state.isEmpty() {
+		return ToolResultDeferredToolState{}, false
+	}
+	return state, true
+}
+
+func (t ToolResult) DeferredToolState() (ToolResultDeferredToolState, bool) {
+	return ParseToolResultDeferredToolState(t.Metadata)
+}
+
+func (t ToolResult) WithDeferredToolState(state ToolResultDeferredToolState) ToolResult {
+	state.ActivatedTools = normalizeDeferredToolNames(state.ActivatedTools)
+	if state.isEmpty() {
+		return t
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		return t
+	}
+
+	var payload map[string]json.RawMessage
+	if strings.TrimSpace(t.Metadata) != "" {
+		if err := json.Unmarshal([]byte(t.Metadata), &payload); err != nil {
+			payload = nil
+		}
+	}
+	if payload == nil {
+		payload = map[string]json.RawMessage{}
+	}
+	payload[toolResultDeferredToolStateKey] = stateData
 
 	merged, err := json.Marshal(payload)
 	if err != nil {

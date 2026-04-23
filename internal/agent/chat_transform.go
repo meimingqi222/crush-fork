@@ -27,18 +27,19 @@ type chatRequestState struct {
 }
 
 type chatRequestStateInput struct {
-	SessionID      string
-	Agent          string
-	Model          Model
-	Provider       plugin.ProviderContext
-	Purpose        plugin.ChatTransformPurpose
-	RequestPurpose plugin.ChatTransformPurpose
-	Messages       []message.Message
-	Message        message.Message
-	Attachments    []message.Attachment
-	SystemPrompt   string
-	PromptPrefix   string
-	PermissionMode session.PermissionMode
+	SessionID             string
+	Agent                 string
+	Model                 Model
+	Provider              plugin.ProviderContext
+	Purpose               plugin.ChatTransformPurpose
+	RequestPurpose        plugin.ChatTransformPurpose
+	Messages              []message.Message
+	Message               message.Message
+	Attachments           []message.Attachment
+	SystemPrompt          string
+	PromptPrefix          string
+	PermissionMode        session.PermissionMode
+	EstimatedPromptTokens int64
 }
 
 func withSessionCompactingPurpose(ctx context.Context, purpose plugin.ChatTransformPurpose) context.Context {
@@ -65,11 +66,44 @@ func cloneMessages(msgs []message.Message) []message.Message {
 }
 
 func agentModelInfo(model Model) plugin.ModelInfo {
+	limits := ContextWindowLimitsFor(model.CatwalkCfg)
 	return plugin.ModelInfo{
-		ProviderID:    model.ModelCfg.Provider,
-		ModelID:       model.ModelCfg.Model,
-		ContextWindow: int64(model.CatwalkCfg.ContextWindow),
+		ProviderID:             model.ModelCfg.Provider,
+		ModelID:                model.ModelCfg.Model,
+		ContextWindow:          limits.ContextWindow,
+		MaxPromptTokens:        limits.MaxPromptTokens,
+		EffectiveContextWindow: limits.EffectiveContextWindow,
 	}
+}
+
+// usageSnapshotFromMessages builds a UsageSnapshot from the most recent
+// assistant message that has reported usage, augmented with estimatedPromptTokens.
+func usageSnapshotFromMessages(msgs []message.Message, estimatedPromptTokens int64) plugin.UsageSnapshot {
+	snap := plugin.UsageSnapshot{EstimatedPromptTokens: estimatedPromptTokens}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role != message.Assistant {
+			continue
+		}
+		if !m.Usage.HasDisplayOutput() {
+			continue
+		}
+		snap.PromptTokens = m.Usage.PromptTokens()
+		snap.CompletionTokens = m.Usage.CompletionTokens()
+		snap.ReasoningTokens = m.Usage.ReasoningTokens
+		snap.CacheReadTokens = m.Usage.CacheReadTokens
+		snap.CacheWriteTokens = m.Usage.CacheWriteTokens
+		snap.TotalTokens = m.Usage.TotalTokens()
+		break
+	}
+	// ContextUsed is max(last_total_tokens, estimated_prompt_tokens) to give
+	// plugins a single number to compare to EffectiveContextWindow.
+	ctxUsed := snap.TotalTokens
+	if estimatedPromptTokens > ctxUsed {
+		ctxUsed = estimatedPromptTokens
+	}
+	snap.ContextUsed = ctxUsed
+	return snap
 }
 
 func defaultProviderContext() plugin.ProviderContext {
@@ -109,6 +143,14 @@ func estimatePromptStateTokens(history []fantasy.Message, systemPrompt, promptPr
 		estimateStringTokens(promptPrefix)
 }
 
+// estimatePromptForMessages is a lightweight estimate used at call sites that
+// only have session messages (not a full fantasy history). It mirrors the
+// heuristic used by buildChatRequestState without tools/system prompt.
+func (a *sessionAgent) estimatePromptForMessages(msgs []message.Message) int64 {
+	prepared, _ := a.preparePrompt(msgs)
+	return estimatePromptTokens(prepared, nil)
+}
+
 func (a *sessionAgent) transformSessionMessages(ctx context.Context, input chatRequestStateInput) ([]message.Message, error) {
 	transformed, err := a.plugins().TriggerChatMessagesTransform(ctx, plugin.ChatMessagesTransformInput{
 		SessionID:      input.SessionID,
@@ -118,6 +160,7 @@ func (a *sessionAgent) transformSessionMessages(ctx context.Context, input chatR
 		Purpose:        input.Purpose,
 		RequestPurpose: input.RequestPurpose,
 		Message:        input.Message,
+		Usage:          usageSnapshotFromMessages(input.Messages, input.EstimatedPromptTokens),
 	}, plugin.ChatMessagesTransformOutput{Messages: cloneMessages(input.Messages)})
 	if err != nil {
 		return nil, err
@@ -134,6 +177,7 @@ func (a *sessionAgent) transformSystemPrompt(ctx context.Context, input chatRequ
 		Purpose:        input.Purpose,
 		RequestPurpose: input.RequestPurpose,
 		Message:        input.Message,
+		Usage:          usageSnapshotFromMessages(input.Messages, input.EstimatedPromptTokens),
 	}, plugin.ChatSystemTransformOutput{System: []string{input.SystemPrompt}, Prefix: input.PromptPrefix})
 	if err != nil {
 		return "", "", err
@@ -145,6 +189,9 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 	start := time.Now()
 	originalHistory, _ := a.preparePrompt(input.Messages)
 	originalEstimate := estimatePromptStateTokens(originalHistory, input.SystemPrompt, input.PromptPrefix)
+	if input.EstimatedPromptTokens <= 0 {
+		input.EstimatedPromptTokens = originalEstimate
+	}
 	transformedMessages, err := a.transformSessionMessages(ctx, input)
 	if err != nil {
 		return chatRequestState{}, err

@@ -168,6 +168,7 @@ type ChatMessagesTransformInput struct {
 	// they would use for the real request without losing the original phase.
 	RequestPurpose ChatTransformPurpose
 	Message        message.Message
+	Usage          UsageSnapshot
 }
 
 // ChatMessagesTransformOutput is the output for ChatMessagesTransform hook.
@@ -184,6 +185,7 @@ type ChatSystemTransformInput struct {
 	Purpose        ChatTransformPurpose
 	RequestPurpose ChatTransformPurpose
 	Message        message.Message
+	Usage          UsageSnapshot
 }
 
 // ChatSystemTransformOutput is the output for ChatSystemTransform hook.
@@ -198,6 +200,7 @@ type SessionCompactingInput struct {
 	Agent     string
 	Model     ModelInfo
 	Purpose   ChatTransformPurpose
+	Usage     UsageSnapshot
 }
 
 // SessionCompactingOutput is the output for SessionCompacting hook.
@@ -249,9 +252,27 @@ type ShellEnvInput struct {
 
 // ModelInfo contains model identification information.
 type ModelInfo struct {
-	ProviderID    string
-	ModelID       string
-	ContextWindow int64 `json:"context_window,omitempty"`
+	ProviderID             string
+	ModelID                string
+	ContextWindow          int64 `json:"context_window,omitempty"`
+	MaxPromptTokens        int64 `json:"max_prompt_tokens,omitempty"`
+	EffectiveContextWindow int64 `json:"effective_context_window,omitempty"`
+}
+
+// UsageSnapshot is an approximate token accounting for the current hook invocation.
+// All fields are optional; 0 means "unknown". PromptTokens is the best available
+// pre-request estimate (may exceed ContextUsed when no real usage reply has been
+// observed). ContextUsed is what should be compared against
+// ModelInfo.EffectiveContextWindow for compaction-threshold decisions.
+type UsageSnapshot struct {
+	PromptTokens          int64 `json:"prompt_tokens,omitempty"`
+	CompletionTokens      int64 `json:"completion_tokens,omitempty"`
+	ReasoningTokens       int64 `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens       int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens      int64 `json:"cache_write_tokens,omitempty"`
+	TotalTokens           int64 `json:"total_tokens,omitempty"`
+	EstimatedPromptTokens int64 `json:"estimated_prompt_tokens,omitempty"`
+	ContextUsed           int64 `json:"context_used,omitempty"`
 }
 
 // ProviderContext contains provider context information.

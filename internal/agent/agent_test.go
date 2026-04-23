@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -734,7 +735,7 @@ func TestNormalizedMessageUsage_PreservesCacheBreakdown(t *testing.T) {
 		CacheWriteTokens: 300,
 	}, normalized)
 	require.Equal(t, int64(1320), normalized.PromptTokens())
-	require.Equal(t, int64(1385), normalized.TotalTokens())
+	require.Equal(t, int64(1365), normalized.TotalTokens())
 }
 
 func TestNormalizedMessageUsage_PrefersEstimatedPromptFloor(t *testing.T) {
@@ -1803,6 +1804,46 @@ type textualToolProtocolTestAgent struct {
 	alwaysText bool
 }
 
+type deferredToolRuntimeStub struct {
+	mu        sync.Mutex
+	activated map[string]map[string]struct{}
+}
+
+func (s *deferredToolRuntimeStub) activateDeferredToolsForSession(sessionID string, toolNames []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activated == nil {
+		s.activated = make(map[string]map[string]struct{})
+	}
+	set := s.activated[sessionID]
+	if set == nil {
+		set = make(map[string]struct{})
+		s.activated[sessionID] = set
+	}
+	activated := make([]string, 0, len(toolNames))
+	for _, name := range toolNames {
+		if _, ok := set[name]; !ok {
+			set[name] = struct{}{}
+		}
+		activated = append(activated, name)
+	}
+	return activated
+}
+
+func (s *deferredToolRuntimeStub) activatedDeferredToolsForSession(sessionID string) map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := s.activated[sessionID]
+	if len(set) == 0 {
+		return nil
+	}
+	clone := make(map[string]struct{}, len(set))
+	for name := range set {
+		clone[name] = struct{}{}
+	}
+	return clone
+}
+
 func (a *textualToolProtocolTestAgent) Generate(context.Context, fantasy.AgentCall) (*fantasy.AgentResult, error) {
 	return &fantasy.AgentResult{}, nil
 }
@@ -1861,6 +1902,46 @@ func (a *textualToolProtocolTestAgent) callCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls
+}
+
+func TestConvertToToolResult_PreservesGenericRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	metadata := `{"recovered_by":"literal_text_fallback","recovery_action":"Pattern was not valid regex syntax. Treated it as literal text instead.","fallback_tool":"grep","fallback_tool_query":"[]fantasy.AgentTool","recovered_parameters":["literal_text"]}`
+	result := (&sessionAgent{}).convertToToolResult(fantasy.ToolResultContent{
+		ToolCallID:     "call-1",
+		ToolName:       agenttools.GrepToolName,
+		ClientMetadata: metadata,
+		Result:         fantasy.ToolResultOutputContentText{Text: "Found 1 matches"},
+	})
+
+	require.False(t, result.IsError)
+	state, ok := result.DeferredToolState()
+	require.True(t, ok)
+	require.Equal(t, "Pattern was not valid regex syntax. Treated it as literal text instead.", state.RecoveryAction)
+	require.Equal(t, "grep", state.FallbackTool)
+	require.Equal(t, "[]fantasy.AgentTool", state.FallbackToolQuery)
+	require.Equal(t, []string{"literal_text"}, state.RecoveredParameters)
+}
+
+func TestConvertToToolResult_PreservesDeferredToolErrorRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	payload := `{"recovered_by":"deferred_tool_not_activated","tool":"sourcegraph","recovery_action":"Run tool_search with query \"select:sourcegraph\" before using this tool.","fallback_tool":"tool_search","fallback_tool_query":"select:sourcegraph","recovered_parameters":["query"]}`
+	result := (&sessionAgent{}).convertToToolResult(fantasy.ToolResultContent{
+		ToolCallID:     "call-1",
+		ToolName:       "sourcegraph",
+		ClientMetadata: payload,
+		Result:         fantasy.ToolResultOutputContentError{Error: errors.New("not activated")},
+	})
+
+	require.True(t, result.IsError)
+	state, ok := result.DeferredToolState()
+	require.True(t, ok)
+	require.Equal(t, "sourcegraph", state.RecoveredTool)
+	require.Equal(t, "tool_search", state.FallbackTool)
+	require.Equal(t, "select:sourcegraph", state.FallbackToolQuery)
+	require.Equal(t, []string{"query"}, state.RecoveredParameters)
 }
 
 func TestRunRecoversFromTextualToolCallProtocol(t *testing.T) {
@@ -1971,6 +2052,33 @@ func TestRunFailsAfterRepeatedTextualToolCallProtocol(t *testing.T) {
 		}
 	}
 	require.Equal(t, 0, assistantCount)
+}
+
+func TestPreparePromptRestoresDeferredToolActivationsFromHistory(t *testing.T) {
+	t.Parallel()
+
+	runtime := &deferredToolRuntimeStub{}
+	a := &sessionAgent{deferredToolRuntime: runtime}
+	_, _ = a.preparePrompt([]message.Message{
+		{
+			SessionID:              "session-1",
+			Role:                   message.Assistant,
+			ActivatedDeferredTools: []string{"sourcegraph"},
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "done"},
+			},
+		},
+		{
+			SessionID: "session-1",
+			Role:      message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{ToolCallID: "call-1", Name: agenttools.ToolSearchToolName, Content: "{}"}.WithDeferredToolState(message.ToolResultDeferredToolState{ActivatedTools: []string{"mcp_acemcp_search_context"}}),
+			},
+		},
+	})
+
+	activated := a.currentActivatedDeferredTools("session-1")
+	require.Equal(t, []string{"mcp_acemcp_search_context", "sourcegraph"}, activated)
 }
 
 func TestPreparePromptDropsOrphanedToolResultsWithoutMatchingToolCall(t *testing.T) {

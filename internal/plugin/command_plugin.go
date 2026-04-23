@@ -80,15 +80,16 @@ type commandPluginResponse struct {
 }
 
 type commandPluginMessage struct {
-	ID               string              `json:"id,omitempty"`
-	Role             string              `json:"role"`
-	SessionID        string              `json:"session_id,omitempty"`
-	Model            string              `json:"model,omitempty"`
-	Provider         string              `json:"provider,omitempty"`
-	CreatedAt        int64               `json:"created_at,omitempty"`
-	UpdatedAt        int64               `json:"updated_at,omitempty"`
-	IsSummaryMessage bool                `json:"is_summary_message,omitempty"`
-	Parts            []commandPluginPart `json:"parts,omitempty"`
+	ID                     string              `json:"id,omitempty"`
+	Role                   string              `json:"role"`
+	SessionID              string              `json:"session_id,omitempty"`
+	Model                  string              `json:"model,omitempty"`
+	Provider               string              `json:"provider,omitempty"`
+	CreatedAt              int64               `json:"created_at,omitempty"`
+	UpdatedAt              int64               `json:"updated_at,omitempty"`
+	IsSummaryMessage       bool                `json:"is_summary_message,omitempty"`
+	ActivatedDeferredTools []string            `json:"activated_deferred_tools,omitempty"`
+	Parts                  []commandPluginPart `json:"parts,omitempty"`
 }
 
 type commandPluginPart struct {
@@ -104,6 +105,7 @@ type commandPluginChatMessagesTransformInput struct {
 	Purpose        string               `json:"purpose"`
 	RequestPurpose string               `json:"request_purpose,omitempty"`
 	Message        commandPluginMessage `json:"message"`
+	Usage          UsageSnapshot        `json:"usage,omitempty"`
 }
 
 type commandPluginChatMessagesTransformOutput struct {
@@ -118,6 +120,7 @@ type commandPluginChatSystemTransformInput struct {
 	Purpose        string               `json:"purpose"`
 	RequestPurpose string               `json:"request_purpose,omitempty"`
 	Message        commandPluginMessage `json:"message"`
+	Usage          UsageSnapshot        `json:"usage,omitempty"`
 }
 
 type commandPluginChatSystemTransformOutput struct {
@@ -126,10 +129,11 @@ type commandPluginChatSystemTransformOutput struct {
 }
 
 type commandPluginSessionCompactingInput struct {
-	SessionID string    `json:"session_id"`
-	Agent     string    `json:"agent"`
-	Model     ModelInfo `json:"model"`
-	Purpose   string    `json:"purpose"`
+	SessionID string        `json:"session_id"`
+	Agent     string        `json:"agent"`
+	Model     ModelInfo     `json:"model"`
+	Purpose   string        `json:"purpose"`
+	Usage     UsageSnapshot `json:"usage,omitempty"`
 }
 
 type commandPluginSessionCompactingOutput struct {
@@ -160,6 +164,7 @@ func (chatMessagesTransformHookDescriptor) attach(hooks *Hooks, invoker commandP
 					Purpose:        string(input.Purpose),
 					RequestPurpose: string(input.RequestPurpose),
 					Message:        toCommandPluginMessage(input.Message),
+					Usage:          input.Usage,
 				}
 			},
 			func(output *ChatMessagesTransformOutput) commandPluginChatMessagesTransformOutput {
@@ -205,6 +210,7 @@ func (chatSystemTransformHookDescriptor) attach(hooks *Hooks, invoker commandPlu
 					Purpose:        string(input.Purpose),
 					RequestPurpose: string(input.RequestPurpose),
 					Message:        toCommandPluginMessage(input.Message),
+					Usage:          input.Usage,
 				}
 			},
 			func(output *ChatSystemTransformOutput) commandPluginChatSystemTransformOutput {
@@ -246,6 +252,7 @@ func (sessionCompactingHookDescriptor) attach(hooks *Hooks, invoker commandPlugi
 					Agent:     input.Agent,
 					Model:     input.Model,
 					Purpose:   string(input.Purpose),
+					Usage:     input.Usage,
 				}
 			},
 			func(output *SessionCompactingOutput) commandPluginSessionCompactingOutput {
@@ -876,15 +883,16 @@ func toCommandPluginMessage(msg message.Message) commandPluginMessage {
 		}
 	}
 	return commandPluginMessage{
-		ID:               msg.ID,
-		Role:             string(msg.Role),
-		SessionID:        msg.SessionID,
-		Model:            msg.Model,
-		Provider:         msg.Provider,
-		CreatedAt:        msg.CreatedAt,
-		UpdatedAt:        msg.UpdatedAt,
-		IsSummaryMessage: msg.IsSummaryMessage,
-		Parts:            parts,
+		ID:                     msg.ID,
+		Role:                   string(msg.Role),
+		SessionID:              msg.SessionID,
+		Model:                  msg.Model,
+		Provider:               msg.Provider,
+		CreatedAt:              msg.CreatedAt,
+		UpdatedAt:              msg.UpdatedAt,
+		IsSummaryMessage:       msg.IsSummaryMessage,
+		ActivatedDeferredTools: append([]string(nil), msg.ActivatedDeferredTools...),
+		Parts:                  parts,
 	}
 }
 
@@ -923,15 +931,16 @@ func fromCommandPluginMessages(messages []commandPluginMessage) ([]message.Messa
 			return nil, err
 		}
 		converted[i] = message.Message{
-			ID:               messages[i].ID,
-			Role:             message.MessageRole(messages[i].Role),
-			SessionID:        messages[i].SessionID,
-			Parts:            parts,
-			Model:            messages[i].Model,
-			Provider:         messages[i].Provider,
-			CreatedAt:        messages[i].CreatedAt,
-			UpdatedAt:        messages[i].UpdatedAt,
-			IsSummaryMessage: messages[i].IsSummaryMessage,
+			ID:                     messages[i].ID,
+			Role:                   message.MessageRole(messages[i].Role),
+			SessionID:              messages[i].SessionID,
+			Parts:                  parts,
+			Model:                  messages[i].Model,
+			Provider:               messages[i].Provider,
+			CreatedAt:              messages[i].CreatedAt,
+			UpdatedAt:              messages[i].UpdatedAt,
+			IsSummaryMessage:       messages[i].IsSummaryMessage,
+			ActivatedDeferredTools: append([]string(nil), messages[i].ActivatedDeferredTools...),
 		}
 	}
 	return converted, nil

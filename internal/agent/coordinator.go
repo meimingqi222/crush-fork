@@ -752,6 +752,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		RefreshCallConfig: func(callCtx context.Context) (sessionAgentRuntimeConfig, error) {
 			return c.refreshSessionAgentRuntimeConfig(callCtx, result, prompt, agent, isSubAgent)
 		},
+		DeferredToolRuntime:  c,
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
 		DisableAutoMemory:    c.cfg.Config().Options.DisableAutoMemory,
@@ -1559,6 +1560,13 @@ func (c *coordinator) activateDeferredTools(ctx context.Context, toolNames []str
 	if sessionID == "" || len(toolNames) == 0 {
 		return nil
 	}
+	return c.activateDeferredToolsForSession(sessionID, toolNames)
+}
+
+func (c *coordinator) activateDeferredToolsForSession(sessionID string, toolNames []string) []string {
+	if sessionID == "" || len(toolNames) == 0 {
+		return nil
+	}
 
 	c.deferredMu.Lock()
 	defer c.deferredMu.Unlock()
@@ -1587,6 +1595,13 @@ func (c *coordinator) activateDeferredTools(ctx context.Context, toolNames []str
 
 func (c *coordinator) activatedDeferredTools(ctx context.Context) map[string]struct{} {
 	sessionID := tools.GetSessionFromContext(ctx)
+	if sessionID == "" {
+		return nil
+	}
+	return c.activatedDeferredToolsForSession(sessionID)
+}
+
+func (c *coordinator) activatedDeferredToolsForSession(sessionID string) map[string]struct{} {
 	if sessionID == "" {
 		return nil
 	}

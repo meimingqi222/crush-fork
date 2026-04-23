@@ -37,6 +37,11 @@ const compactClient = morphApiKey
 // 内存状态存储
 const stateMap = new Map();
 const lastCompactTime = new Map();
+// Usage level (tokens or chars) at the time of the last successful compaction.
+// Used as a floor so we don't immediately re-compact the same session when
+// state is cleared (e.g. by session_compacting) or on the first-time path,
+// which would otherwise write a new artifact every few seconds.
+const lastCompactContextTokens = new Map();
 
 // 压缩统计
 const stats = {
@@ -297,14 +302,27 @@ async function handleChatMessagesTransform(id, input, output) {
 
   const sessionId = input.session_id || input.sessionId || "default";
 
-  // 优先使用动态传入的模型上下文，回退到环境变量
-  const modelContextTokens = input.model?.context_window > 0
-    ? input.model.context_window
-    : defaultModelContextTokens;
+  // Prefer the effective context window (min(context_window, max_prompt_tokens))
+  // so thresholds match what the UI and auto-summarize use as the denominator.
+  const effectiveWindow = Number(input.model?.effective_context_window) > 0
+    ? Number(input.model.effective_context_window)
+    : (Number(input.model?.context_window) > 0
+      ? Number(input.model.context_window)
+      : defaultModelContextTokens);
 
-  const charThreshold = compactTokenLimit
-    ? compactTokenLimit * charsPerToken
-    : modelContextTokens * compactContextThreshold * charsPerToken;
+  // Real context usage from the host (prompt tokens + completion tokens on
+  // the last assistant reply, falling back to the pre-request estimate).
+  const contextUsedTokens = Math.max(
+    Number(input.usage?.context_used ?? 0),
+    Number(input.usage?.total_tokens ?? 0),
+    Number(input.usage?.estimated_prompt_tokens ?? 0),
+  );
+
+  const tokenThreshold = compactTokenLimit
+    ? compactTokenLimit
+    : Math.floor(effectiveWindow * compactContextThreshold);
+  const useRealUsage = contextUsedTokens > 0;
+  const charThreshold = tokenThreshold * charsPerToken;
 
   const state = stateMap.get(sessionId);
 
@@ -370,16 +388,35 @@ async function handleChatMessagesTransform(id, input, output) {
   }
 
   const totalChars = estimateTotalChars(messages);
-  if (totalChars < charThreshold) {
+  const shouldCompactByUsage = useRealUsage && contextUsedTokens >= tokenThreshold;
+  const shouldCompactByChars = totalChars >= charThreshold;
+  if (!(shouldCompactByUsage || shouldCompactByChars)) {
+    return writeResponse({ id, output });
+  }
+
+  // Cooldown on the first-time path. Without this, session_compacting clears
+  // stateMap and the next request immediately re-enters this branch and
+  // writes another artifact; repeated auto-summarize/recover cycles can
+  // produce several compactions per minute.
+  const lastTime = lastCompactTime.get(sessionId) || 0;
+  if (lastTime > 0 && Date.now() - lastTime < minCompactIntervalMs) {
+    return writeResponse({ id, output });
+  }
+  // Token floor: don't re-compact unless usage grew meaningfully since the
+  // last compaction for this session. Guards against estimated_prompt_tokens
+  // monotonically drifting just above the threshold every turn.
+  const lastLevel = lastCompactContextTokens.get(sessionId) || 0;
+  const currentLevel = shouldCompactByUsage ? contextUsedTokens : totalChars;
+  if (lastLevel > 0 && currentLevel < lastLevel * 1.2) {
     return writeResponse({ id, output });
   }
 
   // First-time compaction
-  const next = await compactMessages(sessionId, messages);
+  const next = await compactMessages(sessionId, messages, currentLevel);
   return writeResponse({ id, output: { ...output, messages: next } });
 }
 
-async function compactMessages(sessionId, messages) {
+async function compactMessages(sessionId, messages, contextLevel = 0) {
   // First-time compaction: compact all but recent messages
   const toCompact = messages.slice(0, -compactPreserveRecent);
   const recent = messages.slice(-compactPreserveRecent);
@@ -416,6 +453,7 @@ async function compactMessages(sessionId, messages) {
       frozenChars,
     });
     lastCompactTime.set(sessionId, Date.now());
+    lastCompactContextTokens.set(sessionId, contextLevel > 0 ? contextLevel : frozenChars);
 
     const messagesBefore = saveCompactionText ? messages : undefined;
     const messagesAfter = saveCompactionText ? [...frozen, ...recent] : undefined;
@@ -538,11 +576,13 @@ async function compactNewMessages(sessionId, existingFrozen, existingFrozenChars
 
 async function handleSessionCompacting(id, input, output) {
   // Clear frozen compaction state for this session so it doesn't become
-  // stale after summarization replaces the conversation history.
+  // stale after summarization replaces the conversation history. Keep the
+  // cooldown timer and last-level floor so the next request does not
+  // immediately re-enter the first-time compaction path and write another
+  // artifact seconds after this one.
   const sessionId = input.session_id || input.sessionId || "default";
   if (stateMap.has(sessionId)) {
     stateMap.delete(sessionId);
-    lastCompactTime.delete(sessionId);
   }
 
   const context = Array.isArray(output.context) ? [...output.context] : [];

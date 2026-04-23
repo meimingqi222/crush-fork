@@ -210,6 +210,22 @@ func TestViewTool_AllowsReadingLargeFilesWithLimit(t *testing.T) {
 	require.Contains(t, resp.Content, "a") // Should contain some content
 }
 
+func TestViewTool_MissingFileIncludesRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "missing.txt"})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "Use glob to find the exact path")
+	require.Contains(t, resp.Metadata, "file_not_found_recovery")
+	require.Contains(t, resp.Metadata, "glob")
+}
+
 func TestViewTool_InvalidPathSyntaxReturnsToolErrorResponse(t *testing.T) {
 	t.Parallel()
 
