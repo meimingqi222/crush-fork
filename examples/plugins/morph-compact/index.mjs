@@ -37,11 +37,10 @@ const compactClient = morphApiKey
 // 内存状态存储
 const stateMap = new Map();
 const lastCompactTime = new Map();
-// Usage level (tokens or chars) at the time of the last successful compaction.
-// Used as a floor so we don't immediately re-compact the same session when
-// state is cleared (e.g. by session_compacting) or on the first-time path,
-// which would otherwise write a new artifact every few seconds.
-const lastCompactContextTokens = new Map();
+// Separate floor maps for tokens and chars so we never compare values
+// across different units (e.g. 1200 tokens vs 3000 chars).
+const lastCompactTokens = new Map();
+const lastCompactChars = new Map();
 
 // 压缩统计
 const stats = {
@@ -402,21 +401,27 @@ async function handleChatMessagesTransform(id, input, output) {
   if (lastTime > 0 && Date.now() - lastTime < minCompactIntervalMs) {
     return writeResponse({ id, output });
   }
-  // Token floor: don't re-compact unless usage grew meaningfully since the
-  // last compaction for this session. Guards against estimated_prompt_tokens
-  // monotonically drifting just above the threshold every turn.
-  const lastLevel = lastCompactContextTokens.get(sessionId) || 0;
-  const currentLevel = shouldCompactByUsage ? contextUsedTokens : totalChars;
-  if (lastLevel > 0 && currentLevel < lastLevel * 1.2) {
-    return writeResponse({ id, output });
+  // Floor check: don't re-compact unless usage grew meaningfully since the
+  // last compaction for this session. We keep separate floors per unit so
+  // tokens are compared against tokens and chars against chars.
+  if (shouldCompactByUsage) {
+    const lastTokens = lastCompactTokens.get(sessionId) || 0;
+    if (lastTokens > 0 && contextUsedTokens < lastTokens * 1.2) {
+      return writeResponse({ id, output });
+    }
+  } else {
+    const lastChars = lastCompactChars.get(sessionId) || 0;
+    if (lastChars > 0 && totalChars < lastChars * 1.2) {
+      return writeResponse({ id, output });
+    }
   }
 
   // First-time compaction
-  const next = await compactMessages(sessionId, messages, currentLevel);
+  const next = await compactMessages(sessionId, messages, contextUsedTokens, totalChars);
   return writeResponse({ id, output: { ...output, messages: next } });
 }
 
-async function compactMessages(sessionId, messages, contextLevel = 0) {
+async function compactMessages(sessionId, messages, tokenFloor = 0, charFloor = 0) {
   // First-time compaction: compact all but recent messages
   const toCompact = messages.slice(0, -compactPreserveRecent);
   const recent = messages.slice(-compactPreserveRecent);
@@ -453,7 +458,9 @@ async function compactMessages(sessionId, messages, contextLevel = 0) {
       frozenChars,
     });
     lastCompactTime.set(sessionId, Date.now());
-    lastCompactContextTokens.set(sessionId, contextLevel > 0 ? contextLevel : frozenChars);
+    // Store both floors so the next check can use the correct unit.
+    lastCompactTokens.set(sessionId, tokenFloor > 0 ? tokenFloor : 0);
+    lastCompactChars.set(sessionId, charFloor > 0 ? charFloor : frozenChars);
 
     const messagesBefore = saveCompactionText ? messages : undefined;
     const messagesAfter = saveCompactionText ? [...frozen, ...recent] : undefined;
