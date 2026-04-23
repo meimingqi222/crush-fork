@@ -564,6 +564,8 @@ async function compactNewMessages(sessionId, existingFrozen, existingFrozenChars
       frozenChars: existingFrozenChars + newFrozenChars,
     });
     lastCompactTime.set(sessionId, Date.now());
+    lastCompactTokens.set(sessionId, Math.floor(combinedChars / charsPerToken));
+    lastCompactChars.set(sessionId, combinedChars);
 
     const messagesBefore = saveCompactionText ? [...existingFrozen, ...newMessages] : undefined;
     const messagesAfter = saveCompactionText ? returnedMessages : undefined;
