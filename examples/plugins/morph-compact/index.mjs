@@ -459,8 +459,8 @@ async function compactMessages(sessionId, messages, tokenFloor = 0, charFloor = 
     });
     lastCompactTime.set(sessionId, Date.now());
     // Store both floors so the next check can use the correct unit.
-    lastCompactTokens.set(sessionId, tokenFloor > 0 ? tokenFloor : 0);
-    lastCompactChars.set(sessionId, charFloor > 0 ? charFloor : frozenChars);
+    lastCompactTokens.set(sessionId, tokenFloor > 0 ? tokenFloor : Math.floor(returnedChars / charsPerToken));
+    lastCompactChars.set(sessionId, charFloor > 0 ? charFloor : returnedChars);
 
     const messagesBefore = saveCompactionText ? messages : undefined;
     const messagesAfter = saveCompactionText ? [...frozen, ...recent] : undefined;
