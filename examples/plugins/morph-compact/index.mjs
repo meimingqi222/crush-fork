@@ -417,11 +417,11 @@ async function handleChatMessagesTransform(id, input, output) {
   }
 
   // First-time compaction
-  const next = await compactMessages(sessionId, messages, contextUsedTokens, totalChars);
+  const next = await compactMessages(sessionId, messages);
   return writeResponse({ id, output: { ...output, messages: next } });
 }
 
-async function compactMessages(sessionId, messages, tokenFloor = 0, charFloor = 0) {
+async function compactMessages(sessionId, messages) {
   // First-time compaction: compact all but recent messages
   const toCompact = messages.slice(0, -compactPreserveRecent);
   const recent = messages.slice(-compactPreserveRecent);
@@ -458,9 +458,10 @@ async function compactMessages(sessionId, messages, tokenFloor = 0, charFloor = 
       frozenChars,
     });
     lastCompactTime.set(sessionId, Date.now());
-    // Store both floors so the next check can use the correct unit.
-    lastCompactTokens.set(sessionId, tokenFloor > 0 ? tokenFloor : Math.floor(returnedChars / charsPerToken));
-    lastCompactChars.set(sessionId, charFloor > 0 ? charFloor : returnedChars);
+    // Store post-compaction floors so future checks compare against the
+    // actual compacted result size, not the pre-compaction input size.
+    lastCompactTokens.set(sessionId, Math.floor(returnedChars / charsPerToken));
+    lastCompactChars.set(sessionId, returnedChars);
 
     const messagesBefore = saveCompactionText ? messages : undefined;
     const messagesAfter = saveCompactionText ? [...frozen, ...recent] : undefined;
