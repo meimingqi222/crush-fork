@@ -24,21 +24,21 @@ const (
 )
 
 // memoryRelevancePrompt is the system prompt for the memory relevance selection model.
-const memoryRelevancePrompt = `You are a memory relevance selector. Given a user query and a manifest of available memory entries, select up to 5 most relevant memories that would help answer the query.
+const memoryRelevancePrompt = `You are selecting memories that will be useful to the assistant as it processes a user's query. You will be given the user's query and a list of available memory files with their keys and descriptions.
 
-Rules:
-- Only select memories that are directly relevant to the query
-- Prefer recent memories (higher updated_at timestamps)
-- Prefer specific, actionable memories over vague ones
-- Return ONLY a JSON array of memory keys, nothing else
-- Return an empty array [] if no memories are relevant
+Return a list of memory keys for the memories that will clearly be useful to the assistant as it processes the user's query (up to 5). Only include memories that you are certain will be helpful based on their key and description.
+- If you are unsure if a memory will be useful in processing the user's query, then do not include it in your list. Be selective and discerning.
+- If there are no memories in the list that would clearly be useful, feel free to return an empty list.
+- If a list of recently-used tools is provided, do not select memories that are usage reference or API documentation for those tools (the assistant is already exercising them). DO still select memories containing warnings, gotchas, or known issues about those tools — active use is exactly when those matter.
+- Return ONLY a JSON array of memory keys, nothing else.
+- Return an empty array [] if no memories are relevant.
 
 Example output:
 ["project/goal", "user/preferred-language"]`
 
 // selectRelevantMemories uses the background model to select the most relevant
 // memories for a given query, replacing simple string matching.
-func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model Model, providerCfg config.ProviderConfig, query string, scope string) []memory.Entry {
+func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model Model, providerCfg config.ProviderConfig, query string, scope string, recentTools []string, alreadySurfaced map[string]bool) []memory.Entry {
 	if memorySvc == nil {
 		return nil
 	}
@@ -53,11 +53,18 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 		return nil
 	}
 
+	// Filter by scope and already-surfaced keys so the selector spends its
+	// 5-slot budget on fresh candidates instead of re-picking keys the
+	// caller will discard. Mirrors claude-code's alreadySurfaced approach.
 	filteredInfos := make([]memory.MemoryFileInfo, 0, len(infos))
 	for _, info := range infos {
-		if matchesRequestedMemoryScope(info.Scope, scope) {
-			filteredInfos = append(filteredInfos, info)
+		if !matchesRequestedMemoryScope(info.Scope, scope) {
+			continue
 		}
+		if alreadySurfaced != nil && alreadySurfaced[info.Key] {
+			continue
+		}
+		filteredInfos = append(filteredInfos, info)
 	}
 	infos = filteredInfos
 
@@ -71,7 +78,12 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 
 	manifest := buildMemoryManifest(infos)
 
-	prompt := fmt.Sprintf("Query: %s\n\nMemory manifest:\n%s\n\nSelect relevant memory keys:", query, manifest)
+	toolsSection := ""
+	if len(recentTools) > 0 {
+		toolsSection = fmt.Sprintf("\n\nRecently used tools: %s", strings.Join(recentTools, ", "))
+	}
+
+	prompt := fmt.Sprintf("Query: %s\n\nAvailable memories:\n%s%s", query, manifest, toolsSection)
 
 	agent := fantasy.NewAgent(
 		model.Model,
@@ -95,17 +107,17 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 		},
 	})
 	if err != nil {
-		slog.Warn("LLM memory relevance selection failed, falling back to string matching", "error", err)
-		return fallbackMemorySearch(ctx, memorySvc, query, scope)
+		slog.Warn("LLM memory relevance selection failed", "error", err)
+		return nil
 	}
 	if resp == nil {
-		return fallbackMemorySearch(ctx, memorySvc, query, scope)
+		return nil
 	}
 
 	content := resp.Response.Content.Text()
 	selectedKeys := parseMemorySelectionResponse(content)
 	if len(selectedKeys) == 0 {
-		return fallbackMemorySearch(ctx, memorySvc, query, scope)
+		return nil
 	}
 
 	entries := make([]memory.Entry, 0, len(selectedKeys))
@@ -114,10 +126,6 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 		if err == nil && matchesRequestedMemoryScope(entry.Scope, scope) {
 			entries = append(entries, entry)
 		}
-	}
-
-	if len(entries) == 0 {
-		return fallbackMemorySearch(ctx, memorySvc, query, scope)
 	}
 
 	return entries
@@ -189,21 +197,6 @@ func parseMemorySelectionResponse(content string) []string {
 		return nil
 	}
 	return result
-}
-
-func fallbackMemorySearch(ctx context.Context, memorySvc memory.Service, query, scope string) []memory.Entry {
-	params := memory.SearchParams{
-		Query: query,
-		Limit: autoRecallMemoryLimit,
-	}
-	if scope != "" {
-		params.Scope = scope
-	}
-	entries, err := memorySvc.Search(ctx, params)
-	if err != nil {
-		return nil
-	}
-	return entries
 }
 
 const memoryExtractionThrottleTurns = 1

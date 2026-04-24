@@ -34,6 +34,9 @@ func (m *memoryRelevanceLanguageModel) Stream(_ context.Context, call fantasy.Ca
 		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "selection", Delta: m.response}) {
 			return
 		}
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: "selection"}) {
+			return
+		}
 		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
 	}, nil
 }
@@ -136,7 +139,7 @@ func TestSelectRelevantMemoriesSkipsSessionScopedEntriesByDefault(t *testing.T) 
 		response: `["project/goal","session/other/current"]`,
 	}
 
-	entries := selectRelevantMemories(t.Context(), memorySvc, Model{Model: model}, config.ProviderConfig{ID: "test"}, "search", "")
+	entries := selectRelevantMemories(t.Context(), memorySvc, Model{Model: model}, config.ProviderConfig{ID: "test"}, "search", "", nil, nil)
 	require.Len(t, entries, 1)
 	require.Equal(t, "project/goal", entries[0].Key)
 	require.NotContains(t, model.prompt, "session/other/current")

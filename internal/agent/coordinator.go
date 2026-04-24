@@ -221,6 +221,129 @@ func (c *coordinator) plugins() *plugin.Runtime {
 	return plugin.DefaultRuntime()
 }
 
+// collectRecentSuccessfulTools scans the session message history and returns
+// the names of tools that were successfully invoked in the most recent turn
+// (since the last user message). This mirrors Claude Code's approach of
+// surfacing active-tool context so the memory selector can de-prioritize
+// reference/docs memories for tools the model is already exercising.
+func collectRecentSuccessfulTools(ctx context.Context, messagesSvc message.Service, sessionID string) []string {
+	msgs, err := messagesSvc.List(ctx, sessionID)
+	if err != nil {
+		slog.Debug("Failed to list messages for recent-tools collection", "error", err, "session_id", sessionID)
+		return nil
+	}
+
+	// Find the last user message (the one just created). We only care about
+	// tool calls between that message and the *previous* user message.
+	var lastUserIdx int = -1
+	var prevUserIdx int = -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.User {
+			if lastUserIdx == -1 {
+				lastUserIdx = i
+			} else {
+				prevUserIdx = i
+				break
+			}
+		}
+	}
+	if lastUserIdx == -1 {
+		return nil
+	}
+
+	// Build a map of tool call IDs to tool names from assistant messages.
+	toolCalls := make(map[string]string)
+	// Build a map of tool call IDs to error status from tool result messages.
+	toolErrors := make(map[string]bool)
+
+	// Scan messages between prevUserIdx (exclusive) and lastUserIdx (exclusive).
+	// If prevUserIdx is -1 (no previous user message), scan from the start.
+	startIdx := 0
+	if prevUserIdx != -1 {
+		startIdx = prevUserIdx + 1
+	}
+	for i := startIdx; i < lastUserIdx; i++ {
+		msg := msgs[i]
+		switch msg.Role {
+		case message.Assistant:
+			for _, part := range msg.Parts {
+				if tc, ok := part.(message.ToolCall); ok {
+					toolCalls[tc.ID] = tc.Name
+				}
+			}
+		case message.Tool:
+			for _, part := range msg.Parts {
+				if tr, ok := part.(message.ToolResult); ok {
+					toolErrors[tr.ToolCallID] = tr.IsError
+				}
+			}
+		}
+	}
+
+	// Return tool names for calls that succeeded (no error).
+	seen := make(map[string]bool)
+	var result []string
+	for id, name := range toolCalls {
+		if errored, ok := toolErrors[id]; ok && !errored {
+			if !seen[name] {
+				seen[name] = true
+				result = append(result, name)
+			}
+		}
+	}
+	return result
+}
+
+// collectSurfacedMemories scans the session message history for previously
+// injected auto_recall content and returns the set of surfaced memory keys
+// and the cumulative byte count. This mirrors claude-code's
+// collectSurfacedMemories approach: scanning messages means compact naturally
+// resets both — old auto_recall content is gone from the compacted transcript,
+// so re-surfacing is valid again.
+func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, sessionID string) (map[string]bool, int) {
+	msgs, err := messagesSvc.List(ctx, sessionID)
+	if err != nil {
+		slog.Debug("Failed to list messages for surfaced-memories collection", "error", err, "session_id", sessionID)
+		return nil, 0
+	}
+
+	surfaced := make(map[string]bool)
+	totalBytes := 0
+
+	for _, msg := range msgs {
+		// auto_recall content is injected as system messages.
+		if msg.Role != message.System {
+			continue
+		}
+		for _, part := range msg.Parts {
+			text, ok := part.(message.TextContent)
+			if !ok {
+				continue
+			}
+			content := text.Text
+			if !strings.Contains(content, "<auto_recall>") {
+				continue
+			}
+			totalBytes += len(content)
+			// Extract keys from lines like "- key (meta): value"
+			for _, line := range strings.Split(content, "\n") {
+				line = strings.TrimSpace(line)
+				if !strings.HasPrefix(line, "- ") {
+					continue
+				}
+				line = strings.TrimPrefix(line, "- ")
+				// Key is everything before the first " (" or ": "
+				if idx := strings.Index(line, " ("); idx > 0 {
+					surfaced[line[:idx]] = true
+				} else if idx := strings.Index(line, ": "); idx > 0 {
+					surfaced[line[:idx]] = true
+				}
+			}
+		}
+	}
+	return surfaced, totalBytes
+}
+
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	start := time.Now()
@@ -287,12 +410,19 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	// settled, and check readiness non-blocking at consume time.
 	// Note: DisableAutoMemory only disables automatic memory writes (dreaming),
 	// not recall. Users should still get relevant memories in their context.
+	recentTools := collectRecentSuccessfulTools(ctx, c.messages, sessionID)
+	alreadySurfaced, surfacedBytes := collectSurfacedMemories(ctx, c.messages, sessionID)
 	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
 	defer prefetchCancel()
 	memoryPrefetch := &MemoryPrefetch{}
 	bgModel := c.resolveBackgroundModel(ctx)
 	go func() {
-		recall := buildAutoRecallBlock(prefetchCtx, c.history, c.longTermMemory, bgModel, sessionID, prompt)
+		var recall string
+		// Skip prefetch if cumulative surfaced bytes exceed the session cap.
+		// Mirrors claude-code's MAX_SESSION_BYTES throttle.
+		if surfacedBytes < maxSessionRecallBytes {
+			recall = buildAutoRecallBlock(prefetchCtx, c.longTermMemory, bgModel, sessionID, prompt, recentTools, alreadySurfaced)
+		}
 		memoryPrefetch.Settle(recall)
 		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)
 	}()

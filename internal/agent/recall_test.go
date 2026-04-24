@@ -2,20 +2,16 @@ package agent
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/memory"
-	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildAutoRecallBlockIncludesMemoryAndHistory(t *testing.T) {
+func TestBuildAutoRecallBlockIncludesMemory(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
@@ -24,92 +20,21 @@ func TestBuildAutoRecallBlockIncludesMemoryAndHistory(t *testing.T) {
 
 	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{Key: "project/goal", Value: "Ship MVP search flow", Scope: "project", Category: "product", Type: "goal", Tags: []string{"search", "launch"}}))
 	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey(sess.ID), Value: "Continue current search migration", Scope: "session", Type: "project"}))
-	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
-		Role:  message.User,
-		Parts: []message.ContentPart{message.TextContent{Text: "Remember the search implementation details"}},
-	})
-	require.NoError(t, err)
 
-	block := buildAutoRecallBlock(context.Background(), env.history, env.memory, nil, sess.ID, "search")
+	model := &memoryRelevanceLanguageModel{
+		response: `["project/goal"]`,
+	}
+	bgModel := &backgroundModel{
+		model:    Model{Model: model},
+		provider: config.ProviderConfig{ID: "test"},
+	}
+
+	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search implementation", nil, nil)
 	require.Contains(t, block, "Relevant long-term memory:")
 	require.Contains(t, block, sessionMemoryKey(sess.ID))
 	require.Contains(t, block, "project/goal")
 	require.Contains(t, block, "product/goal")
 	require.Contains(t, block, "#launch #search")
-	require.Contains(t, block, "Relevant session history:")
-	require.Contains(t, block, "search implementation details")
-}
-
-func TestBuildAutoRecallBlockMarksVerifiedAndMissingPaths(t *testing.T) {
-	t.Parallel()
-
-	env := testEnv(t)
-	sess, err := env.sessions.Create(t.Context(), "recall-paths")
-	require.NoError(t, err)
-
-	workingDir := t.TempDir()
-	existingPath := filepath.Join(workingDir, "internal", "agent", "recall.go")
-	require.NoError(t, os.MkdirAll(filepath.Dir(existingPath), 0o755))
-	require.NoError(t, os.WriteFile(existingPath, []byte("package agent\n"), 0o644))
-
-	memoryValue := "Recall D:/archive/notes.txt and internal/agent/recall.go plus docs/missing.md for follow-up"
-	if runtime.GOOS != "windows" {
-		memoryValue = "Recall /definitely/missing/notes.txt and internal/agent/recall.go plus docs/missing.md for follow-up"
-	}
-
-	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{
-		Key:   "project/paths",
-		Scope: "project",
-		Value: memoryValue,
-	}))
-
-	ctx := context.WithValue(context.Background(), tools.WorkingDirContextKey, workingDir)
-	block := buildAutoRecallBlock(ctx, env.history, env.memory, nil, sess.ID, "paths")
-	require.Contains(t, block, "Path checks:")
-	require.Contains(t, block, "internal/agent/recall.go (verified)")
-	require.Contains(t, block, "docs/missing.md (missing)")
-	if runtime.GOOS == "windows" {
-		require.Contains(t, block, "D:/archive/notes.txt (missing)")
-	} else {
-		require.Contains(t, block, "/definitely/missing/notes.txt (missing)")
-	}
-}
-
-func TestBuildAutoRecallBlockMarksDirectoryLikePathsUnverified(t *testing.T) {
-	t.Parallel()
-
-	env := testEnv(t)
-	sess, err := env.sessions.Create(t.Context(), "recall-unverified")
-	require.NoError(t, err)
-
-	workingDir := t.TempDir()
-	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{
-		Key:   "project/layout",
-		Scope: "project",
-		Value: "Investigate src/components and assets/icons before changing anything.",
-	}))
-
-	ctx := context.WithValue(context.Background(), tools.WorkingDirContextKey, workingDir)
-	block := buildAutoRecallBlock(ctx, env.history, env.memory, nil, sess.ID, "layout")
-	require.Contains(t, block, "src/components (unverified)")
-	require.Contains(t, block, "assets/icons (unverified)")
-}
-
-func TestBuildAutoRecallBlockIgnoresNonPathLikeMemoryText(t *testing.T) {
-	t.Parallel()
-
-	env := testEnv(t)
-	sess, err := env.sessions.Create(t.Context(), "recall-no-paths")
-	require.NoError(t, err)
-
-	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{
-		Key:   "project/note",
-		Scope: "project",
-		Value: "Keep search launch status green and coordinate with LaunchPlan owners.",
-	}))
-
-	block := buildAutoRecallBlock(context.Background(), env.history, env.memory, nil, sess.ID, "launch")
-	require.NotContains(t, block, "Path checks:")
 }
 
 func TestBuildAutoRecallBlockSkipsEmptyResults(t *testing.T) {
@@ -119,7 +44,7 @@ func TestBuildAutoRecallBlockSkipsEmptyResults(t *testing.T) {
 	sess, err := env.sessions.Create(t.Context(), "recall-empty")
 	require.NoError(t, err)
 
-	block := buildAutoRecallBlock(context.Background(), env.history, env.memory, nil, sess.ID, "unmatched query")
+	block := buildAutoRecallBlock(context.Background(), env.memory, nil, sess.ID, "unmatched query test", nil, nil)
 	require.Empty(t, block)
 }
 
@@ -134,12 +59,12 @@ func TestBuildAutoRecallBlockFiltersMemoryByAgentPolicy(t *testing.T) {
 	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey(sess.ID), Value: "Session memory", Scope: "session"}))
 
 	ctx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "isolated")
-	block := buildAutoRecallBlock(ctx, env.history, env.memory, nil, sess.ID, "memory")
+	block := buildAutoRecallBlock(ctx, env.memory, nil, sess.ID, "check memory", nil, nil)
 	require.Contains(t, block, sessionMemoryKey(sess.ID))
 	require.NotContains(t, block, "scope/project")
 
 	ephemeralCtx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "ephemeral")
-	ephemeralBlock := buildAutoRecallBlock(ephemeralCtx, env.history, env.memory, nil, sess.ID, "memory")
+	ephemeralBlock := buildAutoRecallBlock(ephemeralCtx, env.memory, nil, sess.ID, "check memory", nil, nil)
 	require.NotContains(t, ephemeralBlock, "Relevant long-term memory:")
 }
 
@@ -172,7 +97,7 @@ func TestBuildAutoRecallBlockWithBackgroundModelSkipsOtherSessionMemory(t *testi
 		provider: config.ProviderConfig{ID: "test"},
 	}
 
-	block := buildAutoRecallBlock(context.Background(), env.history, env.memory, bgModel, sess.ID, "search")
+	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search query", nil, nil)
 	require.Contains(t, model.prompt, "project/goal")
 	require.Contains(t, block, "project/goal")
 	require.NotContains(t, block, sessionMemoryKey(otherSession.ID))
@@ -205,7 +130,7 @@ func TestBuildAutoRecallBlockWithBackgroundModelHonorsProjectScope(t *testing.T)
 	}
 
 	ctx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "project")
-	block := buildAutoRecallBlock(ctx, env.history, env.memory, bgModel, sess.ID, "search")
+	block := buildAutoRecallBlock(ctx, env.memory, bgModel, sess.ID, "search query", nil, nil)
 	require.Contains(t, model.prompt, "project/goal")
 	require.NotContains(t, model.prompt, sessionMemoryKey(sess.ID))
 	require.Contains(t, block, "project/goal")
@@ -224,11 +149,99 @@ func TestAutoRecallMemoryScopeRespectsIsolationHints(t *testing.T) {
 	require.Equal(t, "session", scope)
 }
 
-func TestFormatAutoRecallHistoryUsesSessionScopedResults(t *testing.T) {
+func TestBuildAutoRecallBlockFiltersAlreadySurfaced(t *testing.T) {
 	t.Parallel()
 
-	results := []history.MessageSearchResult{{Role: message.User, Text: "alpha"}, {Role: message.Assistant, Text: "beta"}}
-	formatted := formatAutoRecallHistory(results)
-	require.Contains(t, formatted, "[user] alpha")
-	require.Contains(t, formatted, "[assistant] beta")
+	env := testEnv(t)
+	sess, err := env.sessions.Create(t.Context(), "recall-dedup")
+	require.NoError(t, err)
+
+	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{
+		Key:   "project/goal",
+		Value: "Ship search recall",
+		Scope: "project",
+	}))
+	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{
+		Key:   "project/other",
+		Value: "Other project memory",
+		Scope: "project",
+	}))
+
+	model := &memoryRelevanceLanguageModel{
+		response: `["project/other"]`,
+	}
+	bgModel := &backgroundModel{
+		model:    Model{Model: model},
+		provider: config.ProviderConfig{ID: "test"},
+	}
+
+	// Simulate project/goal already surfaced in a prior turn.
+	alreadySurfaced := map[string]bool{"project/goal": true}
+	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search query", nil, alreadySurfaced)
+
+	// The manifest sent to the LLM should not include the already-surfaced key.
+	require.NotContains(t, model.prompt, "project/goal")
+	require.Contains(t, model.prompt, "project/other")
+	require.Contains(t, block, "project/other")
+	require.NotContains(t, block, "project/goal")
+}
+
+func TestMemoryFreshnessText(t *testing.T) {
+	t.Parallel()
+
+	// Fresh memory (today) — no caveat.
+	now := time.Now().UnixNano()
+	require.Empty(t, memoryFreshnessText(now))
+
+	// 1-day-old memory — no caveat (boundary is >1 day).
+	oneDayAgo := time.Now().Add(-24 * time.Hour).UnixNano()
+	require.Empty(t, memoryFreshnessText(oneDayAgo))
+
+	// 2-day-old memory — caveat present.
+	twoDaysAgo := time.Now().Add(-48 * time.Hour).UnixNano()
+	caveat := memoryFreshnessText(twoDaysAgo)
+	require.Contains(t, caveat, "2 days old")
+	require.Contains(t, caveat, "point-in-time observations")
+
+	// 30-day-old memory.
+	thirtyDaysAgo := time.Now().Add(-30 * 24 * time.Hour).UnixNano()
+	caveat = memoryFreshnessText(thirtyDaysAgo)
+	require.Contains(t, caveat, "30 days old")
+
+	// Zero / negative — no caveat.
+	require.Empty(t, memoryFreshnessText(0))
+}
+
+func TestBuildAutoRecallBlockIncludesStalenessCaveat(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	sess, err := env.sessions.Create(t.Context(), "recall-stale")
+	require.NoError(t, err)
+
+	// Store a memory that is "old" (UpdatedAt in the past).
+	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{
+		Key:   "project/old-decision",
+		Value: "Use library X for search",
+		Scope: "project",
+	}))
+
+	model := &memoryRelevanceLanguageModel{
+		response: `["project/old-decision"]`,
+	}
+	bgModel := &backgroundModel{
+		model:    Model{Model: model},
+		provider: config.ProviderConfig{ID: "test"},
+	}
+
+	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search query", nil, nil)
+	require.Contains(t, block, "project/old-decision")
+	// The memory was just created so it should be fresh — no staleness caveat.
+	require.NotContains(t, block, "days old")
+}
+
+func TestMaxSessionRecallBytes(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 60*1024, maxSessionRecallBytes)
 }

@@ -85,7 +85,15 @@ func TestRecallEntriesForSessionPrependsSessionMemory(t *testing.T) {
 	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: "project/general", Value: "# General\n\nsearch memory", Scope: "project"}))
 	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey("sess-1"), Value: "# Current session state\n\ncontinue search migration", Scope: "session"}))
 
-	entries := recallEntriesForSession(t.Context(), memorySvc, nil, "sess-1", "search", "")
+	model := &memoryRelevanceLanguageModel{
+		response: `["project/general"]`,
+	}
+	bgModel := &backgroundModel{
+		model:    Model{Model: model},
+		provider: config.ProviderConfig{ID: "test"},
+	}
+
+	entries := recallEntriesForSession(t.Context(), memorySvc, bgModel, "sess-1", "search", "", nil, nil)
 	require.NotEmpty(t, entries)
 	require.Equal(t, sessionMemoryKey("sess-1"), entries[0].Key)
 	found := false
@@ -106,7 +114,15 @@ func TestRecallEntriesForSessionSkipsSessionMemoryForProjectScope(t *testing.T) 
 	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: "project/general", Value: "# General\n\nsearch memory", Scope: "project"}))
 	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey("sess-1"), Value: "# Current session state\n\ncontinue search migration", Scope: "session"}))
 
-	entries := recallEntriesForSession(t.Context(), memorySvc, nil, "sess-1", "search", "project")
+	model := &memoryRelevanceLanguageModel{
+		response: `["project/general"]`,
+	}
+	bgModel := &backgroundModel{
+		model:    Model{Model: model},
+		provider: config.ProviderConfig{ID: "test"},
+	}
+
+	entries := recallEntriesForSession(t.Context(), memorySvc, bgModel, "sess-1", "search", "project", nil, nil)
 	require.NotEmpty(t, entries)
 	for _, entry := range entries {
 		require.NotEqual(t, sessionMemoryKey("sess-1"), entry.Key)
