@@ -8,6 +8,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/stretchr/testify/require"
 )
 
@@ -172,4 +173,83 @@ func TestSubtaskResultToolReportsInferenceFailureClearly(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "no child session could be inferred")
+}
+
+func TestSubtaskResultToolFallsBackToBackgroundAgentWhenSessionIDHasNoAssistantText(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	stub.bySession["agent-1"] = []message.Message{}
+	stub.bySession["child-session-1"] = []message.Message{
+		{
+			ID:   "assistant-msg-1",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "full background result"},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+
+	ctx := toolruntime.WithBackgroundAgentLookup(context.Background(), func(agentID string) (string, string, string, bool) {
+		require.Equal(t, "agent-1", agentID)
+		return "completed", "cached background result", "child-session-1", true
+	})
+	resp, err := runSubtaskResultTool(t, ctx, tool, SubtaskResultParams{
+		SessionID: "agent-1",
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, `Agent "agent-1" (completed):`)
+	require.Contains(t, resp.Content, "full background result")
+	require.NotContains(t, resp.Content, "No assistant response found")
+}
+
+func TestSubtaskResultToolInfersLatestReducerChildSession(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	reducerResult := message.ToolResult{
+		ToolCallID: "agent-call-1",
+		Name:       "agent",
+		Content:    "Completed 2/2 subtasks.",
+	}.WithReducer(message.ToolResultReducer{
+		Summary: "Completed 2/2 subtasks.",
+		ChildSessions: []message.ToolResultReducerChildSession{
+			{TaskID: "a", SessionID: "child-session-a", Status: message.ToolResultSubtaskStatusCompleted},
+			{TaskID: "b", SessionID: "child-session-b", Status: message.ToolResultSubtaskStatusCompleted},
+		},
+	})
+
+	stub.bySession["parent-session-4"] = []message.Message{
+		{
+			ID:   "tool-msg-1",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				reducerResult,
+				message.Finish{Reason: message.FinishReasonToolUse},
+			},
+		},
+	}
+	stub.bySession["child-session-b"] = []message.Message{
+		{
+			ID:   "assistant-msg-b",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "latest reducer child result"},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "parent-session-4")
+	resp, err := runSubtaskResultTool(t, ctx, tool, SubtaskResultParams{})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "Session: child-session-b")
+	require.Contains(t, resp.Content, "latest reducer child result")
 }

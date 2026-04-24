@@ -31,6 +31,7 @@ func Reduce(results []TaskResult) message.ToolResultReducer {
 	followupQuestions := make([]string, 0, len(results))
 	risks := make([]string, 0)
 	nextActions := make([]string, 0, 2)
+	childSessions := make([]message.ToolResultReducerChildSession, 0, len(results))
 	seenArtifacts := make(map[string]struct{}, len(results)*2)
 	seenFiles := make(map[string]struct{}, len(results)*2)
 	seenPatchPlan := make(map[string]struct{}, len(results)*2)
@@ -109,8 +110,14 @@ func Reduce(results []TaskResult) message.ToolResultReducer {
 			completed++
 		}
 
-		if strings.TrimSpace(result.ChildSessionID) != "" {
-			addArtifact(fmt.Sprintf("%s session: %s", title, result.ChildSessionID))
+		if childSessionID := strings.TrimSpace(result.ChildSessionID); childSessionID != "" {
+			addArtifact(fmt.Sprintf("%s session: %s", title, childSessionID))
+			childSessions = append(childSessions, message.ToolResultReducerChildSession{
+				TaskID:      strings.TrimSpace(result.ID),
+				Description: title,
+				SessionID:   childSessionID,
+				Status:      result.Status,
+			})
 		}
 		for _, artifact := range result.Artifacts {
 			addArtifact(artifact)
@@ -163,6 +170,7 @@ func Reduce(results []TaskResult) message.ToolResultReducer {
 		Risks:             risks,
 		NextActions:       nextActions,
 		Confidence:        confidence,
+		ChildSessions:     childSessions,
 	}
 }
 

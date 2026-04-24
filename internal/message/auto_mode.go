@@ -44,17 +44,25 @@ type ToolResultSubtaskResult struct {
 	Status           ToolResultSubtaskStatus `json:"status,omitempty"`
 }
 type ToolResultReducer struct {
-	Summary           string   `json:"summary,omitempty"`
-	Artifacts         []string `json:"artifacts,omitempty"`
-	FilesTouched      []string `json:"files_touched,omitempty"`
-	PatchPlan         []string `json:"patch_plan,omitempty"`
-	TestResults       []string `json:"test_results,omitempty"`
-	FollowupQuestions []string `json:"followup_questions,omitempty"`
-	Risks             []string `json:"risks,omitempty"`
-	NextActions       []string `json:"next_actions,omitempty"`
-	Confidence        string   `json:"confidence,omitempty"`
-	MailboxID         string   `json:"mailbox_id,omitempty"`
-	Messages          []string `json:"messages,omitempty"`
+	Summary           string                          `json:"summary,omitempty"`
+	Artifacts         []string                        `json:"artifacts,omitempty"`
+	FilesTouched      []string                        `json:"files_touched,omitempty"`
+	PatchPlan         []string                        `json:"patch_plan,omitempty"`
+	TestResults       []string                        `json:"test_results,omitempty"`
+	FollowupQuestions []string                        `json:"followup_questions,omitempty"`
+	Risks             []string                        `json:"risks,omitempty"`
+	NextActions       []string                        `json:"next_actions,omitempty"`
+	Confidence        string                          `json:"confidence,omitempty"`
+	MailboxID         string                          `json:"mailbox_id,omitempty"`
+	Messages          []string                        `json:"messages,omitempty"`
+	ChildSessions     []ToolResultReducerChildSession `json:"child_sessions,omitempty"`
+}
+
+type ToolResultReducerChildSession struct {
+	TaskID      string                  `json:"task_id,omitempty"`
+	Description string                  `json:"description,omitempty"`
+	SessionID   string                  `json:"session_id,omitempty"`
+	Status      ToolResultSubtaskStatus `json:"status,omitempty"`
 }
 
 func (r ToolResultReducer) isEmpty() bool {
@@ -68,7 +76,8 @@ func (r ToolResultReducer) isEmpty() bool {
 		len(r.NextActions) == 0 &&
 		strings.TrimSpace(r.Confidence) == "" &&
 		strings.TrimSpace(r.MailboxID) == "" &&
-		len(r.Messages) == 0
+		len(r.Messages) == 0 &&
+		len(r.ChildSessions) == 0
 }
 
 const (

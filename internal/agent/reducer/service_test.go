@@ -17,6 +17,10 @@ func TestReduce(t *testing.T) {
 		require.Equal(t, "Completed 2/2 subtasks.", result.Summary)
 		require.Equal(t, "high", result.Confidence)
 		require.Len(t, result.Artifacts, 3)
+		require.Equal(t, []message.ToolResultReducerChildSession{
+			{TaskID: "a", Description: "Fetch", SessionID: "s1", Status: message.ToolResultSubtaskStatusCompleted},
+			{TaskID: "b", Description: "Analyze", SessionID: "s2", Status: message.ToolResultSubtaskStatusCompleted},
+		}, result.ChildSessions)
 		require.Equal(t, []string{"/tmp/a.go", "/tmp/b.go"}, result.FilesTouched)
 		require.Equal(t, []string{"collect baseline", "apply optimization"}, result.PatchPlan)
 		require.Equal(t, []string{"fetch smoke passed", "analysis tests passed"}, result.TestResults)

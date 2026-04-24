@@ -75,6 +75,7 @@ type backgroundAgentEntry struct {
 	commands chan backgroundAgentCommand
 	runner   backgroundAgentRunner
 	stopChan chan struct{}
+	cancel   context.CancelFunc
 }
 
 // ToInfo converts the entry to a public-safe struct.
@@ -234,6 +235,10 @@ func (r *backgroundAgentRegistry) Fail(agentID, errMsg string) {
 func (r *backgroundAgentRegistry) Cancel(agentID, reason string) {
 	r.mu.Lock()
 	if entry, ok := r.agents[agentID]; ok {
+		if entry.cancel != nil {
+			entry.cancel()
+			entry.cancel = nil
+		}
 		entry.Status = backgroundAgentStatusCanceled
 		entry.CompletedAt = time.Now().UnixMilli()
 		entry.Content = reason
@@ -312,7 +317,15 @@ func (r *backgroundAgentRegistry) processQueuedCommands(agentID string, entry *b
 				return
 			}
 			r.markRunning(agentID)
-			result := entry.runner(context.Background(), command)
+			runCtx, cancel := context.WithCancel(context.Background())
+			r.mu.Lock()
+			entry.cancel = cancel
+			r.mu.Unlock()
+			result := entry.runner(runCtx, command)
+			r.mu.Lock()
+			entry.cancel = nil
+			r.mu.Unlock()
+			cancel()
 			if result.ChildSessionID != "" {
 				r.SetChildSession(agentID, result.ChildSessionID)
 			}

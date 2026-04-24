@@ -126,6 +126,9 @@ type coordinator struct {
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
 
+	activeSubAgentsMu sync.Mutex
+	activeSubAgents   map[string]map[SessionAgent]struct{}
+
 	deferredMu                 sync.Mutex
 	activatedDeferredBySession map[string]map[string]struct{}
 
@@ -764,11 +767,11 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		ReviewToolResult: func(callCtx context.Context, sessionID string, toolResult message.ToolResult, permissionMode session.PermissionMode) (message.ToolResult, error) {
 			return c.reviewToolResultForPromptInjection(callCtx, sessionID, toolResult, permissionMode)
 		},
-		Tools:         nil,
-		Notify:        c.notify,
-		HookManager:   c.hookManager,
-		Filetracker:   c.filetracker,
-		Checkpoint:    c.checkpoint,
+		Tools:               nil,
+		Notify:              c.notify,
+		HookManager:         c.hookManager,
+		Filetracker:         c.filetracker,
+		Checkpoint:          c.checkpoint,
 		PluginRuntime:       c.pluginRuntime,
 		EnableSessionMemory: !c.cfg.Config().Options.DisableAutoMemory,
 	})
@@ -1438,6 +1441,50 @@ func isExactoSupported(modelID string) bool {
 
 func (c *coordinator) Cancel(sessionID string) {
 	c.currentAgent.Cancel(sessionID)
+	for _, subAgent := range c.activeSubAgentsForSession(sessionID) {
+		subAgent.CancelAll()
+	}
+}
+
+func (c *coordinator) trackActiveSubAgent(parentSessionID string, subAgent SessionAgent) func() {
+	if c == nil || strings.TrimSpace(parentSessionID) == "" || subAgent == nil {
+		return func() {}
+	}
+	c.activeSubAgentsMu.Lock()
+	if c.activeSubAgents == nil {
+		c.activeSubAgents = make(map[string]map[SessionAgent]struct{})
+	}
+	if c.activeSubAgents[parentSessionID] == nil {
+		c.activeSubAgents[parentSessionID] = make(map[SessionAgent]struct{})
+	}
+	c.activeSubAgents[parentSessionID][subAgent] = struct{}{}
+	c.activeSubAgentsMu.Unlock()
+
+	return func() {
+		c.activeSubAgentsMu.Lock()
+		defer c.activeSubAgentsMu.Unlock()
+		delete(c.activeSubAgents[parentSessionID], subAgent)
+		if len(c.activeSubAgents[parentSessionID]) == 0 {
+			delete(c.activeSubAgents, parentSessionID)
+		}
+	}
+}
+
+func (c *coordinator) activeSubAgentsForSession(parentSessionID string) []SessionAgent {
+	if c == nil || strings.TrimSpace(parentSessionID) == "" {
+		return nil
+	}
+	c.activeSubAgentsMu.Lock()
+	defer c.activeSubAgentsMu.Unlock()
+	agents := c.activeSubAgents[parentSessionID]
+	if len(agents) == 0 {
+		return nil
+	}
+	result := make([]SessionAgent, 0, len(agents))
+	for subAgent := range agents {
+		result = append(result, subAgent)
+	}
+	return result
 }
 
 func (c *coordinator) CancelAll() {
@@ -2165,6 +2212,9 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 	if len(lines) > 0 {
 		content += "\n" + strings.Join(lines, "\n")
 	}
+	if details := taskGraphSessionDetailsForModel(orderedResults); details != "" {
+		content += "\n\nChild sessions:\n" + details
+	}
 	if details := taskGraphOutputDetailsForModel(orderedResults); details != "" {
 		content += "\n\nTask outputs:\n" + details
 	}
@@ -2467,6 +2517,9 @@ func taskGraphToolResultArtifacts(toolResult message.ToolResult) []string {
 }
 
 func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
+	untrackSubAgent := c.trackActiveSubAgent(params.SessionID, params.Agent)
+	defer untrackSubAgent()
+
 	parentSession, err := c.sessions.Get(ctx, params.SessionID)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("get parent session: %w", err)
@@ -2925,6 +2978,22 @@ func taskGraphReducerMessages(results []taskGraphNodeResult) []string {
 	return messages
 }
 
+func taskGraphSessionDetailsForModel(results []taskGraphNodeResult) string {
+	lines := make([]string, 0, len(results))
+	for _, result := range results {
+		sessionID := strings.TrimSpace(result.ChildSessionID)
+		if sessionID == "" {
+			continue
+		}
+		label := strings.TrimSpace(result.Task.Description)
+		if label == "" {
+			label = result.Task.ID
+		}
+		lines = append(lines, fmt.Sprintf("- %s (%s): %s", label, result.Status, sessionID))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 func taskGraphOutputDetailsForModel(results []taskGraphNodeResult) string {
 	lines := make([]string, 0, len(results))
 	remaining := taskGraphOutputAggregateCharsLimit
@@ -3184,8 +3253,8 @@ func (c *coordinator) runBackgroundTaskNode(
 	// Generate a name for the agent based on task ID or description.
 	agentName := fmt.Sprintf("%s-%s", task.ID, generateAgentID())
 
-	runner := func(_ context.Context, command backgroundAgentCommand) backgroundAgentRunResult {
-		attemptCtx, attemptCancel := taskGraphAttemptContext(context.Background(), agentCfg, task.ID)
+	runner := func(ctx context.Context, command backgroundAgentCommand) backgroundAgentRunResult {
+		attemptCtx, attemptCancel := taskGraphAttemptContext(ctx, agentCfg, task.ID)
 		timeoutCancel := func() {}
 		if agentCfg.TaskGovernance != nil {
 			if timeout := agentCfg.TaskGovernance.Timeout(); timeout > 0 {

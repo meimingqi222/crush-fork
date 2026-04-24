@@ -21,8 +21,9 @@ import (
 )
 
 type taskGraphMockSessionAgent struct {
-	model   Model
-	runFunc func(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
+	model         Model
+	runFunc       func(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
+	cancelAllFunc func()
 }
 
 func (m *taskGraphMockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -42,11 +43,15 @@ func (m *taskGraphMockSessionAgent) SetTools(tools []fantasy.AgentTool)         
 func (m *taskGraphMockSessionAgent) SetSystemPrompt(systemPrompt string)             {}
 func (m *taskGraphMockSessionAgent) SetSystemPromptPrefix(systemPromptPrefix string) {}
 func (m *taskGraphMockSessionAgent) Cancel(sessionID string)                         {}
-func (m *taskGraphMockSessionAgent) CancelAll()                                      {}
-func (m *taskGraphMockSessionAgent) IsSessionBusy(sessionID string) bool             { return false }
-func (m *taskGraphMockSessionAgent) IsBusy() bool                                    { return false }
-func (m *taskGraphMockSessionAgent) QueuedPrompts(sessionID string) int              { return 0 }
-func (m *taskGraphMockSessionAgent) QueuedPromptsList(sessionID string) []string     { return nil }
+func (m *taskGraphMockSessionAgent) CancelAll() {
+	if m.cancelAllFunc != nil {
+		m.cancelAllFunc()
+	}
+}
+func (m *taskGraphMockSessionAgent) IsSessionBusy(sessionID string) bool         { return false }
+func (m *taskGraphMockSessionAgent) IsBusy() bool                                { return false }
+func (m *taskGraphMockSessionAgent) QueuedPrompts(sessionID string) int          { return 0 }
+func (m *taskGraphMockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
 func (m *taskGraphMockSessionAgent) RemoveQueuedPrompt(sessionID string, index int) bool {
 	return false
 }
@@ -140,6 +145,11 @@ func TestRunTaskGraphDirect_ParallelAndDependencies(t *testing.T) {
 	require.False(t, resp.IsError)
 	require.GreaterOrEqual(t, atomic.LoadInt32(&maxRunning), int32(2))
 	require.Contains(t, resp.Metadata, "mailbox_id")
+	require.Contains(t, resp.Metadata, "child_sessions")
+	require.Contains(t, resp.Content, "Child sessions:")
+	require.Contains(t, resp.Content, "a (completed): msg-1$$call-1::a")
+	require.Contains(t, resp.Content, "b (completed): msg-1$$call-1::b")
+	require.Contains(t, resp.Content, "c (completed): msg-1$$call-1::c")
 	require.Contains(t, resp.Content, "Task outputs:")
 	require.Contains(t, resp.Content, "- c (completed): done")
 
@@ -734,6 +744,32 @@ func TestRunTaskGraphDirect_TruncatesTaskOutputsForModel(t *testing.T) {
 	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "Task outputs:")
 	require.Contains(t, resp.Content, "[truncated]")
+}
+
+func TestCoordinatorCancelCancelsActiveSubAgents(t *testing.T) {
+	t.Parallel()
+
+	parent := &taskGraphMockSessionAgent{}
+	subAgent := &taskGraphMockSessionAgent{}
+	cancelAllCalled := make(chan struct{}, 1)
+	subAgent.cancelAllFunc = func() {
+		select {
+		case cancelAllCalled <- struct{}{}:
+		default:
+		}
+	}
+
+	coord := &coordinator{currentAgent: parent}
+	untrack := coord.trackActiveSubAgent("parent-session", subAgent)
+	defer untrack()
+
+	coord.Cancel("parent-session")
+
+	select {
+	case <-cancelAllCalled:
+	case <-time.After(time.Second):
+		t.Fatal("expected parent cancellation to cancel active subagent")
+	}
 }
 
 func TestTaskGraphPromptWithMailboxMessagesAddsOmissionNotice(t *testing.T) {
