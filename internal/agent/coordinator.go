@@ -284,7 +284,11 @@ func collectRecentSuccessfulTools(ctx context.Context, messagesSvc message.Servi
 	seen := make(map[string]bool)
 	var result []string
 	for id, name := range toolCalls {
-		if errored, ok := toolErrors[id]; ok && !errored {
+		// Include the tool when there is no matching result (unknown status) or
+		// the result explicitly indicates success. Only exclude when we have
+		// confirmation that it failed.
+		errored, ok := toolErrors[id]
+		if !ok || !errored {
 			if !seen[name] {
 				seen[name] = true
 				result = append(result, name)
