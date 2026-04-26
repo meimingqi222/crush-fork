@@ -89,9 +89,12 @@ func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLa
 		return false, initialized, tokensAtLastExtraction
 	}
 	if toolCallsSinceLastExtraction >= sessionMemoryToolCallsBetweenUpdates {
-		return true, initialized, tokensAtLastExtraction
+		return true, initialized, currentPromptTokens
 	}
-	return currentRunToolUses == 0, initialized, tokensAtLastExtraction
+	if currentRunToolUses == 0 {
+		return true, initialized, currentPromptTokens
+	}
+	return false, initialized, tokensAtLastExtraction
 }
 
 func updateSessionMemory(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, tracker filetracker.Service, sessionID, prompt string, history []string) {

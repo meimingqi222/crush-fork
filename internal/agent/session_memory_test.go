@@ -199,7 +199,7 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			currentRunToolUses:      0,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
 		},
 		{
 			name:                    "waits during tool-heavy turn until tool threshold met",
@@ -221,7 +221,7 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
 		},
 		{
 			name:                    "requires token growth even if tool threshold met",
@@ -254,7 +254,7 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			currentRunToolUses:      0,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens + 1000,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens + 1000 + sessionMemoryMinimumTokensBetweenTurns,
 		},
 	}
 
