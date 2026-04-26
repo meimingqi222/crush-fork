@@ -71,23 +71,27 @@ func buildSessionMemoryFiles(ctx context.Context, tracker filetracker.Service) s
 
 type sessionMemoryContextKey struct{}
 
-func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLastExtraction int64, toolCallsSinceLastExtraction, currentRunToolUses int) (bool, bool) {
+func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLastExtraction int64, toolCallsSinceLastExtraction, currentRunToolUses int) (bool, bool, int64) {
 	if currentPromptTokens <= 0 {
-		return false, initialized
+		return false, initialized, tokensAtLastExtraction
 	}
 	if !initialized {
 		if currentPromptTokens < sessionMemoryInitializationTokens {
-			return false, false
+			return false, false, tokensAtLastExtraction
 		}
 		initialized = true
+		return true, initialized, currentPromptTokens
 	}
-	if max(0, currentPromptTokens-tokensAtLastExtraction) < sessionMemoryMinimumTokensBetweenTurns {
-		return false, initialized
+	if currentPromptTokens < tokensAtLastExtraction {
+		return false, initialized, currentPromptTokens
+	}
+	if currentPromptTokens-tokensAtLastExtraction < sessionMemoryMinimumTokensBetweenTurns {
+		return false, initialized, tokensAtLastExtraction
 	}
 	if toolCallsSinceLastExtraction >= sessionMemoryToolCallsBetweenUpdates {
-		return true, initialized
+		return true, initialized, tokensAtLastExtraction
 	}
-	return currentRunToolUses == 0, initialized
+	return currentRunToolUses == 0, initialized, tokensAtLastExtraction
 }
 
 func updateSessionMemory(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, tracker filetracker.Service, sessionID, prompt string, history []string) {

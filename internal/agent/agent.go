@@ -420,40 +420,40 @@ func NewSessionAgent(
 		retryWaitFunc = waitForRetryDelay
 	}
 	return &sessionAgent{
-		largeModel:           csync.NewValue(opts.LargeModel),
-		smallModel:           csync.NewValue(opts.SmallModel),
-		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
-		systemPrompt:         csync.NewValue(opts.SystemPrompt),
-		workingDir:           opts.WorkingDir,
-		agentFactory:         agentFactory,
-		refreshCallConfig:    opts.RefreshCallConfig,
-		deferredToolRuntime:  opts.DeferredToolRuntime,
-		isSubAgent:           opts.IsSubAgent,
-		sessions:             opts.Sessions,
-		messages:             opts.Messages,
-		memory:               opts.Memory,
-		backgroundModel:      opts.BackgroundModel,
-		reviewToolResult:     opts.ReviewToolResult,
-		disableAutoSummarize: opts.DisableAutoSummarize,
-		disableAutoMemory:    opts.DisableAutoMemory,
-		tools:                csync.NewSliceFrom(opts.Tools),
-		isYolo:               opts.IsYolo,
-		notify:               opts.Notify,
-		hookManager:          opts.HookManager,
-		pluginRuntime:        opts.PluginRuntime,
-		filetracker:          opts.Filetracker,
-		checkpoint:           opts.Checkpoint,
-		retryDelayFunc:       retryDelayFunc,
-		retryWaitFunc:        retryWaitFunc,
-		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
-		activeRequests:       csync.NewMap[string, context.CancelFunc](),
-		pausedQueues:         csync.NewMap[string, bool](),
-		pendingExtractions:         make(map[string][]pendingExtraction),
-		extractionTurnCount:        make(map[string]int),
-		sessionMemoryTurns:         make(map[string]int),
-		sessionMemoryTokens:        make(map[string]int64),
-		sessionMemoryInitialized:   make(map[string]bool),
-		sessionMemoryEnabled:       opts.EnableSessionMemory,
+		largeModel:               csync.NewValue(opts.LargeModel),
+		smallModel:               csync.NewValue(opts.SmallModel),
+		systemPromptPrefix:       csync.NewValue(opts.SystemPromptPrefix),
+		systemPrompt:             csync.NewValue(opts.SystemPrompt),
+		workingDir:               opts.WorkingDir,
+		agentFactory:             agentFactory,
+		refreshCallConfig:        opts.RefreshCallConfig,
+		deferredToolRuntime:      opts.DeferredToolRuntime,
+		isSubAgent:               opts.IsSubAgent,
+		sessions:                 opts.Sessions,
+		messages:                 opts.Messages,
+		memory:                   opts.Memory,
+		backgroundModel:          opts.BackgroundModel,
+		reviewToolResult:         opts.ReviewToolResult,
+		disableAutoSummarize:     opts.DisableAutoSummarize,
+		disableAutoMemory:        opts.DisableAutoMemory,
+		tools:                    csync.NewSliceFrom(opts.Tools),
+		isYolo:                   opts.IsYolo,
+		notify:                   opts.Notify,
+		hookManager:              opts.HookManager,
+		pluginRuntime:            opts.PluginRuntime,
+		filetracker:              opts.Filetracker,
+		checkpoint:               opts.Checkpoint,
+		retryDelayFunc:           retryDelayFunc,
+		retryWaitFunc:            retryWaitFunc,
+		messageQueue:             csync.NewMap[string, []SessionAgentCall](),
+		activeRequests:           csync.NewMap[string, context.CancelFunc](),
+		pausedQueues:             csync.NewMap[string, bool](),
+		pendingExtractions:       make(map[string][]pendingExtraction),
+		extractionTurnCount:      make(map[string]int),
+		sessionMemoryTurns:       make(map[string]int),
+		sessionMemoryTokens:      make(map[string]int64),
+		sessionMemoryInitialized: make(map[string]bool),
+		sessionMemoryEnabled:     opts.EnableSessionMemory,
 	}
 }
 
@@ -1889,7 +1889,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			}(historyForExtraction, extractionID)
 		}
 		if a.enableSessionMemory() {
-			shouldUpdate, initialized := shouldUpdateSessionMemory(
+			shouldUpdate, initialized, newTokensAtLastExtraction := shouldUpdateSessionMemory(
 				a.sessionMemoryInitialized[call.SessionID],
 				currentSession.LastInputTokens(),
 				a.sessionMemoryTokens[call.SessionID],
@@ -1897,9 +1897,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				runToolUses,
 			)
 			a.sessionMemoryInitialized[call.SessionID] = initialized
+			a.sessionMemoryTokens[call.SessionID] = newTokensAtLastExtraction
 			if shouldUpdate {
 				a.sessionMemoryTurns[call.SessionID] = 0
-				a.sessionMemoryTokens[call.SessionID] = currentSession.LastInputTokens()
 				sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
 				sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
 				go func(history []string, pendingID uint64) {

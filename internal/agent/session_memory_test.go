@@ -175,44 +175,53 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 		currentRunToolUses      int
 		wantShouldUpdate        bool
 		wantInitializedAfterRun bool
+		wantNewTokensAtLast     int64
 	}{
 		{
 			name:                    "does not initialize below token threshold",
 			currentPromptTokens:     sessionMemoryInitializationTokens - 1,
 			wantShouldUpdate:        false,
 			wantInitializedAfterRun: false,
+			wantNewTokensAtLast:     0,
 		},
 		{
 			name:                    "initializes and updates at first natural break",
 			currentPromptTokens:     sessionMemoryInitializationTokens,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
 		},
 		{
 			name:                    "updates at natural break after enough growth",
 			initialized:             true,
 			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
+			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
 			currentRunToolUses:      0,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
 		},
 		{
 			name:                    "waits during tool-heavy turn until tool threshold met",
 			initialized:             true,
 			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
+			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
 			currentRunToolUses:      2,
 			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates - 1,
 			wantShouldUpdate:        false,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
 		},
 		{
 			name:                    "updates during tool-heavy turn after tool threshold",
 			initialized:             true,
 			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
+			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
 			currentRunToolUses:      2,
 			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
 		},
 		{
 			name:                    "requires token growth even if tool threshold met",
@@ -223,6 +232,7 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			currentRunToolUses:      1,
 			wantShouldUpdate:        false,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
 		},
 		{
 			name:                    "handles token underflow after compaction by requiring growth from new baseline",
@@ -233,6 +243,7 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			currentRunToolUses:      0,
 			wantShouldUpdate:        false,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens - 1000,
 		},
 		{
 			name:                    "updates after compaction once enough tokens accumulate from new baseline",
@@ -243,13 +254,14 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			currentRunToolUses:      0,
 			wantShouldUpdate:        true,
 			wantInitializedAfterRun: true,
+			wantNewTokensAtLast:     sessionMemoryInitializationTokens + 1000,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gotShouldUpdate, gotInitialized := shouldUpdateSessionMemory(
+			gotShouldUpdate, gotInitialized, gotNewTokensAtLast := shouldUpdateSessionMemory(
 				tt.initialized,
 				tt.currentPromptTokens,
 				tt.tokensAtLastExtraction,
@@ -258,6 +270,7 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			)
 			require.Equal(t, tt.wantShouldUpdate, gotShouldUpdate)
 			require.Equal(t, tt.wantInitializedAfterRun, gotInitialized)
+			require.Equal(t, tt.wantNewTokensAtLast, gotNewTokensAtLast)
 		})
 	}
 }
