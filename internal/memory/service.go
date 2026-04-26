@@ -36,6 +36,12 @@ const (
 	// minImportance and maxImportance bound the importance value.
 	minImportance = 0.0
 	maxImportance = 1.0
+
+	// accessFlushBatch controls how many reads must occur before
+	// the access counters are persisted back to disk. This avoids
+	// a random write on every Get call while still keeping the
+	// recency/frequency signal roughly accurate.
+	accessFlushBatch = 5
 )
 
 var ErrNotFound = errors.New("memory key not found")
@@ -212,12 +218,18 @@ func (s *service) Get(ctx context.Context, key string) (Entry, error) {
 		return Entry{}, err
 	}
 
-	// Bump access counters on read; failures are non-fatal.
+	// Bump access counters on read.
 	entry.AccessCount++
 	entry.LastAccessedAt = time.Now().UnixNano()
-	if writeErr := s.writeAccessMetaLocked(entry); writeErr != nil {
-		// Best-effort: log via returned entry but do not fail the read.
-		_ = writeErr
+
+	// Persist counters back to disk only every accessFlushBatch reads
+	// to avoid a random write on every Get call. The counters are still
+	// returned in the Entry so callers see the latest values.
+	if entry.AccessCount%accessFlushBatch == 0 {
+		if writeErr := s.writeAccessMetaLocked(entry); writeErr != nil {
+			// Best-effort: do not fail the read.
+			_ = writeErr
+		}
 	}
 	return entry, nil
 }
@@ -830,9 +842,9 @@ func isSessionScope(scope string) bool {
 	return strings.EqualFold(strings.TrimSpace(scope), sessionScope)
 }
 
-// writeAccessMetaLocked persists access counters back to the memory file
-// without changing UpdatedAt semantics meaningfully (mtime will be touched,
-// which is acceptable since reading bumps recency too).
+// writeAccessMetaLocked persists access counters back to the memory file.
+// It is called only when AccessCount reaches a batch threshold to avoid a
+// random write on every Get call.
 func (s *service) writeAccessMetaLocked(entry Entry) error {
 	fm := memoryFrontmatter{
 		Key:            entry.Key,
