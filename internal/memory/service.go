@@ -26,27 +26,43 @@ const (
 	consolidatedAtFilename    = ".last_consolidated_at"
 	consolidationLockFilename = ".consolidation.lock"
 	sessionScope              = "session"
+
+	// sessionTTL is the maximum age for session-scoped memories.
+	// They are excluded from listings and removed on access after this age.
+	sessionTTL = 7 * 24 * time.Hour
+
+	// defaultImportance is applied when no importance is specified.
+	defaultImportance = 0.5
+	// minImportance and maxImportance bound the importance value.
+	minImportance = 0.0
+	maxImportance = 1.0
 )
 
 var ErrNotFound = errors.New("memory key not found")
 
 type Entry struct {
-	Key       string   `json:"key" yaml:"key"`
-	Value     string   `json:"value" yaml:"value"`
-	Scope     string   `json:"scope,omitempty" yaml:"scope,omitempty"`
-	Category  string   `json:"category,omitempty" yaml:"category,omitempty"`
-	Type      string   `json:"type,omitempty" yaml:"type,omitempty"`
-	Tags      []string `json:"tags,omitempty" yaml:"tags,omitempty"`
-	UpdatedAt int64    `json:"updated_at" yaml:"updated_at"`
+	Key            string   `json:"key" yaml:"key"`
+	Value          string   `json:"value" yaml:"value"`
+	Description    string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Scope          string   `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Category       string   `json:"category,omitempty" yaml:"category,omitempty"`
+	Type           string   `json:"type,omitempty" yaml:"type,omitempty"`
+	Tags           []string `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Importance     float64  `json:"importance,omitempty" yaml:"importance,omitempty"`
+	AccessCount    int64    `json:"access_count,omitempty" yaml:"access_count,omitempty"`
+	LastAccessedAt int64    `json:"last_accessed_at,omitempty" yaml:"last_accessed_at,omitempty"`
+	UpdatedAt      int64    `json:"updated_at" yaml:"updated_at"`
 }
 
 type StoreParams struct {
-	Key      string
-	Value    string
-	Scope    string
-	Category string
-	Type     string
-	Tags     []string
+	Key         string
+	Value       string
+	Description string
+	Scope       string
+	Category    string
+	Type        string
+	Tags        []string
+	Importance  float64
 }
 
 type SearchParams struct {
@@ -88,12 +104,15 @@ type service struct {
 }
 
 type memoryFrontmatter struct {
-	Key         string   `yaml:"key"`
-	Description string   `yaml:"description"`
-	Scope       string   `yaml:"scope,omitempty"`
-	Category    string   `yaml:"category,omitempty"`
-	Type        string   `yaml:"type,omitempty"`
-	Tags        []string `yaml:"tags,omitempty"`
+	Key            string   `yaml:"key"`
+	Description    string   `yaml:"description"`
+	Scope          string   `yaml:"scope,omitempty"`
+	Category       string   `yaml:"category,omitempty"`
+	Type           string   `yaml:"type,omitempty"`
+	Tags           []string `yaml:"tags,omitempty"`
+	Importance     float64  `yaml:"importance,omitempty"`
+	AccessCount    int64    `yaml:"access_count,omitempty"`
+	LastAccessedAt int64    `yaml:"last_accessed_at,omitempty"`
 }
 
 func NewService(dataDir string) (Service, error) {
@@ -133,13 +152,34 @@ func (s *service) Store(ctx context.Context, params StoreParams) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	description := strings.TrimSpace(params.Description)
+	if description == "" {
+		description = truncateForDescription(params.Value)
+	}
+
+	importance := clampImportance(params.Importance)
+	if importance == 0 {
+		importance = defaultImportanceForType(params.Type)
+	}
+
+	// Preserve access counters across updates so importance is not lost.
+	var existingCount int64
+	var existingLastAccessed int64
+	if existing, err := s.readEntryLocked(normalizedKey); err == nil {
+		existingCount = existing.AccessCount
+		existingLastAccessed = existing.LastAccessedAt
+	}
+
 	fm := memoryFrontmatter{
-		Key:         normalizedKey,
-		Description: truncateForDescription(params.Value),
-		Scope:       strings.TrimSpace(params.Scope),
-		Category:    strings.TrimSpace(params.Category),
-		Type:        strings.TrimSpace(params.Type),
-		Tags:        normalizeTags(params.Tags),
+		Key:            normalizedKey,
+		Description:    description,
+		Scope:          strings.TrimSpace(params.Scope),
+		Category:       strings.TrimSpace(params.Category),
+		Type:           strings.TrimSpace(params.Type),
+		Tags:           normalizeTags(params.Tags),
+		Importance:     importance,
+		AccessCount:    existingCount,
+		LastAccessedAt: existingLastAccessed,
 	}
 
 	filePath := s.entryFilePath(normalizedKey)
@@ -167,7 +207,19 @@ func (s *service) Get(ctx context.Context, key string) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.readEntryLocked(normalizedKey)
+	entry, err := s.readEntryLocked(normalizedKey)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	// Bump access counters on read; failures are non-fatal.
+	entry.AccessCount++
+	entry.LastAccessedAt = time.Now().UnixNano()
+	if writeErr := s.writeAccessMetaLocked(entry); writeErr != nil {
+		// Best-effort: log via returned entry but do not fail the read.
+		_ = writeErr
+	}
+	return entry, nil
 }
 
 func (s *service) Delete(ctx context.Context, key string) error {
@@ -203,8 +255,8 @@ func (s *service) Search(ctx context.Context, params SearchParams) ([]Entry, err
 		return nil, err
 	}
 
-	normalizedQuery := strings.ToLower(strings.TrimSpace(params.Query))
-	if normalizedQuery == "" {
+	queryTokens := tokenizeSearchText(params.Query)
+	if len(queryTokens) == 0 {
 		return nil, fmt.Errorf("query is required")
 	}
 	filters := entryFilters{
@@ -222,7 +274,11 @@ func (s *service) Search(ctx context.Context, params SearchParams) ([]Entry, err
 		return nil, err
 	}
 
-	results := make([]Entry, 0, len(entries))
+	type scoredEntry struct {
+		entry memoryEntry
+		score float64
+	}
+	matches := make([]scoredEntry, 0, len(entries))
 	for _, entry := range entries {
 		if !shouldIncludeEntry(entry, filters.Scope) {
 			continue
@@ -230,11 +286,33 @@ func (s *service) Search(ctx context.Context, params SearchParams) ([]Entry, err
 		if !matchesEntryFilters(entry, filters) {
 			continue
 		}
-		if queryMatchesEntry(entry, normalizedQuery) {
-			results = append(results, entry)
+		score := scoreKeywordMatch(entry, queryTokens)
+		if score <= 0 {
+			continue
 		}
+		matches = append(matches, scoredEntry{entry: memoryEntry(entry), score: score})
 	}
-	sortEntries(results)
+
+	now := time.Now()
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		ei, ej := Entry(matches[i].entry), Entry(matches[j].entry)
+		si, sj := entryScore(ei, now), entryScore(ej, now)
+		if si != sj {
+			return si > sj
+		}
+		if ei.UpdatedAt != ej.UpdatedAt {
+			return ei.UpdatedAt > ej.UpdatedAt
+		}
+		return ei.Key < ej.Key
+	})
+
+	results := make([]Entry, 0, len(matches))
+	for _, match := range matches {
+		results = append(results, Entry(match.entry))
+	}
 	return applyLimit(results, params.Limit), nil
 }
 
@@ -315,13 +393,17 @@ func (s *service) readEntryLocked(key string) (Entry, error) {
 	}
 
 	return Entry{
-		Key:       fm.Key,
-		Value:     strings.TrimSpace(body),
-		Scope:     fm.Scope,
-		Category:  fm.Category,
-		Type:      fm.Type,
-		Tags:      normalizeTags(fm.Tags),
-		UpdatedAt: updatedAt,
+		Key:            fm.Key,
+		Value:          strings.TrimSpace(body),
+		Description:    fm.Description,
+		Scope:          fm.Scope,
+		Category:       fm.Category,
+		Type:           fm.Type,
+		Tags:           normalizeTags(fm.Tags),
+		Importance:     resolveImportance(fm.Importance, fm.Type),
+		AccessCount:    fm.AccessCount,
+		LastAccessedAt: fm.LastAccessedAt,
+		UpdatedAt:      updatedAt,
 	}, nil
 }
 
@@ -356,6 +438,7 @@ func (s *service) loadAllEntriesLocked() ([]Entry, error) {
 	}
 
 	entries := make([]Entry, 0, len(mdFiles))
+	now := time.Now()
 	for _, fs := range mdFiles {
 		content, err := os.ReadFile(filepath.Join(s.memoryDir, fs.name))
 		if err != nil {
@@ -365,14 +448,23 @@ func (s *service) loadAllEntriesLocked() ([]Entry, error) {
 		if err != nil {
 			continue
 		}
+		// Drop session-scoped entries past their TTL. They are still on disk
+		// (no destructive cleanup here) but invisible to listings/search.
+		if isSessionScope(fm.Scope) && now.Sub(fs.modTime) > sessionTTL {
+			continue
+		}
 		entries = append(entries, Entry{
-			Key:       fm.Key,
-			Value:     strings.TrimSpace(body),
-			Scope:     fm.Scope,
-			Category:  fm.Category,
-			Type:      fm.Type,
-			Tags:      normalizeTags(fm.Tags),
-			UpdatedAt: fs.modTime.UnixNano(),
+			Key:            fm.Key,
+			Value:          strings.TrimSpace(body),
+			Description:    fm.Description,
+			Scope:          fm.Scope,
+			Category:       fm.Category,
+			Type:           fm.Type,
+			Tags:           normalizeTags(fm.Tags),
+			Importance:     resolveImportance(fm.Importance, fm.Type),
+			AccessCount:    fm.AccessCount,
+			LastAccessedAt: fm.LastAccessedAt,
+			UpdatedAt:      fs.modTime.UnixNano(),
 		})
 	}
 	return entries, nil
@@ -572,30 +664,192 @@ func matchesEntryFilters(entry Entry, filters entryFilters) bool {
 	return true
 }
 
-func queryMatchesEntry(entry Entry, query string) bool {
-	fields := []string{
-		entry.Key,
-		entry.Value,
-		entry.Scope,
-		entry.Category,
-		entry.Type,
-		strings.Join(entry.Tags, " "),
+type memoryEntry Entry
+
+func tokenizeSearchText(text string) []string {
+	trimmed := strings.TrimSpace(strings.ToLower(text))
+	if trimmed == "" {
+		return nil
 	}
-	for _, field := range fields {
-		if strings.Contains(strings.ToLower(field), query) {
+	splitter := func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		case r >= 0x4E00 && r <= 0x9FFF:
+			return false
+		case r >= 0x3040 && r <= 0x30FF:
+			return false
+		case r >= 0xAC00 && r <= 0xD7AF:
+			return false
+		default:
 			return true
 		}
 	}
-	return false
+	parts := strings.FieldsFunc(trimmed, splitter)
+	if len(parts) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(parts))
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		tokens = append(tokens, part)
+	}
+	return tokens
+}
+
+func scoreKeywordMatch(entry Entry, queryTokens []string) float64 {
+	if len(queryTokens) == 0 {
+		return 0
+	}
+	fieldTexts := []struct {
+		text   string
+		weight float64
+	}{
+		{text: strings.ToLower(entry.Key), weight: 4.0},
+		{text: strings.ToLower(entry.Description), weight: 3.5},
+		{text: strings.ToLower(entry.Category), weight: 2.0},
+		{text: strings.ToLower(entry.Type), weight: 2.0},
+		{text: strings.ToLower(strings.Join(entry.Tags, " ")), weight: 2.5},
+		{text: strings.ToLower(entry.Value), weight: 1.0},
+	}
+
+	score := 0.0
+	matchedTokens := 0
+	for _, token := range queryTokens {
+		tokenMatched := false
+		for _, field := range fieldTexts {
+			if field.text == "" || !strings.Contains(field.text, token) {
+				continue
+			}
+			score += field.weight
+			tokenMatched = true
+		}
+		if tokenMatched {
+			matchedTokens++
+		}
+	}
+	if matchedTokens == 0 {
+		return 0
+	}
+	coverage := float64(matchedTokens) / float64(len(queryTokens))
+	return score + coverage*5.0
+}
+
+// entryScore combines importance, recency, and access frequency into a single
+// ranking signal. Higher score = more relevant.
+//
+//	score = importance*0.5 + recency*0.3 + frequency*0.2
+//
+// recency decays linearly to zero over 30 days; frequency saturates at ~10 hits.
+func entryScore(entry Entry, now time.Time) float64 {
+	importance := resolveImportance(entry.Importance, entry.Type)
+
+	const recencyHalflife = 30 * 24 * time.Hour
+	age := now.Sub(time.Unix(0, entry.UpdatedAt))
+	recency := 1.0 - float64(age)/float64(recencyHalflife)
+	if recency < 0 {
+		recency = 0
+	}
+	if recency > 1 {
+		recency = 1
+	}
+
+	// frequency: 1 - 1/(1+count/10), so 0->0, 10->0.5, +inf->1
+	frequency := 0.0
+	if entry.AccessCount > 0 {
+		frequency = float64(entry.AccessCount) / (float64(entry.AccessCount) + 10.0)
+	}
+
+	return importance*0.5 + recency*0.3 + frequency*0.2
 }
 
 func sortEntries(entries []Entry) {
+	now := time.Now()
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].UpdatedAt == entries[j].UpdatedAt {
-			return entries[i].Key < entries[j].Key
+		si, sj := entryScore(entries[i], now), entryScore(entries[j], now)
+		if si != sj {
+			return si > sj
 		}
-		return entries[i].UpdatedAt > entries[j].UpdatedAt
+		if entries[i].UpdatedAt != entries[j].UpdatedAt {
+			return entries[i].UpdatedAt > entries[j].UpdatedAt
+		}
+		return entries[i].Key < entries[j].Key
 	})
+}
+
+// clampImportance bounds an importance value to [0, 1].
+func clampImportance(v float64) float64 {
+	if v < minImportance {
+		return minImportance
+	}
+	if v > maxImportance {
+		return maxImportance
+	}
+	return v
+}
+
+// defaultImportanceForType returns a sensible default importance based on the
+// memory type. user/feedback memories are weighted higher because they encode
+// persistent constraints; session memories are lower because they are transient.
+func defaultImportanceForType(memType string) float64 {
+	switch strings.ToLower(strings.TrimSpace(memType)) {
+	case "user", "feedback":
+		return 0.8
+	case "project", "reference":
+		return 0.6
+	case "session":
+		return 0.3
+	default:
+		return defaultImportance
+	}
+}
+
+// resolveImportance returns the entry's stored importance if set, otherwise the
+// type-based default. Used during reads so older entries without the field still
+// rank sensibly.
+func resolveImportance(stored float64, memType string) float64 {
+	if stored > 0 {
+		return clampImportance(stored)
+	}
+	return defaultImportanceForType(memType)
+}
+
+// isSessionScope reports whether the given scope value represents the
+// session scope (case-insensitive).
+func isSessionScope(scope string) bool {
+	return strings.EqualFold(strings.TrimSpace(scope), sessionScope)
+}
+
+// writeAccessMetaLocked persists access counters back to the memory file
+// without changing UpdatedAt semantics meaningfully (mtime will be touched,
+// which is acceptable since reading bumps recency too).
+func (s *service) writeAccessMetaLocked(entry Entry) error {
+	fm := memoryFrontmatter{
+		Key:            entry.Key,
+		Description:    entry.Description,
+		Scope:          entry.Scope,
+		Category:       entry.Category,
+		Type:           entry.Type,
+		Tags:           entry.Tags,
+		Importance:     entry.Importance,
+		AccessCount:    entry.AccessCount,
+		LastAccessedAt: entry.LastAccessedAt,
+	}
+	if fm.Description == "" {
+		fm.Description = truncateForDescription(entry.Value)
+	}
+	content := buildMemoryFileContent(fm, entry.Value)
+	return os.WriteFile(s.entryFilePath(entry.Key), []byte(content), 0o644)
 }
 
 func applyLimit(entries []Entry, limit int) []Entry {

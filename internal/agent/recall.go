@@ -23,6 +23,20 @@ type backgroundModel struct {
 	provider config.ProviderConfig
 }
 
+func (b *backgroundModel) semanticSearch(ctx context.Context, memorySvc memory.Service, params memory.SearchParams) ([]memory.Entry, error) {
+	if b == nil {
+		return memorySvc.Search(ctx, params)
+	}
+	entries, err := semanticSearchMemories(ctx, memorySvc, b.model, b.provider, params, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 && strings.TrimSpace(params.Query) == "" {
+		return memorySvc.Search(ctx, params)
+	}
+	return entries, nil
+}
+
 func buildAutoRecallBlock(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, prompt string, recentTools []string, alreadySurfaced map[string]bool) string {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {

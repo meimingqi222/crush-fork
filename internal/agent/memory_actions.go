@@ -88,11 +88,11 @@ func applyExtractedMemories(ctx context.Context, memorySvc memory.Service, memor
 			}
 			slog.Info("Deleted memory", append(logAttrs, "key", mem.Key)...)
 		default:
-			fullContent := fmt.Sprintf("# %s\n\n%s", mem.Description, mem.Content)
 			params := memory.StoreParams{
-				Key:   mem.Key,
-				Value: fullContent,
-				Type:  cmp.Or(mem.Type, "general"),
+				Key:         mem.Key,
+				Value:       mem.Content,
+				Description: mem.Description,
+				Type:        cmp.Or(mem.Type, "general"),
 			}
 			if mem.Scope != "" {
 				params.Scope = mem.Scope

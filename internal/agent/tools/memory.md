@@ -13,10 +13,12 @@ Manages persistent long-term memory entries across sessions.
 - action: Operation to perform (`store`, `get`, `delete`, `search`, `list`) (required)
 - key: Memory key for `store`, `get`, `delete`
 - value: Memory value for `store`
+- description: Optional short summary for `store` (recommended; defaults to a truncated value)
 - scope: Optional memory scope such as `session` or `project`
 - category: Optional higher-level grouping for a memory entry
 - type: Optional memory type or subtype
 - tags: Optional list of tags for the entry
+- importance: Optional 0.0–1.0 weight that influences ranking. Defaults to a sensible value based on `type` (user/feedback ≈ 0.8, project/reference ≈ 0.6, session ≈ 0.3).
 - query: Text query for `search`
 - limit: Maximum entries to return for `search`/`list`
 </parameters>
@@ -50,8 +52,8 @@ Do NOT save:
 
 <notes>
 - Entries are stored in local data directory and persist across sessions.
-- Results are sorted by most recently updated first.
-- Search matches key, value, scope, category, type, and tags.
+- Results are sorted by the memory service's ranking (importance, recency, and access frequency).
+- Search prefers semantic retrieval via the configured background model and falls back to keyword matching if semantic search is unavailable.
 - `category`, `type`, and `tags` can also be used as exact-match filters for `search` and `list`.
 - Write operations (`store`, `delete`) require permission checks.
 - **Drift caveat**: Memories may become stale. Before acting on a recalled memory about file locations or function names, verify the information still holds in the current codebase.

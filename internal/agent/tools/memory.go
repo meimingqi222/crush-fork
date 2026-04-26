@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -18,18 +19,22 @@ var longTermMemoryDescription []byte
 const LongTermMemoryToolName = "long_term_memory"
 
 type LongTermMemoryParams struct {
-	Action   string   `json:"action" description:"Action to perform: store, get, delete, search, or list"`
-	Key      string   `json:"key,omitempty" description:"Memory key for store/get/delete actions"`
-	Value    string   `json:"value,omitempty" description:"Memory value for store action"`
-	Scope    string   `json:"scope,omitempty" description:"Optional scope for store/search/list actions, such as session or project"`
-	Category string   `json:"category,omitempty" description:"Optional memory category for store/search/list actions"`
-	Type     string   `json:"type,omitempty" description:"Optional memory type for store/search/list actions"`
-	Tags     []string `json:"tags,omitempty" description:"Optional tags for store/search/list actions"`
-	Query    string   `json:"query,omitempty" description:"Search query for search action"`
-	Limit    int      `json:"limit,omitempty" description:"Maximum number of items to return"`
+	Action      string   `json:"action" description:"Action to perform: store, get, delete, search, or list"`
+	Key         string   `json:"key,omitempty" description:"Memory key for store/get/delete actions"`
+	Value       string   `json:"value,omitempty" description:"Memory value for store action"`
+	Description string   `json:"description,omitempty" description:"Optional short description (recommended; falls back to a truncated value)"`
+	Scope       string   `json:"scope,omitempty" description:"Optional scope for store/search/list actions, such as session or project"`
+	Category    string   `json:"category,omitempty" description:"Optional memory category for store/search/list actions"`
+	Type        string   `json:"type,omitempty" description:"Optional memory type for store/search/list actions"`
+	Tags        []string `json:"tags,omitempty" description:"Optional tags for store/search/list actions"`
+	Importance  float64  `json:"importance,omitempty" description:"Optional importance from 0.0 to 1.0; influences ranking. Defaults are based on type."`
+	Query       string   `json:"query,omitempty" description:"Search query for search action"`
+	Limit       int      `json:"limit,omitempty" description:"Maximum number of items to return"`
 }
 
-func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Service, workingDir string) fantasy.AgentTool {
+type LongTermMemorySemanticSearchFunc func(context.Context, memory.SearchParams) ([]memory.Entry, error)
+
+func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Service, workingDir string, semanticSearch LongTermMemorySemanticSearchFunc) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		LongTermMemoryToolName,
 		string(longTermMemoryDescription),
@@ -65,12 +70,14 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 				}
 
 				if err := memorySvc.Store(ctx, memory.StoreParams{
-					Key:      params.Key,
-					Value:    params.Value,
-					Scope:    params.Scope,
-					Category: params.Category,
-					Type:     params.Type,
-					Tags:     params.Tags,
+					Key:         params.Key,
+					Value:       params.Value,
+					Description: params.Description,
+					Scope:       params.Scope,
+					Category:    params.Category,
+					Type:        params.Type,
+					Tags:        params.Tags,
+					Importance:  params.Importance,
 				}); err != nil {
 					return fantasy.NewTextErrorResponse(err.Error()), nil
 				}
@@ -116,14 +123,15 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 				}
 				return fantasy.NewTextResponse(fmt.Sprintf("Deleted long-term memory key %q.", strings.TrimSpace(params.Key))), nil
 			case "search":
-				entries, err := memorySvc.Search(ctx, memory.SearchParams{
+				searchParams := memory.SearchParams{
 					Query:    params.Query,
 					Scope:    params.Scope,
 					Category: params.Category,
 					Type:     params.Type,
 					Tags:     params.Tags,
 					Limit:    params.Limit,
-				})
+				}
+				entries, err := semanticSearchEntries(ctx, memorySvc, semanticSearch, searchParams)
 				if err != nil {
 					return fantasy.NewTextErrorResponse(err.Error()), nil
 				}
@@ -145,6 +153,17 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 			}
 		},
 	)
+}
+
+func semanticSearchEntries(ctx context.Context, memorySvc memory.Service, semanticSearch LongTermMemorySemanticSearchFunc, params memory.SearchParams) ([]memory.Entry, error) {
+	if semanticSearch != nil {
+		entries, err := semanticSearch(ctx, params)
+		if err == nil {
+			return entries, nil
+		}
+		slog.Warn("Semantic memory search failed; falling back to keyword search", "error", err)
+	}
+	return memorySvc.Search(ctx, params)
 }
 
 func formatMemoryEntry(entry memory.Entry) string {

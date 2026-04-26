@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"charm.land/fantasy"
@@ -65,7 +66,7 @@ func newLongTermMemoryToolForTest(t *testing.T, permissions permission.Service) 
 	t.Helper()
 	memorySvc, err := memory.NewService(t.TempDir())
 	require.NoError(t, err)
-	return NewLongTermMemoryTool(memorySvc, permissions, "/workspace")
+	return NewLongTermMemoryTool(memorySvc, permissions, "/workspace", nil)
 }
 
 func TestLongTermMemoryToolStoreAndGet(t *testing.T) {
@@ -154,4 +155,46 @@ func TestLongTermMemoryToolRequiresSessionForWrites(t *testing.T) {
 
 	_, err := runLongTermMemoryTool(t, tool, context.Background(), LongTermMemoryParams{Action: "store", Key: "k", Value: "v"})
 	require.ErrorContains(t, err, "session ID is required")
+}
+
+func TestLongTermMemoryToolSearchUsesSemanticSearcher(t *testing.T) {
+	t.Parallel()
+
+	permissions := &memoryPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true}
+	memorySvc, err := memory.NewService(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: "auth/jwt-validation", Value: "JWT validation flow", Scope: "project", Type: "decision"}))
+
+	semanticCalled := false
+	tool := NewLongTermMemoryTool(memorySvc, permissions, "/workspace", func(_ context.Context, params memory.SearchParams) ([]memory.Entry, error) {
+		semanticCalled = true
+		require.Equal(t, "认证流程", params.Query)
+		return []memory.Entry{{Key: "auth/jwt-validation", Value: "JWT validation flow", Scope: "project", Type: "decision"}}, nil
+	})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
+
+	resp, err := runLongTermMemoryTool(t, tool, ctx, LongTermMemoryParams{Action: "search", Query: "认证流程", Scope: "project"})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.True(t, semanticCalled)
+	require.Contains(t, resp.Content, "key=auth/jwt-validation")
+}
+
+func TestLongTermMemoryToolSearchFallsBackToKeywordSearch(t *testing.T) {
+	t.Parallel()
+
+	permissions := &memoryPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true}
+	memorySvc, err := memory.NewService(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: "design", Value: "search index", Scope: "project", Type: "decision", Tags: []string{"search"}}))
+
+	tool := NewLongTermMemoryTool(memorySvc, permissions, "/workspace", func(context.Context, memory.SearchParams) ([]memory.Entry, error) {
+		return nil, errors.New("llm unavailable")
+	})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
+
+	resp, err := runLongTermMemoryTool(t, tool, ctx, LongTermMemoryParams{Action: "search", Query: "index", Scope: "project"})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "key=design")
 }

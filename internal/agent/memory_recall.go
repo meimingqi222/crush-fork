@@ -23,6 +23,13 @@ const (
 	memoryRelevanceMaxFiles    = 200
 )
 
+type memoryInfoFilters struct {
+	Scope    string
+	Category string
+	Type     string
+	Tags     []string
+}
+
 // memoryRelevancePrompt is the system prompt for the memory relevance selection model.
 const memoryRelevancePrompt = `You are selecting memories that will be useful to the assistant as it processes a user's query. You will be given the user's query and a list of available memory files with their keys and descriptions.
 
@@ -39,26 +46,66 @@ Example output:
 // selectRelevantMemories uses the background model to select the most relevant
 // memories for a given query, replacing simple string matching.
 func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model Model, providerCfg config.ProviderConfig, query string, scope string, recentTools []string, alreadySurfaced map[string]bool) []memory.Entry {
-	if memorySvc == nil {
+	entries, err := semanticSearchMemories(ctx, memorySvc, model, providerCfg, memory.SearchParams{Query: query, Scope: scope}, recentTools, alreadySurfaced)
+	if err != nil {
+		slog.Warn("LLM memory relevance selection failed", "error", err)
 		return nil
+	}
+	return entries
+}
+
+func semanticSearchMemories(ctx context.Context, memorySvc memory.Service, model Model, providerCfg config.ProviderConfig, params memory.SearchParams, recentTools []string, alreadySurfaced map[string]bool) ([]memory.Entry, error) {
+	if memorySvc == nil {
+		return nil, nil
 	}
 
 	infos, err := memorySvc.ListMemoryFiles()
 	if err != nil {
-		slog.Warn("Failed to list memory files for relevance selection", "error", err)
-		return nil
+		return nil, fmt.Errorf("listing memory files: %w", err)
 	}
-
 	if len(infos) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// Filter by scope and already-surfaced keys so the selector spends its
-	// 5-slot budget on fresh candidates instead of re-picking keys the
-	// caller will discard. Mirrors claude-code's alreadySurfaced approach.
+	filteredInfos := filterMemoryInfos(infos, memoryInfoFilters{
+		Scope:    strings.TrimSpace(params.Scope),
+		Category: strings.TrimSpace(params.Category),
+		Type:     strings.TrimSpace(params.Type),
+		Tags:     normalizeMemorySearchTags(params.Tags),
+	}, alreadySurfaced)
+	if len(filteredInfos) == 0 {
+		return nil, nil
+	}
+	if len(filteredInfos) > memoryRelevanceMaxFiles {
+		filteredInfos = filteredInfos[:memoryRelevanceMaxFiles]
+	}
+
+	selectedKeys, err := selectRelevantMemoryKeys(ctx, filteredInfos, model, providerCfg, strings.TrimSpace(params.Query), recentTools)
+	if err != nil {
+		return nil, err
+	}
+	if len(selectedKeys) == 0 {
+		return nil, nil
+	}
+
+	entries := make([]memory.Entry, 0, len(selectedKeys))
+	for _, key := range selectedKeys {
+		entry, err := memorySvc.Get(ctx, key)
+		if err != nil || !matchesRequestedMemoryScope(entry.Scope, strings.TrimSpace(params.Scope)) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func filterMemoryInfos(infos []memory.MemoryFileInfo, filters memoryInfoFilters, alreadySurfaced map[string]bool) []memory.MemoryFileInfo {
 	filteredInfos := make([]memory.MemoryFileInfo, 0, len(infos))
 	for _, info := range infos {
-		if !matchesRequestedMemoryScope(info.Scope, scope) {
+		if !matchesRequestedMemoryScope(info.Scope, filters.Scope) {
+			continue
+		}
+		if !matchesMemoryInfoFilters(info, filters) {
 			continue
 		}
 		if alreadySurfaced != nil && alreadySurfaced[info.Key] {
@@ -66,23 +113,65 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 		}
 		filteredInfos = append(filteredInfos, info)
 	}
-	infos = filteredInfos
+	return filteredInfos
+}
 
-	if len(infos) == 0 {
-		return nil
+func matchesMemoryInfoFilters(info memory.MemoryFileInfo, filters memoryInfoFilters) bool {
+	if filters.Category != "" && !strings.EqualFold(strings.TrimSpace(info.Category), filters.Category) {
+		return false
 	}
+	if filters.Type != "" && !strings.EqualFold(strings.TrimSpace(info.Type), filters.Type) {
+		return false
+	}
+	if len(filters.Tags) == 0 {
+		return true
+	}
+	infoTags := normalizeMemorySearchTags(info.Tags)
+	for _, tag := range filters.Tags {
+		if !containsNormalizedTag(infoTags, tag) {
+			return false
+		}
+	}
+	return true
+}
 
-	if len(infos) > memoryRelevanceMaxFiles {
-		infos = infos[:memoryRelevanceMaxFiles]
+func normalizeMemorySearchTags(tags []string) []string {
+	normalized := make([]string, 0, len(tags))
+	seen := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		trimmed := strings.ToLower(strings.TrimSpace(tag))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized
+}
+
+func containsNormalizedTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
+}
+
+func selectRelevantMemoryKeys(ctx context.Context, infos []memory.MemoryFileInfo, model Model, providerCfg config.ProviderConfig, query string, recentTools []string) ([]string, error) {
+	query = strings.TrimSpace(query)
+	if len(infos) == 0 || query == "" {
+		return nil, nil
 	}
 
 	manifest := buildMemoryManifest(infos)
-
 	toolsSection := ""
 	if len(recentTools) > 0 {
 		toolsSection = fmt.Sprintf("\n\nRecently used tools: %s", strings.Join(recentTools, ", "))
 	}
-
 	prompt := fmt.Sprintf("Query: %s\n\nAvailable memories:\n%s%s", query, manifest, toolsSection)
 
 	agent := fantasy.NewAgent(
@@ -107,28 +196,12 @@ func selectRelevantMemories(ctx context.Context, memorySvc memory.Service, model
 		},
 	})
 	if err != nil {
-		slog.Warn("LLM memory relevance selection failed", "error", err)
-		return nil
+		return nil, err
 	}
 	if resp == nil {
-		return nil
+		return nil, nil
 	}
-
-	content := resp.Response.Content.Text()
-	selectedKeys := parseMemorySelectionResponse(content)
-	if len(selectedKeys) == 0 {
-		return nil
-	}
-
-	entries := make([]memory.Entry, 0, len(selectedKeys))
-	for _, key := range selectedKeys {
-		entry, err := memorySvc.Get(ctx, key)
-		if err == nil && matchesRequestedMemoryScope(entry.Scope, scope) {
-			entries = append(entries, entry)
-		}
-	}
-
-	return entries
+	return parseMemorySelectionResponse(resp.Response.Content.Text()), nil
 }
 
 func matchesRequestedMemoryScope(entryScope, requestedScope string) bool {

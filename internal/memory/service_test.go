@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +46,7 @@ func TestMemoryServiceSearchAndList(t *testing.T) {
 
 	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "alpha", Value: "first memory", Scope: "project", Category: "notes", Type: "fact", Tags: []string{"alpha"}}))
 	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "beta", Value: "second memory", Scope: "project", Category: "preferences", Type: "workflow", Tags: []string{"golang", "tests"}}))
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "auth/jwt-validation", Value: "Validates JWT token claims during login", Description: "Authentication flow", Scope: "project", Category: "security", Type: "decision", Tags: []string{"auth", "jwt"}, Importance: 0.9}))
 	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "session-note", Value: "beta plan", Scope: "session", Category: "notes", Type: "plan", Tags: []string{"beta", "tests"}}))
 
 	searchResults, err := service.Search(context.Background(), SearchParams{Query: "beta", Limit: 10})
@@ -67,11 +69,25 @@ func TestMemoryServiceSearchAndList(t *testing.T) {
 	require.Len(t, projectOnly, 1)
 	require.Equal(t, "beta", projectOnly[0].Key)
 
-	listResults, err := service.List(context.Background(), ListParams{Scope: "project", Limit: 2})
+	multiToken, err := service.Search(context.Background(), SearchParams{Query: "jwt auth", Scope: "project", Limit: 10})
 	require.NoError(t, err)
-	require.Len(t, listResults, 2)
-	require.Equal(t, "beta", listResults[0].Key)
-	require.Equal(t, "alpha", listResults[1].Key)
+	require.Len(t, multiToken, 1)
+	require.Equal(t, "auth/jwt-validation", multiToken[0].Key)
+
+	punctuated, err := service.Search(context.Background(), SearchParams{Query: "auth jwt-validation", Scope: "project", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, punctuated, 1)
+	require.Equal(t, "auth/jwt-validation", punctuated[0].Key)
+
+	coverageRanked, err := service.Search(context.Background(), SearchParams{Query: "jwt validation login", Scope: "project", Limit: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, coverageRanked)
+	require.Equal(t, "auth/jwt-validation", coverageRanked[0].Key)
+
+	listResults, err := service.List(context.Background(), ListParams{Scope: "project", Limit: 3})
+	require.NoError(t, err)
+	require.Len(t, listResults, 3)
+	require.Equal(t, "auth/jwt-validation", listResults[0].Key)
 
 	tagFiltered, err := service.List(context.Background(), ListParams{Category: "notes", Tags: []string{"beta"}, Limit: 10})
 	require.NoError(t, err)
@@ -263,4 +279,68 @@ func TestMemoryServiceTruncateForDescription(t *testing.T) {
 	result := truncateForDescription(long)
 	require.Len(t, []rune(result), 121)
 	require.True(t, strings.HasSuffix(result, "…"))
+}
+
+func TestMemoryServiceCustomDescriptionAndImportance(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:         "k",
+		Value:       strings.Repeat("body ", 40),
+		Description: "explicit summary",
+		Importance:  0.9,
+		Type:        "project",
+	}))
+
+	entry, err := service.Get(context.Background(), "k")
+	require.NoError(t, err)
+	require.Equal(t, "explicit summary", entry.Description)
+	require.InDelta(t, 0.9, entry.Importance, 0.0001)
+	require.GreaterOrEqual(t, entry.AccessCount, int64(1))
+}
+
+func TestMemoryServiceImportanceAffectsRanking(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(t.TempDir())
+	require.NoError(t, err)
+
+	// "low" stored first (older mtime), "high" stored second.
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "low", Value: "low importance", Type: "project", Importance: 0.1}))
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "high", Value: "high importance", Type: "project", Importance: 1.0}))
+
+	entries, err := service.List(context.Background(), ListParams{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	require.Equal(t, "high", entries[0].Key, "high-importance entry should rank first regardless of recency tie")
+}
+
+func TestMemoryServiceSessionTTL(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	service, err := NewService(dataDir)
+	require.NoError(t, err)
+
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "stale-session", Value: "old", Scope: "session"}))
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "fresh-session", Value: "new", Scope: "session"}))
+
+	// Backdate the stale session file past the TTL.
+	memoryDir := filepath.Join(dataDir, "memory")
+	files, err := os.ReadDir(memoryDir)
+	require.NoError(t, err)
+	for _, f := range files {
+		if strings.Contains(f.Name(), "stale-session") {
+			old := time.Now().Add(-(sessionTTL + time.Hour))
+			require.NoError(t, os.Chtimes(filepath.Join(memoryDir, f.Name()), old, old))
+		}
+	}
+
+	entries, err := service.List(context.Background(), ListParams{Scope: "session", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "fresh-session", entries[0].Key)
 }

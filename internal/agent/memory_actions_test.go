@@ -50,6 +50,6 @@ func TestApplyExtractedMemoriesStoresContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "user", entry.Type)
 	require.Equal(t, "project", entry.Scope)
-	require.Contains(t, entry.Value, "# Concise responses")
+	require.Equal(t, "Concise responses", entry.Description)
 	require.Contains(t, entry.Value, "User prefers concise responses.")
 }

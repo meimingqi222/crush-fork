@@ -22,7 +22,7 @@ import (
 const (
 	memoryDreamMinHours            = 24
 	memoryDreamStaleLockWindow     = time.Hour
-	memoryDreamMaxSessions         = 8
+	memoryDreamMaxSessions         = 24
 	memoryDreamMaxChars            = 24000
 	memoryFreshnessWarnAfter       = 30 * 24 * time.Hour
 	memoryDreamSessionScanInterval = 10 * time.Minute

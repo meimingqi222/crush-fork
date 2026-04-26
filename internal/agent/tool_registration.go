@@ -10,6 +10,7 @@ import (
 	"charm.land/fantasy"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/session"
 )
@@ -98,7 +99,13 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewHistorySearchTool(c.history),
 		agenttools.NewCrushInfoTool(c.cfg, c.lspManager),
 		agenttools.NewCrushLogsTool(filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
-		agenttools.NewLongTermMemoryTool(c.longTermMemory, c.permissions, c.cfg.WorkingDir()),
+		agenttools.NewLongTermMemoryTool(c.longTermMemory, c.permissions, c.cfg.WorkingDir(), func(callCtx context.Context, params memory.SearchParams) ([]memory.Entry, error) {
+			bgModel := c.resolveBackgroundModel(callCtx)
+			if bgModel == nil {
+				return c.longTermMemory.Search(callCtx, params)
+			}
+			return bgModel.semanticSearch(callCtx, c.longTermMemory, params)
+		}),
 		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),
