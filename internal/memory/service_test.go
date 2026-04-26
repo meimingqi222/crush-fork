@@ -344,3 +344,39 @@ func TestMemoryServiceSessionTTL(t *testing.T) {
 	require.Len(t, entries, 1)
 	require.Equal(t, "fresh-session", entries[0].Key)
 }
+
+func TestMemoryServiceStorePreservesUnflushedAccessCount(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(t.TempDir())
+	require.NoError(t, err)
+
+	// Store an entry so it exists on disk with AccessCount=0.
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "counter-key",
+		Value: "initial value",
+		Type:  "project",
+	}))
+
+	// Call Get fewer times than accessFlushBatch so the increments are
+	// not yet flushed to disk.
+	const getsBeforeStore = 3
+	for i := 0; i < getsBeforeStore; i++ {
+		entry, err := service.Get(context.Background(), "counter-key")
+		require.NoError(t, err)
+		require.Equal(t, int64(i+1), entry.AccessCount, "in-memory counter should increment")
+	}
+
+	// Store should merge the pending increments instead of overwriting
+	// with the stale disk value.
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "counter-key",
+		Value: "updated value",
+		Type:  "project",
+	}))
+
+	entry, err := service.Get(context.Background(), "counter-key")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, entry.AccessCount, int64(getsBeforeStore+1),
+		"Store must preserve unflushed access-count increments from Get")
+}

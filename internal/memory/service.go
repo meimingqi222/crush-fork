@@ -103,10 +103,19 @@ type Service interface {
 	ReleaseConsolidationLock(string) error
 }
 
+// pendingAccess tracks unflushed access-counter increments for a memory
+// key so that Store can merge them instead of overwriting with stale disk
+// values.
+type pendingAccess struct {
+	count  int64
+	lastAt int64
+}
+
 type service struct {
-	memoryDir string
-	indexPath string
-	mu        sync.Mutex
+	memoryDir     string
+	indexPath     string
+	mu            sync.Mutex
+	pendingAccess map[string]pendingAccess
 }
 
 type memoryFrontmatter struct {
@@ -133,8 +142,9 @@ func NewService(dataDir string) (Service, error) {
 	}
 
 	s := &service{
-		memoryDir: memoryDir,
-		indexPath: filepath.Join(memoryDir, indexFilename),
+		memoryDir:     memoryDir,
+		indexPath:     filepath.Join(memoryDir, indexFilename),
+		pendingAccess: make(map[string]pendingAccess),
 	}
 	if err := s.ensureIndexFile(); err != nil {
 		return nil, err
@@ -169,11 +179,20 @@ func (s *service) Store(ctx context.Context, params StoreParams) error {
 	}
 
 	// Preserve access counters across updates so importance is not lost.
+	// Merge any unflushed increments from Get calls that have not yet been
+	// persisted to disk.
 	var existingCount int64
 	var existingLastAccessed int64
 	if existing, err := s.readEntryLocked(normalizedKey); err == nil {
 		existingCount = existing.AccessCount
 		existingLastAccessed = existing.LastAccessedAt
+	}
+	if pending, ok := s.pendingAccess[normalizedKey]; ok {
+		if pending.count > existingCount {
+			existingCount = pending.count
+			existingLastAccessed = pending.lastAt
+		}
+		delete(s.pendingAccess, normalizedKey)
 	}
 
 	fm := memoryFrontmatter{
@@ -218,17 +237,33 @@ func (s *service) Get(ctx context.Context, key string) (Entry, error) {
 		return Entry{}, err
 	}
 
+	// Merge any pending unflushed increments so consecutive Get calls
+	// see a monotonically increasing counter instead of reading the
+	// stale disk value.
+	if pending, ok := s.pendingAccess[normalizedKey]; ok && pending.count > entry.AccessCount {
+		entry.AccessCount = pending.count
+		entry.LastAccessedAt = pending.lastAt
+	}
+
 	// Bump access counters on read.
 	entry.AccessCount++
 	entry.LastAccessedAt = time.Now().UnixNano()
 
+	// Track the unflushed increment so Store can merge it later.
+	s.pendingAccess[normalizedKey] = pendingAccess{
+		count:  entry.AccessCount,
+		lastAt: entry.LastAccessedAt,
+	}
+
 	// Persist counters back to disk only every accessFlushBatch reads
-	// to avoid a random write on every Get call. The counters are still
-	// returned in the Entry so callers see the latest values.
+	// to avoid a random write on every Get call.
 	if entry.AccessCount%accessFlushBatch == 0 {
 		if writeErr := s.writeAccessMetaLocked(entry); writeErr != nil {
-			// Best-effort: do not fail the read.
+			// Best-effort: do not fail the read; leave pending intact
+			// for the next Store or flush attempt.
 			_ = writeErr
+		} else {
+			delete(s.pendingAccess, normalizedKey)
 		}
 	}
 	return entry, nil
@@ -259,6 +294,7 @@ func (s *service) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("deleting memory file: %w", err)
 	}
 
+	delete(s.pendingAccess, normalizedKey)
 	return s.rebuildIndexLocked()
 }
 
