@@ -347,12 +347,14 @@ type sessionAgent struct {
 	activeRequests *csync.Map[string, context.CancelFunc]
 	pausedQueues   *csync.Map[string, bool]
 
-	extractionMu         sync.Mutex
-	pendingExtractions   map[string][]pendingExtraction
-	nextExtractionID     uint64
-	extractionTurnCount  map[string]int
-	sessionMemoryTurns   map[string]int
-	sessionMemoryEnabled bool
+	extractionMu             sync.Mutex
+	pendingExtractions       map[string][]pendingExtraction
+	nextExtractionID         uint64
+	extractionTurnCount      map[string]int
+	sessionMemoryTurns       map[string]int
+	sessionMemoryTokens      map[string]int64
+	sessionMemoryInitialized map[string]bool
+	sessionMemoryEnabled     bool
 }
 
 type SessionAgentOptions struct {
@@ -446,10 +448,12 @@ func NewSessionAgent(
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
 		pausedQueues:         csync.NewMap[string, bool](),
-		pendingExtractions:   make(map[string][]pendingExtraction),
-		extractionTurnCount:  make(map[string]int),
-		sessionMemoryTurns:   make(map[string]int),
-		sessionMemoryEnabled: opts.EnableSessionMemory,
+		pendingExtractions:         make(map[string][]pendingExtraction),
+		extractionTurnCount:        make(map[string]int),
+		sessionMemoryTurns:         make(map[string]int),
+		sessionMemoryTokens:        make(map[string]int64),
+		sessionMemoryInitialized:   make(map[string]bool),
+		sessionMemoryEnabled:       opts.EnableSessionMemory,
 	}
 }
 
@@ -1884,14 +1888,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				extractMemories(extractionCtx, a.memory, a.backgroundModel, call.SessionID, call.Prompt, history)
 			}(historyForExtraction, extractionID)
 		}
-		if a.enableSessionMemory() && shouldExtractMemories(sessionMemoryTurns) {
-			a.sessionMemoryTurns[call.SessionID] = 0
-			sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
-			sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
-			go func(history []string, pendingID uint64) {
-				defer a.finishPendingExtraction(call.SessionID, pendingID)
-				updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
-			}(historyForExtraction, sessionMemoryID)
+		if a.enableSessionMemory() {
+			shouldUpdate, initialized := shouldUpdateSessionMemory(
+				a.sessionMemoryInitialized[call.SessionID],
+				currentSession.LastInputTokens(),
+				a.sessionMemoryTokens[call.SessionID],
+				sessionMemoryTurns,
+				runToolUses,
+			)
+			a.sessionMemoryInitialized[call.SessionID] = initialized
+			if shouldUpdate {
+				a.sessionMemoryTurns[call.SessionID] = 0
+				a.sessionMemoryTokens[call.SessionID] = currentSession.LastInputTokens()
+				sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
+				sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
+				go func(history []string, pendingID uint64) {
+					defer a.finishPendingExtraction(call.SessionID, pendingID)
+					updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
+				}(historyForExtraction, sessionMemoryID)
+			}
 		}
 		a.extractionMu.Unlock()
 	}

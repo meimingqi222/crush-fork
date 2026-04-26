@@ -153,6 +153,24 @@ func TestMemoryServiceListMemoryFiles(t *testing.T) {
 	require.Equal(t, "k1", infos[1].Key)
 }
 
+func TestMemoryServiceListMemoryFilesSkipsInvalidFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	service, err := NewService(dataDir)
+	require.NoError(t, err)
+
+	require.NoError(t, service.Store(context.Background(), StoreParams{Key: "valid", Value: "valid body", Type: "project"}))
+
+	memoryDir := filepath.Join(dataDir, "memory")
+	require.NoError(t, os.WriteFile(filepath.Join(memoryDir, "broken.md"), []byte("---\nkey: [\n---\n\nbroken\n"), 0o644))
+
+	infos, err := service.ListMemoryFiles()
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, "valid", infos[0].Key)
+}
+
 func TestMemoryServiceReadMemoryFileBody(t *testing.T) {
 	t.Parallel()
 
@@ -171,6 +189,23 @@ func TestMemoryServiceReadMemoryFileBody(t *testing.T) {
 
 	_, err = service.ReadMemoryFileBody("../../../etc/passwd")
 	require.ErrorContains(t, err, "invalid memory file path")
+}
+
+func TestParseMemoryFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	fm, err := parseMemoryFrontmatter([]byte("---\nkey: test\ndescription: desc\ntype: project\n---\n\nbody\n"))
+	require.NoError(t, err)
+	require.Equal(t, "test", fm.Key)
+	require.Equal(t, "desc", fm.Description)
+	require.Equal(t, "project", fm.Type)
+
+	empty, err := parseMemoryFrontmatter([]byte("body only"))
+	require.NoError(t, err)
+	require.Equal(t, memoryFrontmatter{}, empty)
+
+	_, err = parseMemoryFrontmatter([]byte("---\nkey: [\n---\n\nbody\n"))
+	require.Error(t, err)
 }
 
 func TestMemoryServiceValidation(t *testing.T) {

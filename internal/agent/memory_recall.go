@@ -20,7 +20,7 @@ var memoryUserAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", v
 
 const (
 	memoryRelevanceMaxSelected = 5
-	memoryRelevanceMaxFiles    = 50
+	memoryRelevanceMaxFiles    = 200
 )
 
 // memoryRelevancePrompt is the system prompt for the memory relevance selection model.

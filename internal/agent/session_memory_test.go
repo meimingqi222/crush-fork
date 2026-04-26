@@ -162,3 +162,82 @@ func TestBuildSessionMemoryHistoryTrimsToRecentTurns(t *testing.T) {
 	require.NotContains(t, block, history[0]+"\n\n")
 	require.Contains(t, block, history[len(history)-1])
 }
+
+func TestShouldUpdateSessionMemory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                    string
+		initialized             bool
+		currentPromptTokens     int64
+		tokensAtLastExtraction  int64
+		toolCallsSinceLast      int
+		currentRunToolUses      int
+		wantShouldUpdate        bool
+		wantInitializedAfterRun bool
+	}{
+		{
+			name:                    "does not initialize below token threshold",
+			currentPromptTokens:     sessionMemoryInitializationTokens - 1,
+			wantShouldUpdate:        false,
+			wantInitializedAfterRun: false,
+		},
+		{
+			name:                    "initializes and updates at first natural break",
+			currentPromptTokens:     sessionMemoryInitializationTokens,
+			wantShouldUpdate:        true,
+			wantInitializedAfterRun: true,
+		},
+		{
+			name:                    "updates at natural break after enough growth",
+			initialized:             true,
+			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
+			currentRunToolUses:      0,
+			wantShouldUpdate:        true,
+			wantInitializedAfterRun: true,
+		},
+		{
+			name:                    "waits during tool-heavy turn until tool threshold met",
+			initialized:             true,
+			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
+			currentRunToolUses:      2,
+			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates - 1,
+			wantShouldUpdate:        false,
+			wantInitializedAfterRun: true,
+		},
+		{
+			name:                    "updates during tool-heavy turn after tool threshold",
+			initialized:             true,
+			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
+			currentRunToolUses:      2,
+			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
+			wantShouldUpdate:        true,
+			wantInitializedAfterRun: true,
+		},
+		{
+			name:                    "requires token growth even if tool threshold met",
+			initialized:             true,
+			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns - 1,
+			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
+			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
+			currentRunToolUses:      1,
+			wantShouldUpdate:        false,
+			wantInitializedAfterRun: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotShouldUpdate, gotInitialized := shouldUpdateSessionMemory(
+				tt.initialized,
+				tt.currentPromptTokens,
+				tt.tokensAtLastExtraction,
+				tt.toolCallsSinceLast,
+				tt.currentRunToolUses,
+			)
+			require.Equal(t, tt.wantShouldUpdate, gotShouldUpdate)
+			require.Equal(t, tt.wantInitializedAfterRun, gotInitialized)
+		})
+	}
+}

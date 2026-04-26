@@ -417,8 +417,35 @@ func parseMemoryFile(content []byte) (memoryFrontmatter, string, error) {
 	if err := yaml.Unmarshal([]byte(fmText), &fm); err != nil {
 		return memoryFrontmatter{}, "", fmt.Errorf("parsing frontmatter: %w", err)
 	}
-
 	return fm, body, nil
+}
+
+func parseMemoryFrontmatter(content []byte) (memoryFrontmatter, error) {
+	text := string(content)
+	if !strings.HasPrefix(text, "---\n") {
+		return memoryFrontmatter{}, nil
+	}
+
+	endIdx := strings.Index(text[4:], "\n---\n")
+	if endIdx < 0 {
+		return memoryFrontmatter{}, nil
+	}
+	endIdx += 4
+
+	fmText := text[4:endIdx]
+	var fm memoryFrontmatter
+	if err := yaml.Unmarshal([]byte(fmText), &fm); err != nil {
+		return memoryFrontmatter{}, fmt.Errorf("parsing frontmatter: %w", err)
+	}
+	return fm, nil
+}
+
+func readMemoryFileFrontmatter(filePath string) (memoryFrontmatter, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return memoryFrontmatter{}, err
+	}
+	return parseMemoryFrontmatter(content)
 }
 
 func buildMemoryFileContent(fm memoryFrontmatter, body string) string {
@@ -619,42 +646,46 @@ func (s *service) ListMemoryFiles() ([]MemoryFileInfo, error) {
 		return nil, fmt.Errorf("reading memory directory: %w", err)
 	}
 
-	var infos []MemoryFileInfo
+	type fileInfo struct {
+		name      string
+		updatedAt int64
+	}
+	candidates := make([]fileInfo, 0, len(files))
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".md") || f.Name() == indexFilename {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(s.memoryDir, f.Name()))
+		info, err := f.Info()
 		if err != nil {
 			continue
 		}
-		fm, _, err := parseMemoryFile(content)
+		candidates = append(candidates, fileInfo{name: f.Name(), updatedAt: info.ModTime().UnixNano()})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].updatedAt > candidates[j].updatedAt
+	})
+
+	if len(candidates) > maxMemoryFiles {
+		candidates = candidates[:maxMemoryFiles]
+	}
+
+	infos := make([]MemoryFileInfo, 0, len(candidates))
+	for _, candidate := range candidates {
+		fm, err := readMemoryFileFrontmatter(filepath.Join(s.memoryDir, candidate.name))
 		if err != nil {
 			continue
-		}
-		info, statErr := f.Info()
-		updatedAt := time.Now().UnixNano()
-		if statErr == nil {
-			updatedAt = info.ModTime().UnixNano()
 		}
 		infos = append(infos, MemoryFileInfo{
 			Key:         fm.Key,
-			FileName:    f.Name(),
+			FileName:    candidate.name,
 			Description: fm.Description,
 			Scope:       fm.Scope,
 			Category:    fm.Category,
 			Type:        fm.Type,
 			Tags:        normalizeTags(fm.Tags),
-			UpdatedAt:   updatedAt,
+			UpdatedAt:   candidate.updatedAt,
 		})
-	}
-
-	sort.Slice(infos, func(i, j int) bool {
-		return infos[i].UpdatedAt > infos[j].UpdatedAt
-	})
-
-	if len(infos) > maxMemoryFiles {
-		infos = infos[:maxMemoryFiles]
 	}
 	return infos, nil
 }

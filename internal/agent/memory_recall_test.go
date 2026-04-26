@@ -145,6 +145,36 @@ func TestSelectRelevantMemoriesSkipsSessionScopedEntriesByDefault(t *testing.T) 
 	require.NotContains(t, model.prompt, "session/other/current")
 }
 
+func TestSelectRelevantMemoriesUsesExpandedCandidatePool(t *testing.T) {
+	t.Parallel()
+
+	memorySvc, err := memory.NewService(t.TempDir())
+	require.NoError(t, err)
+
+	for i := range memoryRelevanceMaxFiles + 5 {
+		require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{
+			Key:   "project/memory-" + string(rune('a'+(i%26))) + "-" + string(rune('0'+(i%10))),
+			Value: "Memory value",
+			Scope: "project",
+			Type:  "project",
+		}))
+	}
+
+	lateKey := "project/target-memory"
+	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{
+		Key:   lateKey,
+		Value: "Target memory value",
+		Scope: "project",
+		Type:  "project",
+	}))
+
+	model := &memoryRelevanceLanguageModel{response: `["project/target-memory"]`}
+	entries := selectRelevantMemories(t.Context(), memorySvc, Model{Model: model}, config.ProviderConfig{ID: "test"}, "target", "", nil, nil)
+	require.Len(t, entries, 1)
+	require.Equal(t, lateKey, entries[0].Key)
+	require.Contains(t, model.prompt, lateKey)
+}
+
 func TestHasMemoryWritesInHistory(t *testing.T) {
 	t.Parallel()
 

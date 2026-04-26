@@ -14,7 +14,12 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 )
 
-const sessionMemoryMaxHistory = 12
+const (
+	sessionMemoryMaxHistory                 = 12
+	sessionMemoryInitializationTokens      = 10_000
+	sessionMemoryMinimumTokensBetweenTurns = 5_000
+	sessionMemoryToolCallsBetweenUpdates   = 3
+)
 
 const sessionMemoryPrompt = `You maintain a single session memory entry that helps future turns quickly recover the current working state.
 
@@ -65,6 +70,25 @@ func buildSessionMemoryFiles(ctx context.Context, tracker filetracker.Service) s
 }
 
 type sessionMemoryContextKey struct{}
+
+func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLastExtraction int64, toolCallsSinceLastExtraction, currentRunToolUses int) (bool, bool) {
+	if currentPromptTokens <= 0 {
+		return false, initialized
+	}
+	if !initialized {
+		if currentPromptTokens < sessionMemoryInitializationTokens {
+			return false, false
+		}
+		initialized = true
+	}
+	if currentPromptTokens-tokensAtLastExtraction < sessionMemoryMinimumTokensBetweenTurns {
+		return false, initialized
+	}
+	if toolCallsSinceLastExtraction >= sessionMemoryToolCallsBetweenUpdates {
+		return true, initialized
+	}
+	return currentRunToolUses == 0, initialized
+}
 
 func updateSessionMemory(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, tracker filetracker.Service, sessionID, prompt string, history []string) {
 	if memorySvc == nil || bgModel == nil {
