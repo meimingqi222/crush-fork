@@ -380,3 +380,39 @@ func TestMemoryServiceStorePreservesUnflushedAccessCount(t *testing.T) {
 	require.GreaterOrEqual(t, entry.AccessCount, int64(getsBeforeStore+1),
 		"Store must preserve unflushed access-count increments from Get")
 }
+
+func TestMemoryServiceStoreLastAccessedAtMonotonic(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(t.TempDir())
+	require.NoError(t, err)
+
+	// Store initial entry.
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "time-key",
+		Value: "initial",
+		Type:  "project",
+	}))
+
+	// Get to bump LastAccessedAt.
+	entry1, err := service.Get(context.Background(), "time-key")
+	require.NoError(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	// Get again to increment count but not flush (assuming batch > 1).
+	entry2, err := service.Get(context.Background(), "time-key")
+	require.NoError(t, err)
+	require.Greater(t, entry2.LastAccessedAt, entry1.LastAccessedAt)
+
+	// Store should preserve the newer LastAccessedAt even if counts are equal.
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "time-key",
+		Value: "updated",
+		Type:  "project",
+	}))
+
+	entry3, err := service.Get(context.Background(), "time-key")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, entry3.LastAccessedAt, entry2.LastAccessedAt,
+		"LastAccessedAt must not go backwards after Store")
+}

@@ -190,6 +190,8 @@ func (s *service) Store(ctx context.Context, params StoreParams) error {
 	if pending, ok := s.pendingAccess[normalizedKey]; ok {
 		if pending.count > existingCount {
 			existingCount = pending.count
+		}
+		if pending.lastAt > existingLastAccessed {
 			existingLastAccessed = pending.lastAt
 		}
 		delete(s.pendingAccess, normalizedKey)
