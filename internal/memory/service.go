@@ -197,6 +197,12 @@ func (s *service) Store(ctx context.Context, params StoreParams) error {
 		delete(s.pendingAccess, normalizedKey)
 	}
 
+	// For truly new entries (no existing disk entry, no pending access),
+	// initialize LastAccessedAt to the current time instead of 0.
+	if existingLastAccessed == 0 {
+		existingLastAccessed = time.Now().UnixNano()
+	}
+
 	fm := memoryFrontmatter{
 		Key:            normalizedKey,
 		Description:    description,

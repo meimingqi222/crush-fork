@@ -416,3 +416,24 @@ func TestMemoryServiceStoreLastAccessedAtMonotonic(t *testing.T) {
 	require.GreaterOrEqual(t, entry3.LastAccessedAt, entry2.LastAccessedAt,
 		"LastAccessedAt must not go backwards after Store")
 }
+
+func TestMemoryServiceNewEntryLastAccessedAt(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(t.TempDir())
+	require.NoError(t, err)
+
+	// Store a brand new entry (no prior Get, no pending state).
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "new-key",
+		Value: "brand new",
+		Type:  "project",
+	}))
+
+	entry, err := service.Get(context.Background(), "new-key")
+	require.NoError(t, err)
+	require.NotZero(t, entry.LastAccessedAt,
+		"New entries must have a non-zero LastAccessedAt")
+	require.Greater(t, entry.LastAccessedAt, int64(0),
+		"LastAccessedAt should be a valid timestamp, not Unix epoch")
+}
