@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	sessionMemoryMaxHistory                 = 12
+	sessionMemoryMaxHistory                = 12
 	sessionMemoryInitializationTokens      = 10_000
 	sessionMemoryMinimumTokensBetweenTurns = 5_000
 	sessionMemoryToolCallsBetweenUpdates   = 3
@@ -81,7 +81,7 @@ func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLa
 		}
 		initialized = true
 	}
-	if currentPromptTokens-tokensAtLastExtraction < sessionMemoryMinimumTokensBetweenTurns {
+	if max(0, currentPromptTokens-tokensAtLastExtraction) < sessionMemoryMinimumTokensBetweenTurns {
 		return false, initialized
 	}
 	if toolCallsSinceLastExtraction >= sessionMemoryToolCallsBetweenUpdates {

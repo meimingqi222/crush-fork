@@ -224,6 +224,26 @@ func TestShouldUpdateSessionMemory(t *testing.T) {
 			wantShouldUpdate:        false,
 			wantInitializedAfterRun: true,
 		},
+		{
+			name:                    "handles token underflow after compaction by requiring growth from new baseline",
+			initialized:             true,
+			currentPromptTokens:     sessionMemoryInitializationTokens - 1000,
+			tokensAtLastExtraction:  sessionMemoryInitializationTokens + 1000,
+			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
+			currentRunToolUses:      0,
+			wantShouldUpdate:        false,
+			wantInitializedAfterRun: true,
+		},
+		{
+			name:                    "updates after compaction once enough tokens accumulate from new baseline",
+			initialized:             true,
+			currentPromptTokens:     sessionMemoryInitializationTokens + 1000 + sessionMemoryMinimumTokensBetweenTurns,
+			tokensAtLastExtraction:  sessionMemoryInitializationTokens + 1000,
+			toolCallsSinceLast:      0,
+			currentRunToolUses:      0,
+			wantShouldUpdate:        true,
+			wantInitializedAfterRun: true,
+		},
 	}
 
 	for _, tt := range tests {
