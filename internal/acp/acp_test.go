@@ -274,6 +274,10 @@ func (f *fakeCoordinator) Summarize(_ context.Context, _ string, _ fantasy.Provi
 }
 func (f *fakeCoordinator) Dream(_ context.Context, _ string, _ bool) error { return nil }
 
+func (f *fakeCoordinator) EnhancePrompt(_ context.Context, _ string, _ string) (string, error) {
+	return "", nil
+}
+
 func (f *fakeCoordinator) GenerateHandoff(_ context.Context, _ string, _ string) (agent.HandoffDraft, error) {
 	return agent.HandoffDraft{}, nil
 }

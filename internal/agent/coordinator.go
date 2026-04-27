@@ -101,6 +101,11 @@ type Coordinator interface {
 	UpdateModels(ctx context.Context) error
 	RefreshTools(ctx context.Context) error
 
+	// EnhancePrompt uses the small model to rewrite a prompt to be clearer and
+	// more specific, taking conversation history into account.
+	// sessionID is the current session; pass empty string to skip history.
+	EnhancePrompt(ctx context.Context, sessionID, prompt string) (string, error)
+
 	// EscalationBridge returns the permission escalation bridge for worker-to-leader communication.
 	EscalationBridge() *permission.EscalationBridge
 }

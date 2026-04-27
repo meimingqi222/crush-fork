@@ -193,6 +193,10 @@ type (
 		closeDialog  bool
 		err          error
 	}
+	promptEnhanceResultMsg struct {
+		enhanced string
+		err      error
+	}
 	handoffGeneratedMsg struct {
 		sessionID string
 		title     string
@@ -309,6 +313,7 @@ type UI struct {
 	focusedPillSection pillSection
 	promptQueue        int
 	queuePaused        bool
+	isEnhancingPrompt  bool
 	selectedQueueIndex int
 	pillsPreviousFocus uiFocusState
 	pillsView          string
@@ -1091,6 +1096,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		cmds = append(cmds, util.ReportInfo(fmt.Sprintf("%s model changed to %s", msg.modelType, msg.modelName)))
+	case promptEnhanceResultMsg:
+		m.isEnhancingPrompt = false
+		if msg.err != nil {
+			cmds = append(cmds, util.ReportError(fmt.Errorf("prompt enhancement failed: %w", msg.err)))
+			break
+		}
+		m.textarea.SetValue(msg.enhanced)
+		m.textarea.CursorEnd()
+		cmds = append(cmds, util.ReportInfo("Prompt enhanced."))
 	case handoffGeneratedMsg:
 		m.dialog.StopLoading()
 		if msg.err != nil {
@@ -3019,6 +3033,19 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if cmd := m.cycleExecutionMode(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
+			case key.Matches(msg, m.keyMap.Editor.PromptEnhance):
+				if m.isEnhancingPrompt {
+					break
+				}
+				if strings.TrimSpace(m.textarea.Value()) == "" {
+					cmds = append(cmds, util.ReportWarn("Type something first to enhance."))
+					break
+				}
+				m.isEnhancingPrompt = true
+				cmds = append(cmds,
+					util.ReportInfo("Enhancing prompt…"),
+					m.enhancePromptCmd(),
+				)
 			case key.Matches(msg, m.keyMap.Editor.Newline):
 				prevHeight := m.textarea.Height()
 				m.textarea.InsertRune('\n')
@@ -3404,14 +3431,13 @@ func (m *UI) ShortHelp() []key.Binding {
 	tab := k.Tab
 	commands := k.Commands
 	if m.focus == uiFocusEditor && m.textarea.Value() == "" {
-		commands.SetHelp("/ or ctrl+p", "commands")
+		commands.SetHelp("/ or ctrl+/", "commands")
 	}
 
 	switch m.state {
 	case uiInitialize:
 		binds = append(binds, k.Quit)
 	case uiChat:
-		// Show cancel binding if agent is busy.
 		if m.isAgentBusy() {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
@@ -3431,43 +3457,29 @@ func (m *UI) ShortHelp() []key.Binding {
 		binds = append(binds,
 			tab,
 			commands,
-			k.Models,
 		)
 
 		switch m.focus {
 		case uiFocusEditor:
 			binds = append(binds,
 				k.Editor.CycleExecutionMode,
-				k.Editor.Newline,
+				k.Editor.PromptEnhance,
 			)
 		case uiFocusMain:
-			binds = append(binds,
-				k.Chat.UpDown,
-				k.Chat.UpDownOneItem,
-				k.Chat.PageUp,
-				k.Chat.PageDown,
-				k.Chat.Copy,
-				k.Chat.SessionNav,
-			)
-			if m.pillsExpanded && hasIncompleteTodos(m.session.Todos) && m.promptQueue > 0 {
-				binds = append(binds, k.Chat.PillLeft)
-			}
+			binds = append(binds, k.Chat.UpDown)
 		}
 	default:
-		// TODO: other states
-		// if m.session == nil {
-		// no session selected
 		binds = append(binds,
 			commands,
-			k.Models,
-			k.Editor.CycleExecutionMode,
-			k.Editor.Newline,
+			k.Editor.PromptEnhance,
 		)
 	}
 
+	help := k.Help
+	help.SetHelp("ctrl+g", "more shortcuts")
 	binds = append(binds,
 		k.Quit,
-		k.Help,
+		help,
 	)
 
 	return binds
@@ -3482,7 +3494,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 	hasSession := m.hasSession()
 	commands := k.Commands
 	if m.focus == uiFocusEditor && m.textarea.Value() == "" {
-		commands.SetHelp("/ or ctrl+p", "commands")
+		commands.SetHelp("/ or ctrl+/", "commands")
 	}
 
 	switch m.state {
@@ -3528,6 +3540,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			binds = append(binds,
 				[]key.Binding{
 					k.Editor.CycleExecutionMode,
+					k.Editor.PromptEnhance,
 					k.Editor.Newline,
 					k.Editor.AddImage,
 					k.Editor.PasteImage,
@@ -3583,6 +3596,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 				},
 				[]key.Binding{
 					k.Editor.CycleExecutionMode,
+					k.Editor.PromptEnhance,
 					k.Editor.Newline,
 					k.Editor.AddImage,
 					k.Editor.PasteImage,
@@ -5487,6 +5501,25 @@ func renderLogo(t *styles.Styles, compact bool, width int) string {
 		VersionColor: t.LogoVersionColor,
 		Width:        width,
 	})
+}
+
+// enhancePromptCmd returns a tea.Cmd that uses the small LLM model to rewrite
+// the current prompt text to be clearer and more specific (Ctrl+P feature,
+// ported from Augment's V0o template).
+// The current session ID is passed so the LLM can use conversation history as context.
+func (m *UI) enhancePromptCmd() tea.Cmd {
+	prompt := m.textarea.Value()
+	coordinator := m.com.App.AgentCoordinator
+	var sessionID string
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		enhanced, err := coordinator.EnhancePrompt(ctx, sessionID, prompt)
+		return promptEnhanceResultMsg{enhanced: enhanced, err: err}
+	}
 }
 
 func (m *UI) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State]) tea.Cmd {

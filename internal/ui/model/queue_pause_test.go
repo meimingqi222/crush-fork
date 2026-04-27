@@ -46,6 +46,10 @@ func (m *mockQueueCoordinator) Summarize(context.Context, string, fantasy.Provid
 }
 func (m *mockQueueCoordinator) Dream(context.Context, string, bool) error { return nil }
 
+func (m *mockQueueCoordinator) EnhancePrompt(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
 func (m *mockQueueCoordinator) GenerateHandoff(context.Context, string, string) (agent.HandoffDraft, error) {
 	return agent.HandoffDraft{}, nil
 }

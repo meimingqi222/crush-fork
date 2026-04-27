@@ -13,6 +13,7 @@ type KeyMap struct {
 		PasteImage         key.Binding
 		MentionFile        key.Binding
 		Commands           key.Binding
+		PromptEnhance      key.Binding
 
 		// Attachments key maps
 		AttachmentDeleteMode key.Binding
@@ -88,8 +89,11 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("ctrl+g", "shortcuts"),
 		),
 		Commands: key.NewBinding(
-			key.WithKeys("ctrl+p"),
-			key.WithHelp("ctrl+p", "commands"),
+			// "ctrl+_" is the fallback for terminals (e.g. Windows Terminal in
+			// VT input mode) that send 0x1F for ctrl+/ instead of the Kitty
+			// disambiguation sequence.
+			key.WithKeys("ctrl+/", "ctrl+_"),
+			key.WithHelp("ctrl+/", "commands"),
 		),
 		Models: key.NewBinding(
 			key.WithKeys("ctrl+m", "ctrl+l"),
@@ -122,11 +126,19 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("ctrl+o", "open editor"),
 	)
 	km.Editor.Newline = key.NewBinding(
-		key.WithKeys("shift+enter", "ctrl+j"),
-		// "ctrl+j" is a common keybinding for newline in many editors. If
-		// the terminal supports "shift+enter", we substitute the help tex
-		// to reflect that.
-		key.WithHelp("ctrl+j", "newline"),
+		// "ctrl+j" (0x0A linefeed) is the fallback for Windows Terminal in
+		// VT input mode, where modifier info is lost for enter-family keys
+		// and both ctrl+enter and shift+enter decode as plain enter. ctrl+j
+		// is distinct from enter and works reliably without keyboard
+		// enhancement.
+		key.WithKeys("shift+enter", "ctrl+enter", "ctrl+j"),
+		// "ctrl+enter" requires keyboard enhancement. If the terminal
+		// supports "shift+enter", we substitute the help text to reflect that.
+		key.WithHelp("ctrl+enter", "newline"),
+	)
+	km.Editor.PromptEnhance = key.NewBinding(
+		key.WithKeys("ctrl+p"),
+		key.WithHelp("ctrl+p", "enhance prompt"),
 	)
 	km.Editor.CycleExecutionMode = key.NewBinding(
 		key.WithKeys("shift+tab"),
@@ -221,7 +233,7 @@ func DefaultKeyMap() KeyMap {
 	)
 
 	km.Chat.Down = key.NewBinding(
-		key.WithKeys("down", "ctrl+j", "j"),
+		key.WithKeys("down", "j"),
 		key.WithHelp("↓", "down"),
 	)
 	km.Chat.Up = key.NewBinding(
@@ -293,7 +305,7 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("ctrl+↓", "next subagent"),
 	)
 	km.Chat.SessionPrev = key.NewBinding(
-		key.WithKeys("ctrl+up", "alt+up", "ctrl+p", "alt+p"),
+		key.WithKeys("ctrl+up", "alt+up", "alt+p"),
 		key.WithHelp("ctrl+↑", "prev subagent"),
 	)
 	km.Chat.SessionNav = key.NewBinding(
