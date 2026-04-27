@@ -46,7 +46,7 @@ const enhancePromptTemplate = "⚠️ NO TOOLS ALLOWED ⚠️\n\n" +
 // EnhancePrompt implements [Coordinator.EnhancePrompt].
 //
 // The request shape intentionally tracks Augment's old method closely:
-//   - always uses the current agent chat model semantics (not the background model),
+//   - prefers the configured small model with normal chat semantics (not the background model),
 //   - disables tools,
 //   - passes sanitized chat history,
 //   - uses strict XML extraction only.
@@ -82,10 +82,13 @@ func (c *coordinator) EnhancePrompt(ctx context.Context, sessionID, userPrompt s
 	_, err = ag.Stream(
 		copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent),
 		fantasy.AgentStreamCall{
+			Messages:        append([]fantasy.Message(nil), preparedMessages...),
 			ProviderOptions: getProviderOptions(model, providerCfg),
-			PrepareStep: func(callCtx context.Context, _ fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+			PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 				callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
-				prepared.Messages = append([]fantasy.Message(nil), preparedMessages...)
+				if options.StepNumber > 0 {
+					prepared.Messages = truncateMessagesToFit(options.Messages, augmentEnhancePromptBudget(model, maxOutputTokens))
+				}
 				return callCtx, prepared, nil
 			},
 			OnTextDelta: func(_ string, text string) error {
@@ -110,17 +113,6 @@ func (c *coordinator) EnhancePrompt(ctx context.Context, sessionID, userPrompt s
 }
 
 func (c *coordinator) enhancePromptModel(ctx context.Context) (Model, config.ProviderConfig, error) {
-	if c.currentAgent != nil {
-		current := c.currentAgent.Model()
-		if current.Model != nil {
-			providerCfg, ok := c.cfg.Config().Providers.Get(current.ModelCfg.Provider)
-			if !ok {
-				return Model{}, config.ProviderConfig{}, errModelProviderNotConfigured
-			}
-			return current, providerCfg, nil
-		}
-	}
-
 	model, providerCfg, err := c.selectedModel(ctx, config.SelectedModelTypeSmall, false)
 	if err == nil {
 		return model, providerCfg, nil
@@ -183,6 +175,11 @@ func (c *coordinator) loadEnhancePromptHistory(ctx context.Context, sessionID st
 	if len(history) == 0 {
 		return nil
 	}
+
+	// Drop tool-call parts from assistant messages: prompt enhancement does not
+	// include tool result messages, and orphan tool_calls are rejected by
+	// strict OpenAI-compatible providers (HTTP 400).
+	history = stripToolCallPartsFromFantasyMessages(history)
 
 	if !model.CatwalkCfg.SupportsImages {
 		history = stripImagePartsFromFantasyMessages(history)

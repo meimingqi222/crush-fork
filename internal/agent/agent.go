@@ -4199,6 +4199,58 @@ func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Me
 	return result
 }
 
+// stripToolCallPartsFromFantasyMessages removes tool-call parts from
+// assistant messages and drops tool-result messages entirely. This is used
+// for auxiliary flows (such as prompt enhancement) that send sanitized chat
+// history without the corresponding tool execution results: strict
+// OpenAI-compatible providers reject assistant messages whose tool_calls
+// have no matching tool response, so leaving the parts in place produces
+// HTTP 400 errors.
+//
+// Assistant messages that become empty after stripping are dropped so that
+// providers do not see an assistant turn with no content.
+func stripToolCallPartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Message {
+	result := make([]fantasy.Message, 0, len(messages))
+	for _, msg := range messages {
+		switch msg.Role {
+		case fantasy.MessageRoleAssistant:
+			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
+			hasMeaningful := false
+			for _, part := range msg.Content {
+				if _, ok := part.(fantasy.ToolCallPart); ok {
+					continue
+				}
+				if _, ok := part.(*fantasy.ToolCallPart); ok {
+					continue
+				}
+				filtered = append(filtered, part)
+				switch p := part.(type) {
+				case fantasy.TextPart:
+					if strings.TrimSpace(p.Text) != "" {
+						hasMeaningful = true
+					}
+				case *fantasy.TextPart:
+					if p != nil && strings.TrimSpace(p.Text) != "" {
+						hasMeaningful = true
+					}
+				}
+			}
+			if !hasMeaningful {
+				continue
+			}
+			msg.Content = filtered
+			result = append(result, msg)
+		case fantasy.MessageRoleTool:
+			// Drop tool result messages entirely: their matching tool_calls
+			// have already been stripped from the preceding assistant turn.
+			continue
+		default:
+			result = append(result, msg)
+		}
+	}
+	return result
+}
+
 // buildSummaryPrompt constructs the prompt text for session summarization.
 func buildSummaryPrompt(todos []session.Todo) string {
 	var sb strings.Builder
