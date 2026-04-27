@@ -289,7 +289,7 @@ func (s *Shell) builtinHandler() func(next interp.ExecHandlerFunc) interp.ExecHa
 			switch args[0] {
 			case "jq":
 				hc := interp.HandlerCtx(ctx)
-				return handleJQ(args, hc.Stdin, hc.Stdout, hc.Stderr)
+				return handleJQ(ctx, args, hc.Stdin, hc.Stdout, hc.Stderr)
 			default:
 				return next(ctx, args)
 			}
