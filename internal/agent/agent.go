@@ -4233,6 +4233,14 @@ func stripToolCallPartsFromFantasyMessages(messages []fantasy.Message) []fantasy
 					if p != nil && strings.TrimSpace(p.Text) != "" {
 						hasMeaningful = true
 					}
+				case fantasy.ReasoningPart:
+					if strings.TrimSpace(p.Text) != "" {
+						hasMeaningful = true
+					}
+				case *fantasy.ReasoningPart:
+					if p != nil && strings.TrimSpace(p.Text) != "" {
+						hasMeaningful = true
+					}
 				}
 			}
 			if !hasMeaningful {

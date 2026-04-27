@@ -62,6 +62,49 @@ func TestEnhancePromptModelPrefersSmallConfiguredModel(t *testing.T) {
 	require.Equal(t, providerCfg.ID, gotProvider.ID)
 }
 
+func TestEnhancePromptModelFallsBackToLargeWhenSmallNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	// Remove small model config
+	smallCfg := cfg.Config().Models[config.SelectedModelTypeSmall]
+	delete(cfg.Config().Models, config.SelectedModelTypeSmall)
+
+	want := cfg.Config().Models[config.SelectedModelTypeLarge]
+	providerCfg, ok := cfg.Config().Providers.Get(want.Provider)
+	require.True(t, ok)
+
+	coord := &coordinator{cfg: cfg}
+	got, gotProvider, err := coord.enhancePromptModel(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, want.Model, got.ModelCfg.Model)
+	require.Equal(t, want.Provider, got.ModelCfg.Provider)
+	require.Equal(t, providerCfg.ID, gotProvider.ID)
+
+	// Restore small config for other tests
+	cfg.Config().Models[config.SelectedModelTypeSmall] = smallCfg
+}
+
+func TestEnhancePromptModelErrorWhenNoModelAvailable(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	// Remove both small and large model configs
+	delete(cfg.Config().Models, config.SelectedModelTypeSmall)
+	delete(cfg.Config().Models, config.SelectedModelTypeLarge)
+
+	coord := &coordinator{cfg: cfg}
+	_, _, err = coord.enhancePromptModel(t.Context())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no model available for prompt enhancement")
+}
+
 func TestLoadEnhancePromptHistorySkipsToolsAndHonorsSummaryBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -228,6 +271,105 @@ func TestAugmentEnhancePromptBudgetUsesEffectiveContextWindow(t *testing.T) {
 
 	fallback := augmentEnhancePromptBudget(Model{}, 1_024)
 	require.Equal(t, int64(23_976), fallback)
+}
+
+func TestStripToolCallPartsFromFantasyMessages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    []fantasy.Message
+		expected []fantasy.Message
+	}{
+		{
+			name:     "empty input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "assistant with text and tool call",
+			input: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "hello"},
+					fantasy.ToolCallPart{ToolCallID: "call_1"},
+				}},
+			},
+			expected: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "hello"},
+				}},
+			},
+		},
+		{
+			name: "assistant with only tool call dropped",
+			input: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.ToolCallPart{ToolCallID: "call_1"},
+				}},
+			},
+			expected: nil,
+		},
+		{
+			name: "assistant with reasoning kept",
+			input: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.ReasoningPart{Text: "thinking..."},
+					fantasy.ToolCallPart{ToolCallID: "call_1"},
+				}},
+			},
+			expected: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.ReasoningPart{Text: "thinking..."},
+				}},
+			},
+		},
+		{
+			name: "tool message dropped",
+			input: []fantasy.Message{
+				{Role: fantasy.MessageRoleUser, Content: []fantasy.MessagePart{fantasy.TextPart{Text: "hi"}}},
+				{Role: fantasy.MessageRoleTool, Content: []fantasy.MessagePart{fantasy.ToolResultPart{ToolCallID: "call_1"}}},
+			},
+			expected: []fantasy.Message{
+				{Role: fantasy.MessageRoleUser, Content: []fantasy.MessagePart{fantasy.TextPart{Text: "hi"}}},
+			},
+		},
+		{
+			name: "whitespace-only text treated as empty",
+			input: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "   "},
+					fantasy.ToolCallPart{ToolCallID: "call_1"},
+				}},
+			},
+			expected: nil,
+		},
+		{
+			name: "whitespace-only reasoning treated as empty",
+			input: []fantasy.Message{
+				{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.ReasoningPart{Text: "   "},
+					fantasy.ToolCallPart{ToolCallID: "call_1"},
+				}},
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripToolCallPartsFromFantasyMessages(tc.input)
+			if tc.expected == nil {
+				require.Empty(t, got)
+				return
+			}
+			require.Len(t, got, len(tc.expected))
+			for i := range got {
+				require.Equal(t, tc.expected[i].Role, got[i].Role)
+				require.Len(t, got[i].Content, len(tc.expected[i].Content))
+			}
+		})
+	}
 }
 
 func TestEnhancePromptTemplatePreservesLanguageInstruction(t *testing.T) {
