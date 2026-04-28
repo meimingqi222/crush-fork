@@ -1250,7 +1250,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		}, nil
 }
 
-func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, useCopilotClient, isSubAgent bool) (fantasy.Provider, error) {
+func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, useCopilotClient, isSubAgent, thinkingDisabled bool) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
 	switch {
@@ -1282,7 +1282,16 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	} else if c.cfg.Config().Options.Debug {
 		httpClient = log.NewHTTPClient()
 	}
-	opts = append(opts, anthropic.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
+	wrapped := httpext.WrapActivityTrackingHTTPClient(httpClient)
+	if thinkingDisabled {
+		// Some Anthropic-protocol providers (notably DeepSeek's /anthropic
+		// endpoint) default to thinking ON and only honor an explicit
+		// `thinking: {type: "disabled"}` field in the request body. The
+		// fantasy SDK has no typed way to emit that, so we rewrite the body
+		// at the HTTP layer when the user has disabled thinking.
+		wrapped = httpext.WrapAnthropicDisableThinkingHTTPClient(wrapped)
+	}
+	opts = append(opts, anthropic.WithHTTPClient(wrapped))
 
 	return anthropic.New(opts...)
 }
@@ -1535,7 +1544,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 	case openai.Name:
 		return c.buildOpenaiProvider(baseURL, apiKey, headers, providerCfg.CopilotService, providerCfg.UseCopilotClient, isSubAgent, providerCfg.ResponsesWebSocket)
 	case anthropic.Name:
-		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, providerCfg.UseCopilotClient, isSubAgent)
+		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, providerCfg.UseCopilotClient, isSubAgent, thinkingDisabled)
 	case openrouter.Name:
 		return c.buildOpenrouterProvider(baseURL, apiKey, headers)
 	case vercel.Name:
