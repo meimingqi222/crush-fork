@@ -4,6 +4,7 @@ Available subagent types:
 {agents}
 
 When to use the Agent tool:
+- **Prefer `explore` over `general` for any read-only investigation.** The `explore` subagent runs on a smaller, faster, cheaper model by default and is purpose-built for parallel context gathering. Reaching for `general` whenever you need to "look at" the codebase wastes large-model budget and slows the main thread. If the task does not require editing files, running tests, or invoking LSP/MCP, it should almost always go to `explore`.
 - Open-ended codebase exploration, pattern hunting, and implementation lookup should usually use the `explore` subagent.
 - The `explore` subagent is read-only and has a restricted `bash` tool for direct local read-only git inspection only. It is suitable for `git diff`, `git status`, `git log`, `git show`, `git blame`, `git rev-parse`, `git merge-base`, and `git ls-files`, but not for mutating git commands, wrapper shells, or general shell work.
 - Independent implementation tasks, test reproduction, or file-local refactors that can proceed without blocking your immediate next step should usually use the `general` subagent.

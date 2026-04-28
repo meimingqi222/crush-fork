@@ -5464,8 +5464,10 @@ func (m *UI) enableDockerMCP() tea.Msg {
 	}
 
 	// Refresh agent tools to include the new Docker MCP tools.
-	if err := m.com.App.AgentCoordinator.RefreshTools(ctx); err != nil {
-		slog.Warn("Failed to refresh agent tools after enabling Docker MCP", "error", err)
+	if m.com.App.AgentCoordinator != nil {
+		if err := m.com.App.AgentCoordinator.RefreshTools(ctx); err != nil {
+			slog.Warn("Failed to refresh agent tools after enabling Docker MCP", "error", err)
+		}
 	}
 
 	return util.NewInfoMsg("Docker MCP enabled and started successfully")
@@ -5484,8 +5486,10 @@ func (m *UI) disableDockerMCP() tea.Msg {
 	}
 
 	// Refresh agent tools to remove the Docker MCP tools.
-	if err := m.com.App.AgentCoordinator.RefreshTools(context.Background()); err != nil {
-		slog.Warn("Failed to refresh agent tools after disabling Docker MCP", "error", err)
+	if m.com.App.AgentCoordinator != nil {
+		if err := m.com.App.AgentCoordinator.RefreshTools(context.Background()); err != nil {
+			slog.Warn("Failed to refresh agent tools after disabling Docker MCP", "error", err)
+		}
 	}
 
 	return util.NewInfoMsg("Docker MCP disabled successfully")
@@ -5510,6 +5514,11 @@ func renderLogo(t *styles.Styles, compact bool, width int) string {
 func (m *UI) enhancePromptCmd() tea.Cmd {
 	prompt := m.textarea.Value()
 	coordinator := m.com.App.AgentCoordinator
+	if coordinator == nil {
+		return func() tea.Msg {
+			return promptEnhanceResultMsg{err: fmt.Errorf("coder agent is not initialized")}
+		}
+	}
 	var sessionID string
 	if m.session != nil {
 		sessionID = m.session.ID

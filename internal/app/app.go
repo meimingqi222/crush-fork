@@ -200,7 +200,20 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		return app, nil
 	}
 	if err := app.InitCoderAgent(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
+		// If the failure is because the user's selected model can no longer
+		// be resolved against the current provider config (e.g., a custom
+		// provider's models were edited or removed), don't abort startup.
+		// Let the TUI come up so the user can pick a valid model from the
+		// model dialog and re-initialize the coder agent.
+		if errors.Is(err, agent.ErrUnresolvedModel) {
+			slog.Warn(
+				"Coder agent not initialized: selected model is unavailable. "+
+					"Open the model picker to choose a valid model.",
+				"err", err,
+			)
+		} else {
+			return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
+		}
 	}
 
 	// Set up callback for LSP state updates.

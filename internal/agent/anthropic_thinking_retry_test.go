@@ -131,6 +131,18 @@ func TestShouldRetryWithoutAnthropicThinking_FuzzyProviderMessage(t *testing.T) 
 			status:  400,
 			options: fantasy.ProviderOptions{},
 		},
+		{
+			name:   "matches must-be-passed-back wording from strict proxies",
+			msg:    "The content[].thinking in the thinking mode must be passed back to the API.",
+			want:   true,
+			status: 400,
+		},
+		{
+			name:   "matches lowercased passed-back-to-api wording",
+			msg:    "thinking block missing — must be passed back to the api",
+			want:   true,
+			status: 400,
+		},
 	}
 
 	for _, tt := range tests {

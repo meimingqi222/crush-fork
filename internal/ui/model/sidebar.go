@@ -74,7 +74,11 @@ func (m *UI) modelInfo(width int) string {
 			ModelContext: usage.ContextWindow,
 		}
 	}
-	info := common.ModelInfo(m.com.Styles, model.CatwalkCfg.Name, providerName, reasoningInfo, modelContext, width)
+	modelName := ""
+	if model != nil {
+		modelName = model.CatwalkCfg.Name
+	}
+	info := common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width)
 	modeLine := m.modeInfo(width)
 	if modeLine == "" {
 		return info

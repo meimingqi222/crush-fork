@@ -2529,7 +2529,19 @@ func trimCanceledPromptBranches(msgs []message.Message) []message.Message {
 		if !hasLaterUser {
 			continue
 		}
-		if msg.Role != message.Assistant || msg.FinishReason() != message.FinishReasonCanceled {
+		if msg.Role != message.Assistant {
+			continue
+		}
+		// Drop both explicitly canceled assistant turns and orphaned
+		// assistant turns that never received a Finish part (e.g. the
+		// process was interrupted before cleanup could persist the
+		// finish reason). Leaving these in place sends a partially-
+		// streamed assistant turn — often missing its signed thinking
+		// block — back to strict thinking-mode proxies, which reject the
+		// request with errors such as "content[].thinking in the
+		// thinking mode must be passed back to the API".
+		finishReason := msg.FinishReason()
+		if finishReason != message.FinishReasonCanceled && finishReason != "" {
 			continue
 		}
 		if keep[i] {
@@ -2890,6 +2902,19 @@ func shouldRetryWithoutAnthropicThinking(err error, opts fantasy.ProviderOptions
 		return false
 	}
 	if strings.Contains(msg, "thinking is enabled but reasoning_content is missing") {
+		return true
+	}
+	// Some Anthropic-compatible proxies enforce that every assistant turn
+	// in history carries its original `thinking` block when thinking mode
+	// is on. After an ESC interruption, an assistant turn may be persisted
+	// without a signed thinking block, causing errors like:
+	//   "The content[].thinking in the thinking mode must be passed back
+	//    to the API."
+	// Treat these as retryable by disabling thinking for the retry.
+	if strings.Contains(msg, "thinking") &&
+		(strings.Contains(msg, "must be passed back") ||
+			strings.Contains(msg, "must be passed-back") ||
+			strings.Contains(msg, "passed back to the api")) {
 		return true
 	}
 	hasThinking := strings.Contains(msg, "thinking")

@@ -65,14 +65,20 @@ import (
 var (
 	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
 	errModelProviderNotConfigured      = errors.New("model provider not configured")
-	errLargeModelNotSelected           = errors.New("large model not selected")
-	errSmallModelNotSelected           = errors.New("small model not selected")
-	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
-	errLargeModelNotFound              = errors.New("large model not found in provider config")
-	errSmallModelNotFound              = errors.New("small model not found in provider config")
+	errLargeModelNotSelected           = fmt.Errorf("%w: large model not selected", ErrUnresolvedModel)
+	errSmallModelNotSelected           = fmt.Errorf("%w: small model not selected", ErrUnresolvedModel)
+	errLargeModelProviderNotConfigured = fmt.Errorf("%w: large model provider not configured", ErrUnresolvedModel)
+	errSmallModelProviderNotConfigured = fmt.Errorf("%w: small model provider not configured", ErrUnresolvedModel)
+	errLargeModelNotFound              = fmt.Errorf("%w: large model not found in provider config", ErrUnresolvedModel)
+	errSmallModelNotFound              = fmt.Errorf("%w: small model not found in provider config", ErrUnresolvedModel)
 	errTargetModelNotFound             = errors.New("target model not found in provider config")
 )
+
+// ErrUnresolvedModel indicates that the configured large or small model could
+// not be resolved against the current provider configuration. Callers (e.g.,
+// app startup) can use errors.Is to detect this recoverable condition and
+// allow the user to re-select a model from the UI instead of failing hard.
+var ErrUnresolvedModel = errors.New("selected model is unavailable in provider config")
 
 const maxModelSwitchSummaries = 2
 

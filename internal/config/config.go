@@ -815,7 +815,12 @@ func builtinAgents(primaryTools, generalTools, exploreTools, contextPaths []stri
 			Memory:           "inherit",
 			Isolation:        "session",
 			Mode:             AgentModeSubagent,
-			Model:            SelectedModelTypeLarge,
+			// Explore is read-only and used for parallel context gathering.
+			// Default to the small/fast model so it is cheaper and quicker
+			// than the general subagent, encouraging the orchestrator to
+			// prefer explore for any pure-investigation work. Users can
+			// override this in crush.json if they want a larger model.
+			Model:            SelectedModelTypeSmall,
 			ContextPaths:     contextPaths,
 			AllowedTools:     exploreTools,
 			// NO MCPs or LSPs by default

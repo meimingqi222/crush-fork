@@ -2324,3 +2324,110 @@ func TestPreparePromptKeepsLatestCanceledBranchWithoutLaterUser(t *testing.T) {
 	require.Contains(t, toolResultIDs, "call-1")
 	require.NotContains(t, systemTexts, canceledPromptBranchSystemNote)
 }
+
+// TestPreparePromptDropsOrphanedUnfinishedAssistantBeforeNextUser verifies
+// that an assistant turn left without any Finish part (e.g. ESC interrupted
+// the agent before cleanup could persist a finish reason) is dropped when a
+// later user message exists. Otherwise its partially-streamed content —
+// often a thinking block without a signature — would be sent back to strict
+// thinking-mode proxies and rejected with errors like "content[].thinking
+// in the thinking mode must be passed back to the API".
+func TestPreparePromptDropsOrphanedUnfinishedAssistantBeforeNextUser(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{
+			ID:   "user-1",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "first ask"},
+			},
+		},
+		{
+			ID:   "assistant-orphan",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ReasoningContent{Thinking: "partial unsigned thoughts"},
+				message.TextContent{Text: "partial answer"},
+			},
+		},
+		{
+			ID:   "user-2",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "second ask"},
+			},
+		},
+	})
+
+	var userTexts []string
+	var assistantTexts []string
+	var systemTexts []string
+	for _, msg := range history {
+		switch msg.Role {
+		case fantasy.MessageRoleUser:
+			for _, part := range msg.Content {
+				if textPart, ok := part.(fantasy.TextPart); ok {
+					userTexts = append(userTexts, textPart.Text)
+				}
+			}
+		case fantasy.MessageRoleAssistant:
+			for _, part := range msg.Content {
+				if textPart, ok := part.(fantasy.TextPart); ok {
+					assistantTexts = append(assistantTexts, textPart.Text)
+				}
+			}
+		case fantasy.MessageRoleSystem:
+			for _, part := range msg.Content {
+				if textPart, ok := part.(fantasy.TextPart); ok {
+					systemTexts = append(systemTexts, textPart.Text)
+				}
+			}
+		}
+	}
+
+	require.Equal(t, []string{"first ask", "second ask"}, userTexts)
+	require.NotContains(t, assistantTexts, "partial answer")
+	require.Contains(t, systemTexts, canceledPromptBranchSystemNote)
+}
+
+// TestPreparePromptKeepsUnfinishedAssistantWhenItIsTheLastTurn verifies that
+// the orphan-cleanup heuristic only fires when a later user message exists.
+// Without a later user turn there is nothing to "branch away from", so the
+// assistant message is preserved.
+func TestPreparePromptKeepsUnfinishedAssistantWhenItIsTheLastTurn(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{
+			ID:   "user-1",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "first ask"},
+			},
+		},
+		{
+			ID:   "assistant-orphan",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "in-progress reply"},
+			},
+		},
+	})
+
+	var assistantTexts []string
+	for _, msg := range history {
+		if msg.Role != fantasy.MessageRoleAssistant {
+			continue
+		}
+		for _, part := range msg.Content {
+			if textPart, ok := part.(fantasy.TextPart); ok {
+				assistantTexts = append(assistantTexts, textPart.Text)
+			}
+		}
+	}
+
+	require.Contains(t, assistantTexts, "in-progress reply")
+}

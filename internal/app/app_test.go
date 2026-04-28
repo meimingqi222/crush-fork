@@ -222,9 +222,6 @@ func TestNew_RestoresDefaultPluginRuntimeWhenInitCoderAgentFails(t *testing.T) {
 	})
 
 	conn, store := setupMessageSubscriberDependencies(t)
-	defer func() {
-		require.NoError(t, conn.Close())
-	}()
 
 	cfg := store.Config()
 	cfg.Models[config.SelectedModelTypeLarge] = config.SelectedModel{
@@ -232,9 +229,17 @@ func TestNew_RestoresDefaultPluginRuntimeWhenInitCoderAgentFails(t *testing.T) {
 		Model:    "missing-model",
 	}
 
-	_, err := New(t.Context(), conn, store)
-	require.Error(t, err)
-	require.Same(t, originalRuntime, plugin.DefaultRuntime())
+	// A missing/changed provider for the selected model is recoverable: the
+	// app should still start so the user can pick a valid model from the
+	// model dialog. The coder agent will be left uninitialized.
+	app, err := New(t.Context(), conn, store)
+	require.NoError(t, err)
+	require.NotNil(t, app)
+	require.Nil(t, app.AgentCoordinator)
+	t.Cleanup(func() {
+		// App.Shutdown closes the underlying DB connection.
+		app.Shutdown()
+	})
 }
 
 func setupMessageSubscriberDependencies(t *testing.T) (*sql.DB, *config.ConfigStore) {
