@@ -2431,3 +2431,75 @@ func TestPreparePromptKeepsUnfinishedAssistantWhenItIsTheLastTurn(t *testing.T) 
 
 	require.Contains(t, assistantTexts, "in-progress reply")
 }
+
+// TestPreparePromptKeepsRoundTrippedAssistantBeforeNextUser verifies that an
+// assistant turn that has been round-tripped through fantasy.Message
+// conversion (which loses the persisted Finish part) is NOT mistaken for an
+// orphaned/interrupted turn and dropped. PrepareStep performs this round
+// trip when calling builtinPruneToolResults or messages.transform plugins,
+// so this regression test ensures prior turns survive when a new user
+// message arrives.
+func TestPreparePromptKeepsRoundTrippedAssistantBeforeNextUser(t *testing.T) {
+	t.Parallel()
+
+	// Build a completed prior turn via the same path PrepareStep uses:
+	// internal -> fantasy -> internal. The conversion drops the Finish part,
+	// which previously caused trimCanceledPromptBranches to nuke the entire
+	// prior turn.
+	prior := []message.Message{
+		{
+			ID:   "user-1",
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "first ask"},
+			},
+		},
+		{
+			ID:   "assistant-1",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "first reply"},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+	var fantasyMsgs []fantasy.Message
+	for _, m := range prior {
+		fantasyMsgs = append(fantasyMsgs, m.ToAIMessage()...)
+	}
+	roundTripped := message.FromFantasyMessages(fantasyMsgs)
+	roundTripped = append(roundTripped, message.Message{
+		ID:   "user-2",
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "second ask"},
+		},
+	})
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt(roundTripped)
+
+	var userTexts, assistantTexts, systemTexts []string
+	for _, msg := range history {
+		for _, part := range msg.Content {
+			tp, ok := part.(fantasy.TextPart)
+			if !ok {
+				continue
+			}
+			switch msg.Role {
+			case fantasy.MessageRoleUser:
+				userTexts = append(userTexts, tp.Text)
+			case fantasy.MessageRoleAssistant:
+				assistantTexts = append(assistantTexts, tp.Text)
+			case fantasy.MessageRoleSystem:
+				systemTexts = append(systemTexts, tp.Text)
+			}
+		}
+	}
+
+	require.Equal(t, []string{"first ask", "second ask"}, userTexts)
+	require.Contains(t, assistantTexts, "first reply",
+		"prior assistant reply was incorrectly dropped after round-tripping through fantasy.Message")
+	require.NotContains(t, systemTexts, canceledPromptBranchSystemNote,
+		"canceled-prompt boundary note was injected for a completed prior turn")
+}

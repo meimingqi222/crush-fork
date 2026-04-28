@@ -679,6 +679,7 @@ func FromFantasyMessages(msgs []fantasy.Message) []Message {
 			}
 		case fantasy.MessageRoleAssistant:
 			m.Role = Assistant
+			hasToolCall := false
 			for _, part := range msg.Content {
 				switch p := part.(type) {
 				case fantasy.TextPart:
@@ -699,6 +700,7 @@ func FromFantasyMessages(msgs []fantasy.Message) []Message {
 					}
 					m.Parts = append(m.Parts, rc)
 				case fantasy.ToolCallPart:
+					hasToolCall = true
 					m.Parts = append(m.Parts, ToolCall{
 						ID:               p.ToolCallID,
 						Name:             p.ToolName,
@@ -706,6 +708,21 @@ func FromFantasyMessages(msgs []fantasy.Message) []Message {
 						ProviderExecuted: p.ProviderExecuted,
 					})
 				}
+			}
+			// Synthesize a Finish part for assistant turns reconstructed from
+			// fantasy messages. Any assistant turn that has already been
+			// converted into fantasy form represents a completed turn (either
+			// a final reply or a step that produced tool calls). Without this,
+			// downstream consumers (e.g. trimCanceledPromptBranches) would see
+			// FinishReason() == "" and incorrectly classify the message as an
+			// orphaned/interrupted turn, dropping the entire prior conversation
+			// turn before the next user message.
+			if len(m.Parts) > 0 && !m.IsFinished() {
+				reason := FinishReasonEndTurn
+				if hasToolCall {
+					reason = FinishReasonToolUse
+				}
+				m.Parts = append(m.Parts, Finish{Reason: reason})
 			}
 		case fantasy.MessageRoleTool:
 			m.Role = Tool
