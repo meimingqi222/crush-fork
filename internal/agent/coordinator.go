@@ -1250,7 +1250,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		}, nil
 }
 
-func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, useCopilotClient, isSubAgent, thinkingDisabled bool) (fantasy.Provider, error) {
+func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, useCopilotClient, isSubAgent bool) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
 	switch {
@@ -1282,16 +1282,15 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	} else if c.cfg.Config().Options.Debug {
 		httpClient = log.NewHTTPClient()
 	}
-	wrapped := httpext.WrapActivityTrackingHTTPClient(httpClient)
-	if thinkingDisabled {
-		// Some Anthropic-protocol providers (notably DeepSeek's /anthropic
-		// endpoint) default to thinking ON and only honor an explicit
-		// `thinking: {type: "disabled"}` field in the request body. The
-		// fantasy SDK has no typed way to emit that, so we rewrite the body
-		// at the HTTP layer when the user has disabled thinking.
-		wrapped = httpext.WrapAnthropicDisableThinkingHTTPClient(wrapped)
-	}
-	opts = append(opts, anthropic.WithHTTPClient(wrapped))
+	// Always wrap so that requests without an explicit `thinking` field have
+	// `thinking:{type:"disabled"}` injected. This is a no-op for upstream
+	// Anthropic (where omitting thinking already means disabled) but is
+	// required for Anthropic-compatible proxies (DeepSeek's /anthropic
+	// endpoint, etc.) whose default is ON. It also makes the in-flight
+	// "retry without thinking" path actually disable thinking on the wire
+	// when the SDK has nilled the typed Thinking option.
+	wrapped := httpext.WrapAnthropicDisableThinkingHTTPClient(httpClient)
+	opts = append(opts, anthropic.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(wrapped)))
 
 	return anthropic.New(opts...)
 }
@@ -1544,7 +1543,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 	case openai.Name:
 		return c.buildOpenaiProvider(baseURL, apiKey, headers, providerCfg.CopilotService, providerCfg.UseCopilotClient, isSubAgent, providerCfg.ResponsesWebSocket)
 	case anthropic.Name:
-		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, providerCfg.UseCopilotClient, isSubAgent, thinkingDisabled)
+		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, providerCfg.UseCopilotClient, isSubAgent)
 	case openrouter.Name:
 		return c.buildOpenrouterProvider(baseURL, apiKey, headers)
 	case vercel.Name:

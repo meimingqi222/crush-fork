@@ -10,21 +10,26 @@ import (
 )
 
 // WrapAnthropicDisableThinkingHTTPClient wraps an HTTP client so that any
-// outgoing JSON request body to the Anthropic Messages API has its `thinking`
-// field forced to {"type": "disabled"}.
+// outgoing JSON request body to the Anthropic Messages API which lacks an
+// explicit `thinking` field has it set to {"type": "disabled"}.
 //
 // This is required for Anthropic-protocol providers whose default behavior is
 // to enable thinking (e.g. DeepSeek's `/anthropic` endpoint with reasoning
-// models such as deepseek-v4-flash / deepseek-v4-pro). The fantasy SDK has no
-// way to express `thinking: {type: "disabled"}` in its typed options struct
-// (its `ThinkingProviderOption` only carries a budget, which always emits
+// models such as deepseek-v4-flash / deepseek-v4-pro, and similar
+// Anthropic-compatible proxies). The fantasy SDK has no way to express
+// `thinking: {type: "disabled"}` in its typed options struct (its
+// `ThinkingProviderOption` only carries a budget, which always emits
 // `type: "enabled"`), and simply omitting the field is not enough on those
 // providers because their default is ON.
 //
+// Bodies that already carry a `thinking` field (e.g. when the user has
+// thinking enabled and the SDK emitted `{type:"enabled", budget_tokens:N}`
+// or `{type:"adaptive"}`) are passed through unchanged.
+//
 // Sending `thinking: {type: "disabled"}` is also accepted by the upstream
-// Anthropic API, where it is the documented way to explicitly disable
-// extended thinking, so this transformation is safe across all
-// Anthropic-protocol backends.
+// Anthropic API as the documented way to explicitly disable extended
+// thinking, so this transformation is safe across all Anthropic-protocol
+// backends.
 func WrapAnthropicDisableThinkingHTTPClient(client *http.Client) *http.Client {
 	if client == nil {
 		return &http.Client{
@@ -91,9 +96,11 @@ func shouldRewriteAnthropicThinking(req *http.Request) bool {
 }
 
 // rewriteAnthropicBodyDisableThinking parses a JSON Anthropic Messages body
-// and forces `thinking` to {"type": "disabled"}. It returns the rewritten
-// bytes and true on success, or (nil, false) if the body is not a JSON object
-// we can safely modify.
+// and, if the `thinking` field is absent, injects `{"type": "disabled"}`.
+// Bodies that already carry a `thinking` field are returned unchanged. It
+// returns the (possibly rewritten) bytes and a bool indicating whether the
+// body was modified. On any parse failure it returns (nil, false) and the
+// caller should send the original body unchanged.
 func rewriteAnthropicBodyDisableThinking(body []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -103,6 +110,9 @@ func rewriteAnthropicBodyDisableThinking(body []byte) ([]byte, bool) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if err := dec.Decode(&payload); err != nil {
+		return nil, false
+	}
+	if _, ok := payload["thinking"]; ok {
 		return nil, false
 	}
 	payload["thinking"] = map[string]any{"type": "disabled"}
