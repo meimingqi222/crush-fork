@@ -73,6 +73,34 @@ func TestToAIMessage_ReasoningWithoutSignature(t *testing.T) {
 	}
 }
 
+// TestToAIMessage_ReasoningWithoutSignatureNoText verifies that when an
+// anthropic-compatible proxy (e.g. DeepSeek's /anthropic endpoint) returns the
+// assistant response entirely as a thinking block without a signature and
+// without a separate text block, ToAIMessage promotes the reasoning content to
+// a TextPart so the assistant turn is not sent as empty content. Without this
+// fallback, the model would lose its own prior reply from history.
+func TestToAIMessage_ReasoningWithoutSignatureNoText(t *testing.T) {
+	t.Parallel()
+
+	msg := Message{
+		Role: Assistant,
+		Parts: []ContentPart{
+			ReasoningContent{
+				Thinking:  "the actual answer lives here",
+				Signature: "",
+			},
+		},
+	}
+
+	aiMsgs := msg.ToAIMessage()
+	require.Len(t, aiMsgs, 1)
+	require.Len(t, aiMsgs[0].Content, 1)
+
+	textPart, ok := fantasy.AsContentType[fantasy.TextPart](aiMsgs[0].Content[0])
+	require.True(t, ok, "expected reasoning to be promoted to TextPart when no signature and no text")
+	require.Equal(t, "the actual answer lives here", textPart.Text)
+}
+
 // TestToAIMessage_ReasoningBeforeText verifies that the reasoning (thinking)
 // block appears before the text block in the assistant message parts.  Kimi
 // (and Anthropic) require this ordering; sending text first causes a 400 error.

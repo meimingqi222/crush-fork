@@ -586,6 +586,14 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 			}
 			if len(reasoningPart.ProviderOptions) > 0 {
 				parts = append(parts, reasoningPart)
+			} else if text == "" && !hasToolCalls {
+				// Reasoning has no provider-specific signature/metadata and there is
+				// no text content or tool call to carry the response. Without this
+				// fallback, the assistant turn would be sent as empty content,
+				// causing the model to lose its own prior reply from history (seen
+				// with DeepSeek's Anthropic-compatible proxy, which can return
+				// reasoning blocks without signatures and no separate text block).
+				text = reasoning.Thinking
 			}
 		}
 		if text != "" {
