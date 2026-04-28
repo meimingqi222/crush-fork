@@ -2913,7 +2913,6 @@ func shouldRetryWithoutAnthropicThinking(err error, opts fantasy.ProviderOptions
 	// Treat these as retryable by disabling thinking for the retry.
 	if strings.Contains(msg, "thinking") &&
 		(strings.Contains(msg, "must be passed back") ||
-			strings.Contains(msg, "must be passed-back") ||
 			strings.Contains(msg, "passed back to the api")) {
 		return true
 	}
