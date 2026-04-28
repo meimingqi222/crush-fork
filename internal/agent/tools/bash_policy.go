@@ -443,7 +443,7 @@ func isRestrictedGitBlockedPipeOption(flag string, arg string, blockedOptions ma
 		return false
 	}
 	for blockedFlag := range blockedOptions {
-		if strings.HasPrefix(blockedFlag, "--") && strings.HasPrefix(blockedFlag, flag) {
+		if strings.HasPrefix(blockedFlag, "--") && (flag == blockedFlag || strings.HasPrefix(arg, blockedFlag+"=")) {
 			return true
 		}
 	}
