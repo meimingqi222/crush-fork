@@ -77,6 +77,7 @@ func TestBuildSubagentRolePromptSupportsCommonRoles(t *testing.T) {
 	t.Parallel()
 
 	assert.Contains(t, buildSubagentRolePrompt(config.Agent{Role: "planner"}), "Role: planner")
+	assert.Contains(t, buildSubagentRolePrompt(config.Agent{Role: "researcher"}), "Role: researcher")
 	assert.Contains(t, buildSubagentRolePrompt(config.Agent{Role: "reviewer"}), "Role: reviewer")
 	assert.Contains(t, buildSubagentRolePrompt(config.Agent{Role: "executor"}), "Role: executor")
 	assert.Contains(t, buildSubagentRolePrompt(config.Agent{Role: "custom-role"}), "Role: custom-role")

@@ -37,6 +37,10 @@ func TestBuildDelegationPromptPrefixAddsCostAwareDelegationPolicyForPrimaryAgent
 	assert.Contains(t, prefix, "Cost comparison")
 	assert.Contains(t, prefix, "view/grep/glob")
 	assert.Contains(t, prefix, "read/list files and return raw contents")
+	assert.Contains(t, prefix, "not to make final")
+	assert.Contains(t, prefix, "do final review in primary")
+	assert.Contains(t, prefix, "do not ask 'explore' to run build, test, lint, package-manager, or")
+	assert.Contains(t, prefix, "do not ask it for final code-review approval")
 }
 
 func TestPromptForAgentUsesWorkerPromptForWritableSubagents(t *testing.T) {
@@ -50,7 +54,7 @@ func TestPromptForAgentUsesWorkerPromptForWritableSubagents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "general", promptBuilder.Name())
 
-	promptBuilder, err = promptForAgent(config.Agent{ID: config.AgentExplore, Role: "reviewer"}, true)
+	promptBuilder, err = promptForAgent(config.Agent{ID: config.AgentExplore, Role: "researcher"}, true)
 	require.NoError(t, err)
 	assert.Equal(t, "explore", promptBuilder.Name())
 

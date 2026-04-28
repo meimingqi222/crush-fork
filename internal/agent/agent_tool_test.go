@@ -77,6 +77,8 @@ func TestBuildAgentToolDescriptionEmphasizesParallelDelegation(t *testing.T) {
 	assert.Contains(t, description, "If 2 or more substantial independent tasks can proceed in parallel")
 	assert.Contains(t, description, "use a single Agent call with the `tasks` array")
 	assert.Contains(t, description, "Prefer early delegation for bounded work")
+	assert.Contains(t, description, "Use `explore` only for evidence gathering, not final judgment")
+	assert.Contains(t, description, "Do not delegate final code review, correctness approval, or bug triage decisions to `explore`")
 	assert.Contains(t, description, "restricted `bash` tool")
 	assert.Contains(t, description, "git diff")
 	assert.Contains(t, description, "Do not claim that you are delegating")

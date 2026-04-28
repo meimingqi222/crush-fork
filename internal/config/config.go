@@ -809,20 +809,21 @@ func builtinAgents(primaryTools, generalTools, exploreTools, contextPaths []stri
 		AgentExplore: {
 			ID:               AgentExplore,
 			Name:             "Explore",
-			Description:      "A read-only subagent that reviews code, diffs, and local git state with a restricted bash tool limited to safe read-only git commands.",
-			Role:             "reviewer",
-			AdditionalPrompt: "Act as the reviewer: inspect code or outputs, validate assumptions, summarize findings clearly, and do not edit files unless the delegated task explicitly asks for a fix.",
+			Description:      "A read-only research subagent for broad codebase exploration, evidence gathering, pattern hunting, and local git inspection. It reports facts and references for the primary agent to analyze; use the primary agent for final code review and general for implementation, reproduction, build, test, lint, package-manager, or non-git shell commands.",
+			Role:             "researcher",
+			AdditionalPrompt: "Act as a read-only researcher: gather source-backed context, map relevant files/symbols/history, and return concise evidence with file:line references. Do not provide final code-review approval, make correctness judgments beyond clearly supported facts, edit files, or attempt build, test, lint, package-manager, reproduction, or non-git shell commands.",
 			Memory:           "inherit",
 			Isolation:        "session",
 			Mode:             AgentModeSubagent,
 			// Explore is read-only and used for parallel context gathering.
 			// Default to the small/fast model so it is cheaper and quicker
-			// than the general subagent, encouraging the orchestrator to
-			// prefer explore for any pure-investigation work. Users can
-			// override this in crush.json if they want a larger model.
-			Model:            SelectedModelTypeSmall,
-			ContextPaths:     contextPaths,
-			AllowedTools:     exploreTools,
+			// than the general subagent. Keep its responsibility narrow:
+			// gather evidence for the primary model rather than making final
+			// review or implementation decisions. Users can override this in
+			// crush.json if they want a larger model.
+			Model:        SelectedModelTypeSmall,
+			ContextPaths: contextPaths,
+			AllowedTools: exploreTools,
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},

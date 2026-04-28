@@ -690,8 +690,9 @@ func TestConfig_setupAgentsWithNoDisabledTools(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []string{"bash", "glob", "grep", "ls", "tool_search", "view"}, exploreAgent.AllowedTools)
 	assert.Equal(t, AgentModeSubagent, exploreAgent.Mode)
-	assert.Equal(t, "reviewer", exploreAgent.Role)
-	assert.Contains(t, exploreAgent.AdditionalPrompt, "Act as the reviewer")
+	assert.Equal(t, "researcher", exploreAgent.Role)
+	assert.Contains(t, exploreAgent.AdditionalPrompt, "Act as a read-only researcher")
+	assert.Contains(t, exploreAgent.AdditionalPrompt, "Do not provide final code-review approval")
 }
 
 func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {

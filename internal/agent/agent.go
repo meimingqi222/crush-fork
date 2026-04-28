@@ -939,6 +939,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					call  SessionAgentCall
 				}
 				var selected []selectedCall
+				// Dedupe queued prompts that exactly match the active call
+				// prompt or another already-selected queued prompt. Pressing
+				// "继续" / "continue" multiple times in quick succession would
+				// otherwise inject N identical text blocks into one Anthropic
+				// user turn, which is pure noise to the model and on some
+				// providers (Anthropic with thinking enabled, several
+				// Anthropic-compatible proxies) causes the assistant to treat
+				// the turn as a redundant continuation and end_turn early —
+				// the "莫名其妙中断" symptom. Drop duplicates outright instead
+				// of re-enqueuing them, otherwise they'd just be reinjected on
+				// the next step.
+				seenPrompts := make(map[string]struct{})
+				if mainPrompt := strings.TrimSpace(call.Prompt); mainPrompt != "" {
+					seenPrompts[mainPrompt] = struct{}{}
+				}
 				for i := len(queuedCalls) - 1; i >= 0; i-- {
 					queued := queuedCalls[i]
 					if len(selected) >= joinActiveRunMaxInjectedCalls || remainingJoinBudget <= 0 {
@@ -950,6 +965,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						a.enqueueQueuedCall(call.SessionID, queued)
 						continue
 					}
+					if _, dup := seenPrompts[prompt]; dup {
+						// Identical to an already-handled prompt this turn;
+						// drop silently rather than re-enqueue.
+						slog.Debug("dropping duplicate queued prompt for join-active-run",
+							"session_id", call.SessionID, "prompt_runes", len([]rune(prompt)))
+						continue
+					}
 					promptRunes := []rune(prompt)
 					if len(promptRunes) > remainingJoinBudget {
 						if remainingJoinBudget <= 1 {
@@ -959,6 +981,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						prompt = string(promptRunes[:remainingJoinBudget-1]) + "…"
 					}
 					queued.Prompt = prompt
+					seenPrompts[prompt] = struct{}{}
 					selected = append(selected, selectedCall{index: i, call: queued})
 					remainingJoinBudget -= len([]rune(prompt))
 				}
@@ -970,6 +993,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					}
 					prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
 				}
+
+				// Defensive structural merge: collapse any consecutive
+				// same-role fantasy messages into a single message before
+				// handing off to provider serialization. Even though
+				// fantasy's Anthropic provider already groups consecutive
+				// user/tool messages into one wire-level user turn, this
+				// guarantees the invariant locally and removes pathological
+				// repeated text blocks (e.g. ["继续","继续","继续"]) that
+				// look like noise to the model and can cause early end_turn
+				// on Anthropic with thinking enabled.
+				prepared.Messages = mergeConsecutiveSameRoleFantasyMessages(prepared.Messages)
 
 				prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
 				if !largeModel.CatwalkCfg.SupportsImages {
@@ -1421,7 +1455,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				"Service temporarily unavailable. Retrying in %d seconds... (attempt %d/%d)",
 				int(delay.Seconds()), retryAttempt, maxRetriableAttempts,
 			)
-			retryMsg, retryMsgErr := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+			retryMsg, retryMsgErr := a.messages.Create(genCtx, call.SessionID, message.CreateMessageParams{
 				Role: message.Assistant,
 				Parts: []message.ContentPart{
 					message.TextContent{Text: retryText},
@@ -1430,18 +1464,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				Provider: largeModel.ModelCfg.Provider,
 			})
 
-			waitErr := a.retryWaitFunc(ctx, delay)
+			waitErr := a.retryWaitFunc(genCtx, delay)
 			if waitErr != nil {
 				// Clean up the retry message before returning.
 				if retryMsgErr == nil {
-					_ = a.messages.Delete(ctx, retryMsg.ID)
+					_ = a.messages.Delete(genCtx, retryMsg.ID)
 				}
 				return nil, waitErr
 			}
 
 			// Remove the temporary retry message before the next attempt.
 			if retryMsgErr == nil {
-				_ = a.messages.Delete(ctx, retryMsg.ID)
+				_ = a.messages.Delete(genCtx, retryMsg.ID)
 			}
 			continue
 		}
@@ -4167,6 +4201,80 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 	}
 
 	return convertedMessages
+}
+
+// mergeConsecutiveSameRoleFantasyMessages collapses consecutive fantasy
+// messages that share a role into a single message by concatenating their
+// content parts and de-duplicating identical adjacent text parts.
+//
+// Why this exists:
+//   - Anthropic (and most Anthropic-compatible proxies) require strictly
+//     alternating user / assistant turns. Fantasy's Anthropic provider
+//     already groups consecutive user/tool messages into one wire-level
+//     user message, but crush can append several queued user calls in a
+//     single step (when the user spams "继续"/"continue"), producing a
+//     wire payload like [{role:user,content:[{text:"继续"}]} ×3]. Even
+//     after fantasy merges roles, the resulting single user turn ends up
+//     with [text:"继续", text:"继续", text:"继续"] blocks — pure noise
+//     that some providers interpret as a redundant continuation and
+//     respond to with an immediate end_turn (the "莫名其妙中断" bug).
+//   - Doing this pass in crush, before provider serialization, also makes
+//     the invariant locally explicit and protects against any future
+//     provider that doesn't merge on its own.
+//
+// System messages are intentionally skipped: they are handled separately
+// (PromptPrefix is prepended later, lastSystemRoleInx tracking, etc.) and
+// merging them here would interfere with that flow.
+func mergeConsecutiveSameRoleFantasyMessages(msgs []fantasy.Message) []fantasy.Message {
+	if len(msgs) < 2 {
+		return msgs
+	}
+	out := make([]fantasy.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if len(out) == 0 {
+			out = append(out, m)
+			continue
+		}
+		prev := &out[len(out)-1]
+		if prev.Role != m.Role || prev.Role == fantasy.MessageRoleSystem {
+			out = append(out, m)
+			continue
+		}
+		// Same role, non-system: concatenate content with adjacent
+		// duplicate text-part suppression.
+		for _, part := range m.Content {
+			if isDuplicateAdjacentTextPart(prev.Content, part) {
+				continue
+			}
+			prev.Content = append(prev.Content, part)
+		}
+		// Preserve cache_control / provider hints from the latest
+		// message in the merged group. Anthropic's cache_control marker
+		// must sit on the tail of the user turn to be effective.
+		if m.ProviderOptions != nil {
+			prev.ProviderOptions = m.ProviderOptions
+		}
+	}
+	return out
+}
+
+// isDuplicateAdjacentTextPart returns true if appending `part` to `existing`
+// would produce two adjacent text parts with identical text. This drops the
+// typical "继续 继续 继续" repetition without affecting tool_result, file,
+// source, or interleaved text+other-content patterns.
+func isDuplicateAdjacentTextPart(existing []fantasy.MessagePart, part fantasy.MessagePart) bool {
+	if len(existing) == 0 {
+		return false
+	}
+	newText, ok := fantasy.AsMessagePart[fantasy.TextPart](part)
+	if !ok {
+		return false
+	}
+	prevText, ok := fantasy.AsMessagePart[fantasy.TextPart](existing[len(existing)-1])
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(newText.Text) == strings.TrimSpace(prevText.Text) && strings.TrimSpace(newText.Text) != ""
 }
 
 // stripImagePartsFromFantasyMessages removes all image content from fantasy

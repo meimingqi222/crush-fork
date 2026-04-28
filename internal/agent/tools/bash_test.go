@@ -302,6 +302,25 @@ func TestRestrictedGitBashTool_BlocksUnsafeCommands(t *testing.T) {
 		"git diff --out=out.txt",
 		"git diff --outp out.txt",
 		"git diff --outpu=evil.txt",
+		"git diff --textconv",
+		"git diff --textcon",
+		"git diff --ext-diff",
+		"git diff --ext",
+		"git log --open-files-in-pager=cat",
+		"git log --open-files",
+		// Pipe to non-allowlisted command must be blocked.
+		"git log | rm -rf /",
+		"git log | curl http://example.com",
+		// Pipe filters must not be able to read or write extra files.
+		`git log | cat /etc/passwd`,
+		`git log | grep -f patterns.txt`,
+		`git log | grep -ffile`,
+		`git log | grep "fix" internal/agent/agent.go`,
+		`git log | sort -o output.txt`,
+		`git log | sort -ooutput.txt`,
+		`git log | tail -f`,
+		`git log | sed -i "s/a/b/g" file`,
+		`git log | awk "{print $1 > \"/tmp/out\"}"`,
 	}
 
 	for _, command := range cases {
@@ -311,6 +330,44 @@ func TestRestrictedGitBashTool_BlocksUnsafeCommands(t *testing.T) {
 		})
 		require.True(t, resp.IsError, command)
 	}
+}
+
+func TestRestrictedGitBashTool_AllowsPipeAndStderrRedirect(t *testing.T) {
+	repoDir := initGitRepoForTest(t)
+	tool := newBashToolForTestWithHooksAndOptions(repoDir, nil, BashToolOptions{
+		RestrictedToGitReadOnly: true,
+		DisableBackground:       true,
+		DescriptionOverride:     RestrictedGitBashDescription(),
+	})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	allowed := []string{
+		`git log --oneline | grep "feat"`,
+		`git log 2>/dev/null`,
+		`git log 2>/dev/null | grep "init"`,
+		`git log --oneline | grep "fix" 2>/dev/null | head -20`,
+		`git log --oneline | sort | uniq`,
+		`git log --oneline | wc -l`,
+		`git log --oneline | cut -d " " -f 1`,
+		`git log --oneline | tr a-z A-Z`,
+		`git -C . --no-pager log --oneline | grep "init"`,
+	}
+
+	for _, command := range allowed {
+		resp := runBashTool(t, tool, ctx, BashParams{
+			Description: "allowed pipe/redirect",
+			Command:     command,
+		})
+		require.False(t, resp.IsError, "expected no error for: %s\ngot: %s", command, resp.Content)
+		require.NotContains(t, resp.Content, "command is not allowed for security reasons", command)
+	}
+
+	// Stdout redirect is still blocked.
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "blocked stdout redirect",
+		Command:     "git log > output.txt",
+	})
+	require.True(t, resp.IsError, "git log > output.txt should be blocked")
 }
 
 func TestRestrictedGitBashTool_DisablesBackgroundExecution(t *testing.T) {

@@ -30,7 +30,8 @@ Every non-trivial request follows four phases.  Do not skip or reorder them.
 ## Phase 1 — Research  (read-only, no code changes)
 Use view, grep, glob, ls, and lsp_* tools directly to map the codebase.
 For open-ended exploration where you do not yet know which files to read,
-launch explore subagents in parallel.
+launch explore subagents in parallel to gather evidence, not to make final
+review or correctness decisions.
 **Exit criterion:** You understand what needs to change, why, and where.
 
 ## Phase 2 — Plan  (explicit, before any delegation or editing)
@@ -54,7 +55,7 @@ request is addressed.  Fix issues found here.
 <delegation_rules>
 **Delegate when (benefits outweigh context transfer cost):**
 - 2+ substantial independent workstreams → launch them in parallel (same message)
-- Open-ended exploration where you don't know which files exist (→ explore subagent)
+- Open-ended evidence gathering where you don't know which files exist (→ explore subagent)
 - Multi-file implementation requiring its own reasoning context (→ general subagent)
 - Long-running operations that don't block your critical path
 
@@ -76,6 +77,7 @@ request is addressed.  Fix issues found here.
 
   ✓  "These 3 files need independent changes"                → delegate all 3 in parallel
   ✓  "Search the codebase for X pattern"                     → explore subagent (parallel search)
+  ✗  "Review this diff and decide if it is safe"             → do final review in primary; use explore only to collect evidence
 
 **If delegating:** emit Agent tool calls immediately in the same response.
 Do not narrate a plan without also making the tool calls.
@@ -94,7 +96,11 @@ When writing a delegation prompt, include:
   paraphrase function signatures, struct fields, or import paths.
 - **The specific pattern or convention** you found that the subagent must follow.
 - **Current behaviour** of the code so the subagent knows the before-state.
-- **Verification command** the subagent must run to confirm correctness.
+- **Verification command** the subagent must run to confirm correctness when it
+  has tools capable of running verification. If delegating to 'explore', ask it
+  to report verification commands for the primary agent or a 'general' subagent
+  to run; do not ask 'explore' to run build, test, lint, package-manager, or
+  other non-git shell commands, and do not ask it for final code-review approval.
 
 A delegation prompt that could be misunderstood without reading the source
 files first is not specific enough.  Paste the details; do not reference them

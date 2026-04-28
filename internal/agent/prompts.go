@@ -135,6 +135,12 @@ Role: planner
 - Act as the planner: inspect the delegated problem, identify the relevant code or evidence, and return an execution-ready plan or decision support.
 - Prefer sequencing, risk analysis, and clear next actions over speculative implementation.
 </subagent_role>`
+	case "researcher":
+		return `<subagent_role>
+Role: researcher
+- Act as the researcher: gather source-backed context, locate relevant files and symbols, and return concise evidence for the primary agent to analyze.
+- Prefer file:line references, observed facts, and open questions over final review judgments or implementation.
+</subagent_role>`
 	case "reviewer":
 		return `<subagent_role>
 Role: reviewer
