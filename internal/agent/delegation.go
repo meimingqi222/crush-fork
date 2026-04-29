@@ -68,6 +68,11 @@ request is addressed.  Fix issues found here.
 - Single-file or <10 line edits
 - You have complete context and execution is faster than delegation
 
+**Scope threshold — when to delegate vs. do inline:**
+- 1 file, change is obvious → do it inline; delegation overhead exceeds benefit
+- 2–3 files, changes are independent → delegate as parallel workstreams
+- 3+ files or 2+ conceptual unknowns → plan first, then delegate
+
 **Cost comparison (be honest with yourself):**
   ✗  Agent { prompt: "Read coordinator.go lines 400-600" }  → wastes 1 LLM turn
   ✓  view(coordinator.go, offset=400, limit=200)             → instant, no overhead
@@ -89,22 +94,43 @@ Research or what you reasoned during Planning.  If your delegation prompt
 describes the task in conceptual terms only, the subagent must rediscover
 everything from scratch and may reach different conclusions.
 
-When writing a delegation prompt, include:
-- **Exact file paths and line numbers** of the code to change
-  (e.g. "edit internal/agent/coordinator.go around line 2055").
-- **Relevant code snippets** copied verbatim from what you read — do not
-  paraphrase function signatures, struct fields, or import paths.
-- **The specific pattern or convention** you found that the subagent must follow.
-- **Current behaviour** of the code so the subagent knows the before-state.
-- **Verification command** the subagent must run to confirm correctness when it
-  has tools capable of running verification. If delegating to 'explore', ask it
-  to report verification commands for the primary agent or a 'general' subagent
-  to run; do not ask 'explore' to run build, test, lint, package-manager, or
-  other non-git shell commands, and do not ask it for final code-review approval.
+**Avoid two failure modes when writing a delegation prompt:**
+- **Over-specified** (too detailed): Pasting full function bodies or writing
+  step-by-step implementation instructions wastes more tokens than doing it
+  yourself, and turns the subagent into a copy-paste executor.
+- **Under-specified** (too vague): "Fix the auth system" or "implement feature
+  X" gives the subagent no anchor points — it reinvents everything and drifts.
 
-A delegation prompt that could be misunderstood without reading the source
-files first is not specific enough.  Paste the details; do not reference them
-by name alone.
+**Target: specify intent + interface, not implementation.**
+
+Every delegation prompt should answer five questions concisely:
+1. **Goal** — What should be different after completion? Observable behaviour,
+   not code steps.  E.g. "Function Foo should return ErrNotFound instead of nil
+   when the key is missing."
+2. **Context** — Key anchors the subagent needs: file paths, function
+   *signatures* (not bodies), struct field names, import paths, and the
+   specific pattern or convention to follow.  Do NOT paste full function
+   implementations — the subagent can read the body itself if it needs to.
+3. **Constraints** — What must NOT change?  Unrelated files, API contracts,
+   test behaviour that must stay green.
+4. **Validation** — Which command confirms success?
+   E.g. "go test ./internal/agent/..."
+5. **Scope** — Which files should be touched?  An explicit list prevents the
+   subagent from wandering into unrelated areas.
+
+A concise five-sentence prompt that answers these questions outperforms either
+extreme — more grounding than vague intent, far cheaper than pasted code.
+
+**Practical rule for Context**: paste the function signature + a one-line
+description of its role.  Never paste the function body unless the body itself
+IS the specification (e.g. a reference implementation to port to another
+language).
+
+**Verification commands**: always include the command the subagent must run to
+confirm correctness.  If delegating to 'explore', ask it to report verification
+commands for the primary agent or a 'general' subagent to run;
+do not ask 'explore' to run build, test, lint, package-manager, or other non-git shell
+commands, and do not ask it for final code-review approval.
 </context_handoff>`
 
 func buildDelegationPromptPrefix(basePrefix string, agentTools []fantasy.AgentTool, isSubAgent bool) string {
