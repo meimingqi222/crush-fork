@@ -8,7 +8,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/userinput"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -82,18 +81,7 @@ func (r *RequestUserInput) Cursor() *tea.Cursor {
 	if !r.customMode {
 		return nil
 	}
-	cur := InputCursor(r.com.Styles, r.customInput.Cursor())
-	if cur == nil {
-		return nil
-	}
-
-	innerWidth := max(0, r.dialogInnerWidth)
-	question := r.currentQuestion()
-	questionRendered := lipgloss.NewStyle().Width(innerWidth).Render(question.Question)
-	helperRendered := r.com.Styles.Dialog.SecondaryText.Width(innerWidth).Render("Provide a custom answer and press Enter to continue.")
-
-	cur.Y += titleContentHeight + 3 + lipgloss.Height(questionRendered) + lipgloss.Height(helperRendered)
-	return cur
+	return r.customInput.Cursor()
 }
 
 func (r *RequestUserInput) HandleMsg(msg tea.Msg) Action {
@@ -198,7 +186,10 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	r.customInput.SetWidth(max(0, r.dialogInnerWidth-r.com.Styles.Dialog.InputPrompt.GetHorizontalFrameSize()-1))
 	rendered := r.com.Styles.Dialog.View.Width(dialogWidth).Render(content)
 	cur := r.Cursor()
-	DrawCenterCursor(scr, area, rendered, cur)
+	if cur != nil {
+		cur = CenterCursor(area, rendered, cur)
+	}
+	DrawCenter(scr, area, rendered)
 	return cur
 }
 

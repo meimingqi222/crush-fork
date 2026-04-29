@@ -24,7 +24,7 @@ Fast file pattern matching tool that finds files by name/pattern, returning path
 <limitations>
 - Results limited to 100 files (newest first)
 - Does not search file contents (use Grep for that)
-- Hidden files (starting with '.') skipped
+- Common ignored directories such as .git and node_modules are skipped
 </limitations>
 
 <cross_platform>

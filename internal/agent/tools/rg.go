@@ -31,9 +31,9 @@ func getRgCmd(ctx context.Context, globPattern string) *exec.Cmd {
 	// semantics and the -L flag can cause issues.
 	var args []string
 	if runtime.GOOS == "windows" {
-		args = []string{"--files", "--null"}
+		args = []string{"--files", "--hidden", "--null"}
 	} else {
-		args = []string{"--files", "-L", "--null"}
+		args = []string{"--files", "-L", "--hidden", "--null"}
 	}
 	if globPattern != "" {
 		args = append(args, "--glob", globPattern)

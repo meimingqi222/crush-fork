@@ -173,6 +173,18 @@ func DrawCenterCursor(scr uv.Screen, area uv.Rectangle, view string, cur *tea.Cu
 	uv.NewStyledString(view).Draw(scr, center)
 }
 
+// CenterCursor returns the screen position of a cursor within a centered view.
+func CenterCursor(area uv.Rectangle, view string, cur *tea.Cursor) *tea.Cursor {
+	if cur == nil {
+		return nil
+	}
+	width, height := lipgloss.Size(view)
+	center := common.CenterRect(area, width, height)
+	cur.X += center.Min.X
+	cur.Y += center.Min.Y
+	return cur
+}
+
 // DrawCenter draws the given string view centered in the screen area.
 func DrawCenter(scr uv.Screen, area uv.Rectangle, view string) {
 	DrawCenterCursor(scr, area, view, nil)

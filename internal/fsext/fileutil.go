@@ -21,12 +21,14 @@ type FileInfo struct {
 }
 
 func SkipHidden(path string) bool {
-	// Check for hidden files (starting with a dot)
 	base := filepath.Base(path)
 	if base != "." && strings.HasPrefix(base, ".") {
 		return true
 	}
+	return SkipCommonIgnored(path)
+}
 
+func SkipCommonIgnored(path string) bool {
 	commonIgnoredDirs := map[string]bool{
 		".crush":           true,
 		"node_modules":     true,
@@ -94,6 +96,16 @@ func GlobGitignoreAware(pattern string, cwd string, limit int) ([]string, bool, 
 	return globWithDoubleStar(pattern, cwd, limit, true)
 }
 
+func MatchesGlob(pattern, path string) bool {
+	pattern = filepath.ToSlash(pattern)
+	path = filepath.ToSlash(path)
+	if path == "." && pattern == "**" {
+		return true
+	}
+	matched, err := doublestar.Match(pattern, path)
+	return err == nil && matched
+}
+
 func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) ([]string, bool, error) {
 	// Normalize pattern to forward slashes on Windows so their config can use
 	// backslashes
@@ -116,10 +128,6 @@ func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) (
 			if gitignore && walker.ShouldSkipDir(path) {
 				return filepath.SkipDir
 			}
-		} else {
-			if gitignore && walker.ShouldSkip(path) {
-				return nil
-			}
 		}
 
 		relPath, err := filepath.Rel(searchPath, path)
@@ -131,8 +139,10 @@ func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) (
 		relPath = filepath.ToSlash(relPath)
 
 		// Check if path matches the pattern
-		matched, err := doublestar.Match(pattern, relPath)
-		if err != nil || !matched {
+		if !MatchesGlob(pattern, relPath) {
+			return nil
+		}
+		if !isDir && gitignore && walker.ShouldSkip(path) {
 			return nil
 		}
 

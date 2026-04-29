@@ -76,7 +76,7 @@ func globFiles(ctx context.Context, pattern, searchPath string, limit int) ([]st
 	cmdRg := getRgCmd(ctx, pattern)
 	if cmdRg != nil {
 		cmdRg.Dir = searchPath
-		matches, err := runRipgrep(cmdRg, searchPath, limit)
+		matches, err := runRipgrep(cmdRg, pattern, searchPath, limit)
 		if err == nil {
 			return matches, len(matches) >= limit && limit > 0, nil
 		}
@@ -86,7 +86,7 @@ func globFiles(ctx context.Context, pattern, searchPath string, limit int) ([]st
 	return fsext.GlobGitignoreAware(pattern, searchPath, limit)
 }
 
-func runRipgrep(cmd *exec.Cmd, searchRoot string, limit int) ([]string, error) {
+func runRipgrep(cmd *exec.Cmd, pattern, searchRoot string, limit int) ([]string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
@@ -108,7 +108,11 @@ func runRipgrep(cmd *exec.Cmd, searchRoot string, limit int) ([]string, error) {
 		if !filepath.IsAbs(absPath) {
 			absPath = filepath.Join(searchRoot, absPath)
 		}
-		if fsext.SkipHidden(absPath) {
+		relPath, relErr := filepath.Rel(searchRoot, absPath)
+		if relErr != nil {
+			relPath = absPath
+		}
+		if !fsext.MatchesGlob(pattern, relPath) || fsext.SkipCommonIgnored(absPath) {
 			continue
 		}
 		info, statErr := os.Stat(absPath)

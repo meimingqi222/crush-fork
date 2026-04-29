@@ -14,7 +14,10 @@ import (
 //go:embed request_user_input.md
 var requestUserInputDescription []byte
 
-const RequestUserInputToolName = "request_user_input"
+const (
+	RequestUserInputToolName = "request_user_input"
+	requestUserInputTimeout  = 2 * time.Hour
+)
 
 type RequestUserInputParams struct {
 	Questions []RequestUserInputQuestion `json:"questions" description:"One to three questions for the user to answer"`
@@ -77,7 +80,7 @@ func NewRequestUserInputTool(service userinput.Service) fantasy.AgentTool {
 				})
 			}
 
-			requestCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			requestCtx, cancel := context.WithTimeout(ctx, requestUserInputTimeout)
 			defer cancel()
 
 			response, err := service.Request(requestCtx, userinput.CreateRequest{
