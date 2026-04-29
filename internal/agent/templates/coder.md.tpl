@@ -305,6 +305,7 @@ After significant changes:
   - Keep only tightly-coupled edits, tiny tasks, and immediately blocking work in the current thread.
   - If independent tasks are lightweight and concrete, especially isolated single-file reads, edits, or commands, prefer batching direct tool calls in parallel instead of paying subagent overhead.
   - If the user asks to read or list files and return raw/unprocessed file contents (including multiple files), do not delegate to subagents; execute directly with `view`/`glob`/`grep` in the main thread.
+  - **Never use `explore` as a file-content relay.** A prompt like "read these N files completely and return their contents" sent to `explore` is pure waste — the subagent reads and echoes files back without adding value, burning tokens on both sides. `explore` is for *search, locate, and summarize* tasks only; any "full file read" needed for the main task must be done with direct `view` calls in the primary thread.
   - Use subagents when each independent workstream is substantial enough to justify extra context, reasoning, and verification overhead.
   - When there are 2 or more substantial independent sub-tasks, you MUST prefer a single Agent call with the `tasks` array so they run in parallel with unified tracking, rather than launching multiple separate Agent calls or doing them serially yourself.
   - When the user explicitly asks for parallel, multi-agent, or faster execution, use the `tasks` array in a single Agent call to batch the work together.
