@@ -643,9 +643,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// output token reservation internally, so we don't need to add maxOutputTokens here.
 		// This prevents double-counting the output reservation for large context models.
 		estimatedInput := a.estimateSessionPromptTokens(preflightState.History, call.Prompt, call.Attachments, agentTools, preflightState.SystemPrompt, preflightState.PromptPrefix)
-		if !preflightState.EstimateReduced {
-			estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
-		}
+		estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
 		if trigger := proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens); trigger != sessionCompactionTriggerNone {
 			if truncErr := a.truncateOversizedToolResults(ctx, call.SessionID); truncErr != nil {
 				slog.Warn("Failed to truncate oversized tool results before preflight summarization", "error", truncErr, "session_id", call.SessionID)
@@ -1237,7 +1235,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			},
 			StopWhen: []fantasy.StopCondition{
 				func(_ []fantasy.StepResult) bool {
-					projectedPromptTokens, estimateReduced, estimateErr := a.estimateNextStepPromptTokens(genCtx, call.SessionID, agentTools, systemPrompt, promptPrefix, largeModel, providerCtx, requestPurpose)
+					projectedPromptTokens, _, estimateErr := a.estimateNextStepPromptTokens(genCtx, call.SessionID, agentTools, systemPrompt, promptPrefix, largeModel, providerCtx, requestPurpose)
 					if estimateErr != nil {
 						slog.Warn("Failed to estimate next-step prompt tokens", "error", estimateErr, "session_id", call.SessionID)
 						// Fallback: use the higher of LastInputTokens or the current step's estimatedPromptTokens.
@@ -1252,7 +1250,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						}
 						projectedPromptTokens = fallbackTokens
 					}
-					if !preflightSummarized && !estimateReduced {
+					if !preflightSummarized {
 						projectedPromptTokens = max(projectedPromptTokens, currentSession.LastInputTokens())
 					}
 					// Pass input-only estimate to shouldAutoSummarize. The function
@@ -3548,7 +3546,19 @@ func (a *sessionAgent) EstimateSessionPromptTokensForModel(ctx context.Context, 
 		defaultProviderContext(),
 		plugin.ChatTransformPurposeRequest,
 	)
-	return tokens, err
+	if err != nil {
+		return 0, err
+	}
+	// Cap with the last API-observed token count to avoid character-based
+	// over-estimation (can be 2x+ actual) triggering premature summarization
+	// on model switch. Falls back to the character estimate when no observed
+	// count is available.
+	if session, sessErr := a.sessions.Get(ctx, sessionID); sessErr == nil {
+		if observed := session.LastInputTokens(); observed > 0 && observed < tokens {
+			tokens = observed
+		}
+	}
+	return tokens, nil
 }
 
 func applyRuntimeConfig(call *SessionAgentCall, runtimeConfig sessionAgentRuntimeConfig) {

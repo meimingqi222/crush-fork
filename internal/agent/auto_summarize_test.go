@@ -527,12 +527,16 @@ func TestRunPreflightEstimateTrustsPluginCompactionForRequestPurpose(t *testing.
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, 0, fakeAgent.summaryCalls)
+	// LastInputTokens (9_500) is the observed API count and must always
+	// serve as the floor for compaction decisions, regardless of whether
+	// a plugin transform reduced the character-based estimate. With a
+	// 10_000 window, usable budget is 5_000, so 9_500 triggers summarization.
+	require.Equal(t, 1, fakeAgent.summaryCalls)
 	require.Equal(t, 1, fakeAgent.runCalls)
 
 	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
 	require.NoError(t, err)
-	require.Empty(t, savedSession.SummaryMessageID)
+	require.NotEmpty(t, savedSession.SummaryMessageID)
 }
 
 func TestRunPreflightEstimateKeepsLastInputFallbackWhenTransformDoesNotReduceEstimate(t *testing.T) {

@@ -67,15 +67,16 @@ func promptTokenBudgetForModel(model Model, maxOutputTokens int64) promptTokenBu
 		}
 	}
 
-	toolReserve := autoSummarizeToolReserveTokens(contextWindow)
-	safetyReserve := autoSummarizeSafetyReserveTokens(contextWindow)
+	effectiveWindow := EffectiveContextWindow(model.CatwalkCfg)
+	toolReserve := autoSummarizeToolReserveTokens(effectiveWindow)
+	safetyReserve := autoSummarizeSafetyReserveTokens(effectiveWindow)
 	return promptTokenBudget{
-		ContextWindow:       contextWindow,
+		ContextWindow:       effectiveWindow,
 		MaxOutputTokens:     maxOutputTokens,
 		ReservedInputTokens: reserved,
 		ToolReserveTokens:   toolReserve,
 		SafetyReserveTokens: safetyReserve,
-		UsableInputTokens:   contextWindow - reserved - toolReserve - safetyReserve,
+		UsableInputTokens:   effectiveWindow - reserved - toolReserve - safetyReserve,
 	}
 }
 

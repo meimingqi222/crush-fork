@@ -954,24 +954,24 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if cmd := m.chat.ScrollByAndAnimate(-MouseScrollThreshold); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
+				// After scrolling, anchor selection to the last visible item so the
+				// viewport stays where the user scrolled (mirroring PageUp behaviour).
+				// The old approach of SelectPrev + ScrollToSelectedAndAnimate caused
+				// the view to jump back toward the selection when it drifted out of
+				// the viewport.
 				if !m.chat.SelectedItemInView() {
-					m.chat.SelectPrev()
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
+					m.chat.SelectLastInView()
 				}
 			case tea.MouseWheelDown:
 				if cmd := m.chat.ScrollByAndAnimate(MouseScrollThreshold); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
+				// Mirror PageDown behaviour: keep selection inside the viewport.
 				if !m.chat.SelectedItemInView() {
 					if m.chat.AtBottom() {
 						m.chat.SelectLast()
 					} else {
-						m.chat.SelectNext()
-					}
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
-						cmds = append(cmds, cmd)
+						m.chat.SelectFirstInView()
 					}
 				}
 			}

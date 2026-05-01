@@ -866,3 +866,55 @@ func TestHashlineEditSequentialOperationsWithFreshHashes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "line1\nNEW_LINE2\nline3\n", string(data))
 }
+
+// TestHashlineEditReplaceRangeShrinksThenAppendAfter is a regression test for a
+// panic: slice bounds out of range that occurred when a replace_range operation
+// reduced the file length and a subsequent prepend/append on a line that comes
+// after the replaced range used the stale offset-based position instead of the
+// correct mapping-based position.
+func TestHashlineEditReplaceRangeShrinksThenAppendAfter(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "main.txt")
+	// Build a file with 10 lines so the delta is significant.
+	content := "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n"
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0o644))
+
+	tracker := newHashlineEditFileTracker()
+	tracker.lastRead[filePath] = time.Now().Add(time.Second)
+	tool := newHashlineEditToolForTest(t, workingDir, tracker)
+
+	// Replace lines 2-8 (7 lines) with a single line — big reduction in file length.
+	ref2 := formatHashlineReference(2, "b")
+	ref8 := formatHashlineReference(8, "h")
+	// Line 10 comes after the replaced range.
+	ref10 := formatHashlineReference(10, "j")
+
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+		FilePath: filePath,
+		Operations: []HashlineEditOperation{
+			{
+				Operation: hashlineEditOpReplaceRange,
+				Start:     ref2,
+				End:       ref8,
+				Content:   "REPLACED",
+			},
+			// append after line 10 — used to panic because lineCurrent was
+			// computed without the -6 delta from the replace above.
+			{
+				Operation: hashlineEditOpAppend,
+				Line:      ref10,
+				Content:   "after_j",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, "Response error: %s", resp.Content)
+
+	data, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	// File should be: a, REPLACED, i, j, after_j
+	require.Equal(t, "a\nREPLACED\ni\nj\nafter_j\n", string(data))
+}

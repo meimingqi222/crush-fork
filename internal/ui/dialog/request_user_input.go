@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
+
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
@@ -185,9 +187,32 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	r.dialogInnerWidth = max(0, dialogWidth-r.com.Styles.Dialog.View.GetHorizontalFrameSize())
 	r.customInput.SetWidth(max(0, r.dialogInnerWidth-r.com.Styles.Dialog.InputPrompt.GetHorizontalFrameSize()-1))
 	rendered := r.com.Styles.Dialog.View.Width(dialogWidth).Render(content)
-	cur := r.Cursor()
-	if cur != nil {
-		cur = CenterCursor(area, rendered, cur)
+	var cur *tea.Cursor
+	if r.customMode {
+		cur = r.customInput.Cursor()
+		if cur != nil {
+			dialogStyle := r.com.Styles.Dialog.View
+			inputStyle := r.com.Styles.Dialog.InputPrompt
+			// Count the visual lines of content that appear above the InputPrompt part.
+			// Use lipgloss rendering at the dialog inner width to correctly handle
+			// word-wrapped content (e.g. long question text).
+			aboveInput := strings.Join(parts[:len(parts)-1], "\n")
+			linesAbove := lipgloss.Height(lipgloss.NewStyle().Width(r.dialogInnerWidth).Render(aboveInput))
+			cur.X += dialogStyle.GetBorderLeftSize() +
+				dialogStyle.GetPaddingLeft() +
+				dialogStyle.GetMarginLeft() +
+				inputStyle.GetBorderLeftSize() +
+				inputStyle.GetMarginLeft() +
+				inputStyle.GetPaddingLeft()
+			cur.Y += dialogStyle.GetBorderTopSize() +
+				dialogStyle.GetPaddingTop() +
+				dialogStyle.GetMarginTop() +
+				linesAbove +
+				inputStyle.GetBorderTopSize() +
+				inputStyle.GetMarginTop() +
+				inputStyle.GetPaddingTop()
+			cur = CenterCursor(area, rendered, cur)
+		}
 	}
 	DrawCenter(scr, area, rendered)
 	return cur

@@ -385,20 +385,22 @@ func insertRelativeToOriginalLine(lines []string, mapping []int, prependOffsets 
 		return nil, nil, nil, fmt.Errorf("line %d no longer exists after previous operations", originalLine)
 	}
 
-	// Calculate current position: original position + all inserts before this line + own prepends
-	lineCurrent := originalLine
-	for prevLine := 1; prevLine < originalLine; prevLine++ {
-		if mapping[prevLine] > 0 {
-			lineCurrent += prependOffsets[prevLine] + appendOffsets[prevLine]
-		}
-	}
-	lineCurrent += prependOffsets[originalLine]
+	// Use mapping[originalLine] as the authoritative current position of the original line.
+	// Recalculating from prependOffsets/appendOffsets alone is wrong when prior
+	// replace_line/replace_range operations have already shifted positions — those ops
+	// update mapping but not the offset arrays, so the offset-based formula diverges and
+	// can produce an insertAt that exceeds len(lines), causing a slice-bounds panic.
+	lineCurrent := mapping[originalLine]
 
-	// For prepend: insert before the line (at its current position)
-	// For append: insert after the line (after existing appends)
+	// For prepend: insert at the line's current position (after existing prepends, before the line).
+	// For append: insert after the line and after any already-appended lines.
 	insertAt := lineCurrent
 	if !before {
 		insertAt = lineCurrent + 1 + appendOffsets[originalLine]
+	}
+
+	if insertAt-1 > len(lines) {
+		return nil, nil, nil, fmt.Errorf("computed insert position %d exceeds file length %d (line %d is at position %d)", insertAt, len(lines), originalLine, lineCurrent)
 	}
 
 	updatedLines := make([]string, 0, len(lines)+len(contentLines))
@@ -406,7 +408,7 @@ func insertRelativeToOriginalLine(lines []string, mapping []int, prependOffsets 
 	updatedLines = append(updatedLines, contentLines...)
 	updatedLines = append(updatedLines, lines[insertAt-1:]...)
 
-	// Update the appropriate offset
+	// Update the appropriate offset counter.
 	updatedPrepend := append([]int(nil), prependOffsets...)
 	updatedAppend := append([]int(nil), appendOffsets...)
 	if before {
@@ -415,21 +417,14 @@ func insertRelativeToOriginalLine(lines []string, mapping []int, prependOffsets 
 		updatedAppend[originalLine] += len(contentLines)
 	}
 
-	// Recalculate mapping based on new offsets (mapping tracks where each original line currently is)
-	updatedMapping := make([]int, len(mapping))
+	// Update mapping with a delta shift: every original line currently at or after
+	// insertAt moves down by len(contentLines). This correctly preserves any prior
+	// shifts introduced by replace operations instead of recalculating from scratch.
+	updatedMapping := append([]int(nil), mapping...)
 	for orig := 1; orig < len(mapping); orig++ {
-		if mapping[orig] == 0 {
-			continue // Line was deleted
+		if mapping[orig] >= insertAt {
+			updatedMapping[orig] = mapping[orig] + len(contentLines)
 		}
-		// Position = original line number + inserts before it + own prepends
-		pos := orig
-		for prev := 1; prev < orig; prev++ {
-			if mapping[prev] > 0 {
-				pos += updatedPrepend[prev] + updatedAppend[prev]
-			}
-		}
-		pos += updatedPrepend[orig]
-		updatedMapping[orig] = pos
 	}
 
 	if before {
