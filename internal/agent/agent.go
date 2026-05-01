@@ -862,7 +862,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							injected := false
 							for i := len(prepared.Messages) - 1; i >= 0; i-- {
 								if prepared.Messages[i].Role == fantasy.MessageRoleUser {
-									prepared.Messages[i].Content = append(prepared.Messages[i].Content, fantasy.TextPart{Text: "\n\n" + memoryContent})
+									memoryPart := fantasy.TextPart{Text: "\n\n" + memoryContent}
+									// Insert before the first tool result block so text content
+									// precedes tool results, matching the Anthropic API format.
+									insertIdx := len(prepared.Messages[i].Content)
+									for j, c := range prepared.Messages[i].Content {
+										if c.GetType() == fantasy.ContentTypeToolResult {
+											insertIdx = j
+											break
+										}
+									}
+									prepared.Messages[i].Content = append(prepared.Messages[i].Content[:insertIdx], append([]fantasy.MessagePart{memoryPart}, prepared.Messages[i].Content[insertIdx:]...)...)
 									injected = true
 									break
 								}
