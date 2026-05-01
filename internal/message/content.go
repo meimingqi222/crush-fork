@@ -152,7 +152,7 @@ func (u Usage) PromptTokens() int64 {
 }
 
 func (u Usage) CompletionTokens() int64 {
-	return u.OutputTokens
+	return u.OutputTokens + u.ReasoningTokens
 }
 
 func (u Usage) TotalTokens() int64 {

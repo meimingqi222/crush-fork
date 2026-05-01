@@ -783,13 +783,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if stripRedactedThinking {
 			initialMessages, _ = stripRedactedThinkingParts(initialMessages)
 		}
-		// Inject memory as user message for first request if ready.
-		// This mirrors Claude Code's approach: memories are injected as user
-		// messages wrapped in <system-reminder> tags, preserving prompt cache.
+		// Inject memory for first request if ready.
+		// Mirror Claude Code's attachment-merge approach: memory content is merged into
+		// the user prompt (as an extra text block), NOT prepended as a separate message.
+		// Prepending would change the message prefix and invalidate prompt cache.
+		// By appending to the prompt, the system message prefix stays stable.
 		if prefetchedRecallReady && call.MemoryPrefetch != nil {
 			if result, settled := call.MemoryPrefetch.GetSettled(); settled && result != "" {
-				memoryMsg := fantasy.NewUserMessage(FormatAutoRecallMessage(result))
-				initialMessages = append([]fantasy.Message{memoryMsg}, initialMessages...)
+				call.Prompt += "\n\n" + FormatAutoRecallMessage(result)
 			}
 		}
 
@@ -851,11 +852,29 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					if result, settled := call.MemoryPrefetch.GetSettled(); settled {
 						prefetchedRecallInjected = true
 						if result != "" {
-							// Inject memory as user message wrapped in <system-reminder>,
-							// matching Claude Code's approach to preserve prompt cache.
-							memoryMsg := fantasy.NewUserMessage(FormatAutoRecallMessage(result))
-							prepared.Messages = append([]fantasy.Message{memoryMsg}, prepared.Messages...)
-							slog.Debug("[PERF] sessionAgent: injected settled memory prefetch during step", "session_id", call.SessionID)
+							// Mirror Claude Code's approach: memory content is merged into
+							// the last user message (which carries tool_results) as extra text,
+							// NOT prepended as a separate message. Prepending would change
+							// the message prefix and invalidate established prompt cache.
+							// By appending to an existing user message, the system prompt
+							// and conversation history prefix remain cache-stable.
+							memoryContent := FormatAutoRecallMessage(result)
+							injected := false
+							for i := len(prepared.Messages) - 1; i >= 0; i-- {
+								if prepared.Messages[i].Role == fantasy.MessageRoleUser {
+									prepared.Messages[i].Content = append(prepared.Messages[i].Content, fantasy.TextPart{Text: "\n\n" + memoryContent})
+									injected = true
+									break
+								}
+							}
+							// Fallback: if no user message exists to merge into (e.g. empty
+							// history), append a new user message. This keeps the system
+							// prompt prefix stable because the new message is at the tail,
+							// not at the head of the array.
+							if !injected {
+								prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(memoryContent))
+							}
+							slog.Debug("[PERF] sessionAgent: injected settled memory prefetch into last user message", "session_id", call.SessionID)
 						}
 					} else if !prefetchNotReadyLogged {
 						prefetchNotReadyLogged = true
@@ -915,10 +934,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						}
 
 						// Re-inject auto_recall if transform removed it.
+						// Mirror Claude Code's approach: merge into the last user message
+						// instead of prepending, to preserve prompt cache stability.
 						if autoRecallContent != "" && !hasAutoRecallInMessages(prepared.Messages) {
-							memoryMsg := fantasy.NewUserMessage(FormatAutoRecallMessage(autoRecallContent))
-							prepared.Messages = append([]fantasy.Message{memoryMsg}, prepared.Messages...)
-							slog.Debug("[PERF] sessionAgent: re-injected auto_recall after transform", "session_id", call.SessionID)
+							memoryContent := FormatAutoRecallMessage(autoRecallContent)
+							injected := false
+							for i := len(prepared.Messages) - 1; i >= 0; i-- {
+								if prepared.Messages[i].Role == fantasy.MessageRoleUser {
+									prepared.Messages[i].Content = append(prepared.Messages[i].Content, fantasy.TextPart{Text: "\n\n" + memoryContent})
+									injected = true
+									break
+								}
+							}
+							if !injected {
+								prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(memoryContent))
+							}
+							slog.Debug("[PERF] sessionAgent: re-injected auto_recall into last user message after transform", "session_id", call.SessionID)
 						}
 
 						newTokens := a.estimateSessionPromptTokens(
@@ -3402,7 +3433,7 @@ func normalizedMessageUsage(usage fantasy.Usage, providerID string, estimatedPro
 }
 
 func totalTokensForUsage(usage fantasy.Usage, providerID string) int64 {
-	return promptTokensForUsage(usage, providerID) + usage.OutputTokens
+	return promptTokensForUsage(usage, providerID) + usage.OutputTokens + usage.ReasoningTokens
 }
 
 func autoSummarizeReservedTokens(maxOutputTokens int64) int64 {
@@ -4430,8 +4461,9 @@ func buildSummaryPrompt(todos []session.Todo) string {
 }
 
 // hasAutoRecallInMessages checks if any user message contains system-reminder
-// with memory recall content. Memory is now injected as user message to preserve
-// prompt cache (matching Claude Code's approach).
+// with memory recall content. Memory is merged into existing user messages
+// (not prepended), matching Claude Code's attachment-merge approach to preserve
+// prompt cache.
 func hasAutoRecallInMessages(messages []fantasy.Message) bool {
 	for _, msg := range messages {
 		if msg.Role != fantasy.MessageRoleUser {

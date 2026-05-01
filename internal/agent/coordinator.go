@@ -453,8 +453,8 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	// This allows the memory recall to happen in parallel with other setup work.
 	// Modeled after Claude Code's approach: start prefetch, cache result when
 	// settled, and check readiness non-blocking at consume time.
-	// Note: DisableAutoMemory only disables automatic memory writes (dreaming),
-	// not recall. Users should still get relevant memories in their context.
+	// Memories are merged into existing user messages (not prepended),
+	// preserving prompt cache by keeping the system prompt prefix stable.
 	recentTools := collectRecentSuccessfulTools(ctx, c.messages, sessionID)
 	alreadySurfaced, surfacedBytes := collectSurfacedMemories(ctx, c.messages, sessionID)
 	recentConversation := buildRecentConversation(ctx, c.messages, sessionID, shortQueryExpansionMaxTurns)

@@ -45,7 +45,7 @@ func TestServiceUpdatePersistsUsage(t *testing.T) {
 	reloaded, err := messages.Get(t.Context(), msg.ID)
 	require.NoError(t, err)
 	require.Equal(t, msg.Usage, reloaded.Usage)
-	require.Equal(t, int64(10320), reloaded.Usage.TotalTokens())
+	require.Equal(t, int64(10400), reloaded.Usage.TotalTokens())
 }
 
 func TestServicePersistsActivatedDeferredTools(t *testing.T) {

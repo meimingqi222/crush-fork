@@ -37,11 +37,11 @@ func TestUsageSnapshotFromMessagesReturnsLatestAssistantUsage(t *testing.T) {
 	}
 	snap := usageSnapshotFromMessages(msgs, 0)
 	require.Equal(t, int64(3000+100), snap.PromptTokens)
-	require.Equal(t, int64(500), snap.CompletionTokens)
+	require.Equal(t, int64(540), snap.CompletionTokens)
 	require.Equal(t, int64(40), snap.ReasoningTokens)
 	require.Equal(t, int64(100), snap.CacheReadTokens)
-	require.Equal(t, int64(3000+100+500), snap.TotalTokens)
-	require.Equal(t, int64(3000+100+500), snap.ContextUsed)
+	require.Equal(t, int64(3640), snap.TotalTokens)
+	require.Equal(t, int64(3640), snap.ContextUsed)
 }
 
 func TestUsageSnapshotFromMessagesContextUsedUsesEstimateWhenLarger(t *testing.T) {

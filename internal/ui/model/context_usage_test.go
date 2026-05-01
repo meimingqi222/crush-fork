@@ -53,8 +53,8 @@ func TestLatestAssistantUsageSnapshotUsesLastAssistantUsageModel(t *testing.T) {
 		},
 	}, cfg, selected)
 	require.True(t, ok)
-	require.Equal(t, int64(1365), snapshot.TotalTokens)
-	require.Equal(t, int64(45), snapshot.OutputTokens)
+	require.Equal(t, int64(1395), snapshot.TotalTokens)
+	require.Equal(t, int64(75), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 }
 

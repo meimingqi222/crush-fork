@@ -735,7 +735,7 @@ func TestNormalizedMessageUsage_PreservesCacheBreakdown(t *testing.T) {
 		CacheWriteTokens: 300,
 	}, normalized)
 	require.Equal(t, int64(1320), normalized.PromptTokens())
-	require.Equal(t, int64(1365), normalized.TotalTokens())
+	require.Equal(t, int64(1385), normalized.TotalTokens())
 }
 
 func TestNormalizedMessageUsage_PrefersEstimatedPromptFloor(t *testing.T) {

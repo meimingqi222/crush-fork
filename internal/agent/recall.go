@@ -270,8 +270,10 @@ func truncateRecallText(text string, limit int) string {
 }
 
 // FormatAutoRecallMessage wraps memory content in a system-reminder tag.
-// This approach mirrors Claude Code's design: memories are injected as user
-// messages wrapped in <system-reminder> tags, preserving prompt cache.
+// This approach mirrors Claude Code's design: memories are presented as
+// user-message content wrapped in <system-reminder> tags, and merged into
+// existing user messages rather than prepended to the message list,
+// preserving prompt cache.
 func FormatAutoRecallMessage(content string) string {
 	if content == "" {
 		return ""
