@@ -25,6 +25,7 @@ const (
 	indexFilename             = "MEMORY.md"
 	consolidatedAtFilename    = ".last_consolidated_at"
 	consolidationLockFilename = ".consolidation.lock"
+	writeLockFilename         = ".write.lock"
 	sessionScope              = "session"
 
 	// sessionTTL is the maximum age for session-scoped memories.
@@ -42,6 +43,24 @@ const (
 	// a random write on every Get call while still keeping the
 	// recency/frequency signal roughly accurate.
 	accessFlushBatch = 5
+
+	// maxIndexLines caps the number of entries in MEMORY.md to keep
+	// the index from bloating the agent's context window.
+	// ~125 chars/line at 200 lines ≈ 25KB.
+	maxIndexLines = 200
+	// maxIndexBytes is a hard byte cap on the generated MEMORY.md
+	// content. Long lines can slip past the line cap.
+	maxIndexBytes = 25000
+
+	// writeLockStaleWindow is how long a write lock may be held before
+	// another process may reclaim it (e.g., after a crash).
+	// Must be generous enough for slow disks and large indexes (rebuild
+	// can involve reading 100+ files, sorting, and rewriting).
+	writeLockStaleWindow = 5 * time.Minute
+
+	// duplicateSimilarityThreshold is the Jaccard similarity above which a
+	// new memory is considered a duplicate of an existing one.
+	duplicateSimilarityThreshold = 0.7
 )
 
 var ErrNotFound = errors.New("memory key not found")
@@ -113,9 +132,22 @@ type pendingAccess struct {
 
 type service struct {
 	memoryDir     string
+	userMemoryDir string
 	indexPath     string
+	userIndexPath string
 	mu            sync.Mutex
 	pendingAccess map[string]pendingAccess
+}
+
+// Option configures a memory service.
+type Option func(*service)
+
+// WithUserMemoryDir enables a separate directory for user-scoped memories
+// that persist across projects.
+func WithUserMemoryDir(dir string) Option {
+	return func(s *service) {
+		s.userMemoryDir = dir
+	}
 }
 
 type memoryFrontmatter struct {
@@ -130,7 +162,7 @@ type memoryFrontmatter struct {
 	LastAccessedAt int64    `yaml:"last_accessed_at,omitempty"`
 }
 
-func NewService(dataDir string) (Service, error) {
+func NewService(dataDir string, opts ...Option) (Service, error) {
 	root := strings.TrimSpace(dataDir)
 	if root == "" {
 		return nil, fmt.Errorf("data directory is required")
@@ -146,10 +178,107 @@ func NewService(dataDir string) (Service, error) {
 		indexPath:     filepath.Join(memoryDir, indexFilename),
 		pendingAccess: make(map[string]pendingAccess),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	if s.userMemoryDir != "" {
+		if err := os.MkdirAll(s.userMemoryDir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating user memory directory: %w", err)
+		}
+		s.userIndexPath = filepath.Join(s.userMemoryDir, indexFilename)
+	}
+
 	if err := s.ensureIndexFile(); err != nil {
 		return nil, err
 	}
+	if s.userMemoryDir != "" {
+		if err := s.ensureUserIndexFile(); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// writeFileAtomic writes data to a temporary file and renames it to path,
+// ensuring readers never see a partially-written file. This mirrors the
+// atomic-write pattern used in claude-code's tool result storage.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp." + strconv.Itoa(os.Getpid())
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// withDirLock acquires an inter-process write lock for a specific directory,
+// executes fn, and releases the lock. The lock uses O_CREAT|O_EXCL atomic
+// creation with stale detection, matching claude-code's consolidation lock
+// pattern. Each directory has its own lock file so that operations on different
+// directories do not block each other.
+func (s *service) withDirLock(dir string, fn func() error) error {
+	lockPath := filepath.Join(dir, writeLockFilename)
+	owner := fmt.Sprintf("%d", os.Getpid())
+
+	acquire := func() (bool, error) {
+		payload := []byte(fmt.Sprintf(`{"owner":%q,"acquired_at":%d}`, owner, time.Now().Unix()))
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, _ = f.Write(payload)
+			_ = f.Close()
+			return true, nil
+		}
+		if !os.IsExist(err) {
+			return false, fmt.Errorf("creating write lock: %w", err)
+		}
+		return false, nil
+	}
+
+	for retries := 0; retries < 3; retries++ {
+		acquired, err := acquire()
+		if err != nil {
+			return err
+		}
+		if acquired {
+			defer func() { _ = os.Remove(lockPath) }()
+			return fn()
+		}
+
+		// Lock exists — check if stale.
+		content, err := os.ReadFile(lockPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Reclaim raced window; retry in next iteration.
+				continue
+			}
+			return fmt.Errorf("reading write lock: %w", err)
+		}
+
+		var state struct {
+			Owner      string `json:"owner"`
+			AcquiredAt int64  `json:"acquired_at"`
+		}
+		if err := json.Unmarshal(content, &state); err != nil || state.AcquiredAt == 0 {
+			// Corrupt lock — reclaim and retry.
+			_ = os.Remove(lockPath)
+			continue
+		}
+
+		if time.Since(time.Unix(state.AcquiredAt, 0)) > writeLockStaleWindow {
+			// Stale lock — reclaim and retry.
+			_ = os.Remove(lockPath)
+			continue
+		}
+
+		return fmt.Errorf("memory write lock held by process %s", state.Owner)
+	}
+
+	return fmt.Errorf("failed to acquire memory write lock after retries")
 }
 
 func (s *service) Store(ctx context.Context, params StoreParams) error {
@@ -165,66 +294,104 @@ func (s *service) Store(ctx context.Context, params StoreParams) error {
 		return fmt.Errorf("value is required")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	description := strings.TrimSpace(params.Description)
-	if description == "" {
-		description = truncateForDescription(params.Value)
+	// Determine target directory based on scope so the correct inter-process
+	// lock is acquired. User-scoped entries live in userMemoryDir; all others
+	// in memoryDir.
+	targetDir := s.memoryDir
+	scope := strings.TrimSpace(params.Scope)
+	if isUserScope(scope) && s.userMemoryDir != "" {
+		targetDir = s.userMemoryDir
 	}
 
-	importance := clampImportance(params.Importance)
-	if importance == 0 {
-		importance = defaultImportanceForType(params.Type)
-	}
+	return s.withDirLock(targetDir, func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	// Preserve access counters across updates so importance is not lost.
-	// Merge any unflushed increments from Get calls that have not yet been
-	// persisted to disk.
-	var existingCount int64
-	var existingLastAccessed int64
-	if existing, err := s.readEntryLocked(normalizedKey); err == nil {
-		existingCount = existing.AccessCount
-		existingLastAccessed = existing.LastAccessedAt
-	}
-	if pending, ok := s.pendingAccess[normalizedKey]; ok {
-		if pending.count > existingCount {
-			existingCount = pending.count
+		description := strings.TrimSpace(params.Description)
+		if description == "" {
+			description = truncateForDescription(params.Value)
 		}
-		if pending.lastAt > existingLastAccessed {
-			existingLastAccessed = pending.lastAt
+
+		importance := clampImportance(params.Importance)
+		if importance == 0 {
+			importance = defaultImportanceForType(params.Type)
 		}
-		delete(s.pendingAccess, normalizedKey)
-	}
 
-	// For truly new entries (no existing disk entry, no pending access),
-	// initialize LastAccessedAt to the current time instead of 0.
-	if existingLastAccessed == 0 {
-		existingLastAccessed = time.Now().UnixNano()
-	}
+		// Preserve access counters across updates so importance is not lost.
+		// Merge any unflushed increments from Get calls that have not yet been
+		// persisted to disk.
+		var existingCount int64
+		var existingLastAccessed int64
+		isNewKey := false
+		existing, err := s.readEntryLocked(normalizedKey)
+		if err == nil {
+			existingCount = existing.AccessCount
+			existingLastAccessed = existing.LastAccessedAt
+		} else if errors.Is(err, ErrNotFound) {
+			isNewKey = true
+		}
+		if pending, ok := s.pendingAccess[normalizedKey]; ok {
+			if pending.count > existingCount {
+				existingCount = pending.count
+			}
+			if pending.lastAt > existingLastAccessed {
+				existingLastAccessed = pending.lastAt
+			}
+			delete(s.pendingAccess, normalizedKey)
+		}
 
-	fm := memoryFrontmatter{
-		Key:            normalizedKey,
-		Description:    description,
-		Scope:          strings.TrimSpace(params.Scope),
-		Category:       strings.TrimSpace(params.Category),
-		Type:           strings.TrimSpace(params.Type),
-		Tags:           normalizeTags(params.Tags),
-		Importance:     importance,
-		AccessCount:    existingCount,
-		LastAccessedAt: existingLastAccessed,
-	}
+		// For truly new entries (no existing disk entry, no pending access),
+		// initialize LastAccessedAt to the current time instead of 0.
+		if existingLastAccessed == 0 {
+			existingLastAccessed = time.Now().UnixNano()
+		}
 
-	filePath := s.entryFilePath(normalizedKey)
-	content := buildMemoryFileContent(fm, params.Value)
-	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("writing memory file: %w", err)
-	}
+		// Check for duplicates before writing a new memory. If an existing
+		// memory has a value that is very similar to the new one, suggest
+		// updating it instead of creating a duplicate.
+		if isNewKey {
+			entries, _ := s.loadAllEntriesLocked()
+			if s.userMemoryDir != "" {
+				userEntries, _ := s.loadAllUserEntriesLocked()
+				entries = append(entries, userEntries...)
+			}
+			for _, entry := range entries {
+				if sim := jaccardSimilarity(entry.Value, params.Value); sim > duplicateSimilarityThreshold {
+					return fmt.Errorf("a similar memory already exists with key %q (similarity %.2f); consider updating it instead of creating a duplicate", entry.Key, sim)
+				}
+			}
+		}
 
-	if err := s.rebuildIndexLocked(); err != nil {
-		return fmt.Errorf("rebuilding index: %w", err)
-	}
-	return nil
+		fm := memoryFrontmatter{
+			Key:            normalizedKey,
+			Description:    description,
+			Scope:          scope,
+			Category:       strings.TrimSpace(params.Category),
+			Type:           strings.TrimSpace(params.Type),
+			Tags:           normalizeTags(params.Tags),
+			Importance:     importance,
+			AccessCount:    existingCount,
+			LastAccessedAt: existingLastAccessed,
+		}
+
+		filePath := s.entryFilePathWithScope(normalizedKey, fm.Scope)
+		content := buildMemoryFileContent(fm, params.Value)
+		if err := writeFileAtomic(filePath, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("writing memory file: %w", err)
+		}
+
+		// Rebuild only the index for the directory that was written to.
+		if targetDir == s.userMemoryDir {
+			if err := s.rebuildUserIndexLocked(); err != nil {
+				return fmt.Errorf("rebuilding user index: %w", err)
+			}
+		} else {
+			if err := s.rebuildIndexLocked(); err != nil {
+				return fmt.Errorf("rebuilding index: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (s *service) Get(ctx context.Context, key string) (Entry, error) {
@@ -240,7 +407,7 @@ func (s *service) Get(ctx context.Context, key string) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, err := s.readEntryLocked(normalizedKey)
+	entry, _, err := s.readEntryAnyDirLocked(normalizedKey)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -287,23 +454,58 @@ func (s *service) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("key is required")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// Determine target directory before acquiring the lock.
 	filePath := s.entryFilePath(normalizedKey)
+	targetDir := s.memoryDir
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			return ErrNotFound
+			if s.userMemoryDir != "" {
+				filePath = s.entryFilePathWithScope(normalizedKey, "user")
+				targetDir = s.userMemoryDir
+				_, err = os.Stat(filePath)
+				if err != nil {
+					if os.IsNotExist(err) {
+						return ErrNotFound
+					}
+					return fmt.Errorf("checking memory file: %w", err)
+				}
+			} else {
+				return ErrNotFound
+			}
+		} else {
+			return fmt.Errorf("checking memory file: %w", err)
 		}
-		return fmt.Errorf("checking memory file: %w", err)
 	}
 
-	if err := os.Remove(filePath); err != nil {
-		return fmt.Errorf("deleting memory file: %w", err)
-	}
+	return s.withDirLock(targetDir, func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	delete(s.pendingAccess, normalizedKey)
-	return s.rebuildIndexLocked()
+		// Re-check under lock: another process may have deleted the file
+		// between the pre-lock stat and now.
+		if _, err := os.Stat(filePath); err != nil {
+			if os.IsNotExist(err) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("checking memory file: %w", err)
+		}
+
+		if err := os.Remove(filePath); err != nil {
+			return fmt.Errorf("deleting memory file: %w", err)
+		}
+
+		delete(s.pendingAccess, normalizedKey)
+		if targetDir == s.userMemoryDir {
+			if err := s.rebuildUserIndexLocked(); err != nil {
+				return err
+			}
+		} else {
+			if err := s.rebuildIndexLocked(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *service) Search(ctx context.Context, params SearchParams) ([]Entry, error) {
@@ -328,6 +530,12 @@ func (s *service) Search(ctx context.Context, params SearchParams) ([]Entry, err
 	entries, err := s.loadAllEntriesLocked()
 	if err != nil {
 		return nil, err
+	}
+	if s.userMemoryDir != "" {
+		userEntries, err := s.loadAllUserEntriesLocked()
+		if err == nil {
+			entries = append(entries, userEntries...)
+		}
 	}
 
 	type scoredEntry struct {
@@ -390,6 +598,12 @@ func (s *service) List(ctx context.Context, params ListParams) ([]Entry, error) 
 	if err != nil {
 		return nil, err
 	}
+	if s.userMemoryDir != "" {
+		userEntries, err := s.loadAllUserEntriesLocked()
+		if err == nil {
+			entries = append(entries, userEntries...)
+		}
+	}
 
 	results := make([]Entry, 0, len(entries))
 	for _, entry := range entries {
@@ -418,17 +632,45 @@ func (s *service) ensureIndexFile() error {
 	return os.WriteFile(s.indexPath, []byte("# Memory Index\n\n"), 0o644)
 }
 
+func (s *service) ensureUserIndexFile() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := os.Stat(s.userIndexPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking user memory index: %w", err)
+	}
+
+	return os.WriteFile(s.userIndexPath, []byte("# Memory Index\n\n"), 0o644)
+}
+
 func (s *service) entryFilePath(key string) string {
+	return s.entryFilePathWithScope(key, "")
+}
+
+func (s *service) entryFilePathWithScope(key, scope string) string {
 	safeKey := sanitizeFilename(key)
 	if safeKey+".md" == indexFilename {
 		safeKey = "_" + safeKey
 	}
 	filename := safeKey + ".md"
+	if isUserScope(scope) && s.userMemoryDir != "" {
+		return filepath.Join(s.userMemoryDir, filename)
+	}
 	return filepath.Join(s.memoryDir, filename)
 }
 
 func (s *service) readEntryLocked(key string) (Entry, error) {
-	filePath := s.entryFilePath(key)
+	return s.readEntryFromDirLocked(s.memoryDir, key)
+}
+
+func (s *service) readEntryFromDirLocked(dir, key string) (Entry, error) {
+	safeKey := sanitizeFilename(key)
+	if safeKey+".md" == indexFilename {
+		safeKey = "_" + safeKey
+	}
+	filePath := filepath.Join(dir, safeKey+".md")
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -463,8 +705,35 @@ func (s *service) readEntryLocked(key string) (Entry, error) {
 	}, nil
 }
 
+// readEntryAnyDirLocked tries the primary directory first, then falls back
+// to the user memory directory for cross-project memories.
+func (s *service) readEntryAnyDirLocked(key string) (Entry, string, error) {
+	entry, err := s.readEntryFromDirLocked(s.memoryDir, key)
+	if err == nil {
+		return entry, s.memoryDir, nil
+	}
+	if s.userMemoryDir != "" {
+		entry, err = s.readEntryFromDirLocked(s.userMemoryDir, key)
+		if err == nil {
+			return entry, s.userMemoryDir, nil
+		}
+	}
+	return Entry{}, "", ErrNotFound
+}
+
 func (s *service) loadAllEntriesLocked() ([]Entry, error) {
-	files, err := os.ReadDir(s.memoryDir)
+	return loadEntriesFromDir(s.memoryDir)
+}
+
+func (s *service) loadAllUserEntriesLocked() ([]Entry, error) {
+	if s.userMemoryDir == "" {
+		return nil, nil
+	}
+	return loadEntriesFromDir(s.userMemoryDir)
+}
+
+func loadEntriesFromDir(dir string) ([]Entry, error) {
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading memory directory: %w", err)
 	}
@@ -496,7 +765,7 @@ func (s *service) loadAllEntriesLocked() ([]Entry, error) {
 	entries := make([]Entry, 0, len(mdFiles))
 	now := time.Now()
 	for _, fs := range mdFiles {
-		content, err := os.ReadFile(filepath.Join(s.memoryDir, fs.name))
+		content, err := os.ReadFile(filepath.Join(dir, fs.name))
 		if err != nil {
 			continue
 		}
@@ -532,18 +801,96 @@ func (s *service) rebuildIndexLocked() error {
 		return err
 	}
 
-	var sb strings.Builder
-	sb.WriteString("# Memory Index\n\n")
-	sb.WriteString("Auto-generated index of memory entries. Do not edit manually.\n\n")
+	var indexEntries []Entry
 	for _, entry := range entries {
 		if strings.EqualFold(strings.TrimSpace(entry.Scope), sessionScope) {
 			continue
+		}
+		indexEntries = append(indexEntries, entry)
+	}
+
+	sortEntries(indexEntries)
+
+	var sb strings.Builder
+	sb.WriteString("# Memory Index\n\n")
+	sb.WriteString("Auto-generated index of memory entries. Do not edit manually.\n\n")
+
+	truncatedByLines := false
+	for i, entry := range indexEntries {
+		if i >= maxIndexLines {
+			truncatedByLines = true
+			break
 		}
 		desc := truncateForDescription(entry.Value)
 		fileName := sanitizeFilename(entry.Key) + ".md"
 		fmt.Fprintf(&sb, "- [%s](%s) — %s\n", entry.Key, fileName, desc)
 	}
-	return os.WriteFile(s.indexPath, []byte(sb.String()), 0o644)
+
+	content := sb.String()
+	if len(content) > maxIndexBytes {
+		cutAt := strings.LastIndex(content[:maxIndexBytes], "\n")
+		if cutAt > 0 {
+			content = content[:cutAt]
+		} else {
+			content = content[:maxIndexBytes]
+		}
+		truncatedByLines = true
+	}
+
+	if truncatedByLines {
+		content += "\n\n> WARNING: MEMORY.md exceeded its size limit and was truncated. Keep individual memory entries concise and remove outdated entries to stay under the cap.\n"
+	}
+
+	return writeFileAtomic(s.indexPath, []byte(content), 0o644)
+}
+
+func (s *service) rebuildUserIndexLocked() error {
+	entries, err := s.loadAllUserEntriesLocked()
+	if err != nil {
+		return err
+	}
+
+	var indexEntries []Entry
+	for _, entry := range entries {
+		if strings.EqualFold(strings.TrimSpace(entry.Scope), sessionScope) {
+			continue
+		}
+		indexEntries = append(indexEntries, entry)
+	}
+
+	sortEntries(indexEntries)
+
+	var sb strings.Builder
+	sb.WriteString("# Memory Index\n\n")
+	sb.WriteString("Auto-generated index of memory entries. Do not edit manually.\n\n")
+
+	truncatedByLines := false
+	for i, entry := range indexEntries {
+		if i >= maxIndexLines {
+			truncatedByLines = true
+			break
+		}
+		desc := truncateForDescription(entry.Value)
+		fileName := sanitizeFilename(entry.Key) + ".md"
+		fmt.Fprintf(&sb, "- [%s](%s) — %s\n", entry.Key, fileName, desc)
+	}
+
+	content := sb.String()
+	if len(content) > maxIndexBytes {
+		cutAt := strings.LastIndex(content[:maxIndexBytes], "\n")
+		if cutAt > 0 {
+			content = content[:cutAt]
+		} else {
+			content = content[:maxIndexBytes]
+		}
+		truncatedByLines = true
+	}
+
+	if truncatedByLines {
+		content += "\n\n> WARNING: MEMORY.md exceeded its size limit and was truncated. Keep individual memory entries concise and remove outdated entries to stay under the cap.\n"
+	}
+
+	return writeFileAtomic(s.userIndexPath, []byte(content), 0o644)
 }
 
 func parseMemoryFile(content []byte) (memoryFrontmatter, string, error) {
@@ -763,6 +1110,67 @@ func tokenizeSearchText(text string) []string {
 	return tokens
 }
 
+// jaccardSimilarity computes the Jaccard similarity between two strings using
+// whitespace tokenization. Returns a value in [0, 1] where 1 means identical
+// token sets.
+func jaccardSimilarity(a, b string) float64 {
+	setA := tokenSet(a)
+	setB := tokenSet(b)
+
+	if len(setA) == 0 && len(setB) == 0 {
+		return 1.0
+	}
+	if len(setA) == 0 || len(setB) == 0 {
+		return 0.0
+	}
+
+	intersection := 0
+	for tok := range setA {
+		if _, ok := setB[tok]; ok {
+			intersection++
+		}
+	}
+	union := len(setA) + len(setB) - intersection
+	return float64(intersection) / float64(union)
+}
+
+// tokenSet returns a set of whitespace-delimited tokens from s, lowercased.
+func tokenSet(s string) map[string]struct{} {
+	trimmed := strings.TrimSpace(strings.ToLower(s))
+	if trimmed == "" {
+		return nil
+	}
+	splitter := func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		case r >= 0x4E00 && r <= 0x9FFF:
+			return false
+		case r >= 0x3040 && r <= 0x30FF:
+			return false
+		case r >= 0xAC00 && r <= 0xD7AF:
+			return false
+		default:
+			return true
+		}
+	}
+	parts := strings.FieldsFunc(trimmed, splitter)
+	if len(parts) == 0 {
+		return nil
+	}
+	result := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		result[part] = struct{}{}
+	}
+	return result
+}
+
 func scoreKeywordMatch(entry Entry, queryTokens []string) float64 {
 	if len(queryTokens) == 0 {
 		return 0
@@ -886,6 +1294,12 @@ func isSessionScope(scope string) bool {
 	return strings.EqualFold(strings.TrimSpace(scope), sessionScope)
 }
 
+// isUserScope reports whether the given scope value represents the
+// user scope (case-insensitive).
+func isUserScope(scope string) bool {
+	return strings.EqualFold(strings.TrimSpace(scope), "user")
+}
+
 // writeAccessMetaLocked persists access counters back to the memory file.
 // It is called only when AccessCount reaches a batch threshold to avoid a
 // random write on every Get call.
@@ -905,7 +1319,7 @@ func (s *service) writeAccessMetaLocked(entry Entry) error {
 		fm.Description = truncateForDescription(entry.Value)
 	}
 	content := buildMemoryFileContent(fm, entry.Value)
-	return os.WriteFile(s.entryFilePath(entry.Key), []byte(content), 0o644)
+	return writeFileAtomic(s.entryFilePathWithScope(entry.Key, entry.Scope), []byte(content), 0o644)
 }
 
 func applyLimit(entries []Entry, limit int) []Entry {
@@ -923,6 +1337,7 @@ func applyLimit(entries []Entry, limit int) []Entry {
 }
 
 // ReadIndex returns the raw content of the MEMORY.md index file.
+// When a user memory directory is configured, both indexes are concatenated.
 func (s *service) ReadIndex() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -931,7 +1346,14 @@ func (s *service) ReadIndex() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading memory index: %w", err)
 	}
-	return string(content), nil
+	if s.userMemoryDir == "" {
+		return string(content), nil
+	}
+	userContent, err := os.ReadFile(s.userIndexPath)
+	if err != nil {
+		return string(content), nil
+	}
+	return string(content) + "\n\n---\n\n" + string(userContent), nil
 }
 
 // MemoryFileInfo holds metadata about a memory file without loading full content.
@@ -946,12 +1368,9 @@ type MemoryFileInfo struct {
 	UpdatedAt   int64
 }
 
-// ListMemoryFiles returns metadata about all memory files without loading full content.
-func (s *service) ListMemoryFiles() ([]MemoryFileInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	files, err := os.ReadDir(s.memoryDir)
+// listMemoryFilesFromDir returns metadata about memory files in a single directory.
+func listMemoryFilesFromDir(dir string) ([]MemoryFileInfo, error) {
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading memory directory: %w", err)
 	}
@@ -982,7 +1401,7 @@ func (s *service) ListMemoryFiles() ([]MemoryFileInfo, error) {
 
 	infos := make([]MemoryFileInfo, 0, len(candidates))
 	for _, candidate := range candidates {
-		fm, err := readMemoryFileFrontmatter(filepath.Join(s.memoryDir, candidate.name))
+		fm, err := readMemoryFileFrontmatter(filepath.Join(dir, candidate.name))
 		if err != nil {
 			continue
 		}
@@ -1000,24 +1419,55 @@ func (s *service) ListMemoryFiles() ([]MemoryFileInfo, error) {
 	return infos, nil
 }
 
+// ListMemoryFiles returns metadata about all memory files without loading full content.
+func (s *service) ListMemoryFiles() ([]MemoryFileInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	infos, err := listMemoryFilesFromDir(s.memoryDir)
+	if err != nil {
+		return nil, err
+	}
+	if s.userMemoryDir != "" {
+		userInfos, err := listMemoryFilesFromDir(s.userMemoryDir)
+		if err == nil {
+			infos = append(infos, userInfos...)
+		}
+	}
+	return infos, nil
+}
+
 // ReadMemoryFileBody reads just the body content of a memory file by filename.
 func (s *service) ReadMemoryFileBody(fileName string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fullPath := filepath.Join(s.memoryDir, fileName)
-	cleanPath := filepath.Clean(fullPath)
-	cleanDir := filepath.Clean(s.memoryDir) + string(filepath.Separator)
-	if !strings.HasPrefix(cleanPath, cleanDir) {
-		return "", fmt.Errorf("invalid memory file path")
+	readFromDir := func(dir string) (string, error) {
+		fullPath := filepath.Join(dir, fileName)
+		cleanPath := filepath.Clean(fullPath)
+		cleanDir := filepath.Clean(dir) + string(filepath.Separator)
+		if !strings.HasPrefix(cleanPath, cleanDir) {
+			return "", fmt.Errorf("invalid memory file path")
+		}
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			return "", err
+		}
+		_, body, err := parseMemoryFile(content)
+		return strings.TrimSpace(body), err
 	}
 
-	content, err := os.ReadFile(fullPath)
-	if err != nil {
-		return "", fmt.Errorf("reading memory file: %w", err)
+	body, err := readFromDir(s.memoryDir)
+	if err == nil {
+		return body, nil
 	}
-	_, body, err := parseMemoryFile(content)
-	return strings.TrimSpace(body), err
+	if s.userMemoryDir != "" {
+		body, err = readFromDir(s.userMemoryDir)
+		if err == nil {
+			return body, nil
+		}
+	}
+	return "", fmt.Errorf("reading memory file: %w", err)
 }
 
 type consolidationLockState struct {
@@ -1071,7 +1521,7 @@ func (s *service) WriteLastConsolidatedAt(at time.Time) error {
 	defer s.mu.Unlock()
 
 	content := strconv.FormatInt(at.Unix(), 10)
-	if err := os.WriteFile(s.consolidatedAtPath(), []byte(content+"\n"), 0o644); err != nil {
+	if err := writeFileAtomic(s.consolidatedAtPath(), []byte(content+"\n"), 0o644); err != nil {
 		return fmt.Errorf("writing last consolidated timestamp: %w", err)
 	}
 	return nil

@@ -123,7 +123,6 @@ func isFantasyToolParallelSafe(tool fantasy.AgentTool) bool {
 		agenttools.GrepToolName,
 		agenttools.LSToolName,
 		agenttools.ViewToolName,
-		agenttools.HistorySearchToolName,
 		agenttools.DiagnosticsToolName,
 		agenttools.ReferencesToolName,
 		agenttools.LSPDeclarationToolName,

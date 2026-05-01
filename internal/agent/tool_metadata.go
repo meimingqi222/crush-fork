@@ -30,8 +30,6 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect local files", SearchTags: []string{"read", "filesystem"}, Direct: true}
 	case tools.SourcegraphToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "search public repositories", SearchTags: []string{"code-search", "network", "deferred"}, Exposure: tools.ToolExposureDeferred, Direct: true}
-	case tools.HistorySearchToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "search session history", SearchTags: []string{"history", "session"}, Direct: true}
 	case tools.LongTermMemoryToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "manage long-term memory entries", SearchTags: []string{"memory", "state"}}
 	case tools.TodosToolName:

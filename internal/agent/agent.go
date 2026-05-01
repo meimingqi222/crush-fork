@@ -562,14 +562,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Check if memory prefetch is ready (non-blocking). If settled, use cached
 	// result. This approach mirrors Claude Code's design: the result is cached
 	// after settlement, so retries get the same data without re-running.
-	prefetchedRecallInSystemPrompt := false
+	// Memory is now injected as user message (see below), not in system prompt,
+	// to preserve prompt cache.
+	prefetchedRecallReady := false
 	prefetchNotReadyLogged := false
 	if !a.isSubAgent && call.MemoryPrefetch != nil {
 		if result, settled := call.MemoryPrefetch.GetSettled(); settled {
 			if result != "" {
-				systemPrompt += "\n\n<auto_recall>\n" + result + "\n</auto_recall>"
-				prefetchedRecallInSystemPrompt = true
-				slog.Debug("[PERF] sessionAgent: injected prefetched memory recall", "session_id", call.SessionID)
+				prefetchedRecallReady = true
+				slog.Debug("[PERF] sessionAgent: prefetched memory recall ready", "session_id", call.SessionID)
 			}
 		} else {
 			prefetchNotReadyLogged = true
@@ -748,7 +749,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// prepareStep invocations strip those blocks from the history.
 	var stripRedactedThinking bool
 	runStream := func(providerOptions fantasy.ProviderOptions, billFirstStepAsUser bool) (*fantasy.AgentResult, error) {
-		prefetchedRecallInjected := prefetchedRecallInSystemPrompt
+		prefetchedRecallInjected := prefetchedRecallReady
 		currentAssistant = nil
 		currentStepToolMessageIDs = nil
 		currentStepToolResultChars = 0
@@ -781,6 +782,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		initialMessages := requestState.History
 		if stripRedactedThinking {
 			initialMessages, _ = stripRedactedThinkingParts(initialMessages)
+		}
+		// Inject memory as user message for first request if ready.
+		// This mirrors Claude Code's approach: memories are injected as user
+		// messages wrapped in <system-reminder> tags, preserving prompt cache.
+		if prefetchedRecallReady && call.MemoryPrefetch != nil {
+			if result, settled := call.MemoryPrefetch.GetSettled(); settled && result != "" {
+				memoryMsg := fantasy.NewUserMessage(FormatAutoRecallMessage(result))
+				initialMessages = append([]fantasy.Message{memoryMsg}, initialMessages...)
+			}
 		}
 
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
@@ -841,7 +851,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					if result, settled := call.MemoryPrefetch.GetSettled(); settled {
 						prefetchedRecallInjected = true
 						if result != "" {
-							prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage("<auto_recall>\n" + result + "\n</auto_recall>")}, prepared.Messages...)
+							// Inject memory as user message wrapped in <system-reminder>,
+							// matching Claude Code's approach to preserve prompt cache.
+							memoryMsg := fantasy.NewUserMessage(FormatAutoRecallMessage(result))
+							prepared.Messages = append([]fantasy.Message{memoryMsg}, prepared.Messages...)
 							slog.Debug("[PERF] sessionAgent: injected settled memory prefetch during step", "session_id", call.SessionID)
 						}
 					} else if !prefetchNotReadyLogged {
@@ -903,7 +916,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 						// Re-inject auto_recall if transform removed it.
 						if autoRecallContent != "" && !hasAutoRecallInMessages(prepared.Messages) {
-							prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage("<auto_recall>\n" + autoRecallContent + "\n</auto_recall>")}, prepared.Messages...)
+							memoryMsg := fantasy.NewUserMessage(FormatAutoRecallMessage(autoRecallContent))
+							prepared.Messages = append([]fantasy.Message{memoryMsg}, prepared.Messages...)
 							slog.Debug("[PERF] sessionAgent: re-injected auto_recall after transform", "session_id", call.SessionID)
 						}
 
@@ -4415,15 +4429,17 @@ func buildSummaryPrompt(todos []session.Todo) string {
 	return sb.String()
 }
 
-// hasAutoRecallInMessages checks if any system message contains auto_recall.
+// hasAutoRecallInMessages checks if any user message contains system-reminder
+// with memory recall content. Memory is now injected as user message to preserve
+// prompt cache (matching Claude Code's approach).
 func hasAutoRecallInMessages(messages []fantasy.Message) bool {
 	for _, msg := range messages {
-		if msg.Role != fantasy.MessageRoleSystem {
+		if msg.Role != fantasy.MessageRoleUser {
 			continue
 		}
 		for _, part := range msg.Content {
 			if textPart, ok := part.(fantasy.TextPart); ok {
-				if strings.Contains(textPart.Text, "<auto_recall>") {
+				if strings.Contains(textPart.Text, "<system-reminder>") && strings.Contains(textPart.Text, "Relevant long-term memory:") {
 					return true
 				}
 			}

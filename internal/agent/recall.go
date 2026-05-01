@@ -7,15 +7,29 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/oauth/copilot"
 )
 
 const (
-	autoRecallMemoryLimit      = 5
-	autoRecallSectionCharLimit = 4096
-	maxSessionRecallBytes      = 60 * 1024 // 60KB cumulative cap, matching claude-code's MAX_SESSION_BYTES
+	autoRecallMemoryLimit        = 5
+	autoRecallSectionCharLimit   = 4096
+	maxSessionRecallBytes        = 60 * 1024 // 60KB cumulative cap, matching claude-code's MAX_SESSION_BYTES
+	shortQueryWordThreshold      = 5
+	shortQueryExpansionMaxTokens = 256
+	shortQueryExpansionMaxTurns  = 6
+	shortQueryExpansionPrompt    = `You are expanding a short user query into a richer search query for memory retrieval. Given the user's current query and the recent conversation history, produce an expanded query that captures the user's actual intent.
+
+Rules:
+- Keep the expansion concise (under 20 words).
+- Preserve the user's language (do not translate).
+- Focus on the core topic, not conversational filler.
+- If the query is already specific enough, return it unchanged.
+
+Return ONLY the expanded query text, nothing else.`
 )
 
 type backgroundModel struct {
@@ -37,14 +51,30 @@ func (b *backgroundModel) semanticSearch(ctx context.Context, memorySvc memory.S
 	return entries, nil
 }
 
-func buildAutoRecallBlock(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, prompt string, recentTools []string, alreadySurfaced map[string]bool) string {
+func buildAutoRecallBlock(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, prompt string, recentTools []string, alreadySurfaced map[string]bool, recentConversation string) string {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return ""
 	}
-	// Single-word prompts lack enough context for meaningful term extraction.
-	if !strings.Contains(prompt, " ") {
-		return ""
+
+	// Short prompts lack enough context for meaningful term extraction.
+	// When a background model and recent conversation are available,
+	// expand the query into a semantically richer search query.
+	// If expansion fails and the query still has at least two words,
+	// fall back to the original query rather than skipping entirely.
+	wordCount := len(strings.Fields(prompt))
+	if wordCount < shortQueryWordThreshold {
+		if bgModel != nil && strings.TrimSpace(recentConversation) != "" {
+			expanded, err := expandShortQuery(ctx, bgModel, prompt, recentConversation)
+			if err == nil && strings.TrimSpace(expanded) != "" {
+				prompt = strings.TrimSpace(expanded)
+				wordCount = len(strings.Fields(prompt))
+			}
+		}
+		// Single-word queries remain too ambiguous even after expansion.
+		if wordCount < 2 {
+			return ""
+		}
 	}
 
 	sections := make([]string, 0, 1)
@@ -63,6 +93,47 @@ func buildAutoRecallBlock(ctx context.Context, memorySvc memory.Service, bgModel
 		return ""
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+// expandShortQuery uses the background model to expand a terse user query into
+// a richer search query by incorporating recent conversation context.
+// This mirrors claude-code's approach of surfacing more relevant memories
+// when the user says things like "continue" or "fix it".
+func expandShortQuery(ctx context.Context, bgModel *backgroundModel, query, recentConversation string) (string, error) {
+	if bgModel == nil {
+		return "", nil
+	}
+
+	prompt := fmt.Sprintf("Recent conversation:\n%s\n\nCurrent query: %s\n\nExpanded query:", recentConversation, query)
+
+	agent := fantasy.NewAgent(
+		bgModel.model.Model,
+		fantasy.WithSystemPrompt(shortQueryExpansionPrompt),
+		fantasy.WithMaxOutputTokens(shortQueryExpansionMaxTokens),
+		fantasy.WithUserAgent(memoryUserAgent),
+	)
+
+	resp, err := agent.Stream(copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent), fantasy.AgentStreamCall{
+		Prompt:          prompt,
+		ProviderOptions: getProviderOptions(bgModel.model, bgModel.provider),
+		PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+			callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
+			prepared.Messages = options.Messages
+			if bgModel.provider.SystemPromptPrefix != "" {
+				prepared.Messages = append([]fantasy.Message{
+					fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix),
+				}, prepared.Messages...)
+			}
+			return callCtx, prepared, nil
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.Response.Content.Text()), nil
 }
 
 func recallEntriesForSession(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, query, scope string, recentTools []string, alreadySurfaced map[string]bool) []memory.Entry {
@@ -196,4 +267,14 @@ func truncateRecallText(text string, limit int) string {
 	}
 	runes := []rune(text)
 	return string(runes[:limit]) + "…"
+}
+
+// FormatAutoRecallMessage wraps memory content in a system-reminder tag.
+// This approach mirrors Claude Code's design: memories are injected as user
+// messages wrapped in <system-reminder> tags, preserving prompt cache.
+func FormatAutoRecallMessage(content string) string {
+	if content == "" {
+		return ""
+	}
+	return "<system-reminder>\n" + content + "\n</system-reminder>"
 }

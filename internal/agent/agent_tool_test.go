@@ -135,7 +135,6 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	assert.Contains(t, generalNames, "bash")
 	assert.Contains(t, generalNames, "edit")
 	assert.Contains(t, generalNames, tools.HashlineEditToolName)
-	assert.Contains(t, generalNames, tools.HistorySearchToolName)
 	assert.Contains(t, generalNames, tools.LongTermMemoryToolName)
 	assert.Contains(t, generalNames, tools.SendMessageToolName)
 	assert.Contains(t, generalNames, tools.TaskStopToolName)
@@ -182,7 +181,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	assert.Equal(t, []string{
 		"glob",
 		"grep",
-		"history_search",
 		"ls",
 		"lsp_declaration",
 		"lsp_definition",

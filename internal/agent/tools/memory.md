@@ -14,7 +14,7 @@ Manages persistent long-term memory entries across sessions.
 - key: Memory key for `store`, `get`, `delete`
 - value: Memory value for `store`
 - description: Optional short summary for `store` (recommended; defaults to a truncated value)
-- scope: Optional memory scope such as `session` or `project`
+- scope: Optional memory scope: `session` (temporary, 7-day TTL), `project` (persist within this project), or `user` (persist across all projects)
 - category: Optional higher-level grouping for a memory entry
 - type: Optional memory type or subtype
 - tags: Optional list of tags for the entry

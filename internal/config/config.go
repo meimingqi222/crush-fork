@@ -729,7 +729,7 @@ func allToolNames() []string {
 		"grep",
 		"ls",
 		"request_user_input",
-		"history_search",
+	
 		"crush_info",
 		"crush_logs",
 		"long_term_memory",
