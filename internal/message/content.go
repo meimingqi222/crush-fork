@@ -282,16 +282,13 @@ func (m *Message) IsThinking() bool {
 }
 
 func (m *Message) AppendContent(delta string) {
-	found := false
 	for i, part := range m.Parts {
 		if c, ok := part.(TextContent); ok {
 			m.Parts[i] = TextContent{Text: c.Text + delta}
-			found = true
+			return
 		}
 	}
-	if !found {
-		m.Parts = append(m.Parts, TextContent{Text: delta})
-	}
+	m.Parts = append(m.Parts, TextContent{Text: delta})
 }
 
 func (m *Message) SetContent(text string) {
@@ -541,7 +538,10 @@ func (m *Message) AddImageURL(url, detail string) {
 }
 
 func (m *Message) AddBinary(mimeType string, data []byte) {
-	m.Parts = append(m.Parts, BinaryContent{MIMEType: mimeType, Data: data})
+	// Copy data to prevent external modifications from affecting the message
+	copiedData := make([]byte, len(data))
+	copy(copiedData, data)
+	m.Parts = append(m.Parts, BinaryContent{MIMEType: mimeType, Data: copiedData})
 }
 
 func PromptWithTextAttachments(prompt string, attachments []Attachment) string {

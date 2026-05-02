@@ -131,14 +131,23 @@ func NewDownloadTool(permissions permission.Service, workingDir string, client *
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to create output file: %w", err)
 			}
-			defer outFile.Close()
 
-			// Copy data without an explicit size limit.
-			// The overall download is still constrained by the HTTP client's timeout
-			// and any upstream server limits.
-			bytesWritten, err := io.Copy(outFile, resp.Body)
+			// Copy data with a 1GB size limit to prevent disk exhaustion
+			const maxDownloadSize = 1 << 30 // 1GB
+			bytesWritten, err := io.Copy(outFile, io.LimitReader(resp.Body, maxDownloadSize+1))
+			closeErr := outFile.Close()
 			if err != nil {
+				// Clean up truncated file on error
+				_ = os.Remove(filePath)
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
+			}
+			if closeErr != nil {
+				_ = os.Remove(filePath)
+				return fantasy.ToolResponse{}, fmt.Errorf("failed to close file: %w", closeErr)
+			}
+			if bytesWritten > maxDownloadSize {
+				_ = os.Remove(filePath)
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("download exceeded maximum size of %d bytes (1GB)", maxDownloadSize)), nil
 			}
 
 			contentType := resp.Header.Get("Content-Type")

@@ -85,7 +85,7 @@ func RestrictedGitBashDescription() string {
 func validateNoWrapperShellCommand(command string) error {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return nil
+		return fmt.Errorf("failed to parse shell command: %w", err)
 	}
 
 	var wrapperErr error

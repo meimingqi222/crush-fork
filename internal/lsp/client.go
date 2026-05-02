@@ -430,8 +430,8 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		return fmt.Errorf("cannot notify change for unopened file: %s", filepath)
 	}
 
-	// Increment version
-	fileInfo.Version++
+	// Increment version atomically to avoid race conditions
+	newVersion := atomic.AddInt32(&fileInfo.Version, 1)
 
 	// Create change event
 	changes := []protocol.TextDocumentContentChangeEvent{
@@ -442,7 +442,7 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		},
 	}
 
-	return c.client.NotifyDidChangeTextDocument(ctx, uri, int(fileInfo.Version), changes)
+	return c.client.NotifyDidChangeTextDocument(ctx, uri, int(newVersion), changes)
 }
 
 // IsFileOpen checks if a file is currently open.
