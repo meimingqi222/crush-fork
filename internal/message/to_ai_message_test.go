@@ -101,6 +101,21 @@ func TestToAIMessage_ReasoningWithoutSignatureNoText(t *testing.T) {
 	require.Equal(t, "the actual answer lives here", textPart.Text)
 }
 
+func TestToAIMessage_DropsTextualToolCallProtocolOnlyReasoning(t *testing.T) {
+	t.Parallel()
+
+	msg := Message{
+		Role: Assistant,
+		Parts: []ContentPart{
+			ReasoningContent{
+				Thinking: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>",
+			},
+		},
+	}
+
+	require.Empty(t, msg.ToAIMessage())
+}
+
 // TestToAIMessage_ReasoningBeforeText verifies that the reasoning (thinking)
 // block appears before the text block in the assistant message parts.  Kimi
 // (and Anthropic) require this ordering; sending text first causes a 400 error.

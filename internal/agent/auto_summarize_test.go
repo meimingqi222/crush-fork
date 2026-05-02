@@ -877,7 +877,7 @@ func TestRunNormalSummarizeUsesSummarizePurpose(t *testing.T) {
 			_, createErr = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
 				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.ToolResult{ToolCallID: "tc-1", Name: "view", Content: strings.Repeat("x", 30000)},
+					message.ToolResult{ToolCallID: "tc-1", Name: "view", Content: strings.Repeat("x", 50000)},
 				},
 			})
 			require.NoError(t, createErr)

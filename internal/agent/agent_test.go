@@ -764,22 +764,22 @@ func TestShouldAutoSummarize(t *testing.T) {
 		want            bool
 	}{
 		{
-			name: "fallback input budget uses capped reserve plus tool and safety headroom",
+			name: "fallback context budget reserves full max output like opencode",
 			model: Model{CatwalkCfg: catwalk.Model{
 				ContextWindow:    200_000,
 				DefaultMaxTokens: 50_000,
 			}},
-			contextUsed:     168_000,
+			contextUsed:     150_000,
 			maxOutputTokens: 50_000,
 			want:            true,
 		},
 		{
-			name: "fallback input budget stays below capped reserve headroom threshold",
+			name: "fallback context budget stays below full output threshold",
 			model: Model{CatwalkCfg: catwalk.Model{
 				ContextWindow:    200_000,
 				DefaultMaxTokens: 50_000,
 			}},
-			contextUsed:     167_999,
+			contextUsed:     149_999,
 			maxOutputTokens: 50_000,
 			want:            false,
 		},
@@ -1904,6 +1904,112 @@ func (a *textualToolProtocolTestAgent) callCount() int {
 	return a.calls
 }
 
+func TestShouldRetryForTextualToolCallProtocolAllowsToolUseWithoutStructuredToolCalls(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.Finish{Reason: message.FinishReasonToolUse},
+		},
+	}
+
+	require.True(t, shouldRetryForTextualToolCallProtocol(msg))
+}
+
+func TestShouldRetryForTextualToolCallProtocolDetectsReasoning(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.Finish{Reason: message.FinishReasonEndTurn},
+		},
+	}
+
+	require.True(t, shouldRetryForTextualToolCallProtocol(msg))
+}
+
+func TestParseTextualToolCallsFromAssistantUsesAnthropicSafeIDs(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+		},
+	}
+
+	toolCalls := parseTextualToolCallsFromAssistant(msg)
+
+	require.Len(t, toolCalls, 1)
+	require.Equal(t, "functions_view_25", toolCalls[0].ID)
+	require.Equal(t, agenttools.ViewToolName, toolCalls[0].Name)
+	require.Equal(t, `{"file_path":"main.go"}`, toolCalls[0].Input)
+}
+
+func TestStripTextualToolCallProtocolFromAssistant(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "I will inspect it.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.view:6<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.ReasoningContent{Thinking: "Thinking first.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.grep:7<|tool_call_argument_begin|>{\"pattern\":\"x\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.ToolCall{ID: "call-1", Name: agenttools.ViewToolName, Input: `{"file_path":"main.go"}`, Finished: true},
+		},
+	}
+
+	require.True(t, stripTextualToolCallProtocolFromAssistant(msg))
+	require.Equal(t, "I will inspect it.", msg.Content().Text)
+	require.Equal(t, "Thinking first.", msg.ReasoningContent().Thinking)
+}
+
+func TestSanitizeAnthropicToolCallIDsInMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := []fantasy.Message{
+		{
+			Role: fantasy.MessageRoleAssistant,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{
+					ToolCallID: "functions.grep:64",
+					ToolName:   agenttools.GrepToolName,
+					Input:      `{"pattern":"x"}`,
+				},
+			},
+		},
+		{
+			Role: fantasy.MessageRoleTool,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolResultPart{
+					ToolCallID: "functions.grep:64",
+					Output:     fantasy.ToolResultOutputContentText{Text: "ok"},
+				},
+				fantasy.ToolResultPart{
+					ToolCallID: "safe_id-1",
+					Output:     fantasy.ToolResultOutputContentText{Text: "ok"},
+				},
+			},
+		},
+	}
+
+	sanitized, changed, count := sanitizeAnthropicToolCallIDsInMessages(messages)
+
+	require.True(t, changed)
+	require.Equal(t, 2, count)
+	require.Equal(t, "functions.grep:64", messages[0].Content[0].(fantasy.ToolCallPart).ToolCallID)
+	require.Equal(t, "functions_grep_64", sanitized[0].Content[0].(fantasy.ToolCallPart).ToolCallID)
+	require.Equal(t, "functions_grep_64", sanitized[1].Content[0].(fantasy.ToolResultPart).ToolCallID)
+	require.Equal(t, "safe_id-1", sanitized[1].Content[1].(fantasy.ToolResultPart).ToolCallID)
+}
+
 func TestConvertToToolResult_PreservesGenericRecoveryMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -2033,8 +2139,8 @@ func TestRunFailsAfterRepeatedTextualToolCallProtocol(t *testing.T) {
 		Prompt:          "please inspect and fix",
 		MaxOutputTokens: 1000,
 	})
-	require.ErrorContains(t, err, "model emitted textual tool-call protocol instead of structured tool calls")
-	require.Equal(t, maxTextualToolProtocolRetries+1, testAgent.callCount())
+	require.ErrorContains(t, err, "model repeatedly emitted the same textual tool-call protocol instead of structured tool calls")
+	require.Equal(t, maxRepeatedTextualToolProtocolRecoveries+1, testAgent.callCount())
 
 	msgs, err := env.messages.List(t.Context(), testSession.ID)
 	require.NoError(t, err)
@@ -2044,6 +2150,7 @@ func TestRunFailsAfterRepeatedTextualToolCallProtocol(t *testing.T) {
 		if msg.Role == message.Assistant {
 			assistantCount++
 			require.NotContains(t, msg.Content().Text, "<|tool_calls_section_begin|>")
+			require.NotContains(t, msg.ReasoningContent().Thinking, "<|tool_calls_section_begin|>")
 		}
 		if msg.Role == message.Tool {
 			for _, tr := range msg.ToolResults() {
@@ -2051,7 +2158,7 @@ func TestRunFailsAfterRepeatedTextualToolCallProtocol(t *testing.T) {
 			}
 		}
 	}
-	require.Equal(t, 0, assistantCount)
+	require.Equal(t, maxRepeatedTextualToolProtocolRecoveries, assistantCount)
 }
 
 func TestPreparePromptRestoresDeferredToolActivationsFromHistory(t *testing.T) {

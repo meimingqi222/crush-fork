@@ -62,9 +62,11 @@ const (
 	// Constants for auto-summarization thresholds
 	autoSummarizeReserveTokens = 20_000
 
-	joinActiveRunMaxInjectedCalls  = 2
-	joinActiveRunPromptCharsBudget = 1_600
-	maxTextualToolProtocolRetries  = 2
+	joinActiveRunMaxInjectedCalls            = 2
+	joinActiveRunPromptCharsBudget           = 1_600
+	maxTextualToolProtocolRetries            = 2
+	maxTextualToolProtocolRecoveries         = 64
+	maxRepeatedTextualToolProtocolRecoveries = 3
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -81,7 +83,11 @@ var (
 	titleWhitespaceRegex = regexp.MustCompile(`\s+`)
 )
 
-var textualToolCallProtocolRegex = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?<\|tool_call_begin\|>.*?functions\.[a-zA-Z0-9_]+:\d+`)
+var (
+	textualToolCallProtocolRegex      = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?<\|tool_call_begin\|>.*?functions\.[a-zA-Z0-9_]+(?::\d+)?`)
+	textualToolCallProtocolBlockRegex = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?(?:<\|tool_calls_section_end\|>|$)`)
+	textualToolCallProtocolCallRegex  = regexp.MustCompile(`(?is)<\|tool_call_begin\|>\s*functions\.([a-zA-Z0-9_]+)(?::([0-9]+))?\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>`)
+)
 
 const autoResumePromptPrefix = "The previous session was interrupted because it got too long, the initial user request was: `"
 
@@ -152,17 +158,6 @@ func shouldAutoCompactMessages(purpose plugin.ChatTransformPurpose, msgs []messa
 	}
 }
 
-func (a *sessionAgent) microCompactSessionMessages(_ context.Context, _ string, _ Model, _ plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
-	// Only apply the builtin transform (strip reasoning/binary from older
-	// turns). The plugin call was removed because micro_compact purpose
-	// does not trigger Morph API compression — it only does
-	// frozen-message replacement which will happen again in the
-	// subsequent buildChatRequestState call with purpose "request".
-	// Eliminating it avoids a full JSON serialization round-trip per
-	// session restore.
-	return builtinMicroCompactMessages(msgs), nil
-}
-
 func (a *sessionAgent) collapseSessionMessages(_ context.Context, _ string, _ Model, _ plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
 	// Plugin call removed — collapse purpose does not trigger Morph API
 	// compression and has no builtin post-processing. The plugin will
@@ -198,7 +193,7 @@ func (a *sessionAgent) autoCompactSessionMessages(ctx context.Context, sessionID
 	if err != nil {
 		return nil, err
 	}
-	return builtinAutoCompactMessages(result), nil
+	return result, nil
 }
 
 func (a *sessionAgent) postCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
@@ -604,13 +599,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// older messages, preventing the stdin/stdout JSON payload from
 		// exceeding plugin buffer limits on session restore.
 		msgs = builtinPruneToolResults(msgs)
-		microCompacted, compactErr := a.microCompactSessionMessages(ctx, call.SessionID, largeModel, providerCtx, msgs)
-		if compactErr != nil {
-			return nil, compactErr
-		}
-		if len(microCompacted) > 0 {
-			msgs = microCompacted
-		}
 		collapsed, collapseErr := a.collapseSessionMessages(ctx, call.SessionID, largeModel, providerCtx, msgs)
 		if collapseErr != nil {
 			return nil, collapseErr
@@ -619,7 +607,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			msgs = collapsed
 		}
 	}
-	slog.Debug("[PERF] sessionAgent: micro compact done", "duration", time.Since(start), "session_id", call.SessionID)
+	slog.Debug("[PERF] sessionAgent: restored session context", "duration", time.Since(start), "session_id", call.SessionID)
 
 	preflightState, err := a.buildChatRequestState(ctx, chatRequestStateInput{
 		SessionID:      call.SessionID,
@@ -780,6 +768,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 
 		initialMessages := requestState.History
+		if isAnthropicStyleProtocolProvider(largeModel) {
+			var sanitized bool
+			var sanitizedCount int
+			initialMessages, sanitized, sanitizedCount = sanitizeAnthropicToolCallIDsInMessages(initialMessages)
+			if sanitized {
+				slog.Warn("Sanitized Anthropic-compatible tool call IDs before initial provider request",
+					"session_id", call.SessionID,
+					"model", largeModel.ModelCfg.Model,
+					"provider", largeModel.ModelCfg.Provider,
+					"sanitized_count", sanitizedCount,
+				)
+			}
+		}
 		if stripRedactedThinking {
 			initialMessages, _ = stripRedactedThinkingParts(initialMessages)
 		}
@@ -903,7 +904,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// Prune old tool results before sending to plugins in each step.
 				// Only attempt the expensive fantasy↔internal conversion when the
 				// message count suggests pruning might be worthwhile.
-				if len(prepared.Messages) > builtinPruneRecentTurns*3 {
+				if len(prepared.Messages) > builtinPruneRecentUserTurns*3 {
 					internalForPrune := message.FromFantasyMessages(prepared.Messages)
 					pruned := builtinPruneToolResults(internalForPrune)
 					// builtinPruneToolResults returns the same slice pointer when
@@ -1082,6 +1083,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if requestState.PromptPrefix != "" {
 					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(requestState.PromptPrefix)}, prepared.Messages...)
 				}
+				if isAnthropicStyleProtocolProvider(largeModel) {
+					var sanitized bool
+					var sanitizedCount int
+					prepared.Messages, sanitized, sanitizedCount = sanitizeAnthropicToolCallIDsInMessages(prepared.Messages)
+					if sanitized {
+						slog.Warn("Sanitized Anthropic-compatible tool call IDs before provider request",
+							"session_id", call.SessionID,
+							"model", largeModel.ModelCfg.Model,
+							"provider", largeModel.ModelCfg.Provider,
+							"sanitized_count", sanitizedCount,
+						)
+					}
+				}
 
 				var assistantMsg message.Message
 				assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
@@ -1128,6 +1142,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					prepared.Tools,
 					requestState.SystemPrompt,
 					"",
+				)
+				slog.Debug("Prepared provider prompt usage estimate",
+					"session_id", call.SessionID,
+					"model", largeModel.ModelCfg.Model,
+					"provider", largeModel.ModelCfg.Provider,
+					"estimated_prompt_tokens", estimatedPromptTokens,
+					"prepared_messages", len(prepared.Messages),
+					"prepared_tools", len(prepared.Tools),
+					"has_current_user_message", hasCurrentUserMessage,
+					"prompt_for_estimate_chars", len([]rune(promptForEstimate)),
+					"attachments_for_estimate", len(attachmentsForEstimate),
 				)
 				if estimatedPromptTokens > 0 {
 					currentAssistant.SetUsage(message.Usage{InputTokens: estimatedPromptTokens})
@@ -1177,6 +1202,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				return a.messages.Update(genCtx, *currentAssistant)
 			},
 			OnToolInputStart: func(id string, toolName string) error {
+				currentAssistant.FinishThinking()
 				toolCall := message.ToolCall{
 					ID:               id,
 					Name:             toolName,
@@ -1184,6 +1210,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					Finished:         false,
 				}
 				currentAssistant.AddToolCall(toolCall)
+				if stripTextualToolCallProtocolFromAssistant(currentAssistant) {
+					slog.Warn("Removed textual tool-call protocol from assistant content after tool input started",
+						"session_id", currentAssistant.SessionID,
+						"message_id", currentAssistant.ID,
+						"model", currentAssistant.Model,
+						"provider", currentAssistant.Provider,
+						"tool_call_id", id,
+						"tool_name", toolName,
+					)
+				}
 				return a.messages.Update(ctx, *currentAssistant)
 			},
 			OnRetry: func(providerErr *fantasy.ProviderError, delay time.Duration) {
@@ -1199,6 +1235,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				currentStepToolResultChars = 0
 			},
 			OnToolCall: func(tc fantasy.ToolCallContent) error {
+				currentAssistant.FinishThinking()
 				toolCall := message.ToolCall{
 					ID:               tc.ToolCallID,
 					Name:             tc.ToolName,
@@ -1207,6 +1244,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					Finished:         true,
 				}
 				currentAssistant.AddToolCall(toolCall)
+				if stripTextualToolCallProtocolFromAssistant(currentAssistant) {
+					slog.Warn("Removed textual tool-call protocol from assistant content after structured tool call",
+						"session_id", currentAssistant.SessionID,
+						"message_id", currentAssistant.ID,
+						"model", currentAssistant.Model,
+						"provider", currentAssistant.Provider,
+						"tool_call_id", tc.ToolCallID,
+						"tool_name", tc.ToolName,
+					)
+				}
 				runToolUses++
 				runLastTool = tc.ToolName
 				return a.messages.Update(ctx, *currentAssistant)
@@ -1257,6 +1304,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				return nil
 			},
 			OnStepFinish: func(stepResult fantasy.StepResult) error {
+				if len(currentAssistant.ToolCalls()) > 0 && stripTextualToolCallProtocolFromAssistant(currentAssistant) {
+					slog.Warn("Removed textual tool-call protocol from assistant content at step finish",
+						"session_id", currentAssistant.SessionID,
+						"message_id", currentAssistant.ID,
+						"model", currentAssistant.Model,
+						"provider", currentAssistant.Provider,
+						"tool_calls_count", len(currentAssistant.ToolCalls()),
+						"finish_reason", stepResult.FinishReason,
+					)
+				}
 				finishReason := message.FinishReasonUnknown
 				switch stepResult.FinishReason {
 				case fantasy.FinishReasonLength:
@@ -1281,7 +1338,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				completedStepsThisRun++
 				currentSession = updatedSession
-				currentAssistant.SetUsage(normalizedMessageUsage(stepResult.Usage, usageProvider(largeModel), estimatedPromptTokens))
+				normalizedUsage := normalizedMessageUsage(stepResult.Usage, usageProvider(largeModel), estimatedPromptTokens)
+				slog.Debug("Updated assistant usage from provider response",
+					"session_id", call.SessionID,
+					"message_id", currentAssistant.ID,
+					"model", largeModel.ModelCfg.Model,
+					"provider", largeModel.ModelCfg.Provider,
+					"provider_usage_provider", usageProvider(largeModel),
+					"provider_input_tokens", stepResult.Usage.InputTokens,
+					"provider_output_tokens", stepResult.Usage.OutputTokens,
+					"provider_reasoning_tokens", stepResult.Usage.ReasoningTokens,
+					"provider_cache_read_tokens", stepResult.Usage.CacheReadTokens,
+					"provider_cache_creation_tokens", stepResult.Usage.CacheCreationTokens,
+					"estimated_prompt_tokens", estimatedPromptTokens,
+					"normalized_prompt_tokens", normalizedUsage.PromptTokens(),
+					"normalized_output_tokens", normalizedUsage.OutputTokens,
+					"normalized_reasoning_tokens", normalizedUsage.ReasoningTokens,
+					"normalized_total_tokens", normalizedUsage.PromptTokens()+normalizedUsage.OutputTokens,
+				)
+				currentAssistant.SetUsage(normalizedUsage)
 				updateErr := a.messages.Update(genCtx, *currentAssistant)
 				if call.OnProgress != nil {
 					call.OnProgress(runToolUses, runLastTool)
@@ -1351,8 +1426,88 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	var result *fantasy.AgentResult
 	var retryAttempt int
 	var textualToolProtocolRetryAttempt int
+	var textualToolProtocolRecoveries int
+	textualToolProtocolRecoveryCounts := make(map[string]int)
 	for {
 		result, err = runStream(providerOptions, retryAttempt == 0)
+
+		if err == nil {
+			textualToolCalls := parseTextualToolCallsFromAssistant(currentAssistant)
+			if len(textualToolCalls) > 0 && textualToolProtocolRecoveries >= maxTextualToolProtocolRecoveries {
+				if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
+					return nil, cleanupErr
+				}
+				err = fmt.Errorf("model emitted textual tool-call protocol instead of structured tool calls after repeated recovery")
+				break
+			}
+			if repeatedKey, repeatedCount, repeated := recordTextualToolCallRecoveries(textualToolCalls, textualToolProtocolRecoveryCounts); repeated {
+				if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
+					return nil, cleanupErr
+				}
+				err = fmt.Errorf("model repeatedly emitted the same textual tool-call protocol instead of structured tool calls")
+				slog.Warn("Stopping repeated textual tool-call recovery",
+					"session_id", call.SessionID,
+					"model", largeModel.ModelCfg.Model,
+					"provider", largeModel.ModelCfg.Provider,
+					"repeated_key", repeatedKey,
+					"repeated_count", repeatedCount,
+				)
+				break
+			}
+			recoveredToolMessageIDs, recoveredToolUses, recoveredLastTool, recovered, recoverErr := a.recoverTextualToolCallProtocol(
+				ctx,
+				genCtx,
+				currentAssistant,
+				textualToolCalls,
+				agentTools,
+				runtimeConfig,
+				largeModel,
+				&currentStepToolResultChars,
+			)
+			if recoverErr != nil {
+				err = recoverErr
+				break
+			}
+			if recovered {
+				textualToolProtocolRecoveries++
+				currentStepToolMessageIDs = append(currentStepToolMessageIDs, recoveredToolMessageIDs...)
+				runToolUses += recoveredToolUses
+				if recoveredLastTool != "" {
+					runLastTool = recoveredLastTool
+				}
+				currentSession, err = a.sessions.Get(ctx, call.SessionID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to reload session after textual tool-call recovery: %w", err)
+				}
+				retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+				if getMsgsErr != nil {
+					return nil, getMsgsErr
+				}
+				retryMsgs = excludeCurrentUserMessage(retryMsgs, call.UserMessage)
+				retryState, buildErr := a.buildChatRequestState(genCtx, chatRequestStateInput{
+					SessionID:      call.SessionID,
+					Agent:          "session",
+					Model:          largeModel,
+					Provider:       providerCtx,
+					Purpose:        requestPurpose,
+					RequestPurpose: requestPurpose,
+					Messages:       retryMsgs,
+					Message:        userMessage,
+					Attachments:    call.Attachments,
+					SystemPrompt:   systemPrompt,
+					PromptPrefix:   promptPrefix,
+					PermissionMode: currentSession.PermissionMode,
+				})
+				if buildErr != nil {
+					return nil, buildErr
+				}
+				requestState = retryState
+				currentAssistant = nil
+				currentStepToolMessageIDs = nil
+				currentStepToolResultChars = 0
+				continue
+			}
+		}
 
 		if err == nil && shouldRetryForTextualToolCallProtocol(currentAssistant) {
 			if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
@@ -2083,9 +2238,17 @@ func isContextLengthError(err error) bool {
 		"context_too_long",
 		"context window exceeded",
 		"input length exceeds",
+		"input token count",
 		"prompt is too long",
+		"prompt too long",
 		"token limit exceeded",
+		"exceeded model token limit",
+		"reduce the length of the messages",
+		"exceeds the available context size",
+		"greater than the context length",
+		"too large for model",
 		"request body too large",
+		"request entity too large",
 	}
 	lowerErr := strings.ToLower(errStr)
 	for _, indicator := range contextLengthIndicators {
@@ -2161,6 +2324,17 @@ func truncateMessagesToFit(msgs []fantasy.Message, maxTokens int64) []fantasy.Me
 	return msgs[startIdx:]
 }
 
+func summaryHistoryTokenBudget(model Model, maxOutputTokens int64, prompt string, systemPrompt string, systemPromptPrefix string) int64 {
+	budget := promptTokenBudgetForModel(model, maxOutputTokens)
+	if budget.UsableInputTokens <= 0 {
+		return 0
+	}
+	overheadTokens := estimateStringTokens(prompt) +
+		estimateStringTokens(systemPrompt) +
+		estimateStringTokens(systemPromptPrefix)
+	return max(0, budget.UsableInputTokens-overheadTokens)
+}
+
 func (a *sessionAgent) applyToolResultReview(ctx context.Context, sessionID string, toolResult message.ToolResult, permissionMode session.PermissionMode) message.ToolResult {
 	if a.reviewToolResult == nil {
 		return toolResult
@@ -2220,17 +2394,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	// Prune old tool results before sending to plugins during
 	// summarization. Without this, the full unpruned payload sent
-	// to microCompact/collapse (which call plugins) can exceed
-	// plugin buffer limits on large sessions.
+	// to transforms can exceed plugin buffer limits on large sessions.
 	msgs = builtinPruneToolResults(msgs)
 
-	microCompacted, err := a.microCompactSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
-	if err != nil {
-		return err
-	}
-	if len(microCompacted) > 0 {
-		msgs = microCompacted
-	}
 	if shouldCollapseMessages(compactingPurpose) {
 		collapsed, collapseErr := a.collapseSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
 		if collapseErr != nil {
@@ -2326,16 +2492,19 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	summaryPromptText := buildSessionCompactingPrompt(currentSession.Todos, compacting.Context, compacting.Prompt)
 
-	// Check if aiMsgs exceeds context window limit and truncate if necessary.
-	// This prevents 400 Bad Request when the context is too large for the model.
-	contextWindow := int64(largeModel.CatwalkCfg.ContextWindow)
-	if contextWindow > 0 {
+	// Check whether history alone would leave enough room for the summary
+	// prompt, system prompt, and output reserve. This uses the same effective
+	// prompt budget as normal auto-summarization, including max_prompt_tokens.
+	contextWindow := EffectiveContextWindow(largeModel.CatwalkCfg)
+	maxAllowedTokens := summaryHistoryTokenBudget(
+		largeModel,
+		0,
+		summaryPromptText,
+		string(summaryPrompt),
+		systemPromptPrefix,
+	)
+	if maxAllowedTokens > 0 {
 		estimatedTokens := estimatePromptTokens(aiMsgs, nil)
-		// Leave room for system prompt, summary prompt, and output tokens.
-		maxAllowedTokens := contextWindow - 4000 // Reserve 4k for safety.
-		if maxAllowedTokens < 0 {
-			maxAllowedTokens = contextWindow * 3 / 4 // Fallback: use 75% of context window.
-		}
 		if estimatedTokens > maxAllowedTokens {
 			slog.Warn("Messages exceed context window, truncating before summarization",
 				"estimated_tokens", estimatedTokens,
@@ -2888,6 +3057,110 @@ func disableAnthropicThinking(opts fantasy.ProviderOptions) (fantasy.ProviderOpt
 	return cloned, true
 }
 
+func isAnthropicStyleProtocolProvider(model Model) bool {
+	return isAnthropicStyleUsageProvider(model.ModelCfg.Provider) || isAnthropicStyleUsageProvider(usageProvider(model))
+}
+
+func sanitizeAnthropicToolCallID(id string) string {
+	if id == "" {
+		return id
+	}
+	var sb strings.Builder
+	sb.Grow(len(id))
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' ||
+			r == '-' {
+			sb.WriteRune(r)
+			continue
+		}
+		sb.WriteByte('_')
+	}
+	return sb.String()
+}
+
+func sanitizeAnthropicToolCallIDsInMessages(messages []fantasy.Message) ([]fantasy.Message, bool, int) {
+	var changed bool
+	var count int
+	result := make([]fantasy.Message, len(messages))
+	copy(result, messages)
+	for i := range result {
+		if len(result[i].Content) == 0 {
+			continue
+		}
+		var clonedParts []fantasy.MessagePart
+		for j, part := range result[i].Content {
+			switch p := part.(type) {
+			case fantasy.ToolCallPart:
+				sanitized := sanitizeAnthropicToolCallID(p.ToolCallID)
+				if sanitized == p.ToolCallID {
+					continue
+				}
+				if clonedParts == nil {
+					clonedParts = append([]fantasy.MessagePart(nil), result[i].Content...)
+				}
+				p.ToolCallID = sanitized
+				clonedParts[j] = p
+				changed = true
+				count++
+			case *fantasy.ToolCallPart:
+				if p == nil {
+					continue
+				}
+				sanitized := sanitizeAnthropicToolCallID(p.ToolCallID)
+				if sanitized == p.ToolCallID {
+					continue
+				}
+				if clonedParts == nil {
+					clonedParts = append([]fantasy.MessagePart(nil), result[i].Content...)
+				}
+				cloned := *p
+				cloned.ToolCallID = sanitized
+				clonedParts[j] = &cloned
+				changed = true
+				count++
+			case fantasy.ToolResultPart:
+				sanitized := sanitizeAnthropicToolCallID(p.ToolCallID)
+				if sanitized == p.ToolCallID {
+					continue
+				}
+				if clonedParts == nil {
+					clonedParts = append([]fantasy.MessagePart(nil), result[i].Content...)
+				}
+				p.ToolCallID = sanitized
+				clonedParts[j] = p
+				changed = true
+				count++
+			case *fantasy.ToolResultPart:
+				if p == nil {
+					continue
+				}
+				sanitized := sanitizeAnthropicToolCallID(p.ToolCallID)
+				if sanitized == p.ToolCallID {
+					continue
+				}
+				if clonedParts == nil {
+					clonedParts = append([]fantasy.MessagePart(nil), result[i].Content...)
+				}
+				cloned := *p
+				cloned.ToolCallID = sanitized
+				clonedParts[j] = &cloned
+				changed = true
+				count++
+			}
+		}
+		if clonedParts != nil {
+			result[i].Content = clonedParts
+		}
+	}
+	if !changed {
+		return messages, false, 0
+	}
+	return result, true, count
+}
+
 // stripRedactedThinkingParts removes Anthropic redacted_thinking reasoning
 // blocks from assistant messages. Some Anthropic-compatible proxies (e.g.
 // third-party OpenAI/Claude bridges) do not implement the
@@ -3013,31 +3286,353 @@ func shouldRetryWithoutAnthropicThinking(err error, opts fantasy.ProviderOptions
 	return hasThinking && hasReasoning && hasMissing && isToolContext
 }
 
+func previewText(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
+	}
+	return text[:maxLen] + "..."
+}
+
+func textualToolCallSource(assistant *message.Message) string {
+	if assistant == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		assistant.Content().Text,
+		assistant.ReasoningContent().Thinking,
+	}, "\n")
+}
+
+func parseTextualToolCallsFromAssistant(assistant *message.Message) []message.ToolCall {
+	source := textualToolCallSource(assistant)
+	if !hasTextualToolCallProtocol(source) {
+		return nil
+	}
+	matches := textualToolCallProtocolCallRegex.FindAllStringSubmatch(source, -1)
+	if len(matches) == 0 {
+		slog.Warn("Textual tool-call protocol was detected but no complete tool call blocks could be parsed",
+			"message_id", assistant.ID,
+			"model", assistant.Model,
+			"provider", assistant.Provider,
+			"text_preview", previewText(assistant.Content().Text, 500),
+			"reasoning_preview", previewText(assistant.ReasoningContent().Thinking, 500),
+		)
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(matches))
+	toolCalls := make([]message.ToolCall, 0, len(matches))
+	for _, match := range matches {
+		name := strings.TrimSpace(match[1])
+		index := strings.TrimSpace(match[2])
+		input := strings.TrimSpace(match[3])
+		if name == "" || input == "" || !json.Valid([]byte(input)) {
+			slog.Warn("Skipping malformed textual tool-call block",
+				"message_id", assistant.ID,
+				"model", assistant.Model,
+				"provider", assistant.Provider,
+				"tool_name", name,
+				"has_input", input != "",
+				"input_preview", previewText(input, 500),
+			)
+			continue
+		}
+		id := "functions." + name
+		if index != "" {
+			id += ":" + index
+		}
+		id = sanitizeAnthropicToolCallID(id)
+		key := id + "\x00" + name + "\x00" + input
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		toolCalls = append(toolCalls, message.ToolCall{
+			ID:               id,
+			Name:             name,
+			Input:            input,
+			ProviderExecuted: false,
+			Finished:         true,
+		})
+	}
+	return toolCalls
+}
+
+func textualToolCallRecoveryKey(toolCall message.ToolCall) string {
+	var normalizedInput any
+	input := strings.TrimSpace(toolCall.Input)
+	if err := json.Unmarshal([]byte(input), &normalizedInput); err == nil {
+		if encoded, marshalErr := json.Marshal(normalizedInput); marshalErr == nil {
+			input = string(encoded)
+		}
+	}
+	return toolCall.Name + "\x00" + input
+}
+
+func recordTextualToolCallRecoveries(toolCalls []message.ToolCall, counts map[string]int) (string, int, bool) {
+	for _, toolCall := range toolCalls {
+		key := textualToolCallRecoveryKey(toolCall)
+		counts[key]++
+		if counts[key] > maxRepeatedTextualToolProtocolRecoveries {
+			return key, counts[key], true
+		}
+	}
+	return "", 0, false
+}
+
+func toolResponseToToolResultContent(toolCall message.ToolCall, response fantasy.ToolResponse, runErr error) fantasy.ToolResultContent {
+	result := fantasy.ToolResultContent{
+		ToolCallID:       toolCall.ID,
+		ToolName:         toolCall.Name,
+		ClientMetadata:   response.Metadata,
+		ProviderExecuted: false,
+	}
+	if runErr != nil {
+		result.Result = fantasy.ToolResultOutputContentError{Error: runErr}
+		return result
+	}
+	if response.IsError {
+		result.Result = fantasy.ToolResultOutputContentError{Error: errors.New(response.Content)}
+		return result
+	}
+	if response.Type == "image" || response.Type == "media" {
+		result.Result = fantasy.ToolResultOutputContentMedia{
+			Data:      base64.StdEncoding.EncodeToString(response.Data),
+			MediaType: response.MediaType,
+			Text:      response.Content,
+		}
+		return result
+	}
+	result.Result = fantasy.ToolResultOutputContentText{Text: response.Content}
+	return result
+}
+
+func (a *sessionAgent) persistRecoveredToolResult(ctx context.Context, genCtx context.Context, assistant *message.Message, result fantasy.ToolResultContent, runtimeConfig *sessionAgentRuntimeConfig, currentStepToolResultChars *int) (string, error) {
+	toolResult := a.convertToToolResult(result)
+	if toolResult.Name == tools.ToolSearchToolName {
+		if state, ok := deferredToolStateFromToolSearchResult(toolResult.Content); ok {
+			toolResult = toolResult.WithDeferredToolState(state)
+		}
+	}
+	toolResult, additionalMedia := a.extractAdditionalMCPMedia(toolResult)
+	if runtimeConfig != nil {
+		toolResult = a.applyToolResultReview(genCtx, assistant.SessionID, toolResult, runtimeConfig.PermissionMode)
+	}
+	if currentStepToolResultChars != nil {
+		toolResult = a.enforceStepToolResultBudget(assistant.SessionID, toolResult, currentStepToolResultChars)
+	}
+	if truncatedResult, truncated := a.truncateToolResult(assistant.SessionID, toolResult); truncated {
+		toolResult = truncatedResult
+	}
+	toolMsg, createMsgErr := a.messages.Create(ctx, assistant.SessionID, message.CreateMessageParams{
+		Role:                   message.Tool,
+		Parts:                  []message.ContentPart{toolResult},
+		ActivatedDeferredTools: a.currentActivatedDeferredTools(assistant.SessionID),
+	})
+	if createMsgErr != nil {
+		return "", createMsgErr
+	}
+
+	if len(additionalMedia) > 0 {
+		parts := make([]message.ContentPart, 0, len(additionalMedia)+1)
+		parts = append(parts, message.TextContent{Text: "Additional media content from the tool result:"})
+		for _, mediaPart := range additionalMedia {
+			parts = append(parts, mediaPart)
+		}
+		if _, additionalErr := a.messages.Create(ctx, assistant.SessionID, message.CreateMessageParams{
+			Role:                   message.User,
+			Parts:                  parts,
+			ActivatedDeferredTools: a.currentActivatedDeferredTools(assistant.SessionID),
+		}); additionalErr != nil {
+			return "", additionalErr
+		}
+	}
+	return toolMsg.ID, nil
+}
+
+func (a *sessionAgent) recoverTextualToolCallProtocol(ctx context.Context, genCtx context.Context, assistant *message.Message, toolCalls []message.ToolCall, agentTools []fantasy.AgentTool, runtimeConfig *sessionAgentRuntimeConfig, model Model, currentStepToolResultChars *int) ([]string, int, string, bool, error) {
+	if assistant == nil || len(assistant.ToolCalls()) > 0 {
+		return nil, 0, "", false, nil
+	}
+	if len(toolCalls) == 0 {
+		return nil, 0, "", false, nil
+	}
+
+	toolMap := make(map[string]fantasy.AgentTool, len(agentTools))
+	for _, tool := range agentTools {
+		toolMap[tool.Info().Name] = tool
+	}
+
+	assistant.FinishThinking()
+	for _, toolCall := range toolCalls {
+		assistant.AddToolCall(toolCall)
+	}
+	if stripTextualToolCallProtocolFromAssistant(assistant) {
+		slog.Warn("Recovered structured tool calls from textual tool-call protocol",
+			"session_id", assistant.SessionID,
+			"message_id", assistant.ID,
+			"model", assistant.Model,
+			"provider", assistant.Provider,
+			"tool_calls_count", len(toolCalls),
+		)
+	}
+	assistant.AddFinish(message.FinishReasonToolUse, "", "")
+	if err := a.messages.Update(ctx, *assistant); err != nil {
+		return nil, 0, "", false, err
+	}
+
+	toolCtx := context.WithValue(genCtx, tools.MessageIDContextKey, assistant.ID)
+	toolCtx = context.WithValue(toolCtx, tools.SupportsImagesContextKey, model.CatwalkCfg.SupportsImages)
+	toolCtx = context.WithValue(toolCtx, tools.ModelNameContextKey, model.CatwalkCfg.Name)
+	toolCtx = context.WithValue(toolCtx, tools.SessionServiceContextKey, a.sessions)
+
+	var toolMessageIDs []string
+	var lastTool string
+	for _, toolCall := range toolCalls {
+		tool := toolMap[toolCall.Name]
+		var response fantasy.ToolResponse
+		var runErr error
+		if tool == nil {
+			runErr = fmt.Errorf("tool not found: %s", toolCall.Name)
+		} else {
+			response, runErr = tool.Run(toolCtx, fantasy.ToolCall{
+				ID:    toolCall.ID,
+				Name:  toolCall.Name,
+				Input: toolCall.Input,
+			})
+		}
+		result := toolResponseToToolResultContent(toolCall, response, runErr)
+		toolMessageID, persistErr := a.persistRecoveredToolResult(ctx, genCtx, assistant, result, runtimeConfig, currentStepToolResultChars)
+		if persistErr != nil {
+			return nil, 0, "", false, persistErr
+		}
+		toolMessageIDs = append(toolMessageIDs, toolMessageID)
+		lastTool = toolCall.Name
+	}
+	return toolMessageIDs, len(toolCalls), lastTool, true, nil
+}
+
 func hasTextualToolCallProtocol(text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return false
 	}
-	if !strings.Contains(text, "<|tool_calls_section_begin|>") || !strings.Contains(text, "<|tool_call_begin|>") {
+	hasSectionBegin := strings.Contains(text, "tool_calls_section_begin")
+	hasCallBegin := strings.Contains(text, "tool_call_begin")
+	if !hasSectionBegin || !hasCallBegin {
+		slog.Debug("Textual tool-call protocol detection failed: missing required tags",
+			"has_section_begin", hasSectionBegin,
+			"has_call_begin", hasCallBegin,
+			"text_preview", previewText(text, 200),
+		)
 		return false
 	}
 	if !strings.Contains(text, "functions.") {
+		slog.Debug("Textual tool-call protocol detection failed: missing functions. prefix",
+			"text_preview", previewText(text, 200),
+		)
 		return false
 	}
-	return textualToolCallProtocolRegex.MatchString(text)
+	matched := textualToolCallProtocolRegex.MatchString(text)
+	if !matched {
+		slog.Warn("Textual tool-call protocol detected by substring but regex did not match; possible format mismatch",
+			"text_preview", previewText(text, 500),
+		)
+	}
+	return matched
+}
+
+func stripTextualToolCallProtocol(text string) (string, bool) {
+	if !hasTextualToolCallProtocol(text) {
+		return text, false
+	}
+	cleaned := textualToolCallProtocolBlockRegex.ReplaceAllString(text, "")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned, cleaned != text
+}
+
+func stripTextualToolCallProtocolFromAssistant(assistant *message.Message) bool {
+	if assistant == nil {
+		return false
+	}
+	var changed bool
+	if cleaned, textChanged := stripTextualToolCallProtocol(assistant.Content().Text); textChanged {
+		assistant.SetContent(cleaned)
+		changed = true
+	}
+	if cleaned, reasoningChanged := stripTextualToolCallProtocol(assistant.ReasoningContent().Thinking); reasoningChanged {
+		assistant.SetReasoningThinking(cleaned)
+		changed = true
+	}
+	return changed
 }
 
 func shouldRetryForTextualToolCallProtocol(assistant *message.Message) bool {
 	if assistant == nil {
+		slog.Debug("Should not retry for textual tool-call protocol: assistant message is nil")
 		return false
 	}
 	if len(assistant.ToolCalls()) != 0 {
+		text := assistant.Content().Text
+		reasoning := assistant.ReasoningContent().Thinking
+		textHasProtocol := hasTextualToolCallProtocol(text)
+		reasoningHasProtocol := hasTextualToolCallProtocol(reasoning)
+		if textHasProtocol || reasoningHasProtocol {
+			slog.Warn("Assistant contains textual tool-call protocol but already has structured tool calls; will strip text instead of retrying",
+				"tool_calls_count", len(assistant.ToolCalls()),
+				"message_id", assistant.ID,
+				"model", assistant.Model,
+				"provider", assistant.Provider,
+				"finish_reason", assistant.FinishReason(),
+				"text_has_protocol", textHasProtocol,
+				"reasoning_has_protocol", reasoningHasProtocol,
+				"text_preview", previewText(text, 500),
+				"reasoning_preview", previewText(reasoning, 500),
+			)
+		} else {
+			slog.Debug("Should not retry for textual tool-call protocol: assistant already has structured tool calls",
+				"tool_calls_count", len(assistant.ToolCalls()),
+				"message_id", assistant.ID,
+			)
+		}
 		return false
 	}
-	if reason := assistant.FinishReason(); reason != message.FinishReasonEndTurn && reason != message.FinishReasonUnknown {
+	reason := assistant.FinishReason()
+	if reason != message.FinishReasonEndTurn &&
+		reason != message.FinishReasonUnknown &&
+		reason != message.FinishReasonToolUse {
+		slog.Debug("Should not retry for textual tool-call protocol: finish reason indicates non-tool state",
+			"finish_reason", reason,
+			"message_id", assistant.ID,
+		)
 		return false
 	}
-	return hasTextualToolCallProtocol(assistant.Content().Text)
+	text := assistant.Content().Text
+	reasoning := assistant.ReasoningContent().Thinking
+	textNeedsRetry := hasTextualToolCallProtocol(text)
+	reasoningNeedsRetry := hasTextualToolCallProtocol(reasoning)
+	needsRetry := textNeedsRetry || reasoningNeedsRetry
+	if needsRetry {
+		slog.Warn("Assistant emitted textual tool-call protocol without structured tool calls; will retry request",
+			"message_id", assistant.ID,
+			"model", assistant.Model,
+			"provider", assistant.Provider,
+			"finish_reason", reason,
+			"text_has_protocol", textNeedsRetry,
+			"reasoning_has_protocol", reasoningNeedsRetry,
+			"text_preview", previewText(text, 500),
+			"reasoning_preview", previewText(reasoning, 500),
+		)
+	} else {
+		slog.Debug("Checked textual tool-call protocol for retry",
+			"needs_retry", needsRetry,
+			"message_id", assistant.ID,
+			"finish_reason", reason,
+			"text_preview", previewText(text, 200),
+			"reasoning_preview", previewText(reasoning, 200),
+		)
+	}
+	return needsRetry
 }
 
 func (a *sessionAgent) cleanupFailedAttempt(ctx context.Context, assistant *message.Message, toolMessageIDs []string) error {

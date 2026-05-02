@@ -60,3 +60,35 @@ func TestEffectiveContextWindowWrapper(t *testing.T) {
 		},
 	}))
 }
+
+func TestSummaryHistoryTokenBudgetUsesMaxPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	model := Model{
+		CatwalkCfg: catwalk.Model{
+			ContextWindow:    400_000,
+			DefaultMaxTokens: 32_000,
+			Options: catwalk.ModelOptions{
+				ProviderOptions: map[string]any{"max_prompt_tokens": 100_000},
+			},
+		},
+	}
+
+	overhead := estimateStringTokens("summary prompt") +
+		estimateStringTokens("summary system") +
+		estimateStringTokens("prefix")
+	require.Equal(t, int64(80_000)-overhead, summaryHistoryTokenBudget(model, 0, "summary prompt", "summary system", "prefix"))
+}
+
+func TestSummaryHistoryTokenBudgetSubtractsExplicitOutputReserve(t *testing.T) {
+	t.Parallel()
+
+	model := Model{
+		CatwalkCfg: catwalk.Model{
+			ContextWindow:    100_000,
+			DefaultMaxTokens: 50_000,
+		},
+	}
+
+	require.Equal(t, int64(95_000), summaryHistoryTokenBudget(model, 5_000, "", "", ""))
+}

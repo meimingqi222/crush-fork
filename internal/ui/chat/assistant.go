@@ -143,11 +143,13 @@ func (a *AssistantMessageItem) SetLoadingStateVisible(visible bool) {
 // renderMessageContent renders the message content including thinking, main content, and finish reason.
 func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	var messageParts []string
-	thinking := strings.TrimSpace(a.message.ReasoningContent().Thinking)
-	content := strings.TrimSpace(a.message.Content().Text)
+	thinking, _ := message.StripTextualToolCallProtocol(a.message.ReasoningContent().Thinking)
+	thinking = strings.TrimSpace(thinking)
+	content, _ := message.StripTextualToolCallProtocol(a.message.Content().Text)
+	content = strings.TrimSpace(content)
 	// if the massage has reasoning content add that first
 	if thinking != "" {
-		messageParts = append(messageParts, a.renderThinking(a.message.ReasoningContent().Thinking, width))
+		messageParts = append(messageParts, a.renderThinking(thinking, width))
 	}
 
 	// then add the main content

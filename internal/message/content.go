@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -40,6 +41,14 @@ const (
 
 type ContentPart interface {
 	isPart()
+}
+
+var textualToolCallProtocolBlockRegex = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?(?:<\|tool_calls_section_end\|>|$)`)
+
+func StripTextualToolCallProtocol(text string) (string, bool) {
+	cleaned := textualToolCallProtocolBlockRegex.ReplaceAllString(text, "")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned, cleaned != text
 }
 
 type ReasoningContent struct {
@@ -263,7 +272,10 @@ func (m *Message) FinishReason() FinishReason {
 }
 
 func (m *Message) IsThinking() bool {
-	if m.ReasoningContent().Thinking != "" && m.Content().Text == "" && !m.IsFinished() {
+	if m.ReasoningContent().Thinking != "" &&
+		m.Content().Text == "" &&
+		len(m.ToolCalls()) == 0 &&
+		!m.IsFinished() {
 		return true
 	}
 	return false
@@ -282,15 +294,34 @@ func (m *Message) AppendContent(delta string) {
 	}
 }
 
+func (m *Message) SetContent(text string) {
+	for i, part := range m.Parts {
+		if _, ok := part.(TextContent); ok {
+			if text == "" {
+				m.Parts = slices.Delete(m.Parts, i, i+1)
+			} else {
+				m.Parts[i] = TextContent{Text: text}
+			}
+			return
+		}
+	}
+	if text != "" {
+		m.Parts = append(m.Parts, TextContent{Text: text})
+	}
+}
+
 func (m *Message) AppendReasoningContent(delta string) {
 	found := false
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
 			m.Parts[i] = ReasoningContent{
-				Thinking:   c.Thinking + delta,
-				Signature:  c.Signature,
-				StartedAt:  c.StartedAt,
-				FinishedAt: c.FinishedAt,
+				Thinking:         c.Thinking + delta,
+				Signature:        c.Signature,
+				ThoughtSignature: c.ThoughtSignature,
+				ToolID:           c.ToolID,
+				ResponsesData:    c.ResponsesData,
+				StartedAt:        c.StartedAt,
+				FinishedAt:       c.FinishedAt,
 			}
 			found = true
 		}
@@ -298,6 +329,29 @@ func (m *Message) AppendReasoningContent(delta string) {
 	if !found {
 		m.Parts = append(m.Parts, ReasoningContent{
 			Thinking:  delta,
+			StartedAt: time.Now().Unix(),
+		})
+	}
+}
+
+func (m *Message) SetReasoningThinking(thinking string) {
+	for i, part := range m.Parts {
+		if c, ok := part.(ReasoningContent); ok {
+			m.Parts[i] = ReasoningContent{
+				Thinking:         thinking,
+				Signature:        c.Signature,
+				ThoughtSignature: c.ThoughtSignature,
+				ToolID:           c.ToolID,
+				ResponsesData:    c.ResponsesData,
+				StartedAt:        c.StartedAt,
+				FinishedAt:       c.FinishedAt,
+			}
+			return
+		}
+	}
+	if thinking != "" {
+		m.Parts = append(m.Parts, ReasoningContent{
+			Thinking:  thinking,
 			StartedAt: time.Now().Unix(),
 		})
 	}
@@ -324,10 +378,13 @@ func (m *Message) AppendReasoningSignature(signature string) {
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
 			m.Parts[i] = ReasoningContent{
-				Thinking:   c.Thinking,
-				Signature:  c.Signature + signature,
-				StartedAt:  c.StartedAt,
-				FinishedAt: c.FinishedAt,
+				Thinking:         c.Thinking,
+				Signature:        c.Signature + signature,
+				ThoughtSignature: c.ThoughtSignature,
+				ToolID:           c.ToolID,
+				ResponsesData:    c.ResponsesData,
+				StartedAt:        c.StartedAt,
+				FinishedAt:       c.FinishedAt,
 			}
 			return
 		}
@@ -339,10 +396,13 @@ func (m *Message) SetReasoningResponsesData(data *openai.ResponsesReasoningMetad
 	for i, part := range m.Parts {
 		if c, ok := part.(ReasoningContent); ok {
 			m.Parts[i] = ReasoningContent{
-				Thinking:      c.Thinking,
-				ResponsesData: data,
-				StartedAt:     c.StartedAt,
-				FinishedAt:    c.FinishedAt,
+				Thinking:         c.Thinking,
+				Signature:        c.Signature,
+				ThoughtSignature: c.ThoughtSignature,
+				ToolID:           c.ToolID,
+				ResponsesData:    data,
+				StartedAt:        c.StartedAt,
+				FinishedAt:       c.FinishedAt,
 			}
 			return
 		}
@@ -354,10 +414,13 @@ func (m *Message) FinishThinking() {
 		if c, ok := part.(ReasoningContent); ok {
 			if c.FinishedAt == 0 {
 				m.Parts[i] = ReasoningContent{
-					Thinking:   c.Thinking,
-					Signature:  c.Signature,
-					StartedAt:  c.StartedAt,
-					FinishedAt: time.Now().Unix(),
+					Thinking:         c.Thinking,
+					Signature:        c.Signature,
+					ThoughtSignature: c.ThoughtSignature,
+					ToolID:           c.ToolID,
+					ResponsesData:    c.ResponsesData,
+					StartedAt:        c.StartedAt,
+					FinishedAt:       time.Now().Unix(),
 				}
 			}
 			return
@@ -561,9 +624,11 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		var parts []fantasy.MessagePart
 		text := strings.TrimSpace(m.Content().Text)
 		reasoning := m.ReasoningContent()
+		text, _ = StripTextualToolCallProtocol(text)
+		thinking, _ := StripTextualToolCallProtocol(reasoning.Thinking)
 		hasToolCalls := len(m.ToolCalls()) > 0
-		if reasoning.Thinking != "" {
-			reasoningPart := fantasy.ReasoningPart{Text: reasoning.Thinking, ProviderOptions: fantasy.ProviderOptions{}}
+		if thinking != "" {
+			reasoningPart := fantasy.ReasoningPart{Text: thinking, ProviderOptions: fantasy.ProviderOptions{}}
 			if reasoning.Signature != "" {
 				reasoningPart.ProviderOptions[anthropic.Name] = &anthropic.ReasoningOptionMetadata{
 					Signature: reasoning.Signature,
@@ -581,7 +646,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 			if len(reasoningPart.ProviderOptions) == 0 && hasToolCalls {
 				reasoningPart.Text = ""
 				reasoningPart.ProviderOptions[anthropic.Name] = &anthropic.ReasoningOptionMetadata{
-					RedactedData: base64.StdEncoding.EncodeToString([]byte(reasoning.Thinking)),
+					RedactedData: base64.StdEncoding.EncodeToString([]byte(thinking)),
 				}
 			}
 			if len(reasoningPart.ProviderOptions) > 0 {
@@ -593,7 +658,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				// causing the model to lose its own prior reply from history (seen
 				// with DeepSeek's Anthropic-compatible proxy, which can return
 				// reasoning blocks without signatures and no separate text block).
-				text = reasoning.Thinking
+				text = thinking
 			}
 		}
 		if text != "" {
@@ -608,6 +673,9 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 			})
 		}
 		parts = attachFantasyMessageMetadata(parts, metadata)
+		if len(parts) == 0 {
+			return nil
+		}
 		messages = append(messages, fantasy.Message{
 			Role:    fantasy.MessageRoleAssistant,
 			Content: parts,

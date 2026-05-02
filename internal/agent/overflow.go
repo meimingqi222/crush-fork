@@ -7,17 +7,9 @@ type promptTokenBudget struct {
 	InputLimit             int64
 	MaxOutputTokens        int64
 	ReservedInputTokens    int64
-	ToolReserveTokens      int64
-	SafetyReserveTokens    int64
 	UsableInputTokens      int64
 	UsesExplicitInputLimit bool
 }
-
-const (
-	autoSummarizeToolReserveMax   int64 = 8_000
-	autoSummarizeToolReserveMin   int64 = 2_000
-	autoSummarizeSafetyReserveMin int64 = 2_000
-)
 
 func effectivePromptInputLimit(model Model) (int64, bool) {
 	limits := ContextWindowLimitsFor(model.CatwalkCfg)
@@ -37,20 +29,6 @@ func effectiveAutoSummarizeMaxOutputTokens(model Model, maxOutputTokens int64) i
 	return 0
 }
 
-func autoSummarizeToolReserveTokens(contextWindow int64) int64 {
-	if contextWindow <= 0 {
-		return 0
-	}
-	return min(autoSummarizeToolReserveMax, max(autoSummarizeToolReserveMin, contextWindow/10))
-}
-
-func autoSummarizeSafetyReserveTokens(contextWindow int64) int64 {
-	if contextWindow <= 0 {
-		return 0
-	}
-	return max(autoSummarizeSafetyReserveMin, contextWindow/50)
-}
-
 func promptTokenBudgetForModel(model Model, maxOutputTokens int64) promptTokenBudget {
 	contextWindow := int64(model.CatwalkCfg.ContextWindow)
 	maxOutputTokens = effectiveAutoSummarizeMaxOutputTokens(model, maxOutputTokens)
@@ -68,15 +46,10 @@ func promptTokenBudgetForModel(model Model, maxOutputTokens int64) promptTokenBu
 	}
 
 	effectiveWindow := EffectiveContextWindow(model.CatwalkCfg)
-	toolReserve := autoSummarizeToolReserveTokens(effectiveWindow)
-	safetyReserve := autoSummarizeSafetyReserveTokens(effectiveWindow)
 	return promptTokenBudget{
-		ContextWindow:       effectiveWindow,
-		MaxOutputTokens:     maxOutputTokens,
-		ReservedInputTokens: reserved,
-		ToolReserveTokens:   toolReserve,
-		SafetyReserveTokens: safetyReserve,
-		UsableInputTokens:   effectiveWindow - reserved - toolReserve - safetyReserve,
+		ContextWindow:     effectiveWindow,
+		MaxOutputTokens:   maxOutputTokens,
+		UsableInputTokens: effectiveWindow - maxOutputTokens,
 	}
 }
 
@@ -94,8 +67,6 @@ func shouldAutoSummarize(model Model, contextUsed, maxOutputTokens int64) bool {
 		"input_limit", budget.InputLimit,
 		"max_output_tokens", budget.MaxOutputTokens,
 		"reserved_input_tokens", budget.ReservedInputTokens,
-		"tool_reserve_tokens", budget.ToolReserveTokens,
-		"safety_reserve_tokens", budget.SafetyReserveTokens,
 		"usable_input_tokens", budget.UsableInputTokens,
 		"uses_explicit_input_limit", budget.UsesExplicitInputLimit,
 		"should_summarize", shouldSummarize,

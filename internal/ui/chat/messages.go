@@ -300,8 +300,10 @@ func ExtractMessageItems(sty *styles.Styles, msg *message.Message, toolResults m
 // In some cases the assistant message only has tools so we do not want to render an
 // empty message.
 func ShouldRenderAssistantMessage(msg *message.Message) bool {
-	content := strings.TrimSpace(msg.Content().Text)
-	thinking := strings.TrimSpace(msg.ReasoningContent().Thinking)
+	content, _ := message.StripTextualToolCallProtocol(msg.Content().Text)
+	content = strings.TrimSpace(content)
+	thinking, _ := message.StripTextualToolCallProtocol(msg.ReasoningContent().Thinking)
+	thinking = strings.TrimSpace(thinking)
 	isError := msg.FinishReason() == message.FinishReasonError
 	isCancelled := msg.FinishReason() == message.FinishReasonCanceled
 	hasToolCalls := len(msg.ToolCalls()) > 0
