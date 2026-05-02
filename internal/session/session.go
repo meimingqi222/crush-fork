@@ -262,9 +262,10 @@ func (s Session) LastExchangeTokens() int64 {
 }
 
 // LastTotalTokens returns the total token count for the last exchange,
-// including prompt tokens (input + cache) and completion tokens (output + reasoning).
-// This matches opencode's token counting approach where
-// total = input + output + reasoning + cache_read + cache_write.
+// including prompt tokens (input + cache) and output tokens.
+// OutputTokens already includes ReasoningTokens for OpenAI-style providers
+// (and Anthropic output_tokens includes thinking tokens), so ReasoningTokens
+// is NOT added separately to avoid double-counting.
 func (s Session) LastTotalTokens() int64 {
 	return s.LastPromptTokens + s.LastCompletionTokens
 }

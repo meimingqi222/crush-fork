@@ -1705,6 +1705,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return nil, createErr
 				}
 			}
+			if cw := EffectiveContextWindow(largeModel.CatwalkCfg); cw > 0 {
+				currentAssistant.SetUsage(message.Usage{InputTokens: cw})
+			}
 			currentAssistant.AddFinish(
 				message.FinishReasonError,
 				"Context limit reached",
@@ -3338,7 +3341,10 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	}
 
 	promptTokens := promptTokensForUsage(resp.TotalUsage, usageProvider(model))
-	completionTokens := resp.TotalUsage.OutputTokens + resp.TotalUsage.ReasoningTokens
+	// Use OutputTokens only (not OutputTokens + ReasoningTokens) to avoid
+	// double-counting reasoning tokens for OpenAI-style providers where
+	// OutputTokens already includes ReasoningTokens.
+	completionTokens := resp.TotalUsage.OutputTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
 	// concurrent session updates.
@@ -3443,7 +3449,10 @@ func normalizedMessageUsage(usage fantasy.Usage, providerID string, estimatedPro
 }
 
 func totalTokensForUsage(usage fantasy.Usage, providerID string) int64 {
-	return promptTokensForUsage(usage, providerID) + usage.OutputTokens + usage.ReasoningTokens
+	// Use OutputTokens only (not OutputTokens + ReasoningTokens) to avoid
+	// double-counting reasoning tokens for OpenAI-style providers where
+	// OutputTokens already includes ReasoningTokens.
+	return promptTokensForUsage(usage, providerID) + usage.OutputTokens
 }
 
 func autoSummarizeReservedTokens(maxOutputTokens int64) int64 {
@@ -3742,7 +3751,10 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	session.CompletionTokens += usage.OutputTokens
 	session.PromptTokens += promptTokens
 	session.LastPromptTokens = promptTokens
-	session.LastCompletionTokens = normalizedUsage.CompletionTokens()
+	// Use OutputTokens (not CompletionTokens which adds ReasoningTokens)
+	// to avoid double-counting reasoning tokens for OpenAI-style providers
+	// where OutputTokens already includes ReasoningTokens.
+	session.LastCompletionTokens = normalizedUsage.OutputTokens
 }
 
 func (a *sessionAgent) Cancel(sessionID string) {

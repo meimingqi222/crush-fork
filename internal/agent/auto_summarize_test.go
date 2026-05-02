@@ -812,6 +812,20 @@ func TestRunStreamingContextWindowErrorStringForcesSummarizeRecovery(t *testing.
 		}
 	}
 	require.True(t, foundSyntheticToolResult)
+
+	// Verify the failed assistant message has usage set to the context
+	// window so the UI shows a meaningful 100% instead of a stale
+	// underestimated value.
+	var failedAssistant *message.Message
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.Assistant && msgs[i].FinishReason() == message.FinishReasonError {
+			failedAssistant = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, failedAssistant)
+	require.Equal(t, int64(200_000), failedAssistant.Usage.InputTokens)
+	require.Equal(t, int64(0), failedAssistant.Usage.OutputTokens)
 }
 
 func TestRunStreamingContextWindowRecoveryOnlyOnce(t *testing.T) {

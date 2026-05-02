@@ -64,13 +64,20 @@ func latestAssistantUsageSnapshot(messages []message.Message, cfg *config.Config
 		if msg.Role != message.Assistant {
 			continue
 		}
-		total := msg.Usage.TotalTokens()
+		// Use PromptTokens + OutputTokens for context usage, matching
+		// opencode's approach of inputTokens + outputTokens.
+		// PromptTokens() includes InputTokens + CacheReadTokens + CacheWriteTokens,
+		// which equals the full input sent to the model.
+		// OutputTokens already includes ReasoningTokens for OpenAI-style providers
+		// (and Anthropic output_tokens includes thinking tokens), so we must
+		// NOT add ReasoningTokens again to avoid double-counting.
+		total := msg.Usage.PromptTokens() + msg.Usage.OutputTokens
 		if total <= 0 {
 			continue
 		}
 		return contextUsageSnapshot{
 			TotalTokens:   total,
-			OutputTokens:  msg.Usage.CompletionTokens(),
+			OutputTokens:  msg.Usage.OutputTokens,
 			ContextWindow: contextWindowForUsageMessage(msg, cfg, selected),
 			Provisional:   !msg.IsFinished(),
 			Summary:       msg.IsSummaryMessage,
