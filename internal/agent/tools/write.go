@@ -86,7 +86,7 @@ func NewWriteTool(
 			fileInfo, err := os.Stat(filePath)
 			if err == nil {
 				if fileInfo.IsDir() {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s", filePath)), nil
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s. Use the 'ls' tool to list directory contents.", filePath)), nil
 				}
 
 				modTime := fileInfo.ModTime().Truncate(time.Second)

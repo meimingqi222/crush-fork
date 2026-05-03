@@ -159,7 +159,7 @@ func NewViewTool(
 
 			// Check if it's a directory
 			if fileInfo.IsDir() {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s", filePath)), nil
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s. Use the 'ls' tool to list directory contents.", filePath)), nil
 			}
 
 			isSupportedImage, mimeType := getImageMimeType(filePath)
