@@ -107,10 +107,11 @@ func (d *MCPDetail) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := d.com.Styles
 	width := max(0, min(defaultDialogMaxWidth+20, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
 	// Cap the dialog height to 75% of the screen so it never dominates the terminal.
-	// Both values passed to min represent total dialog height (including borders)
-	// for consistent comparison; the border size is subtracted afterward.
+	// Compute the max total height (including borders), convert it to inner height,
+	// then compare with defaultDialogHeight+4 (both inner heights) for consistency.
 	maxTotalHeight := min(area.Dy(), (area.Dy()*3)/4+t.Dialog.View.GetVerticalBorderSize())
-	height := max(0, min(defaultDialogHeight+4, maxTotalHeight)-t.Dialog.View.GetVerticalBorderSize())
+	maxInnerHeight := maxTotalHeight - t.Dialog.View.GetVerticalBorderSize()
+	height := max(0, min(defaultDialogHeight+4, maxInnerHeight))
 	innerWidth := width - t.Dialog.View.GetHorizontalFrameSize()
 	heightOffset := t.Dialog.Title.GetVerticalFrameSize() + titleContentHeight +
 		t.Dialog.HelpView.GetVerticalFrameSize() +
