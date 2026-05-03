@@ -446,8 +446,6 @@ func TestRunPreflightAutoSummarizesBeforeRequest(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, 1, fakeAgent.summaryCalls)
 	require.Equal(t, 1, fakeAgent.runCalls)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeMicroCompact)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeCollapse)
 	require.Contains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeReactiveCompact)
 	require.Equal(t, []plugin.ChatTransformPurpose{plugin.ChatTransformPurposeProactiveCompact}, purposeTracker.purposes)
 
@@ -738,8 +736,6 @@ func TestRunTransientRetryNearContextLimitSummarizesInsteadOfRetrying(t *testing
 	require.NotNil(t, result)
 	require.Equal(t, 2, fakeAgent.runCalls)
 	require.Equal(t, 1, fakeAgent.summaryCalls)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeMicroCompact)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeCollapse)
 	require.Contains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeReactiveCompact)
 	require.Equal(t, []plugin.ChatTransformPurpose{plugin.ChatTransformPurposeRecover}, purposeTracker.purposes)
 
@@ -779,8 +775,6 @@ func TestRunStreamingContextWindowErrorStringForcesSummarizeRecovery(t *testing.
 	require.NotNil(t, result)
 	require.Equal(t, 2, fakeAgent.runCalls)
 	require.Equal(t, 1, fakeAgent.summaryCalls)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeMicroCompact)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeCollapse)
 	require.Contains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeReactiveCompact)
 	require.Equal(t, []plugin.ChatTransformPurpose{plugin.ChatTransformPurposeRecover}, purposeTracker.purposes)
 
@@ -894,8 +888,6 @@ func TestRunNormalSummarizeUsesSummarizePurpose(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, 1, fakeAgent.runCalls)
 	require.Equal(t, 1, fakeAgent.summaryCalls)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeMicroCompact)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeCollapse)
 	require.Contains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeAutoCompact)
 	require.Contains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposePostCompact)
 	require.Equal(t, []plugin.ChatTransformPurpose{plugin.ChatTransformPurposeSummarize}, purposeTracker.purposes)
@@ -1011,8 +1003,6 @@ func TestSummarizeSkipsAutoCompactForTinyHistory(t *testing.T) {
 	err = sessionAgent.Summarize(t.Context(), testSession.ID, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, fakeAgent.summaryCalls)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeMicroCompact)
-	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeCollapse)
 	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeAutoCompact)
 	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposePostCompact)
 }

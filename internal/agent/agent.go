@@ -123,17 +123,6 @@ func proactiveCompactionTrigger(model Model, contextUsed, maxOutputTokens int64)
 	return sessionCompactionTriggerNone
 }
 
-func shouldCollapseMessages(purpose plugin.ChatTransformPurpose) bool {
-	switch purpose {
-	case plugin.ChatTransformPurposeSummarize,
-		plugin.ChatTransformPurposeRecover,
-		plugin.ChatTransformPurposeProactiveCompact:
-		return true
-	default:
-		return false
-	}
-}
-
 func shouldReactiveCompactMessages(purpose plugin.ChatTransformPurpose) bool {
 	switch purpose {
 	case plugin.ChatTransformPurposeRecover,
@@ -156,14 +145,6 @@ func shouldAutoCompactMessages(purpose plugin.ChatTransformPurpose, msgs []messa
 	default:
 		return false
 	}
-}
-
-func (a *sessionAgent) collapseSessionMessages(_ context.Context, _ string, _ Model, _ plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
-	// Plugin call removed — collapse purpose does not trigger Morph API
-	// compression and has no builtin post-processing. The plugin will
-	// apply its frozen-message replacement in the subsequent
-	// buildChatRequestState call with purpose "request".
-	return msgs, nil
 }
 
 func (a *sessionAgent) reactiveCompactSessionMessages(ctx context.Context, sessionID string, model Model, providerCtx plugin.ProviderContext, msgs []message.Message) ([]message.Message, error) {
@@ -599,13 +580,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// older messages, preventing the stdin/stdout JSON payload from
 		// exceeding plugin buffer limits on session restore.
 		msgs = builtinPruneToolResults(msgs)
-		collapsed, collapseErr := a.collapseSessionMessages(ctx, call.SessionID, largeModel, providerCtx, msgs)
-		if collapseErr != nil {
-			return nil, collapseErr
-		}
-		if len(collapsed) > 0 {
-			msgs = collapsed
-		}
 	}
 	slog.Debug("[PERF] sessionAgent: restored session context", "duration", time.Since(start), "session_id", call.SessionID)
 
@@ -2397,15 +2371,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// to transforms can exceed plugin buffer limits on large sessions.
 	msgs = builtinPruneToolResults(msgs)
 
-	if shouldCollapseMessages(compactingPurpose) {
-		collapsed, collapseErr := a.collapseSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
-		if collapseErr != nil {
-			return collapseErr
-		}
-		if len(collapsed) > 0 {
-			msgs = collapsed
-		}
-	}
 	if shouldReactiveCompactMessages(compactingPurpose) {
 		reactiveCompacted, reactiveErr := a.reactiveCompactSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
 		if reactiveErr != nil {

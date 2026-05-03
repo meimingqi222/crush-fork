@@ -10,13 +10,13 @@ import (
 )
 
 var (
-	kernel32        = syscall.NewLazyDLL("kernel32.dll")
-	lockFileEx      = kernel32.NewProc("LockFileEx")
-	unlockFile      = kernel32.NewProc("UnlockFile")
+	kernel32   = syscall.NewLazyDLL("kernel32.dll")
+	lockFileEx = kernel32.NewProc("LockFileEx")
+	unlockFile = kernel32.NewProc("UnlockFile")
 )
 
 const (
-	LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+	LOCKFILE_EXCLUSIVE_LOCK   = 0x00000002
 	LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
 )
 

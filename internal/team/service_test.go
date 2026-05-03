@@ -197,9 +197,9 @@ func TestService_Write(t *testing.T) {
 	require.NoError(t, err)
 
 	teamFile := &TeamFile{
-		Name:         "test-team",
-		CreatedAt:    time.Now().UnixMilli(),
-		LeadAgentID:  "new-agent",
+		Name:          "test-team",
+		CreatedAt:     time.Now().UnixMilli(),
+		LeadAgentID:   "new-agent",
 		LeadSessionID: "new-session",
 		Members: []Member{
 			{AgentID: "worker-1", Name: "Worker 1"},

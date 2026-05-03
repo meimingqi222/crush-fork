@@ -47,7 +47,7 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	// Determine paths:
 	// - workspaceConfigPath: project-level config in .crush/crush.json (can be committed)
 	// - projectDataDir: centralized data storage (sessions, memory, logs)
-	// 
+	//
 	// For workspaceConfigPath, we use workingDir directly (not workspaceIdentityDir)
 	// because workspaceIdentityDir may resolve to a different path via env vars like PWD.
 	// We want the config to be at <workingDir>/.crush/crush.json.

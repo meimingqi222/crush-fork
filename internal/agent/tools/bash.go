@@ -109,12 +109,12 @@ func patternBlockFunc(args []string) bool {
 		"zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp",
 	}
 
-		baseCommand := strings.ToLower(filepath.Base(args[0]))
-		for _, cmd := range zshDangerousCommands {
-			if baseCommand == cmd {
-				return true
-			}
+	baseCommand := strings.ToLower(filepath.Base(args[0]))
+	for _, cmd := range zshDangerousCommands {
+		if baseCommand == cmd {
+			return true
 		}
+	}
 
 	// Check for control characters (non-printable).
 	// Null bytes and other non-printable chars are silently dropped by bash

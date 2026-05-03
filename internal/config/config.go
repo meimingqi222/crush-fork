@@ -683,12 +683,6 @@ func (c *Config) BackgroundModel() *catwalk.Model {
 	return c.GetModel(model.Provider, model.Model)
 }
 
-// HandoffModel returns the model used for handoff draft generation.
-// Deprecated: use BackgroundModel instead.
-func (c *Config) HandoffModel() *catwalk.Model {
-	return c.BackgroundModel()
-}
-
 func (c *Config) AutoClassifierModel() *catwalk.Model {
 	model, ok := c.Models[SelectedModelTypeAutoClassifier]
 	if !ok {
@@ -729,7 +723,7 @@ func allToolNames() []string {
 		"grep",
 		"ls",
 		"request_user_input",
-	
+
 		"crush_info",
 		"crush_logs",
 		"long_term_memory",
