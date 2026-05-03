@@ -841,9 +841,9 @@ func DefaultStyles() Styles {
 		},
 	}
 
-	// PlainMarkdown style - muted colors on subtle background for thinking content.
+	// PlainMarkdown style - readable colors on subtle background for thinking content.
 	plainBg := stringPtr(bgBaseLighter.Hex())
-	plainFg := stringPtr(fgMuted.Hex())
+	plainFg := stringPtr(fgBase.Hex())
 	s.PlainMarkdown = ansi.StyleConfig{
 		Document: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
@@ -1164,7 +1164,7 @@ func DefaultStyles() Styles {
 
 	// Agent task styles
 	s.Tool.AgentTaskTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(blueLight).Foreground(white)
-	s.Tool.AgentPrompt = s.Muted
+	s.Tool.AgentPrompt = s.Base
 	s.Tool.SubagentBanner = base.Bold(true).Padding(0, 1).Background(blueLight).Foreground(white)
 
 	// Agentic fetch styles
