@@ -67,5 +67,7 @@ func IsOutsideWorkDir(filePath, workDir string) (bool, error) {
 	if err != nil {
 		return true, nil
 	}
-	return strings.HasPrefix(relPath, ".."), nil
+	// Only flag paths that actually traverse upward: "..", "../", or "..\".
+	// Names starting with ".." like "..hiddenfile" are valid inside the workdir.
+	return relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)), nil
 }
