@@ -870,11 +870,24 @@ func (c *Client) connection() *transport.Connection {
 	if c == nil || c.client == nil {
 		return nil
 	}
+	// Note: This uses reflect+unsafe to access the private conn field.
+	// This is fragile and may break if powernap library changes.
+	// A panic recover is added as a safety net.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Failed to access LSP connection via reflect", "error", r)
+		}
+	}()
 	value := reflect.ValueOf(c.client).Elem().FieldByName("conn")
 	if !value.IsValid() || value.IsNil() {
 		return nil
 	}
-	return reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem().Interface().(*transport.Connection)
+	conn, ok := reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem().Interface().(*transport.Connection)
+	if !ok {
+		slog.Error("Failed to cast reflected value to transport.Connection")
+		return nil
+	}
+	return conn
 }
 
 func locationResults(value any) []protocol.Location {

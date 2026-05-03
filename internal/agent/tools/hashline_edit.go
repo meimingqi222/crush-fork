@@ -57,6 +57,15 @@ func NewHashlineEditTool(
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
 
+			// Check if file is outside working directory
+			isOutside, err := filepathext.IsOutsideWorkDir(params.FilePath, effectiveWorkingDir)
+			if err != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("error checking file path: %w", err)
+			}
+			if isOutside {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("file path is outside working directory: %s", params.FilePath)), nil
+			}
+
 			fileInfo, err := os.Stat(params.FilePath)
 			if err != nil {
 				if os.IsNotExist(err) {

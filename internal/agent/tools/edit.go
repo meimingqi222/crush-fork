@@ -81,21 +81,30 @@ func NewEditTool(
 
 			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
 
+			// Check if file is outside working directory
+			isOutside, err := filepathext.IsOutsideWorkDir(params.FilePath, effectiveWorkingDir)
+			if err != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("error checking file path: %w", err)
+			}
+			if isOutside {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("file path is outside working directory: %s", params.FilePath)), nil
+			}
+
 			var response fantasy.ToolResponse
-			var err error
+			var opErr error
 
 			editCtx := editContext{ctx, permissions, files, filetracker, effectiveWorkingDir}
 
 			if params.OldString == "" {
-				response, err = createNewFile(editCtx, params.FilePath, params.NewString, call)
+				response, opErr = createNewFile(editCtx, params.FilePath, params.NewString, call)
 			} else if params.NewString == "" {
-				response, err = deleteContent(editCtx, params.FilePath, params.OldString, params.ReplaceAll, call)
+				response, opErr = deleteContent(editCtx, params.FilePath, params.OldString, params.ReplaceAll, call)
 			} else {
-				response, err = replaceContent(editCtx, params.FilePath, params.OldString, params.NewString, params.ReplaceAll, call)
+				response, opErr = replaceContent(editCtx, params.FilePath, params.OldString, params.NewString, params.ReplaceAll, call)
 			}
 
-			if err != nil {
-				return response, err
+			if opErr != nil {
+				return response, opErr
 			}
 			if response.IsError {
 				// Return early if there was an error during content replacement

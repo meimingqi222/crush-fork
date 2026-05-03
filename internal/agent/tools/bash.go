@@ -470,7 +470,11 @@ func watchBackgroundShellRuntime(ctx context.Context, bgShell *shell.BackgroundS
 			publishShellRuntime(ctx, bgShell, status, finalSnapshot)
 			return
 		}
-		<-ticker.C
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
