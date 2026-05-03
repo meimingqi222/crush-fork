@@ -692,6 +692,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mcpDialog, ok := dia.(*dialog.MCP); ok {
 			mcpDialog.SetStates(msg.states)
 		}
+		// Also refresh the MCP detail dialog if it's currently open.
+		detailDia := m.dialog.Dialog(dialog.MCPDetailID)
+		if detailDialog, ok := detailDia.(*dialog.MCPDetail); ok {
+			if state, ok := msg.states[detailDialog.Name()]; ok {
+				detailDialog.SetState(state)
+			}
+			if cfg, ok := m.com.Config().MCP[detailDialog.Name()]; ok {
+				detailDialog.SetConfig(cfg)
+			}
+		}
 	case mcpPromptsLoadedMsg:
 		m.mcpPrompts = msg.Prompts
 		dia := m.dialog.Dialog(dialog.CommandsID)
@@ -5417,11 +5427,13 @@ func (m *UI) toggleMCP(name string, enable bool) tea.Cmd {
 			return util.ReportError(err)()
 		}
 
-		// Reconnect if enabling
+		// Reconnect so the MCP layer picks up the new disabled state
+		// and publishes a state-changed event for the UI to refresh.
+		if err := mcp.Reconnect(context.Background(), m.com.Store(), name); err != nil {
+			return util.ReportError(err)()
+		}
+
 		if enable {
-			if err := mcp.Reconnect(context.Background(), m.com.Store(), name); err != nil {
-				return util.ReportError(err)()
-			}
 			return util.NewInfoMsg("MCP " + name + " enabled and reconnected")
 		}
 		return util.NewInfoMsg("MCP " + name + " disabled")
