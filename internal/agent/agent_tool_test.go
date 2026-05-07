@@ -134,7 +134,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	}
 	assert.Contains(t, generalNames, "bash")
 	assert.Contains(t, generalNames, "edit")
-	assert.Contains(t, generalNames, tools.HashlineEditToolName)
+	assert.NotContains(t, generalNames, tools.HashlineEditToolName)
 	assert.Contains(t, generalNames, tools.HistorySearchToolName)
 	assert.Contains(t, generalNames, tools.LongTermMemoryToolName)
 	assert.Contains(t, generalNames, tools.SendMessageToolName)
@@ -152,7 +152,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	for _, tool := range exploreTools {
 		exploreNames = append(exploreNames, tool.Info().Name)
 	}
-	assert.Equal(t, []string{"bash", "glob", "grep", "ls", "tool_search", "view"}, exploreNames)
+	assert.Equal(t, []string{"bash", "glob", "grep", "read", "tool_search"}, exploreNames)
 }
 
 func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
@@ -183,7 +183,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"glob",
 		"grep",
 		"history_search",
-		"ls",
 		"lsp_declaration",
 		"lsp_definition",
 		"lsp_diagnostics",
@@ -194,8 +193,8 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"lsp_type_definition",
 		"lsp_workspace_symbols",
 		"plan_exit",
+		"read",
 		"request_user_input",
-		"view",
 	}, planNames)
 	assert.NotContains(t, planNames, AgentToolName)
 	assert.NotContains(t, planNames, "agentic_fetch")
@@ -238,7 +237,7 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 
 	assert.NotContains(t, defaultNames, "bash")
 	assert.NotContains(t, defaultNames, "fetch")
-	assert.Contains(t, defaultNames, "view")
+	assert.Contains(t, defaultNames, "read")
 	assert.Contains(t, defaultNames, "write")
 }
 

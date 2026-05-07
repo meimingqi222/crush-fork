@@ -46,10 +46,14 @@ func TestToAIMessage_ReasoningWithSignature(t *testing.T) {
 	require.True(t, found, "expected a ReasoningPart in the message")
 }
 
-// TestToAIMessage_ReasoningWithoutSignature validates that when an
-// anthropic-compatible proxy returns thinking content but no signature and no
-// other provider metadata, ToAIMessage omits the reasoning part entirely for
-// plain assistant text responses.
+// TestToAIMessage_ReasoningWithoutSignature validates that when an assistant
+// message has both text content and reasoning content without any
+// provider-specific metadata (e.g. DeepSeek native OpenAI-compatible API that
+// returns reasoning_content alongside regular content), ToAIMessage includes the
+// reasoning as a plain ReasoningPart so that the openaicompat provider can attach
+// reasoning_content back to the API request in conversation history.
+// Providers that do not support reasoning (e.g. Anthropic without metadata) will
+// emit a soft warning and skip the part without rejecting the request.
 func TestToAIMessage_ReasoningWithoutSignature(t *testing.T) {
 	t.Parallel()
 
@@ -67,10 +71,18 @@ func TestToAIMessage_ReasoningWithoutSignature(t *testing.T) {
 	aiMsgs := msg.ToAIMessage()
 	require.Len(t, aiMsgs, 1)
 
+	var found bool
 	for _, part := range aiMsgs[0].Content {
-		_, isReasoning := fantasy.AsContentType[fantasy.ReasoningPart](part)
-		require.False(t, isReasoning, "reasoning part without any provider metadata must be omitted for non-tool turns")
+		rp, ok := fantasy.AsContentType[fantasy.ReasoningPart](part)
+		if !ok {
+			continue
+		}
+		found = true
+		// Provider options must be empty (no Anthropic/Google/OpenAI metadata).
+		require.Empty(t, rp.Options(), "plain reasoning part for OpenAI-compat must have no provider-specific options")
+		require.Equal(t, "my thoughts", rp.Text)
 	}
+	require.True(t, found, "reasoning part must be included for OpenAI-compat providers that require reasoning_content passed back")
 }
 
 // TestToAIMessage_ReasoningWithoutSignatureNoText verifies that when an

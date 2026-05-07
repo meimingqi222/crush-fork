@@ -26,7 +26,7 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "modify local files", SearchTags: []string{"file", "edit"}, Direct: true}
 	case tools.FetchToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "fetch raw URL content", SearchTags: []string{"network", "http", "read"}, Direct: true}
-	case tools.GlobToolName, tools.GrepToolName, tools.LSToolName, tools.ViewToolName:
+	case tools.GlobToolName, tools.GrepToolName, tools.LSToolName, tools.ReadToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect local files", SearchTags: []string{"read", "filesystem"}, Direct: true}
 	case tools.SourcegraphToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "search public repositories", SearchTags: []string{"code-search", "network", "deferred"}, Exposure: tools.ToolExposureDeferred, Direct: true}

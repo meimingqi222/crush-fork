@@ -78,7 +78,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 	}
 
 	editTool := agenttools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir())
-	hashlineEditTool := agenttools.NewHashlineEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir())
 
 	builtin := []fantasy.AgentTool{
 		agenttools.NewRequestUserInputTool(c.userInput),
@@ -89,12 +88,9 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewJobKillTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		editTool,
-		hashlineEditTool,
-		agenttools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		agenttools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
-		agenttools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		agenttools.NewSourcegraphTool(nil),
 		agenttools.NewHistorySearchTool(c.history),
 		agenttools.NewCrushInfoTool(c.cfg, c.lspManager),
@@ -110,7 +106,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),
 		agenttools.NewSubtaskResultTool(c.messages),
-		agenttools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
+		agenttools.NewReadTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
 	for _, tool := range builtin {

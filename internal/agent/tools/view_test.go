@@ -138,7 +138,7 @@ func TestViewHashlineSupportsEditingTruncatedLongLines(t *testing.T) {
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	tracker := newHashlineEditFileTracker()
 	viewTool := NewViewTool(nil, permissions, tracker, workingDir)
-	hashlineTool := NewHashlineEditTool(nil, permissions, &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}, tracker, workingDir)
+	hashlineTool := NewEditTool(nil, permissions, &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}, tracker, workingDir)
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
@@ -150,7 +150,7 @@ func TestViewHashlineSupportsEditingTruncatedLongLines(t *testing.T) {
 	lineRef := formatHashlineReference(1, longLine)
 	require.Contains(t, viewResp.Content, lineRef)
 
-	editResp, err := runHashlineEditTool(t, hashlineTool, ctx, HashlineEditParams{
+	editResp, err := runHashlineEditTool(t, hashlineTool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -210,7 +210,7 @@ func TestViewTool_AllowsReadingLargeFilesWithLimit(t *testing.T) {
 	require.Contains(t, resp.Content, "a") // Should contain some content
 }
 
-func TestViewTool_MissingFileIncludesRecoveryMetadata(t *testing.T) {
+func TestViewTool_MissingFileUsesConciseError(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -221,9 +221,27 @@ func TestViewTool_MissingFileIncludesRecoveryMetadata(t *testing.T) {
 	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "missing.txt"})
 	require.NoError(t, err)
 	require.True(t, resp.IsError)
-	require.Contains(t, resp.Content, "Use glob to find the exact path")
-	require.Contains(t, resp.Metadata, "file_not_found_recovery")
-	require.Contains(t, resp.Metadata, "glob")
+	require.Contains(t, resp.Content, "File not found")
+	require.NotContains(t, resp.Content, "Use glob")
+	require.NotContains(t, resp.Metadata, "file_not_found_recovery")
+	require.NotContains(t, resp.Metadata, "glob")
+}
+
+func TestViewTool_MissingFileIncludesSimilarPathSuggestions(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "read.go.txt"), []byte("package test"), 0o644))
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "read.go"})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "Did you mean one of these?")
+	require.Contains(t, resp.Content, "read.go.txt")
+	require.Contains(t, resp.Metadata, "file_not_found_suggestions")
 }
 
 func TestViewTool_InvalidPathSyntaxReturnsToolErrorResponse(t *testing.T) {

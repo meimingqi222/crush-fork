@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -249,13 +250,13 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 
 	switch v := apiKey.(type) {
 	case string:
-		if err := s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), v); err != nil {
+		if err := s.persistProviderAPIKey(scope, providerID, v); err != nil {
 			return fmt.Errorf("failed to save api key to config file: %w", err)
 		}
 		setKeyOrToken = func() { providerConfig.APIKey = v }
 	case *oauth.Token:
 		if err := cmp.Or(
-			s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), v.AccessToken),
+			s.persistProviderAPIKey(scope, providerID, v.AccessToken),
 			s.SetConfigField(scope, fmt.Sprintf("providers.%s.oauth", providerID), v),
 		); err != nil {
 			return err
@@ -302,6 +303,18 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 	}
 	s.config.Providers.Set(providerID, providerConfig)
 	return nil
+}
+
+func (s *ConfigStore) persistProviderAPIKey(scope Scope, providerID string, apiKey string) error {
+	toStore := apiKey
+	if !strings.HasPrefix(apiKey, "$") {
+		if encrypted, encErr := EncryptAPIKey(apiKey); encErr == nil {
+			toStore = encrypted
+		} else {
+			slog.Warn("Failed to encrypt API key, storing in plaintext", "error", encErr)
+		}
+	}
+	return s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), toStore)
 }
 
 func (s *ConfigStore) SetMCPOAuthConfig(scope Scope, mcpName string, oauthCfg *MCPOAuthConfig) error {
@@ -413,7 +426,7 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 	s.config.Providers.Set(providerID, providerConfig)
 
 	if err := cmp.Or(
-		s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), newToken.AccessToken),
+		s.persistProviderAPIKey(scope, providerID, newToken.AccessToken),
 		s.SetConfigField(scope, fmt.Sprintf("providers.%s.oauth", providerID), newToken),
 	); err != nil {
 		return fmt.Errorf("failed to persist refreshed token: %w", err)
@@ -490,13 +503,6 @@ func (s *ConfigStore) ImportCopilot() (*oauth.Token, bool) {
 
 	if err := s.SetProviderAPIKey(ScopeGlobal, string(catwalk.InferenceProviderCopilot), token); err != nil {
 		return token, false
-	}
-
-	if err := cmp.Or(
-		s.SetConfigField(ScopeGlobal, "providers.copilot.api_key", token.AccessToken),
-		s.SetConfigField(ScopeGlobal, "providers.copilot.oauth", token),
-	); err != nil {
-		slog.Error("Unable to save GitHub Copilot token to disk", "error", err)
 	}
 
 	slog.Info("GitHub Copilot successfully imported")

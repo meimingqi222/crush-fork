@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/imageutil"
@@ -64,7 +65,8 @@ type ViewResponseMetadata struct {
 }
 
 const (
-	ViewToolName     = "view"
+	ReadToolName     = "read"
+	ViewToolName     = ReadToolName
 	MaxViewSize      = 1 * 1024 * 1024 // 1MB
 	DefaultReadLimit = 2000
 	MaxLineLength    = 2000
@@ -77,6 +79,7 @@ type textViewLine struct {
 
 var errViewOffsetBeyondEOF = errors.New("offset is beyond end of file")
 
+// NewViewTool is an alias for NewReadTool for backward compatibility.
 func NewViewTool(
 	lspManager *lsp.Manager,
 	permissions permission.Service,
@@ -84,8 +87,18 @@ func NewViewTool(
 	workingDir string,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
+	return NewReadTool(lspManager, permissions, filetracker, workingDir, skillsPaths...)
+}
+
+func NewReadTool(
+	lspManager *lsp.Manager,
+	permissions permission.Service,
+	filetracker filetracker.Service,
+	workingDir string,
+	skillsPaths ...string,
+) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
-		ViewToolName,
+		ReadToolName,
 		string(viewDescription),
 		func(ctx context.Context, params ViewParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.FilePath == "" {
@@ -148,18 +161,22 @@ func NewViewTool(
 					if len(suggestions) > 0 {
 						message += fmt.Sprintf("\n\nDid you mean one of these?\n%s", strings.Join(suggestions, "\n"))
 					}
-					message += "\n\nUse glob to find the exact path before calling view again."
 					return fantasy.WithResponseMetadata(
 						fantasy.NewTextErrorResponse(message),
-						newMissingViewMetadata(filePath),
+						newMissingViewMetadata(filePath, suggestions),
 					), nil
 				}
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error accessing file: %v", err)), nil
 			}
 
-			// Check if it's a directory
+			// Check if it's a directory — automatically fall back to listing its
+			// contents so the LLM gets useful information instead of an error.
 			if fileInfo.IsDir() {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s", filePath)), nil
+				out, _, lsErr := ListDirectoryTree(filePath, LSParams{}, config.ToolLs{})
+				if lsErr != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s", filePath)), nil
+				}
+				return fantasy.NewTextResponse(out), nil
 			}
 
 			isSupportedImage, mimeType := getImageMimeType(filePath)
@@ -252,14 +269,14 @@ func NewViewTool(
 		})
 }
 
-func newMissingViewMetadata(filePath string) ViewResponseMetadata {
-	return ViewResponseMetadata{
-		FilePath:          filePath,
-		RecoveredBy:       "file_not_found_recovery",
-		RecoveryAction:    fmt.Sprintf("File %q was not found. Use glob to discover the correct path, then call view again with that exact path.", filePath),
-		FallbackTool:      GlobToolName,
-		FallbackToolQuery: filepath.Base(filePath),
+func newMissingViewMetadata(filePath string, suggestions []string) ViewResponseMetadata {
+	metadata := ViewResponseMetadata{FilePath: filePath}
+	if len(suggestions) == 0 {
+		return metadata
 	}
+	metadata.RecoveredBy = "file_not_found_suggestions"
+	metadata.RecoveryAction = fmt.Sprintf("File %q was not found. Try one of the suggested paths from the error message.", filePath)
+	return metadata
 }
 
 func findViewSuggestions(filePath string) []string {

@@ -2160,6 +2160,55 @@ func TestPreparePromptInjectsSyntheticToolResultForMissingToolCallResult(t *test
 	require.True(t, foundSynthetic)
 }
 
+func TestPreparePromptDropsLateToolResultForEarlierAssistantCall(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{
+			ID:   "assistant-1",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ToolCall{ID: "call-1", Name: agenttools.GlobToolName, Input: `{"pattern":"**/*.test.ts"}`, Finished: true},
+			},
+		},
+		{
+			ID:   "assistant-error",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Invalid parameters"},
+			},
+		},
+		{
+			ID:   "tool-late",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{ToolCallID: "call-1", Name: agenttools.GlobToolName, Content: "No files found"},
+			},
+		},
+	})
+
+	var toolResultIDs []string
+	for _, msg := range history {
+		if msg.Role != fantasy.MessageRoleTool {
+			continue
+		}
+		for _, part := range msg.Content {
+			toolResultPart, ok := part.(fantasy.ToolResultPart)
+			if !ok {
+				continue
+			}
+			toolResultIDs = append(toolResultIDs, toolResultPart.ToolCallID)
+		}
+	}
+
+	require.Len(t, toolResultIDs, 1)
+	require.Equal(t, "call-1", toolResultIDs[0])
+	errOutput, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](history[1].Content[0].(fantasy.ToolResultPart).Output)
+	require.True(t, ok)
+	require.ErrorContains(t, errOutput.Error, "tool execution was interrupted")
+}
+
 func TestPreparePromptDropsCanceledAssistantToolBranchBeforeNextUser(t *testing.T) {
 	t.Parallel()
 

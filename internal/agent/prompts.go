@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 )
 
@@ -183,11 +184,22 @@ func isReadOnlyAgent(agentCfg config.Agent) bool {
 		return false
 	}
 	readOnlyTools := map[string]struct{}{
-		"glob":        {},
-		"grep":        {},
-		"ls":          {},
-		"sourcegraph": {},
-		"view":        {},
+		agenttools.BashToolName:                {},
+		agenttools.GlobToolName:                {},
+		agenttools.GrepToolName:                {},
+		agenttools.LSToolName:                  {},
+		agenttools.ReadToolName:                {},
+		agenttools.SourcegraphToolName:         {},
+		agenttools.ToolSearchToolName:          {},
+		agenttools.DiagnosticsToolName:         {},
+		agenttools.ReferencesToolName:          {},
+		agenttools.LSPDeclarationToolName:      {},
+		agenttools.LSPDefinitionToolName:       {},
+		agenttools.LSPImplementationToolName:   {},
+		agenttools.LSPTypeDefinitionToolName:   {},
+		agenttools.LSPHoverToolName:            {},
+		agenttools.LSPDocumentSymbolsToolName:  {},
+		agenttools.LSPWorkspaceSymbolsToolName: {},
 	}
 	for _, tool := range agentCfg.AllowedTools {
 		if _, ok := readOnlyTools[tool]; !ok {

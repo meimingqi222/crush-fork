@@ -1163,6 +1163,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						toolResult = toolResult.WithDeferredToolState(state)
 					}
 				}
+				toolResult.Content = redactSecrets(toolResult.Content)
 				toolResult, additionalMedia := a.extractAdditionalMCPMedia(toolResult)
 				if runtimeConfig != nil {
 					toolResult = a.applyToolResultReview(genCtx, currentAssistant.SessionID, toolResult, runtimeConfig.PermissionMode)
@@ -2715,24 +2716,8 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 		a.restoreDeferredToolProtocolState(msgs[0].SessionID, msgs)
 	}
 
-	// Build sets of tool-call and tool-result IDs so we can reconcile stale
-	// history before it reaches the provider.
-	toolCallIDs := make(map[string]bool)
-	toolResultIDs := make(map[string]bool)
-	for _, m := range msgs {
-		if m.Role == message.Assistant {
-			for _, tc := range m.ToolCalls() {
-				toolCallIDs[tc.ID] = true
-			}
-		}
-		if m.Role == message.Tool {
-			for _, tr := range m.ToolResults() {
-				toolResultIDs[tr.ToolCallID] = true
-			}
-		}
-	}
-
-	for _, m := range msgs {
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
 		if len(m.Parts) == 0 {
 			continue
 		}
@@ -2747,13 +2732,15 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 			if len(toolResults) == 0 {
 				continue
 			}
+
+			toolCallIDs := previousAssistantToolCallIDs(msgs, i)
 			filteredToolResults := make([]message.ToolResult, 0, len(toolResults))
 			for _, tr := range toolResults {
 				if toolCallIDs[tr.ToolCallID] {
 					filteredToolResults = append(filteredToolResults, tr)
 					continue
 				}
-				slog.Warn("Dropping orphaned tool_result without matching tool_call",
+				slog.Warn("Dropping orphaned tool_result without matching previous assistant tool_call",
 					"tool_call_id", tr.ToolCallID,
 					"tool_name", tr.Name,
 				)
@@ -2770,32 +2757,8 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 
 		history = append(history, m.ToAIMessage()...)
 
-		// Defensive: if this assistant message contains tool_use blocks
-		// without corresponding tool_result messages anywhere in the
-		// session, inject synthetic error results so the provider never
-		// rejects the request with a "missing tool_result" error.
 		if m.Role == message.Assistant {
-			var missingParts []fantasy.MessagePart
-			for _, tc := range m.ToolCalls() {
-				if !toolResultIDs[tc.ID] {
-					slog.Warn("Injecting synthetic tool_result for orphaned tool_use",
-						"tool_call_id", tc.ID, "tool_name", tc.Name)
-					missingOutput := fantasy.ToolResultOutputContentError{
-						Error: fmt.Errorf("tool execution was interrupted"),
-					}
-					missingPart := fantasy.ToolResultPart{
-						ToolCallID: tc.ID,
-						Output:     missingOutput,
-					}
-					missingParts = append(missingParts, missingPart)
-				}
-			}
-			if len(missingParts) > 0 {
-				history = append(history, fantasy.Message{
-					Role:    fantasy.MessageRoleTool,
-					Content: missingParts,
-				})
-			}
+			history = appendMissingToolResults(history, m, nextToolResultIDs(msgs, i))
 		}
 	}
 
@@ -2812,6 +2775,64 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 	}
 
 	return history, files
+}
+
+func previousAssistantToolCallIDs(msgs []message.Message, toolIndex int) map[string]bool {
+	toolCallIDs := make(map[string]bool)
+	for i := toolIndex - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role == message.Tool {
+			continue
+		}
+		if m.Role != message.Assistant {
+			break
+		}
+		for _, tc := range m.ToolCalls() {
+			toolCallIDs[tc.ID] = true
+		}
+		break
+	}
+	return toolCallIDs
+}
+
+func nextToolResultIDs(msgs []message.Message, assistantIndex int) map[string]bool {
+	toolResultIDs := make(map[string]bool)
+	for i := assistantIndex + 1; i < len(msgs); i++ {
+		m := msgs[i]
+		if m.Role != message.Tool {
+			break
+		}
+		for _, tr := range m.ToolResults() {
+			toolResultIDs[tr.ToolCallID] = true
+		}
+	}
+	return toolResultIDs
+}
+
+func appendMissingToolResults(history []fantasy.Message, m message.Message, toolResultIDs map[string]bool) []fantasy.Message {
+	var missingParts []fantasy.MessagePart
+	for _, tc := range m.ToolCalls() {
+		if toolResultIDs[tc.ID] {
+			continue
+		}
+		slog.Warn("Injecting synthetic tool_result for orphaned tool_use",
+			"tool_call_id", tc.ID, "tool_name", tc.Name)
+		missingOutput := fantasy.ToolResultOutputContentError{
+			Error: fmt.Errorf("tool execution was interrupted"),
+		}
+		missingPart := fantasy.ToolResultPart{
+			ToolCallID: tc.ID,
+			Output:     missingOutput,
+		}
+		missingParts = append(missingParts, missingPart)
+	}
+	if len(missingParts) == 0 {
+		return history
+	}
+	return append(history, fantasy.Message{
+		Role:    fantasy.MessageRoleTool,
+		Content: missingParts,
+	})
 }
 
 func disableAnthropicThinking(opts fantasy.ProviderOptions) (fantasy.ProviderOptions, bool) {
@@ -3163,6 +3184,24 @@ func cleanGeneratedTitle(raw string) string {
 	return cmp.Or(title, DefaultSessionName)
 }
 
+// noReasoningProviderOptions returns ProviderOptions that disable
+// thinking/reasoning for title generation, keeping it lightweight.
+// Only applies to providers/models that support reasoning.
+func noReasoningProviderOptions(model Model) fantasy.ProviderOptions {
+	if model.Model == nil || !model.CatwalkCfg.CanReason {
+		return fantasy.ProviderOptions{}
+	}
+	switch model.Model.Provider() {
+	case anthropic.Name:
+		// Passing an explicit empty ProviderOptions suppresses any
+		// thinking/effort that would otherwise be injected by defaults.
+		return fantasy.ProviderOptions{
+			anthropic.Name: &anthropic.ProviderOptions{},
+		}
+	}
+	return fantasy.ProviderOptions{}
+}
+
 func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, userPrompt string, sessionLock *sync.Mutex) {
 	userPrompt = titleUserPromptFromCall(userPrompt)
 	if userPrompt == "" {
@@ -3173,7 +3212,10 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	largeModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
-	const maxOutputTokens int64 = 40
+	// Use a fixed budget sufficient for reasoning + title output, but well
+	// below any provider's hard limit. The title itself is <50 chars; a
+	// reasoning model may spend ~100-500 tokens thinking before that.
+	const maxOutputTokens int64 = 4096
 
 	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
 		return fantasy.NewAgent(m,
@@ -3207,6 +3249,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	model := smallModel
 	agent := newAgent(model.Model, titlePrompt, maxOutputTokens)
 	titleCtx := copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent)
+	streamCall.ProviderOptions = noReasoningProviderOptions(model)
 	resp, err := agent.Stream(titleCtx, streamCall)
 	if err == nil {
 		// We successfully generated a title with the small model.
@@ -3217,6 +3260,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		model = largeModel
 		agent = newAgent(model.Model, titlePrompt, maxOutputTokens)
 		streamedTitle.Reset()
+		streamCall.ProviderOptions = noReasoningProviderOptions(model)
 		resp, err = agent.Stream(titleCtx, streamCall)
 		if err == nil {
 			slog.Debug("Generated title with large model")

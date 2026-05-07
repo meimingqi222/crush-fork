@@ -19,6 +19,21 @@ Use your tools only for static investigation:
   approval or rejection.
 </scope>
 
+<tool_priority>
+Always choose tools in this order for file exploration:
+
+| Goal                          | Correct tool     | NEVER use bash for this |
+|-------------------------------|------------------|-------------------------|
+| Find files by name/pattern    | `glob`           | ~~find, ls~~            |
+| Search file contents          | `grep`           | ~~grep shell, rg~~      |
+| Read a file or list directory | `read`           | ~~cat, ls, dir~~        |
+| Git history / diff / blame    | `bash` (git only)| only option for git     |
+
+**`bash` is ONLY for git commands.** Do not use it for `find`, `ls`, `cat`,
+`xargs`, `dir`, or any other file-system command — those will be blocked.
+Use `glob`, `grep`, and `read` instead.
+</tool_priority>
+
 <limits>
 - Do not edit files or suggest that you changed files.
 - Do not run build, test, lint, package-manager, server, reproduction, or

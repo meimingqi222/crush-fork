@@ -1,9 +1,9 @@
 Edits files by replacing text, creating new files, or deleting content. For moving/renaming use Bash 'mv'. For large edits use Write tool.
 
 <prerequisites>
-1. Use View tool to understand file contents and context
-2. For new files: Use LS tool to verify parent directory exists
-3. **CRITICAL**: Note exact whitespace, indentation, and formatting from View output
+1. Use read tool to understand file contents and context
+2. For new files: Use bash to check directory exists
+3. Note whitespace, indentation, and formatting from read output
 </prerequisites>
 
 <parameters>
@@ -11,37 +11,41 @@ Edits files by replacing text, creating new files, or deleting content. For movi
 2. old_string: Text to replace (must match exactly including whitespace/indentation)
 3. new_string: Replacement text
 4. replace_all: Replace all occurrences (default false)
+5. edits: Array of edit operations for multiple changes (when provided, old_string/new_string/replace_all are ignored)
+6. operations: Array of hashline operations using LINE#HASH line references from read(hashline=true). When provided, all other parameters except file_path are ignored. Each operation: {operation, content, line/start/end}. Operations: replace_line, replace_range, prepend, append.
 </parameters>
 
 <special_cases>
 
 - Create file: provide file_path + new_string, leave old_string empty
 - Delete content: provide file_path + old_string, leave new_string empty
+- Multiple changes: provide file_path + edits array of {old_string, new_string, replace_all}
   </special_cases>
 
+<whitespace_tolerance>
+Trailing whitespace differences and minor indentation variations are handled automatically via fuzzy matching fallback. When exact matching fails, the tool tries:
+1. Trimming trailing whitespace per line
+2. Trimming all surrounding whitespace per line
+3. Indentation-flexible matching (common indent prefix stripped)
+</whitespace_tolerance>
+
+<hashline_mode>
+When exact text matching is brittle (heavy escaping, repeated snippets, special characters), use hashline mode:
+
+1. Read the file with `read(hashline=true)` to get LINE#HASH references
+2. Call `edit` with `operations` array instead of `old_string`/`new_string`
+3. Each operation uses `LINE#HASH` anchors (e.g. `"5#aa"`) from the read output
+
+Operation types:
+- `replace_line`: replace the referenced line with `content`
+- `replace_range`: replace lines from `start` to `end` (inclusive) with `content`
+- `prepend`: insert `content` before the referenced line
+- `append`: insert `content` after the referenced line
+
+If a hash mismatch error occurs, re-run `read(hashline=true)` and retry.
+</hashline_mode>
+
 <critical_requirements>
-EXACT MATCHING: The tool is extremely literal. Text must match **EXACTLY**
-
-- Every space and tab character
-- Every blank line
-- Every newline character
-- Indentation level (count the spaces/tabs)
-- Comment spacing (`// comment` vs `//comment`)
-- Brace positioning (`func() {` vs `func(){`)
-
-Common failures:
-
-```
-Expected: "    func foo() {"     (4 spaces)
-Provided: "  func foo() {"       (2 spaces) ❌ FAILS
-
-Expected: "}\n\nfunc bar() {"    (2 newlines)
-Provided: "}\nfunc bar() {"      (1 newline) ❌ FAILS
-
-Expected: "// Comment"           (space after //)
-Provided: "//Comment"            (no space) ❌ FAILS
-```
-
 UNIQUENESS (when replace_all=false): old_string MUST uniquely identify target instance
 
 - Include 3-5 lines context BEFORE and AFTER change point
@@ -55,36 +59,32 @@ SINGLE INSTANCE: Tool changes ONE instance when replace_all=false
 
 VERIFICATION BEFORE USING: Before every edit
 
-1. View the file and locate exact target location
+1. Read the file and locate exact target location
 2. Check how many instances of target text exist
-3. Copy the EXACT text including all whitespace
+3. Copy the text including all whitespace
 4. Verify you have enough context for unique identification
-5. Double-check indentation matches (count spaces/tabs)
-6. Plan separate calls or use replace_all for multiple changes
+5. Plan separate calls or use edits[] array or replace_all for multiple changes
    </critical_requirements>
 
 <warnings>
 Tool fails if:
 - old_string matches multiple locations and replace_all=false
-- old_string doesn't match exactly (including whitespace)
 - Insufficient context causes wrong instance change
-- Indentation is off by even one space
 - Missing or extra blank lines
-- Wrong tabs vs spaces
 </warnings>
 
 <recovery_steps>
 If you get "old_string not found in file":
 
-1. **View the file again** at the specific location
+1. **Read the file again** at the specific location
 2. **Copy more context** - include entire function if needed
 3. **Check whitespace**:
    - Count indentation spaces/tabs
    - Look for blank lines
    - Check for trailing spaces
 4. **Verify character-by-character** that your old_string matches
-5. If the target contains heavy escaping, repeated text, or special characters, switch to `view(hashline=true)` + `hashline_edit`
-6. **Never guess** - always View the file to get exact text
+5. If the target contains heavy escaping, repeated text, or special characters, use `read(hashline=true)` to get LINE#HASH references, then pass `operations` array to this tool instead of `old_string`
+6. **Never guess** - always read the file to get exact text
    </recovery_steps>
 
 <best_practices>
@@ -93,23 +93,10 @@ If you get "old_string not found in file":
 - Don't leave code in broken state
 - Use absolute file paths (starting with /)
 - Use forward slashes (/) for cross-platform compatibility
-- Multiple edits to same file: send all in single message with multiple tool calls
+- Multiple edits to same file: use the edits[] array parameter for atomic multi-edit
 - **When in doubt, include MORE context rather than less**
-- Use `hashline_edit` instead when line-anchored edits are safer than copying brittle old text
 - Match the existing code style exactly (spaces, tabs, blank lines)
   </best_practices>
-
-<whitespace_checklist>
-Before submitting an edit, verify:
-
-- [ ] Viewed the file first
-- [ ] Counted indentation spaces/tabs
-- [ ] Included blank lines if they exist
-- [ ] Matched brace/bracket positioning
-- [ ] Included 3-5 lines of surrounding context
-- [ ] Verified text appears exactly once (or using replace_all)
-- [ ] Copied text character-for-character, not approximated
-      </whitespace_checklist>
 
 <examples>
 ✅ Correct: Exact match with context
@@ -126,17 +113,31 @@ new_string: "func ProcessData(input string) error {\n    if input == \"\" {\n   
 old_string: "return nil"  // Appears many times!
 ```
 
-❌ Incorrect: Wrong indentation
+✅ Correct: Multiple edits using edits[] array
 
 ```
-old_string: "  if input == \"\" {"  // 2 spaces
-// But file actually has:        "    if input == \"\" {"  // 4 spaces
+file_path: "/path/to/file.go"
+edits: [
+  {"old_string": "foo", "new_string": "bar"},
+  {"old_string": "baz", "new_string": "qux"}
+]
 ```
 
 ✅ Correct: Including context to make unique
 
 ```
 old_string: "func ProcessData(input string) error {\n    if input == \"\" {\n        return errors.New(\"empty input\")\n    }\n    return nil"
+```
+
+✅ Correct: Hashline mode for brittle matches
+
+```
+file_path: "/path/to/file.go"
+operations: [
+  {"operation": "replace_line", "line": "12#PV", "content": "func main() {"},
+  {"operation": "append", "line": "12#PV", "content": "\tlog.Println(\"started\")"},
+  {"operation": "replace_range", "start": "40#MW", "end": "44#QH", "content": "\treturn nil"}
+]
 ```
 
 </examples>

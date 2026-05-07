@@ -184,8 +184,8 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 	}
 
 	if s.isExplicitlyAllowed(opts, eval.Permission) {
-		if mode == session.PermissionModeAuto && isAlwaysManual(eval.Permission, s.workingDir) {
-			slog.Debug("Auto Mode explicit allowlist still requires manual confirmation",
+		if mode == session.PermissionModeAuto && ignoresExplicitAllowInAutoMode(eval.Permission, s.workingDir) {
+			slog.Debug("Auto Mode explicit allowlist ignored for safety-sensitive request",
 				"session_id", sessionAuthorityID,
 				"tool", eval.Permission.ToolName,
 				"action", eval.Permission.Action,
@@ -302,11 +302,10 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 	)
 
 	s.recordClassifierBlock(sessionAuthorityID)
-	return s.promptWithEscalation(ctx, withAutoReview(eval.Permission, permission.AutoReview{
-		Trigger:    permission.AutoReviewTriggerClassifierBlock,
-		Reason:     firstNonEmpty(classification.Reason, "The classifier could not confirm this action is safe to auto-approve."),
-		Confidence: classification.Confidence,
-	}))
+	return false, permission.NewPermissionBlockedError(
+		"Auto Mode classifier blocked this action.",
+		firstNonEmpty(classification.Reason, "The classifier could not confirm this action is safe to auto-approve."),
+	)
 }
 
 func effectivePermissionSessionID(req permission.PermissionRequest) string {
@@ -531,10 +530,20 @@ func (s *service) isExplicitlyAllowed(opts permission.CreatePermissionRequest, r
 
 func isAutoModeAllowlistedRequest(req permission.PermissionRequest) bool {
 	switch req.ToolName {
-	case tools.ViewToolName:
+	case tools.ReadToolName:
 		return req.Action == "read"
-	case tools.LSToolName:
-		return req.Action == "list"
+	case tools.GrepToolName, tools.GlobToolName:
+		return req.Action == "search"
+	case tools.DiagnosticsToolName,
+		tools.ReferencesToolName,
+		tools.LSPDeclarationToolName,
+		tools.LSPDefinitionToolName,
+		tools.LSPImplementationToolName,
+		tools.LSPTypeDefinitionToolName,
+		tools.LSPHoverToolName,
+		tools.LSPDocumentSymbolsToolName,
+		tools.LSPWorkspaceSymbolsToolName:
+		return req.Action == "inspect" || req.Action == "search"
 	default:
 		return false
 	}
@@ -698,7 +707,15 @@ func isSensitiveWorkspacePath(path, workingDir string) bool {
 		return true
 	case strings.HasPrefix(lowerRel, ".crush/"):
 		return true
+	case strings.HasPrefix(lowerRel, ".claude/"):
+		return true
+	case strings.HasPrefix(lowerRel, ".vscode/"):
+		return true
+	case strings.HasPrefix(lowerRel, ".idea/"):
+		return true
 	case strings.HasPrefix(lowerBase, ".env"):
+		return true
+	case isShellStartupFile(lowerBase):
 		return true
 	}
 
@@ -723,6 +740,30 @@ func isAlwaysManual(req permission.PermissionRequest, workingDir string) bool {
 	case tools.EditToolName, tools.WriteToolName, tools.MultiEditToolName, tools.HashlineEditToolName:
 		filePath, ok := permissionRequestFilePath(req)
 		return ok && isSensitiveWorkspacePath(filePath, workingDir)
+	default:
+		return false
+	}
+}
+
+func ignoresExplicitAllowInAutoMode(req permission.PermissionRequest, workingDir string) bool {
+	return isAlwaysManual(req, workingDir) || isBroadAutoModeAllowTool(req.ToolName)
+}
+
+func isBroadAutoModeAllowTool(toolName string) bool {
+	switch toolName {
+	case tools.BashToolName, "agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func isShellStartupFile(name string) bool {
+	switch name {
+	case ".bashrc", ".bash_profile", ".bash_login", ".profile",
+		".zshrc", ".zprofile", ".zlogin", ".zshenv",
+		".config.fish", "config.fish", "profile.ps1", "microsoft.powershell_profile.ps1":
+		return true
 	default:
 		return false
 	}

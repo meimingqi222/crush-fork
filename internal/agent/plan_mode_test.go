@@ -51,7 +51,7 @@ func TestRiskLevelForTool(t *testing.T) {
 	require.Equal(t, toolRiskNetwork, riskLevelForTool(tools.AgenticFetchToolName))
 	require.Equal(t, toolRiskRead, riskLevelForTool(tools.ViewToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.WriteToolName))
-	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.HashlineEditToolName))
+	require.Equal(t, toolRiskExecute, riskLevelForTool(tools.HashlineEditToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.LongTermMemoryToolName))
 	require.Equal(t, toolRiskExecute, riskLevelForTool(tools.BashToolName))
 	require.Equal(t, toolRiskExecute, riskLevelForTool("unknown_tool"))
@@ -118,8 +118,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		AgentToolName,
 		"bash",
 		"grep",
-		"ls",
-		"view",
+		tools.ReadToolName,
 		tools.GlobToolName,
 		tools.FetchToolName,
 		tools.AgenticFetchToolName,
@@ -143,8 +142,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		AgentToolName,
 		"bash",
 		"grep",
-		"ls",
-		"view",
+		tools.ReadToolName,
 		tools.GlobToolName,
 		tools.FetchToolName,
 		tools.AgenticFetchToolName,
@@ -166,8 +164,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 
 	require.Equal(t, []string{
 		"grep",
-		"ls",
-		"view",
+		tools.ReadToolName,
 		tools.GlobToolName,
 		tools.HistorySearchToolName,
 		tools.RequestUserInputToolName,

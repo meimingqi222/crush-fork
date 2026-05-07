@@ -42,7 +42,7 @@ func (m *hashlineEditFileTracker) ListReadFiles(context.Context, string) ([]stri
 
 var _ filetracker.Service = (*hashlineEditFileTracker)(nil)
 
-func runHashlineEditTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params HashlineEditParams) (fantasy.ToolResponse, error) {
+func runHashlineEditTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params EditParams) (fantasy.ToolResponse, error) {
 	t.Helper()
 
 	input, err := json.Marshal(params)
@@ -50,7 +50,7 @@ func runHashlineEditTool(t *testing.T, tool fantasy.AgentTool, ctx context.Conte
 
 	return tool.Run(ctx, fantasy.ToolCall{
 		ID:    "test-call",
-		Name:  HashlineEditToolName,
+		Name:  EditToolName,
 		Input: string(input),
 	})
 }
@@ -60,7 +60,7 @@ func newHashlineEditToolForTest(t *testing.T, workingDir string, tracker filetra
 
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	historySvc := &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}
-	return NewHashlineEditTool(nil, permissions, historySvc, tracker, workingDir)
+	return NewEditTool(nil, permissions, historySvc, tracker, workingDir)
 }
 
 func TestHashlineEditRejectsHashMismatch(t *testing.T) {
@@ -78,7 +78,7 @@ func TestHashlineEditRejectsHashMismatch(t *testing.T) {
 	lineRef = lineRef[:len(lineRef)-1] + mutateHashlineNibble(lineRef[len(lineRef)-1])
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -114,7 +114,7 @@ func TestHashlineEditAppliesOperationsSuccessfully(t *testing.T) {
 	ref4 := formatHashlineReference(4, "delta")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -163,7 +163,7 @@ func TestHashlineEditDetectsRemovedAnchoredLineInLaterOperation(t *testing.T) {
 	ref2 := formatHashlineReference(2, "beta")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -213,7 +213,7 @@ func TestHashlineEditMultiplePrependsSameLine(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -259,7 +259,7 @@ func TestHashlineEditMultipleAppendsSameLine(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -304,7 +304,7 @@ func TestHashlineEditMixedPrependAppendSameLine(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -360,7 +360,7 @@ func TestHashlineEditReplaceRangeThenReferenceAfter(t *testing.T) {
 	ref5 := formatHashlineReference(5, "line5")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -404,7 +404,7 @@ func TestHashlineEditReplaceRangeWithMultipleLinesThenReferenceAfter(t *testing.
 	ref5 := formatHashlineReference(5, "line5")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -445,7 +445,7 @@ func TestHashlineEditAppendToLastLine(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -479,7 +479,7 @@ func TestHashlineEditPrependToFirstLine(t *testing.T) {
 	ref1 := formatHashlineReference(1, "line1")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -514,7 +514,7 @@ func TestHashlineEditDeleteRangeThenAppendAtEnd(t *testing.T) {
 	ref3 := formatHashlineReference(3, "line3")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -561,7 +561,7 @@ func main() {
 	ref7 := formatHashlineReference(7, "\tfmt.Println(\"world\")")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -609,7 +609,7 @@ func TestHashlineEditReplaceLineThenPrependAppend(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -657,7 +657,7 @@ func TestHashlineEditSequentialRangeReplacements(t *testing.T) {
 	ref6 := formatHashlineReference(6, "f")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -685,9 +685,7 @@ func TestHashlineEditSequentialRangeReplacements(t *testing.T) {
 	require.Equal(t, expected, string(data))
 }
 
-// TestHashlineEditAfterExternalModification tests that hash_edit rejects operations
-// when the file was modified externally (simulating edit tool usage).
-func TestHashlineEditAfterExternalModification(t *testing.T) {
+func TestHashlineEditAfterExternalModificationUsesCurrentContent(t *testing.T) {
 	t.Parallel()
 
 	workingDir := t.TempDir()
@@ -695,17 +693,16 @@ func TestHashlineEditAfterExternalModification(t *testing.T) {
 	require.NoError(t, os.WriteFile(filePath, []byte("line1\nline2\nline3\n"), 0o644))
 
 	tracker := newHashlineEditFileTracker()
-	tracker.lastRead[filePath] = time.Now().Add(time.Second)
+	tracker.lastRead[filePath] = time.Now().Add(-time.Second)
 	tool := newHashlineEditToolForTest(t, workingDir, tracker)
 
-	// Simulate external modification (like edit tool modifying the file)
-	time.Sleep(10 * time.Millisecond) // Ensure mod time is different
+	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, os.WriteFile(filePath, []byte("line1\nMODIFIED\nline3\n"), 0o644))
 
-	ref2 := formatHashlineReference(2, "line2") // This is now stale, line 2 has different content
+	ref2 := formatHashlineReference(2, "MODIFIED")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -716,10 +713,11 @@ func TestHashlineEditAfterExternalModification(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	// Should fail either because:
-	// 1. File was modified since last read (mod time check), or
-	// 2. Hash mismatch
-	require.True(t, resp.IsError, "Expected error due to external modification")
+	require.False(t, resp.IsError, "Expected edit to apply against current content: %s", resp.Content)
+
+	data, readErr := os.ReadFile(filePath)
+	require.NoError(t, readErr)
+	require.Equal(t, "line1\nNEW_LINE2\nline3\n", string(data))
 }
 
 // TestHashlineEditAfterExternalModificationWithStaleHash tests that hash_edit
@@ -749,7 +747,7 @@ func TestHashlineEditAfterExternalModificationWithStaleHash(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2") // Stale hash for original "line2"
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -780,7 +778,7 @@ func TestHashlineEditRequiresReadFirst(t *testing.T) {
 	ref2 := formatHashlineReference(2, "line2")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -813,7 +811,7 @@ func TestHashlineEditSequentialOperationsWithFreshHashes(t *testing.T) {
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	// First hash_edit operation
-	resp1, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp1, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -833,7 +831,7 @@ func TestHashlineEditSequentialOperationsWithFreshHashes(t *testing.T) {
 	require.Equal(t, "line1\nMODIFIED_LINE2\nline3\n", string(data))
 
 	// Using stale hash for subsequent operation should fail
-	resp2, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp2, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -849,7 +847,7 @@ func TestHashlineEditSequentialOperationsWithFreshHashes(t *testing.T) {
 
 	// Now use fresh hash for the modified line
 	freshRef2 := formatHashlineReference(2, "MODIFIED_LINE2")
-	resp3, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp3, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -892,7 +890,7 @@ func TestHashlineEditReplaceRangeShrinksThenAppendAfter(t *testing.T) {
 	ref10 := formatHashlineReference(10, "j")
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, HashlineEditParams{
+	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{

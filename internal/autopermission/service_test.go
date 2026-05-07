@@ -202,7 +202,25 @@ func TestAutoPermission_AutoModeReadOnlyRequestSkipsClassifier(t *testing.T) {
 
 	base := &mockPermissionService{
 		Broker:      pubsub.NewBroker[permission.PermissionRequest](),
-		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: "view", Action: "read"}},
+		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: tools.ReadToolName, Action: "read"}},
+		promptGrant: true,
+	}
+	classifier := &mockClassifier{}
+	svc := New(base, &mockSessionService{mode: session.PermissionModeAuto}, nil, func() permission.Classifier { return classifier }, "", false, nil)
+
+	granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{})
+	require.NoError(t, err)
+	require.True(t, granted)
+	require.Zero(t, base.promptCalls)
+	require.Zero(t, classifier.calls)
+}
+
+func TestAutoPermission_AutoModeReadOnlySearchRequestSkipsClassifier(t *testing.T) {
+	t.Parallel()
+
+	base := &mockPermissionService{
+		Broker:      pubsub.NewBroker[permission.PermissionRequest](),
+		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: tools.GrepToolName, Action: "search"}},
 		promptGrant: true,
 	}
 	classifier := &mockClassifier{}
@@ -391,25 +409,57 @@ func TestAutoPermission_AutoModeExplicitAllowListDoesNotBypassAlwaysManualRules(
 	require.Equal(t, permission.AutoReviewTriggerAlwaysManual, base.lastPrompt.AutoReview.Trigger)
 }
 
-func TestAutoPermission_AutoModeClassifierBlockFallsBackToPrompt(t *testing.T) {
+func TestAutoPermission_AutoModeExplicitAllowListIgnoresBroadBash(t *testing.T) {
 	t.Parallel()
 
 	base := &mockPermissionService{
-		Broker:      pubsub.NewBroker[permission.PermissionRequest](),
-		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: "edit", Action: "write"}},
-		promptGrant: true,
+		Broker: pubsub.NewBroker[permission.PermissionRequest](),
+		evalResult: permission.EvaluationResult{
+			Decision: permission.EvaluationDecisionAsk,
+			Permission: permission.PermissionRequest{
+				SessionID: "s1",
+				ToolName:  tools.BashToolName,
+				Action:    "execute",
+				Params: tools.BashPermissionsParams{
+					Command: "go test ./internal/autopermission",
+				},
+			},
+		},
+	}
+	classifier := &mockClassifier{result: permission.AutoClassification{AllowAuto: true}}
+	svc := New(base, &mockSessionService{mode: session.PermissionModeAuto}, nil, func() permission.Classifier { return classifier }, "", false, []string{tools.BashToolName})
+
+	granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{
+		SessionID: "s1",
+		ToolName:  tools.BashToolName,
+		Action:    "execute",
+	})
+	require.NoError(t, err)
+	require.True(t, granted)
+	require.Zero(t, base.promptCalls)
+	require.Equal(t, 1, classifier.calls)
+}
+
+func TestAutoPermission_AutoModeClassifierBlockDeniesRequest(t *testing.T) {
+	t.Parallel()
+
+	base := &mockPermissionService{
+		Broker:     pubsub.NewBroker[permission.PermissionRequest](),
+		evalResult: permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: "edit", Action: "write"}},
 	}
 	classifier := &mockClassifier{result: permission.AutoClassification{AllowAuto: false}}
 	svc := New(base, &mockSessionService{mode: session.PermissionModeAuto}, nil, func() permission.Classifier { return classifier }, "", false, nil)
 
 	granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{})
-	require.NoError(t, err)
-	require.True(t, granted)
-	require.Equal(t, 1, base.promptCalls)
+	require.False(t, granted)
+	require.Error(t, err)
+	require.True(t, permission.IsPermissionError(err))
+	require.Zero(t, base.promptCalls)
 	require.Equal(t, 1, classifier.calls)
-	require.NotNil(t, base.lastPrompt.AutoReview)
-	require.Equal(t, permission.AutoReviewTriggerClassifierBlock, base.lastPrompt.AutoReview.Trigger)
-	require.Equal(t, "The classifier could not confirm this action is safe to auto-approve.", base.lastPrompt.AutoReview.Reason)
+	permissionErr, ok := permission.AsPermissionError(err)
+	require.True(t, ok)
+	require.Equal(t, permission.PermissionErrorKindPolicyDenied, permissionErr.Kind)
+	require.Equal(t, "The classifier could not confirm this action is safe to auto-approve.", permissionErr.Details)
 }
 
 func TestAutoPermission_AutoModeClassifierErrorFallsBackToPrompt(t *testing.T) {
@@ -444,21 +494,22 @@ func TestAutoPermission_SuspendsClassifierAfterRepeatedBlocks(t *testing.T) {
 	classifier := &mockClassifier{result: permission.AutoClassification{AllowAuto: false}}
 	svc := New(base, &mockSessionService{mode: session.PermissionModeAuto}, nil, func() permission.Classifier { return classifier }, "", false, nil)
 
-	// First 3 classifier blocks should fall back to prompting the user.
 	for range defaultMaxConsecutiveClassifierBlocks {
 		granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{})
-		require.NoError(t, err)
-		require.True(t, granted)
+		require.False(t, granted)
+		require.Error(t, err)
+		require.True(t, permission.IsPermissionError(err))
 	}
 	require.Equal(t, defaultMaxConsecutiveClassifierBlocks, classifier.calls)
-	require.Equal(t, defaultMaxConsecutiveClassifierBlocks, base.promptCalls)
+	require.Zero(t, base.promptCalls)
 
-	// After reaching threshold, should prompt user without calling the classifier.
 	granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{})
 	require.NoError(t, err)
 	require.True(t, granted)
 	require.Equal(t, defaultMaxConsecutiveClassifierBlocks, classifier.calls)
-	require.Equal(t, defaultMaxConsecutiveClassifierBlocks+1, base.promptCalls)
+	require.Equal(t, 1, base.promptCalls)
+	require.NotNil(t, base.lastPrompt.AutoReview)
+	require.Equal(t, permission.AutoReviewTriggerClassifierSuspended, base.lastPrompt.AutoReview.Trigger)
 }
 
 func TestAutoPermission_AutoModeReadOnlyBashSkipsClassifier(t *testing.T) {
@@ -862,6 +913,10 @@ func TestIsSensitiveWorkspacePath(t *testing.T) {
 		{name: "env file", path: filepath.Join(workingDir, ".env.local"), want: true},
 		{name: "git metadata", path: filepath.Join(workingDir, ".git", "config"), want: true},
 		{name: "cursor rules", path: filepath.Join(workingDir, ".cursor", "rules", "rule.mdc"), want: true},
+		{name: "claude settings", path: filepath.Join(workingDir, ".claude", "settings.json"), want: true},
+		{name: "vscode settings", path: filepath.Join(workingDir, ".vscode", "settings.json"), want: true},
+		{name: "idea settings", path: filepath.Join(workingDir, ".idea", "workspace.xml"), want: true},
+		{name: "shell startup file", path: filepath.Join(workingDir, ".zshrc"), want: true},
 		{name: "normal source file", path: filepath.Join(workingDir, "internal", "agent", "file.go"), want: false},
 		{name: "outside workspace", path: filepath.Join(filepath.Dir(workingDir), "other.go"), want: true},
 	}

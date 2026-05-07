@@ -568,9 +568,25 @@ func (m *Models) setProviderItems() error {
 		}
 	}
 
-	// Move "Charm Hyper" to first position.
-	// (But still after recent models and custom providers).
+	// Sort known providers: configured providers (those with crush.json entries) first,
+	// then Hyper, then other non-configured providers. This ensures user-defined
+	// known providers surface near the top, just after recent models and pure-custom
+	// providers.
 	slices.SortStableFunc(m.providers, func(a, b catwalk.Provider) int {
+		_, aConfigured := cfg.Providers.Get(string(a.ID))
+		aConfigured = aConfigured && !addedProviders[string(a.ID)]
+		_, bConfigured := cfg.Providers.Get(string(b.ID))
+		bConfigured = bConfigured && !addedProviders[string(b.ID)]
+
+		// Configured providers come before non-configured ones.
+		if aConfigured != bConfigured {
+			if aConfigured {
+				return -1
+			}
+			return 1
+		}
+
+		// Among same tier, Hyper comes first.
 		switch {
 		case a.ID == "hyper":
 			return -1

@@ -27,18 +27,23 @@ func TestIsReadOnlyAgent(t *testing.T) {
 			expected:     false,
 		},
 		{
-			name:         "read-only tools returns true",
+			name:         "legacy read-only tools returns false",
 			allowedTools: []string{"glob", "grep", "ls", "view"},
+			expected:     false,
+		},
+		{
+			name:         "read-only tools returns true",
+			allowedTools: []string{"bash", "glob", "grep", "tool_search", "read"},
 			expected:     true,
 		},
 		{
 			name:         "read-only tools with sourcegraph returns true",
-			allowedTools: []string{"sourcegraph", "view", "grep"},
+			allowedTools: []string{"sourcegraph", "read", "grep", "lsp_definition", "lsp_workspace_symbols"},
 			expected:     true,
 		},
 		{
 			name:         "mixed tools returns false",
-			allowedTools: []string{"glob", "bash", "view"},
+			allowedTools: []string{"glob", "edit", "read"},
 			expected:     false,
 		},
 		{
@@ -114,17 +119,24 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 	require.NoError(t, err)
 	cfg.Config().Options.ContextPaths = nil
 
+	// hashline_edit functionality is now integrated into the edit tool via
+	// its operations[] parameter, so the AllowedTools list only needs the
+	// core editing tools. The read tool (formerly "view") provides hashline
+	// anchors via read(hashline=true).
 	promptBuilder, err := promptForAgent(config.Agent{
 		ID:           config.AgentGeneral,
-		AllowedTools: []string{"view", "edit", "multiedit", "hashline_edit", "write"},
+		AllowedTools: []string{"read", "edit", "write"},
 	}, true)
 	require.NoError(t, err)
 
 	built, err := promptBuilder.Build(t.Context(), "", "", cfg)
 	require.NoError(t, err)
-	assert.Contains(t, built, "`hashline_edit`")
-	assert.Contains(t, built, "`view(hashline=true)`")
-	assert.Contains(t, built, "exact-match retries are failing")
+	// Guidance about hashline-anchored edits via the edit tool's operations[]
+	assert.Contains(t, built, "operations[]")
+	// The read tool's hashline mode should be referenced
+	assert.Contains(t, built, "read(hashline=true)")
+	// Should explain when hashline mode is preferred
+	assert.Contains(t, built, "brittle")
 }
 
 func TestPromptForAgentBuildIncludesLifecyclePolicyAndInitialPrompt(t *testing.T) {
