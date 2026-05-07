@@ -1537,6 +1537,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 	}
 
 	apiKey, _ := c.cfg.Resolve(providerCfg.APIKey)
+	apiKey = config.DecryptAPIKeyIfNeeded(apiKey)
 	baseURL, _ := c.cfg.Resolve(providerCfg.BaseURL)
 
 	switch providerCfg.Type {

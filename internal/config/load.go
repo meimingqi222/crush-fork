@@ -47,7 +47,7 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	// Determine paths:
 	// - workspaceConfigPath: project-level config in .crush/crush.json (can be committed)
 	// - projectDataDir: centralized data storage (sessions, memory, logs)
-	// 
+	//
 	// For workspaceConfigPath, we use workingDir directly (not workspaceIdentityDir)
 	// because workspaceIdentityDir may resolve to a different path via env vars like PWD.
 	// We want the config to be at <workingDir>/.crush/crush.json.
@@ -129,6 +129,9 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	store.knownProviders = providers
 
 	env := env.New()
+	// Migrate any plaintext API keys to encrypted storage before providers are
+	// configured so the resolved in-memory values are always decrypted correctly.
+	migrateAPIKeyEncryption(store)
 	// Configure providers
 	valueResolver := NewShellVariableResolver(env)
 	store.resolver = valueResolver
@@ -389,9 +392,11 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			continue
 		}
 		apiKey, err := resolver.ResolveValue(providerConfig.APIKey)
+		apiKey = DecryptAPIKeyIfNeeded(apiKey)
 		if apiKey == "" || err != nil {
 			slog.Warn("Provider is missing API key, this might be OK for local providers", "provider", id)
 		}
+		providerConfig.APIKey = apiKey
 		baseURL, err := resolver.ResolveValue(providerConfig.BaseURL)
 		if baseURL == "" || err != nil {
 			slog.Warn("Skipping custom provider due to missing API endpoint", "provider", id, "error", err)
