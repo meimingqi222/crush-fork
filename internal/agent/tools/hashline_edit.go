@@ -78,12 +78,9 @@ func NewHashlineEditTool(
 			}
 
 			lastRead := filetracker.LastReadTime(ctx, sessionID, params.FilePath)
-			if lastRead.IsZero() {
-				return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the View tool first"), nil
-			}
 
 			modTime := fileInfo.ModTime().Truncate(time.Second)
-			if modTime.After(lastRead) {
+			if !lastRead.IsZero() && modTime.After(lastRead) {
 				return fantasy.NewTextErrorResponse(
 					fmt.Sprintf("file %s has been modified since it was last read (mod time: %s, last read: %s)",
 						params.FilePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339),

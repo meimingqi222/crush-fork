@@ -264,10 +264,6 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for editing file")
 	}
 
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the read tool first"), nil
-	}
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -523,10 +519,6 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for deleting content")
 	}
 
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the read tool first"), nil
-	}
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -656,10 +648,6 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for edit a file")
 	}
 
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the read tool first"), nil
-	}
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -913,10 +901,6 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", filePath)), nil
 	}
 
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the read tool first"), nil
-	}
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
