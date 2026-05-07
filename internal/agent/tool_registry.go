@@ -121,7 +121,6 @@ func isFantasyToolParallelSafe(tool fantasy.AgentTool) bool {
 	case agenttools.FetchToolName,
 		agenttools.GlobToolName,
 		agenttools.GrepToolName,
-		agenttools.LSToolName,
 		agenttools.ViewToolName,
 		agenttools.DiagnosticsToolName,
 		agenttools.ReferencesToolName,

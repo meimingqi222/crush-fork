@@ -81,6 +81,24 @@ func (v *ViewToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	if err := json.Unmarshal([]byte(opts.Result.Metadata), &meta); err == nil && meta.Content != "" {
 		content = meta.Content
 	}
+
+	// Handle directory listing (view called on a directory path).
+	if meta.IsDirectory {
+		path := fsext.PrettyPath(params.FilePath)
+		dirHeader := toolHeader(sty, opts.Status, "List", cappedWidth, opts.Compact, path)
+		if opts.Compact {
+			return dirHeader
+		}
+		if earlyState, ok := toolEarlyStateContent(sty, opts, cappedWidth); ok {
+			return joinToolParts(dirHeader, earlyState)
+		}
+		if opts.HasEmptyResult() {
+			return dirHeader
+		}
+		bodyWidth := cappedWidth - toolBodyLeftPaddingTotal
+		body := sty.Tool.Body.Render(toolOutputPlainContent(sty, opts.Result.Content, bodyWidth, opts.ExpandedContent))
+		return joinToolParts(dirHeader, body)
+	}
 	if review, ok := opts.Result.AutoReview(); ok && review.Sanitized {
 		if opts.Result.ModelSafeContent() == "" {
 			return header

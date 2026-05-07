@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/imageutil"
@@ -28,19 +29,23 @@ import (
 var viewDescription []byte
 
 type ViewParams struct {
-	FilePath           string `json:"file_path" description:"The path to the file to read"`
-	Offset             int    `json:"offset,omitempty" description:"The line number to start reading from (0-based)"`
-	Limit              int    `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000)"`
-	Hashline           bool   `json:"hashline,omitempty" description:"If true, include hashline anchors in the output for line-addressable editing"`
-	WaitForDiagnostics *bool  `json:"wait_for_diagnostics,omitempty" description:"If true, wait for LSP diagnostics (default: true)"`
+	FilePath           string   `json:"file_path" description:"The path to the file to read"`
+	Offset             int      `json:"offset,omitempty" description:"The line number to start reading from (0-based)"`
+	Limit              int      `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000)"`
+	Hashline           bool     `json:"hashline,omitempty" description:"If true, include hashline anchors in the output for line-addressable editing"`
+	WaitForDiagnostics *bool    `json:"wait_for_diagnostics,omitempty" description:"If true, wait for LSP diagnostics (default: true)"`
+	Ignore             []string `json:"ignore,omitempty" description:"List of glob patterns to ignore (when file_path is a directory)"`
+	Depth              int      `json:"depth,omitempty" description:"The maximum directory depth to traverse (when file_path is a directory)"`
 }
 
 type ViewPermissionsParams struct {
-	FilePath           string `json:"file_path"`
-	Offset             int    `json:"offset"`
-	Limit              int    `json:"limit"`
-	Hashline           bool   `json:"hashline,omitempty"`
-	WaitForDiagnostics *bool  `json:"wait_for_diagnostics,omitempty"`
+	FilePath           string   `json:"file_path"`
+	Offset             int      `json:"offset"`
+	Limit              int      `json:"limit"`
+	Hashline           bool     `json:"hashline,omitempty"`
+	WaitForDiagnostics *bool    `json:"wait_for_diagnostics,omitempty"`
+	Ignore             []string `json:"ignore,omitempty"`
+	Depth              int      `json:"depth,omitempty"`
 }
 
 type ViewResourceType string
@@ -61,11 +66,13 @@ type ViewResponseMetadata struct {
 	RecoveryAction      string           `json:"recovery_action,omitempty"`
 	FallbackTool        string           `json:"fallback_tool,omitempty"`
 	FallbackToolQuery   string           `json:"fallback_tool_query,omitempty"`
+	IsDirectory         bool             `json:"is_directory,omitempty"`
 }
 
 const (
 	ReadToolName     = "read"
 	ViewToolName     = "view"
+	LSToolName       = "ls"
 	MaxViewSize      = 1 * 1024 * 1024 // 1MB
 	DefaultReadLimit = 2000
 	MaxLineLength    = 2000
@@ -84,9 +91,10 @@ func NewViewTool(
 	permissions permission.Service,
 	filetracker filetracker.Service,
 	workingDir string,
+	lsConfig config.ToolLs,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
-	return NewReadTool(lspManager, permissions, filetracker, workingDir, skillsPaths...)
+	return NewReadTool(lspManager, permissions, filetracker, workingDir, lsConfig, skillsPaths...)
 }
 
 func NewReadTool(
@@ -94,6 +102,7 @@ func NewReadTool(
 	permissions permission.Service,
 	filetracker filetracker.Service,
 	workingDir string,
+	lsConfig config.ToolLs,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
@@ -168,10 +177,17 @@ func NewReadTool(
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error accessing file: %v", err)), nil
 			}
 
-			// Check if it's a directory — automatically fall back to listing its
-			// contents so the LLM gets useful information instead of an error.
+			// Check if it's a directory — automatically list its contents.
 			if fileInfo.IsDir() {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s. Use the 'ls' tool to list directory contents.", filePath)), nil
+				lsParams := LSParams{Ignore: params.Ignore, Depth: params.Depth}
+				out, _, lsErr := ListDirectoryTree(filePath, lsParams, lsConfig)
+				if lsErr != nil {
+					return fantasy.NewTextErrorResponse(lsErr.Error()), nil
+				}
+				return fantasy.WithResponseMetadata(
+					fantasy.NewTextResponse(out),
+					ViewResponseMetadata{FilePath: filePath, Content: out, IsDirectory: true},
+				), nil
 			}
 
 			isSupportedImage, mimeType := getImageMimeType(filePath)

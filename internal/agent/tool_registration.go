@@ -106,7 +106,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
-		agenttools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		agenttools.NewSourcegraphTool(nil),
 		agenttools.NewCrushInfoTool(c.cfg, c.lspManager),
 		agenttools.NewCrushLogsTool(filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
@@ -121,7 +120,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),
 		agenttools.NewSubtaskResultTool(c.messages),
-		agenttools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
+		agenttools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
 	for _, tool := range builtin {

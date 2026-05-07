@@ -688,7 +688,7 @@ func TestConfig_setupAgentsWithNoDisabledTools(t *testing.T) {
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Equal(t, []string{"bash", "glob", "grep", "ls", "tool_search", "view"}, exploreAgent.AllowedTools)
+	assert.Equal(t, []string{"bash", "glob", "grep", "tool_search", "view"}, exploreAgent.AllowedTools)
 	assert.Equal(t, AgentModeSubagent, exploreAgent.Mode)
 	assert.Equal(t, "researcher", exploreAgent.Role)
 	assert.Contains(t, exploreAgent.AdditionalPrompt, "Act as a read-only researcher")

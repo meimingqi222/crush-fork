@@ -720,7 +720,6 @@ func allToolNames() []string {
 		"agentic_fetch",
 		"glob",
 		"grep",
-		"ls",
 		"request_user_input",
 
 		"crush_info",
@@ -745,7 +744,7 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"bash", "glob", "grep", "ls", "tool_search", "view"}
+	readOnlyTools := []string{"bash", "glob", "grep", "tool_search", "view"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }

@@ -2,18 +2,13 @@ package tools
 
 import (
 	"cmp"
-	"context"
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/fsext"
-	"github.com/charmbracelet/crush/internal/permission"
 )
 
 type LSParams struct {
@@ -47,78 +42,7 @@ type LSResponseMetadata struct {
 	Truncated     bool `json:"truncated"`
 }
 
-const (
-	LSToolName = "ls"
-	maxLSFiles = 1000
-)
-
-//go:embed ls.md
-var lsDescription []byte
-
-func NewLsTool(permissions permission.Service, workingDir string, lsConfig config.ToolLs) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
-		LSToolName,
-		string(lsDescription),
-		func(ctx context.Context, params LSParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			// Use session-specific working directory from context if available.
-			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
-
-			searchPath, err := fsext.Expand(cmp.Or(params.Path, effectiveWorkingDir))
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("error expanding path: %v", err)), nil
-			}
-
-			searchPath = filepathext.SmartJoin(effectiveWorkingDir, searchPath)
-
-			// Check if directory is outside working directory and request permission if needed
-			absWorkingDir, err := filepath.Abs(effectiveWorkingDir)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("error resolving working directory: %v", err)), nil
-			}
-
-			absSearchPath, err := filepath.Abs(searchPath)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("error resolving search path: %v", err)), nil
-			}
-
-			relPath, err := filepath.Rel(absWorkingDir, absSearchPath)
-			if err != nil || strings.HasPrefix(relPath, "..") {
-				// Directory is outside working directory, request permission
-				sessionID := GetSessionFromContext(ctx)
-				if sessionID == "" {
-					return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for accessing directories outside working directory")
-				}
-
-				permissionResponse, err := RequestPermission(ctx, permissions,
-					permission.CreatePermissionRequest{
-						SessionID:   sessionID,
-						Path:        absSearchPath,
-						ToolCallID:  call.ID,
-						ToolName:    LSToolName,
-						Action:      "list",
-						Description: fmt.Sprintf("List directory outside working directory: %s", absSearchPath),
-						Params:      LSPermissionsParams(params),
-					},
-				)
-				if err != nil {
-					return fantasy.ToolResponse{}, err
-				}
-				if permissionResponse != nil {
-					return *permissionResponse, nil
-				}
-			}
-
-			output, metadata, err := ListDirectoryTree(searchPath, params, lsConfig)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(err.Error()), nil
-			}
-
-			return fantasy.WithResponseMetadata(
-				fantasy.NewTextResponse(output),
-				metadata,
-			), nil
-		})
-}
+const maxLSFiles = 1000
 
 func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolLs) (string, LSResponseMetadata, error) {
 	if _, err := os.Stat(searchPath); os.IsNotExist(err) {

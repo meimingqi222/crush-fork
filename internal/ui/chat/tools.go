@@ -260,8 +260,6 @@ func NewToolMessageItem(
 		item = NewGlobToolMessageItem(sty, toolCall, result, canceled)
 	case tools.GrepToolName:
 		item = NewGrepToolMessageItem(sty, toolCall, result, canceled)
-	case tools.LSToolName:
-		item = NewLSToolMessageItem(sty, toolCall, result, canceled)
 	case tools.DownloadToolName:
 		item = NewDownloadToolMessageItem(sty, toolCall, result, canceled)
 	case tools.FetchToolName:
@@ -1034,15 +1032,6 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			}
 			return strings.Join(parts, "\n")
 		}
-	case tools.LSToolName:
-		var params tools.LSParams
-		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
-			path := params.Path
-			if path == "" {
-				path = "."
-			}
-			return fmt.Sprintf("**Path:** %s", fsext.PrettyPath(path))
-		}
 	case tools.DownloadToolName:
 		var params tools.DownloadParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
@@ -1124,7 +1113,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1468,8 +1457,6 @@ func prettifyToolName(name string) string {
 		return "Glob"
 	case tools.GrepToolName:
 		return "Grep"
-	case tools.LSToolName:
-		return "List"
 	case tools.SourcegraphToolName:
 		return "Sourcegraph"
 	case tools.TodosToolName:

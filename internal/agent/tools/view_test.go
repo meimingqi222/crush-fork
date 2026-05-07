@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -137,7 +138,7 @@ func TestViewHashlineSupportsEditingTruncatedLongLines(t *testing.T) {
 
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	tracker := newHashlineEditFileTracker()
-	viewTool := NewViewTool(nil, permissions, tracker, workingDir)
+	viewTool := NewViewTool(nil, permissions, tracker, workingDir, config.ToolLs{})
 	hashlineTool := NewEditTool(nil, permissions, &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}, tracker, workingDir)
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
@@ -178,7 +179,7 @@ func TestViewTool_AllowsLargeImageWithCompression(t *testing.T) {
 	require.NoError(t, os.WriteFile(filePath, largePNG, 0o644))
 
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 	ctx = context.WithValue(ctx, SupportsImagesContextKey, true)
@@ -199,7 +200,7 @@ func TestViewTool_AllowsReadingLargeFilesWithLimit(t *testing.T) {
 	require.NoError(t, os.WriteFile(filePath, largeText, 0o644))
 
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
@@ -215,7 +216,7 @@ func TestViewTool_MissingFileUsesConciseError(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "missing.txt"})
@@ -233,7 +234,7 @@ func TestViewTool_MissingFileIncludesSimilarPathSuggestions(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "read.go.txt"), []byte("package test"), 0o644))
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "read.go"})
@@ -253,7 +254,7 @@ func TestViewTool_InvalidPathSyntaxReturnsToolErrorResponse(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
-	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir)
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "*.go"})

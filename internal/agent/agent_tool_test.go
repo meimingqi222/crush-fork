@@ -151,7 +151,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	for _, tool := range exploreTools {
 		exploreNames = append(exploreNames, tool.Info().Name)
 	}
-	assert.Equal(t, []string{"bash", "glob", "grep", "ls", "tool_search", "view"}, exploreNames)
+	assert.Equal(t, []string{"bash", "glob", "grep", "tool_search", "view"}, exploreNames)
 }
 
 func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
@@ -181,7 +181,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	assert.Equal(t, []string{
 		"glob",
 		"grep",
-		"ls",
 		"lsp_declaration",
 		"lsp_definition",
 		"lsp_diagnostics",

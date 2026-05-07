@@ -493,10 +493,6 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 		if filePath != "" {
 			lines = append(lines, p.renderKeyValue("File", fsext.PrettyPath(filePath), contentWidth))
 		}
-	case tools.LSToolName:
-		if params, ok := p.permission.Params.(tools.LSPermissionsParams); ok {
-			lines = append(lines, p.renderKeyValue("Directory", fsext.PrettyPath(params.Path), contentWidth))
-		}
 	}
 	if review := p.renderAutoReview(contentWidth); review != "" {
 		lines = append(lines, "", review)
@@ -575,8 +571,6 @@ func (p *Permissions) renderContent(width int) string {
 		return p.renderAgenticFetchContent(width)
 	case tools.ViewToolName:
 		return p.renderViewContent(width)
-	case tools.LSToolName:
-		return p.renderLSContent(width)
 	default:
 		return p.renderDefaultContent(width)
 	}
@@ -695,20 +689,6 @@ func (p *Permissions) renderViewContent(width int) string {
 	}
 	if params.Limit > 0 && params.Limit != 2000 {
 		content += fmt.Sprintf("\nLines to read: %d", params.Limit)
-	}
-
-	return p.renderContentPanel(content, width)
-}
-
-func (p *Permissions) renderLSContent(width int) string {
-	params, ok := p.permission.Params.(tools.LSPermissionsParams)
-	if !ok {
-		return ""
-	}
-
-	content := fmt.Sprintf("Directory: %s", fsext.PrettyPath(params.Path))
-	if len(params.Ignore) > 0 {
-		content += fmt.Sprintf("\nIgnore patterns: %s", strings.Join(params.Ignore, ", "))
 	}
 
 	return p.renderContentPanel(content, width)
