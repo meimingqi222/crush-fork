@@ -182,7 +182,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"glob",
 		"grep",
 		"ls",
-		"ls",
 		"lsp_declaration",
 		"lsp_definition",
 		"lsp_diagnostics",
@@ -205,7 +204,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	assert.NotContains(t, planNames, "edit")
 	assert.NotContains(t, planNames, tools.HashlineEditToolName)
 	assert.NotContains(t, planNames, tools.LongTermMemoryToolName)
-	assert.NotContains(t, planNames, "multiedit")
 	assert.NotContains(t, planNames, "write")
 	assert.NotContains(t, planNames, "todos")
 }
@@ -237,7 +235,7 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 
 	assert.NotContains(t, defaultNames, "bash")
 	assert.NotContains(t, defaultNames, "fetch")
-	assert.Contains(t, defaultNames, "read")
+	assert.Contains(t, defaultNames, "view")
 	assert.Contains(t, defaultNames, "write")
 }
 

@@ -136,7 +136,7 @@ Examples of autonomous decisions:
 - `edit` - Exact find/replace (single or multiple via `edits[]`); or hashline-anchored edits via `operations[]` when text matching is brittle
 - `write` - Create or overwrite an entire file when replacing the whole contents is simpler than patching
 
-Never use `apply_patch`, `multiedit`, `hashline_edit`, or similar - those tools don't exist.
+Never use `apply_patch`, `hashline_edit`, or similar - those tools don't exist.
 
 Critical: ALWAYS read files before editing them in this conversation.
 

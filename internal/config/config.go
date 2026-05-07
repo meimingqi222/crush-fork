@@ -703,7 +703,6 @@ func allToolNames() []string {
 		"download",
 		"edit",
 		"hashline_edit",
-		"multiedit",
 		"lsp_diagnostics",
 		"lsp_references",
 		"lsp_declaration",

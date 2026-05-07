@@ -763,36 +763,6 @@ func TestHashlineEditAfterExternalModificationWithStaleHash(t *testing.T) {
 	require.Contains(t, resp.Content, "hash mismatch")
 }
 
-// TestHashlineEditRequiresReadFirst tests that hash_edit requires reading the file first.
-func TestHashlineEditRequiresReadFirst(t *testing.T) {
-	t.Parallel()
-
-	workingDir := t.TempDir()
-	filePath := filepath.Join(workingDir, "main.txt")
-	require.NoError(t, os.WriteFile(filePath, []byte("line1\nline2\nline3\n"), 0o644))
-
-	tracker := newHashlineEditFileTracker()
-	// Don't record any read - simulate that file was never read with view tool
-	tool := newHashlineEditToolForTest(t, workingDir, tracker)
-
-	ref2 := formatHashlineReference(2, "line2")
-
-	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
-	resp, err := runHashlineEditTool(t, tool, ctx, EditParams{
-		FilePath: filePath,
-		Operations: []HashlineEditOperation{
-			{
-				Operation: hashlineEditOpReplaceLine,
-				Line:      ref2,
-				Content:   "NEW_LINE2",
-			},
-		},
-	})
-	require.NoError(t, err)
-	require.True(t, resp.IsError)
-	require.Contains(t, resp.Content, "must read the file before editing")
-}
-
 // TestHashlineEditSequentialOperationsWithFreshHashes tests that sequential
 // hash_edit operations work correctly when using fresh hashes from previous edits.
 func TestHashlineEditSequentialOperationsWithFreshHashes(t *testing.T) {

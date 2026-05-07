@@ -815,18 +815,6 @@ func TestIsSafeWorkspaceWrite(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "safe multiedit in workspace",
-			req: permission.PermissionRequest{
-				ToolName: tools.MultiEditToolName,
-				Action:   "write",
-				Path:     workingDir,
-				Params: tools.MultiEditPermissionsParams{
-					FilePath: insideFile,
-				},
-			},
-			want: true,
-		},
-		{
 			name: "safe hashline edit in workspace",
 			req: permission.PermissionRequest{
 				ToolName: tools.HashlineEditToolName,

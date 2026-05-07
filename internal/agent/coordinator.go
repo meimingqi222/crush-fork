@@ -2664,7 +2664,7 @@ func taskGraphToolResultFiles(toolResult message.ToolResult) []string {
 		FilePath string `json:"file_path"`
 	}
 	switch toolResult.Name {
-	case tools.WriteToolName, tools.EditToolName, tools.MultiEditToolName, tools.HashlineEditToolName:
+	case tools.WriteToolName, tools.EditToolName, tools.HashlineEditToolName:
 		if strings.TrimSpace(toolResult.Metadata) == "" {
 			return nil
 		}

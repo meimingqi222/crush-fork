@@ -48,41 +48,6 @@ func TestViewToolRenderContextRendersSanitizedResultAsPlainText(t *testing.T) {
 	require.NotContains(t, out, "|package main")
 }
 
-func TestMultiEditToolRenderContextParsesMetadataWithoutAutoReviewCollision(t *testing.T) {
-	t.Parallel()
-
-	sty := styles.DefaultStyles()
-	renderer := &MultiEditToolRenderContext{}
-
-	metaJSON, err := json.Marshal(tools.MultiEditResponseMetadata{
-		OldContent:   "line1\n",
-		NewContent:   "line1\nline2\n",
-		Additions:    1,
-		Removals:     0,
-		EditsApplied: 1,
-	})
-	require.NoError(t, err)
-
-	result := message.ToolResult{
-		Name:     tools.MultiEditToolName,
-		Content:  "Applied 1 edits to file: /tmp/test.go",
-		Metadata: string(metaJSON),
-	}
-
-	out := renderer.RenderTool(&sty, 120, &ToolRenderOpts{
-		ToolCall: message.ToolCall{
-			Name:  tools.MultiEditToolName,
-			Input: `{"file_path":"/tmp/test.go","edits":[{"old_string":"line1","new_string":"line1\nline2"}]}`,
-		},
-		Result:     &result,
-		Status:     ToolStatusSuccess,
-		IsSpinning: false,
-	})
-
-	require.NotContains(t, out, "Applied 1 edits to file")
-	require.Contains(t, out, "line2")
-}
-
 func TestViewToolRenderContextRendersSanitizedResultWithWindowsPath(t *testing.T) {
 	t.Parallel()
 

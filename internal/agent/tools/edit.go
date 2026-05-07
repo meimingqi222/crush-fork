@@ -44,11 +44,20 @@ type EditPermissionsParams struct {
 }
 
 type EditResponseMetadata struct {
-	FilePath   string `json:"file_path,omitempty"`
-	Additions  int    `json:"additions"`
-	Removals   int    `json:"removals"`
-	OldContent string `json:"old_content,omitempty"`
-	NewContent string `json:"new_content,omitempty"`
+	FilePath     string       `json:"file_path,omitempty"`
+	Additions    int          `json:"additions"`
+	Removals     int          `json:"removals"`
+	OldContent   string       `json:"old_content,omitempty"`
+	NewContent   string       `json:"new_content,omitempty"`
+	EditsApplied int          `json:"edits_applied,omitempty"`
+	EditsFailed  []FailedEdit `json:"edits_failed,omitempty"`
+}
+
+// FailedEdit records a single edit operation that could not be applied.
+type FailedEdit struct {
+	Index int       `json:"index"`
+	Error string    `json:"error"`
+	Edit  EditEntry `json:"edit"`
 }
 
 const EditToolName = "edit"
@@ -168,7 +177,7 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
 				Error: err.Error(),
-				Edit:  MultiEditOperation{OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll},
+				Edit:  EditEntry{OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll},
 			})
 			continue
 		}
@@ -234,7 +243,7 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 
 	return fantasy.WithResponseMetadata(
 		fantasy.NewTextResponse(message),
-		MultiEditResponseMetadata{
+		EditResponseMetadata{
 			FilePath:     filePath,
 			OldContent:   "",
 			NewContent:   currentContent,
@@ -280,7 +289,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
 				Error: applyErr.Error(),
-				Edit:  MultiEditOperation{OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll},
+				Edit:  EditEntry{OldString: e.OldString, NewString: e.NewString, ReplaceAll: e.ReplaceAll},
 			})
 			continue
 		}
@@ -291,7 +300,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 		if len(failedEdits) > 0 {
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextErrorResponse(fmt.Sprintf("no changes made - all %d edit(s) failed", len(failedEdits))),
-				MultiEditResponseMetadata{
+				EditResponseMetadata{
 					FilePath:     filePath,
 					EditsApplied: 0,
 					EditsFailed:  failedEdits,
@@ -370,7 +379,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 
 	return fantasy.WithResponseMetadata(
 		fantasy.NewTextResponse(message),
-		MultiEditResponseMetadata{
+		EditResponseMetadata{
 			FilePath:     filePath,
 			OldContent:   oldContent,
 			NewContent:   currentContent,
