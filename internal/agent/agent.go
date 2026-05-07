@@ -445,6 +445,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Memory is now injected as user message (see below), not in system prompt,
 	// to preserve prompt cache.
 	prefetchedRecallReady := false
+	promptMemoryInjected := false // guards one-time injection of prefetched memory into call.Prompt
 	prefetchNotReadyLogged := false
 	if !a.isSubAgent && call.MemoryPrefetch != nil {
 		if result, settled := call.MemoryPrefetch.GetSettled(); settled {
@@ -667,9 +668,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// the user prompt (as an extra text block), NOT prepended as a separate message.
 		// Prepending would change the message prefix and invalidate prompt cache.
 		// By appending to the prompt, the system message prefix stays stable.
-		if prefetchedRecallReady && call.MemoryPrefetch != nil {
+		// promptMemoryInjected is declared in the outer Run scope (not inside runStream)
+		// so that retry calls to runStream do NOT re-append the same memory content.
+		if prefetchedRecallReady && !promptMemoryInjected && call.MemoryPrefetch != nil {
 			if result, settled := call.MemoryPrefetch.GetSettled(); settled && result != "" {
 				call.Prompt += "\n\n" + FormatAutoRecallMessage(result)
+				promptMemoryInjected = true
 			}
 		}
 

@@ -104,11 +104,11 @@ func NewEditTool(
 			editCtx := editContext{ctx, permissions, files, filetracker, effectiveWorkingDir}
 
 			if len(params.Operations) > 0 {
-				response, err = applyHashlineEdit(editCtx, params.FilePath, params.Operations, call)
+				response, opErr = applyHashlineEdit(editCtx, params.FilePath, params.Operations, call)
 			} else if len(params.Edits) > 0 {
-				response, err = applyEditEntries(editCtx, params.FilePath, params.Edits, call)
+				response, opErr = applyEditEntries(editCtx, params.FilePath, params.Edits, call)
 			} else if params.OldString == "" {
-				response, err = createNewFile(editCtx, params.FilePath, params.NewString, call)
+				response, opErr = createNewFile(editCtx, params.FilePath, params.NewString, call)
 			} else if params.NewString == "" {
 				response, opErr = deleteContent(editCtx, params.FilePath, params.OldString, params.ReplaceAll, call)
 			} else {
