@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,17 +47,20 @@ func NewWebFetchTool(workingDir string, client *http.Client) fantasy.AgentTool {
 			var result strings.Builder
 
 			if hasLargeContent {
-				tempFile, err := os.CreateTemp(workingDir, "page-*.md")
+				// Use URL-based filename for better predictability
+				tempFilePath := filepath.Join(workingDir, fmt.Sprintf("fetch-%x.md", time.Now().UnixNano()))
+				tempFile, err := os.Create(tempFilePath)
 				if err != nil {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to create temporary file: %s", err)), nil
 				}
-				tempFilePath := tempFile.Name()
 
 				if _, err := tempFile.WriteString(content); err != nil {
-					_ = tempFile.Close() // Best effort close
+					_ = tempFile.Close()
+					_ = os.Remove(tempFilePath) // Clean up on write failure
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to write content to file: %s", err)), nil
 				}
 				if err := tempFile.Close(); err != nil {
+					_ = os.Remove(tempFilePath) // Clean up on close failure
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to close temporary file: %s", err)), nil
 				}
 

@@ -143,8 +143,6 @@ const (
 	ChatTransformPurposePreflightEstimate ChatTransformPurpose = "preflight_estimate"
 	// ChatTransformPurposeNextStepEstimate is the purpose for a next step estimate.
 	ChatTransformPurposeNextStepEstimate ChatTransformPurpose = "next_step_estimate"
-	ChatTransformPurposeMicroCompact     ChatTransformPurpose = "micro_compact"
-	ChatTransformPurposeCollapse         ChatTransformPurpose = "collapse"
 	ChatTransformPurposeReactiveCompact  ChatTransformPurpose = "reactive_compact"
 	ChatTransformPurposeAutoCompact      ChatTransformPurpose = "auto_compact"
 	ChatTransformPurposePostCompact      ChatTransformPurpose = "post_compact"

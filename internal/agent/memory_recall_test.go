@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"charm.land/fantasy"
@@ -154,7 +155,7 @@ func TestSelectRelevantMemoriesUsesExpandedCandidatePool(t *testing.T) {
 	for i := range memoryRelevanceMaxFiles + 5 {
 		require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{
 			Key:   "project/memory-" + string(rune('a'+(i%26))) + "-" + string(rune('0'+(i%10))),
-			Value: "Memory value",
+			Value: fmt.Sprintf("Memory value for entry index %d unique", i),
 			Scope: "project",
 			Type:  "project",
 		}))

@@ -430,8 +430,8 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		return fmt.Errorf("cannot notify change for unopened file: %s", filepath)
 	}
 
-	// Increment version
-	fileInfo.Version++
+	// Increment version atomically to avoid race conditions
+	newVersion := atomic.AddInt32(&fileInfo.Version, 1)
 
 	// Create change event
 	changes := []protocol.TextDocumentContentChangeEvent{
@@ -442,7 +442,7 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		},
 	}
 
-	return c.client.NotifyDidChangeTextDocument(ctx, uri, int(fileInfo.Version), changes)
+	return c.client.NotifyDidChangeTextDocument(ctx, uri, int(newVersion), changes)
 }
 
 // IsFileOpen checks if a file is currently open.
@@ -870,11 +870,24 @@ func (c *Client) connection() *transport.Connection {
 	if c == nil || c.client == nil {
 		return nil
 	}
+	// Note: This uses reflect+unsafe to access the private conn field.
+	// This is fragile and may break if powernap library changes.
+	// A panic recover is added as a safety net.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Failed to access LSP connection via reflect", "error", r)
+		}
+	}()
 	value := reflect.ValueOf(c.client).Elem().FieldByName("conn")
 	if !value.IsValid() || value.IsNil() {
 		return nil
 	}
-	return reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem().Interface().(*transport.Connection)
+	conn, ok := reflect.NewAt(value.Type(), unsafe.Pointer(value.UnsafeAddr())).Elem().Interface().(*transport.Connection)
+	if !ok {
+		slog.Error("Failed to cast reflected value to transport.Connection")
+		return nil
+	}
+	return conn
 }
 
 func locationResults(value any) []protocol.Location {

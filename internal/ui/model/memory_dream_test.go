@@ -36,7 +36,6 @@ func TestRenderEditorViewDoesNotShowMemoryFreshnessBanner(t *testing.T) {
 }
 
 func TestHandleAgentNotificationMemoryDreamLifecycle(t *testing.T) {
-
 	ui := testExecutionModeUI(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
 	backend := &testNotificationBackend{}
 	ui.notifyBackend = backend
@@ -66,7 +65,6 @@ func TestHandleAgentNotificationMemoryDreamLifecycle(t *testing.T) {
 }
 
 func TestStartMemoryDreamTriggersCoordinator(t *testing.T) {
-
 	coord := &memoryDreamCoordinator{}
 	ui := &UI{
 		session: &session.Session{ID: "s1"},
@@ -113,7 +111,9 @@ func runCmdTree(msg tea.Msg) {
 	}
 }
 
-var _ tea.Msg = memoryDreamStartedMsg{}
-var _ = fantasy.ProviderOptions{}
-var _ = message.Attachment{}
-var _ = permission.AutoClassification{}
+var (
+	_ tea.Msg = memoryDreamStartedMsg{}
+	_         = fantasy.ProviderOptions{}
+	_         = message.Attachment{}
+	_         = permission.AutoClassification{}
+)

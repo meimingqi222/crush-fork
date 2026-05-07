@@ -89,11 +89,15 @@ func usageSnapshotFromMessages(msgs []message.Message, estimatedPromptTokens int
 			continue
 		}
 		snap.PromptTokens = m.Usage.PromptTokens()
-		snap.CompletionTokens = m.Usage.CompletionTokens()
+		snap.CompletionTokens = m.Usage.OutputTokens
 		snap.ReasoningTokens = m.Usage.ReasoningTokens
 		snap.CacheReadTokens = m.Usage.CacheReadTokens
 		snap.CacheWriteTokens = m.Usage.CacheWriteTokens
-		snap.TotalTokens = m.Usage.TotalTokens()
+		// TotalTokens = PromptTokens + OutputTokens (not CompletionTokens).
+		// OutputTokens already includes ReasoningTokens for OpenAI-style
+		// providers (and Anthropic output_tokens includes thinking tokens),
+		// so adding ReasoningTokens again would double-count.
+		snap.TotalTokens = m.Usage.PromptTokens() + m.Usage.OutputTokens
 		break
 	}
 	// ContextUsed is max(last_total_tokens, estimated_prompt_tokens) to give

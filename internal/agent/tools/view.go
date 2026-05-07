@@ -16,7 +16,6 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/imageutil"
@@ -66,7 +65,7 @@ type ViewResponseMetadata struct {
 
 const (
 	ReadToolName     = "read"
-	ViewToolName     = ReadToolName
+	ViewToolName     = "view"
 	MaxViewSize      = 1 * 1024 * 1024 // 1MB
 	DefaultReadLimit = 2000
 	MaxLineLength    = 2000
@@ -98,7 +97,7 @@ func NewReadTool(
 	skillsPaths ...string,
 ) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
-		ReadToolName,
+		ViewToolName,
 		string(viewDescription),
 		func(ctx context.Context, params ViewParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.FilePath == "" {
@@ -172,11 +171,7 @@ func NewReadTool(
 			// Check if it's a directory — automatically fall back to listing its
 			// contents so the LLM gets useful information instead of an error.
 			if fileInfo.IsDir() {
-				out, _, lsErr := ListDirectoryTree(filePath, LSParams{}, config.ToolLs{})
-				if lsErr != nil {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s", filePath)), nil
-				}
-				return fantasy.NewTextResponse(out), nil
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s. Use the 'ls' tool to list directory contents.", filePath)), nil
 			}
 
 			isSupportedImage, mimeType := getImageMimeType(filePath)

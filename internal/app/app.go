@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -94,7 +95,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	cfg := store.Config()
 	runtimeService := toolruntime.NewService()
 	timelineService := timeline.NewService()
-	longTermMemory, err := memory.NewService(cfg.Options.DataDirectory)
+	userMemoryDir := filepath.Join(filepath.Dir(config.GlobalConfigData()), "memory")
+	longTermMemory, err := memory.NewService(cfg.Options.DataDirectory, memory.WithUserMemoryDir(userMemoryDir))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
 	}

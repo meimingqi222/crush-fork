@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,8 +20,10 @@ import (
 var memoryUserAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
 
 const (
-	memoryRelevanceMaxSelected = 5
-	memoryRelevanceMaxFiles    = 200
+	memoryRelevanceMaxSelected        = 5
+	memoryRelevanceMaxFiles           = 200
+	memoryRelevancePreFilterThreshold = 30
+	memoryRelevancePreFilterMax       = 40
 )
 
 type memoryInfoFilters struct {
@@ -76,11 +79,17 @@ func semanticSearchMemories(ctx context.Context, memorySvc memory.Service, model
 	if len(filteredInfos) == 0 {
 		return nil, nil
 	}
+
+	query := strings.TrimSpace(params.Query)
+	if len(filteredInfos) > memoryRelevancePreFilterThreshold && query != "" {
+		filteredInfos = preFilterMemoryInfos(filteredInfos, query, memoryRelevancePreFilterMax)
+	}
+
 	if len(filteredInfos) > memoryRelevanceMaxFiles {
 		filteredInfos = filteredInfos[:memoryRelevanceMaxFiles]
 	}
 
-	selectedKeys, err := selectRelevantMemoryKeys(ctx, filteredInfos, model, providerCfg, strings.TrimSpace(params.Query), recentTools)
+	selectedKeys, err := selectRelevantMemoryKeys(ctx, filteredInfos, model, providerCfg, query, recentTools)
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +168,84 @@ func containsNormalizedTag(tags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func preFilterMemoryInfos(infos []memory.MemoryFileInfo, query string, maxResults int) []memory.MemoryFileInfo {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" || len(infos) <= maxResults {
+		return infos
+	}
+
+	tokens := strings.FieldsFunc(query, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || (r >= 0x4E00 && r <= 0x9FFF))
+	})
+	if len(tokens) == 0 {
+		return infos[:maxResults]
+	}
+
+	type scored struct {
+		info  memory.MemoryFileInfo
+		score float64
+	}
+	scoredInfos := make([]scored, 0, len(infos))
+	for _, info := range infos {
+		score := 0.0
+		matched := 0
+		for _, token := range tokens {
+			found := false
+			if strings.Contains(strings.ToLower(info.Key), token) {
+				score += 4.0
+				found = true
+			}
+			if strings.Contains(strings.ToLower(info.Description), token) {
+				score += 3.0
+				found = true
+			}
+			if strings.Contains(strings.ToLower(info.Type), token) {
+				score += 2.0
+				found = true
+			}
+			if strings.Contains(strings.ToLower(info.Category), token) {
+				score += 2.0
+				found = true
+			}
+			for _, tag := range info.Tags {
+				if strings.Contains(strings.ToLower(tag), token) {
+					score += 2.5
+					found = true
+					break
+				}
+			}
+			if found {
+				matched++
+			}
+		}
+		if matched > 0 {
+			coverage := float64(matched) / float64(len(tokens))
+			score += coverage * 5.0
+			scoredInfos = append(scoredInfos, scored{info: info, score: score})
+		}
+	}
+
+	if len(scoredInfos) == 0 {
+		return infos[:maxResults]
+	}
+
+	sort.Slice(scoredInfos, func(i, j int) bool {
+		if scoredInfos[i].score != scoredInfos[j].score {
+			return scoredInfos[i].score > scoredInfos[j].score
+		}
+		return scoredInfos[i].info.UpdatedAt > scoredInfos[j].info.UpdatedAt
+	})
+
+	if len(scoredInfos) > maxResults {
+		scoredInfos = scoredInfos[:maxResults]
+	}
+	result := make([]memory.MemoryFileInfo, len(scoredInfos))
+	for i, s := range scoredInfos {
+		result[i] = s.info
+	}
+	return result
 }
 
 func selectRelevantMemoryKeys(ctx context.Context, infos []memory.MemoryFileInfo, model Model, providerCfg config.ProviderConfig, query string, recentTools []string) ([]string, error) {

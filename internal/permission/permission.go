@@ -193,9 +193,9 @@ type permissionService struct {
 	activeRequestMu sync.Mutex
 
 	// Skill context for per-skill permission control
-	skillName       string
-	skillAllowed    []string
-	skillContextMu  sync.RWMutex
+	skillName      string
+	skillAllowed   []string
+	skillContextMu sync.RWMutex
 }
 
 func (s *permissionService) GrantPersistent(permission PermissionRequest) {

@@ -46,20 +46,36 @@ func isContextWindowExceededError(err error) bool {
 	if !errors.As(err, &providerErr) || providerErr == nil {
 		return false
 	}
+	if providerErr.StatusCode == 413 {
+		return true
+	}
 	if providerErr.StatusCode != 400 {
 		return false
 	}
 	msg := strings.ToLower(providerErr.Message)
 	return strings.Contains(msg, "context window") ||
 		strings.Contains(msg, "context length") ||
+		strings.Contains(msg, "context_length_exceeded") ||
+		strings.Contains(msg, "context_too_long") ||
 		strings.Contains(msg, "model_context_window_exceeded") ||
 		strings.Contains(msg, "maximum context") ||
+		strings.Contains(msg, "maximum prompt length") ||
 		strings.Contains(msg, "input exceeds") ||
+		strings.Contains(msg, "input token count") && strings.Contains(msg, "exceeds") ||
 		strings.Contains(msg, "input length should be") ||
+		strings.Contains(msg, "input length") && strings.Contains(msg, "exceeds") ||
 		strings.Contains(msg, "range of input length should be") ||
 		strings.Contains(msg, "too many tokens") ||
 		strings.Contains(msg, "prompt is too long") ||
-		strings.Contains(msg, "request body too large")
+		strings.Contains(msg, "prompt too long") ||
+		strings.Contains(msg, "token limit exceeded") ||
+		strings.Contains(msg, "exceeded model token limit") ||
+		strings.Contains(msg, "reduce the length of the messages") ||
+		strings.Contains(msg, "exceeds the available context size") ||
+		strings.Contains(msg, "greater than the context length") ||
+		strings.Contains(msg, "too large for model") ||
+		strings.Contains(msg, "request body too large") ||
+		strings.Contains(msg, "request entity too large")
 }
 
 func (a *sessionAgent) truncateToolResult(sessionID string, tr message.ToolResult) (message.ToolResult, bool) {
@@ -93,7 +109,16 @@ func (a *sessionAgent) truncateToolResult(sessionID string, tr message.ToolResul
 		}
 	}
 
-	tr.Content = string(contentRunes[:keep]) + truncatedToolResultNotice(len(contentRunes)-keep, fullOutputPath)
+	omitted := len(contentRunes) - keep
+	tr.Content = string(contentRunes[:keep]) + truncatedToolResultNotice(omitted, fullOutputPath)
+	slog.Info("Truncated oversized tool result before saving to history",
+		"session_id", sessionID,
+		"tool_name", tr.Name,
+		"original_chars", len(contentRunes),
+		"kept_chars", keep,
+		"omitted_chars", omitted,
+		"full_output_path", fullOutputPath,
+	)
 	return tr, true
 }
 
@@ -178,7 +203,14 @@ func (a *sessionAgent) enforceStepToolResultBudget(sessionID string, tr message.
 				fullOutputPath = persistedPath
 			}
 		}
-		tr.Content = stepBudgetExhaustedToolResultNotice(len([]rune(tr.Content)), fullOutputPath)
+		omitted := len([]rune(tr.Content))
+		tr.Content = stepBudgetExhaustedToolResultNotice(omitted, fullOutputPath)
+		slog.Info("Omitted tool result because step tool-result budget was exhausted",
+			"session_id", sessionID,
+			"tool_name", tr.Name,
+			"omitted_chars", omitted,
+			"full_output_path", fullOutputPath,
+		)
 		return tr
 	}
 	contentRunes := []rune(tr.Content)
@@ -206,8 +238,18 @@ func (a *sessionAgent) enforceStepToolResultBudget(sessionID string, tr message.
 			keep = len(contentRunes)
 		}
 	}
-	tr.Content = string(contentRunes[:keep]) + truncatedToolResultNotice(len(contentRunes)-keep, fullOutputPath)
+	omitted := len(contentRunes) - keep
+	tr.Content = string(contentRunes[:keep]) + truncatedToolResultNotice(omitted, fullOutputPath)
 	*used = contextWindowStepToolResultCharsLimit
+	slog.Info("Truncated tool result to fit step tool-result budget",
+		"session_id", sessionID,
+		"tool_name", tr.Name,
+		"original_chars", len(contentRunes),
+		"kept_chars", keep,
+		"omitted_chars", omitted,
+		"step_budget_chars", contextWindowStepToolResultCharsLimit,
+		"full_output_path", fullOutputPath,
+	)
 	return tr
 }
 

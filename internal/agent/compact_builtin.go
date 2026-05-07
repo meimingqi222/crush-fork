@@ -3,173 +3,77 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
 )
 
 const (
-	// builtinMicroCompactRecentWindow is the number of recent assistant turns
-	// whose reasoning content and binary attachments are preserved during
-	// micro-compaction. Older turns have these stripped to reduce token usage.
-	builtinMicroCompactRecentWindow = 5
+	// builtinPruneProtectTokens mirrors opencode's PRUNE_PROTECT. When walking
+	// backwards, this many estimated tool-output tokens are protected before
+	// older tool results become pruning candidates.
+	builtinPruneProtectTokens int64 = 40_000
 
-	// builtinAutoCompactRecentWindow is the number of recent assistant turns
-	// to keep at full fidelity during auto-compaction. Tool results in older
-	// turns are truncated to builtinAutoCompactToolResultMaxChars.
-	builtinAutoCompactRecentWindow = 10
+	// builtinPruneMinTokens mirrors opencode's PRUNE_MINIMUM. The prune pass
+	// is only applied when candidate tool output exceeds this estimate.
+	builtinPruneMinTokens int64 = 20_000
 
-	// builtinAutoCompactToolResultMaxChars is the maximum number of characters
-	// kept per tool-result during auto-compaction of older turns.
-	builtinAutoCompactToolResultMaxChars = 1_000
-
-	// builtinPruneProtectChars is the character budget for recent tool results
-	// that are protected from pruning. Tool results within this budget
-	// (counting backwards from newest) are kept intact.
-	builtinPruneProtectChars = 120_000
-
-	// builtinPruneMinChars is the minimum number of characters that must be
-	// prunable before we bother running the prune pass. Avoids churning
-	// through messages for negligible savings.
-	builtinPruneMinChars = 60_000
-
-	// builtinPruneRecentTurns is the number of recent assistant turns whose
+	// builtinPruneRecentUserTurns is the number of recent user turns whose
 	// tool results are unconditionally protected from pruning.
-	builtinPruneRecentTurns = 2
+	builtinPruneRecentUserTurns = 2
+
+	builtinPruneCompactedNoticePrefix = "[Old tool result content cleared"
+	builtinPruneProtectedToolName     = "skill"
 )
-
-// builtinMicroCompactMessages strips reasoning content and binary attachments
-// from older assistant messages to reduce token usage before summarization.
-// Messages within the most recent builtinMicroCompactRecentWindow assistant
-// turns are left untouched.
-func builtinMicroCompactMessages(msgs []message.Message) []message.Message {
-	cutoff := assistantTurnCutoff(msgs, builtinMicroCompactRecentWindow)
-	if cutoff == 0 {
-		return msgs
-	}
-	changed := false
-	result := make([]message.Message, len(msgs))
-	copy(result, msgs)
-	for i := 0; i < cutoff; i++ {
-		newParts := make([]message.ContentPart, 0, len(msgs[i].Parts))
-		stripped := false
-		for _, part := range msgs[i].Parts {
-			switch part.(type) {
-			case message.ReasoningContent, message.BinaryContent, message.ImageURLContent:
-				stripped = true
-				changed = true
-			default:
-				newParts = append(newParts, part)
-			}
-		}
-		if stripped {
-			cloned := msgs[i].Clone()
-			cloned.Parts = newParts
-			result[i] = cloned
-		}
-	}
-	if !changed {
-		return msgs
-	}
-	return result
-}
-
-// builtinAutoCompactMessages truncates oversized tool results in older turns to
-// a compact representation suitable for summarization context. Messages within
-// the most recent builtinAutoCompactRecentWindow assistant turns are kept at
-// full fidelity.
-func builtinAutoCompactMessages(msgs []message.Message) []message.Message {
-	cutoff := assistantTurnCutoff(msgs, builtinAutoCompactRecentWindow)
-	if cutoff == 0 {
-		return msgs
-	}
-	changed := false
-	result := make([]message.Message, len(msgs))
-	copy(result, msgs)
-	for i := 0; i < cutoff; i++ {
-		if msgs[i].Role != message.Tool {
-			continue
-		}
-		cloned := msgs[i].Clone()
-		modified := false
-		for j, part := range cloned.Parts {
-			tr, ok := part.(message.ToolResult)
-			if !ok || tr.IsError || tr.Data != "" || tr.MIMEType != "" {
-				continue
-			}
-			runes := []rune(tr.Content)
-			if len(runes) <= builtinAutoCompactToolResultMaxChars {
-				continue
-			}
-			omitted := len(runes) - builtinAutoCompactToolResultMaxChars
-			tr.Content = string(runes[:builtinAutoCompactToolResultMaxChars]) +
-				fmt.Sprintf("\n\n[%d characters omitted during context compaction]", omitted)
-			cloned.Parts[j] = tr
-			modified = true
-			changed = true
-		}
-		if modified {
-			result[i] = cloned
-		}
-	}
-	if !changed {
-		return msgs
-	}
-	return result
-}
-
-// assistantTurnCutoff returns the message index at which the n-th most recent
-// assistant turn begins. All messages before this index are candidates for
-// compaction. Returns 0 when there are fewer than n assistant turns, meaning
-// no compaction should occur.
-func assistantTurnCutoff(msgs []message.Message, n int) int {
-	count := 0
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == message.Assistant {
-			count++
-			if count >= n {
-				return i
-			}
-		}
-	}
-	return 0
-}
 
 // builtinPruneToolResults clears oversized tool result content from older
 // messages to reduce the payload sent to plugins and the LLM. It works
 // similarly to OpenCode's prune mechanism:
 //
-//  1. Walk messages backwards, skip the most recent builtinPruneRecentTurns
-//     assistant turns unconditionally.
-//  2. Accumulate tool result character counts. While the running total is
-//     within builtinPruneProtectChars, keep the results intact.
-//  3. Once the protect budget is exhausted, replace remaining (older) tool
+//  1. Walk messages backwards, skip the most recent builtinPruneRecentUserTurns
+//     user turns unconditionally.
+//  2. Stop at the previous summary boundary.
+//  3. Accumulate estimated tool result tokens. While the running total is
+//     within builtinPruneProtectTokens, keep the results intact.
+//  4. Once the protect budget is exhausted, replace remaining (older) tool
 //     result content with a short placeholder.
-//  4. Only apply the prune if the total prunable content exceeds
-//     builtinPruneMinChars.
+//  5. Only apply the prune if the total prunable content exceeds
+//     builtinPruneMinTokens.
 func builtinPruneToolResults(msgs []message.Message) []message.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
 
-	// Phase 1: Identify the protect boundary — skip recent turns entirely.
-	protectCutoff := assistantTurnCutoff(msgs, builtinPruneRecentTurns)
-
-	// Phase 2: Walk backwards from the protect boundary, accumulate tool
-	// result chars. Once the protect budget is exhausted, mark older
-	// tool results for pruning.
 	type pruneTarget struct {
 		msgIdx  int
 		partIdx int
+		tokens  int64
 		chars   int
 	}
 
 	var (
-		protectedChars int64
-		targets        []pruneTarget
-		totalPrunable  int64
+		protectedTokens int64
+		targets         []pruneTarget
+		totalPrunable   int64
+		userTurns       int
 	)
 
-	for i := protectCutoff - 1; i >= 0; i-- {
+loop:
+	for i := len(msgs) - 1; i >= 0; i-- {
+		switch msgs[i].Role {
+		case message.User:
+			userTurns++
+			if userTurns < builtinPruneRecentUserTurns {
+				continue
+			}
+		case message.Assistant:
+			if msgs[i].IsSummaryMessage {
+				break loop
+			}
+		}
+		if userTurns < builtinPruneRecentUserTurns {
+			continue
+		}
 		if msgs[i].Role != message.Tool {
 			continue
 		}
@@ -178,18 +82,28 @@ func builtinPruneToolResults(msgs []message.Message) []message.Message {
 			if !ok || tr.IsError || tr.Content == "" {
 				continue
 			}
-			charCount := len([]rune(tr.Content))
-			if protectedChars < int64(builtinPruneProtectChars) {
-				protectedChars += int64(charCount)
+			if tr.Name == builtinPruneProtectedToolName {
 				continue
 			}
-			// Beyond protect budget — candidate for pruning.
-			targets = append(targets, pruneTarget{msgIdx: i, partIdx: j, chars: charCount})
-			totalPrunable += int64(charCount)
+			if strings.HasPrefix(tr.Content, builtinPruneCompactedNoticePrefix) {
+				break loop
+			}
+			tokenEstimate := estimateStringTokens(tr.Content)
+			if protectedTokens < builtinPruneProtectTokens {
+				protectedTokens += tokenEstimate
+				continue
+			}
+			targets = append(targets, pruneTarget{
+				msgIdx:  i,
+				partIdx: j,
+				tokens:  tokenEstimate,
+				chars:   len([]rune(tr.Content)),
+			})
+			totalPrunable += tokenEstimate
 		}
 	}
 
-	if totalPrunable < builtinPruneMinChars || len(targets) == 0 {
+	if totalPrunable <= builtinPruneMinTokens || len(targets) == 0 {
 		return msgs
 	}
 
@@ -204,13 +118,13 @@ func builtinPruneToolResults(msgs []message.Message) []message.Message {
 			modifiedMsgs[t.msgIdx] = true
 		}
 		tr := result[t.msgIdx].Parts[t.partIdx].(message.ToolResult)
-		tr.Content = fmt.Sprintf("[Old tool result content cleared to reduce context size. %d characters omitted.]", t.chars)
+		tr.Content = fmt.Sprintf("[Old tool result content cleared to reduce context size. %d estimated tokens omitted, %d characters omitted.]", t.tokens, t.chars)
 		result[t.msgIdx].Parts[t.partIdx] = tr
 	}
 
 	slog.Info("Pruned old tool results before plugin transform",
 		"pruned_results", len(targets),
-		"pruned_chars", totalPrunable,
-		"protected_chars", protectedChars)
+		"pruned_tokens", totalPrunable,
+		"protected_tokens", protectedTokens)
 	return result
 }

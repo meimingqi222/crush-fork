@@ -8,11 +8,13 @@ import (
 const bufferSize = 64
 
 type Broker[T any] struct {
-	subs      map[chan Event[T]]struct{}
-	mu        sync.RWMutex
-	done      chan struct{}
-	subCount  int
-	maxEvents int
+	subs        map[chan Event[T]]struct{}
+	mu          sync.RWMutex
+	done        chan struct{}
+	subCount    int
+	maxEvents   int
+	dropCount   int64 // number of events dropped due to full channels
+	dropCountMu sync.Mutex
 }
 
 func NewBroker[T any]() *Broker[T] {
@@ -106,6 +108,16 @@ func (b *Broker[T]) Publish(t EventType, payload T) {
 		default:
 			// Channel is full, subscriber is slow - skip this event
 			// This prevents blocking the publisher
+			b.dropCountMu.Lock()
+			b.dropCount++
+			b.dropCountMu.Unlock()
 		}
 	}
+}
+
+// DropCount returns the number of events that were dropped due to full subscriber channels.
+func (b *Broker[T]) DropCount() int64 {
+	b.dropCountMu.Lock()
+	defer b.dropCountMu.Unlock()
+	return b.dropCount
 }

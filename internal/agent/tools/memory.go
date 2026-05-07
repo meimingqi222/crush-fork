@@ -51,6 +51,10 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 					return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for long_term_memory store")
 				}
 
+				description := fmt.Sprintf("Store long-term memory key %q", strings.TrimSpace(params.Key))
+				if strings.EqualFold(strings.TrimSpace(params.Scope), "user") {
+					description += " (user scope: affects all projects)"
+				}
 				permissionResponse, err := RequestPermission(ctx, permissions,
 					permission.CreatePermissionRequest{
 						SessionID:   sessionID,
@@ -58,7 +62,7 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 						ToolCallID:  call.ID,
 						ToolName:    LongTermMemoryToolName,
 						Action:      "write",
-						Description: fmt.Sprintf("Store long-term memory key %q", strings.TrimSpace(params.Key)),
+						Description: description,
 						Params:      params,
 					},
 				)
@@ -97,6 +101,10 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 					return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for long_term_memory delete")
 				}
 
+				description := fmt.Sprintf("Delete long-term memory key %q", strings.TrimSpace(params.Key))
+				if strings.EqualFold(strings.TrimSpace(params.Scope), "user") {
+					description += " (user scope: affects all projects)"
+				}
 				permissionResponse, err := RequestPermission(ctx, permissions,
 					permission.CreatePermissionRequest{
 						SessionID:   sessionID,
@@ -104,7 +112,7 @@ func NewLongTermMemoryTool(memorySvc memory.Service, permissions permission.Serv
 						ToolCallID:  call.ID,
 						ToolName:    LongTermMemoryToolName,
 						Action:      "delete",
-						Description: fmt.Sprintf("Delete long-term memory key %q", strings.TrimSpace(params.Key)),
+						Description: description,
 						Params:      params,
 					},
 				)

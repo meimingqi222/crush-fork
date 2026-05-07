@@ -50,3 +50,24 @@ func normalizeWindowsDrivePath(path string) string {
 	}
 	return path
 }
+
+// IsOutsideWorkDir checks if filePath is outside workDir.
+// Returns true if the path escapes the working directory via ".." or is an absolute path
+// that doesn't start with workDir.
+func IsOutsideWorkDir(filePath, workDir string) (bool, error) {
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return false, err
+	}
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return false, err
+	}
+	relPath, err := filepath.Rel(absWorkDir, absFilePath)
+	if err != nil {
+		return true, nil
+	}
+	// Only flag paths that actually traverse upward: "..", "../", or "..\".
+	// Names starting with ".." like "..hiddenfile" are valid inside the workdir.
+	return relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)), nil
+}

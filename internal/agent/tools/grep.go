@@ -186,7 +186,7 @@ func runGrepSearch(ctx context.Context, params GrepParams, rootPath string, limi
 	if err != nil {
 		metadata.RecoveredBy = "path_validation"
 		metadata.RecoveryAction = err.Error()
-		metadata.FallbackTool = ReadToolName
+		metadata.FallbackTool = ViewToolName
 		metadata.FallbackToolQuery = cmp.Or(params.Path, rootPath)
 		metadata.RecoveredParameters = []string{"path"}
 		return grepExecutionResult{metadata: metadata}, nil

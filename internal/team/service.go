@@ -14,28 +14,28 @@ import (
 
 // Member represents a team member agent.
 type Member struct {
-	AgentID      string    `json:"agent_id"`
-	Name         string    `json:"name"`
-	AgentType    string    `json:"agent_type,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	Prompt       string    `json:"prompt,omitempty"`
-	Color        string    `json:"color,omitempty"`
-	JoinedAt     int64     `json:"joined_at"`
-	TmuxPaneID   string    `json:"tmux_pane_id,omitempty"`
-	CWD          string    `json:"cwd"`
-	WorktreePath string    `json:"worktree_path,omitempty"`
-	SessionID    string    `json:"session_id,omitempty"`
-	IsActive     bool      `json:"is_active"`
+	AgentID      string `json:"agent_id"`
+	Name         string `json:"name"`
+	AgentType    string `json:"agent_type,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Prompt       string `json:"prompt,omitempty"`
+	Color        string `json:"color,omitempty"`
+	JoinedAt     int64  `json:"joined_at"`
+	TmuxPaneID   string `json:"tmux_pane_id,omitempty"`
+	CWD          string `json:"cwd"`
+	WorktreePath string `json:"worktree_path,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	IsActive     bool   `json:"is_active"`
 }
 
 // TeamFile represents the persistent team configuration.
 type TeamFile struct {
-	Name         string    `json:"name"`
-	Description  string    `json:"description,omitempty"`
-	CreatedAt    int64     `json:"created_at"`
-	LeadAgentID  string    `json:"lead_agent_id"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	CreatedAt     int64    `json:"created_at"`
+	LeadAgentID   string   `json:"lead_agent_id"`
 	LeadSessionID string   `json:"lead_session_id,omitempty"`
-	Members      []Member  `json:"members"`
+	Members       []Member `json:"members"`
 }
 
 // Service provides team file persistence operations.
@@ -85,11 +85,11 @@ func (s *Service) Create(teamName string, leadAgentID, leadSessionID string) (*T
 	defer s.mu.Unlock()
 
 	teamFile := &TeamFile{
-		Name:         teamName,
-		CreatedAt:    time.Now().UnixMilli(),
-		LeadAgentID:  leadAgentID,
+		Name:          teamName,
+		CreatedAt:     time.Now().UnixMilli(),
+		LeadAgentID:   leadAgentID,
 		LeadSessionID: leadSessionID,
-		Members:      []Member{},
+		Members:       []Member{},
 	}
 
 	if err := s.writeTeamFile(teamName, teamFile); err != nil {

@@ -53,6 +53,8 @@ func TestLatestAssistantUsageSnapshotUsesLastAssistantUsageModel(t *testing.T) {
 		},
 	}, cfg, selected)
 	require.True(t, ok)
+	// TotalTokens = PromptTokens() + OutputTokens = (120 + 900 + 300) + 45 = 1365
+	// (OutputTokens already includes ReasoningTokens for OpenAI-style providers)
 	require.Equal(t, int64(1365), snapshot.TotalTokens)
 	require.Equal(t, int64(45), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)

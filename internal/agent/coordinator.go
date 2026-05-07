@@ -310,11 +310,11 @@ func collectRecentSuccessfulTools(ctx context.Context, messagesSvc message.Servi
 }
 
 // collectSurfacedMemories scans the session message history for previously
-// injected auto_recall content and returns the set of surfaced memory keys
-// and the cumulative byte count. This mirrors claude-code's
-// collectSurfacedMemories approach: scanning messages means compact naturally
-// resets both — old auto_recall content is gone from the compacted transcript,
-// so re-surfacing is valid again.
+// injected memory content (wrapped in system-reminder tags) and returns the
+// set of surfaced memory keys and the cumulative byte count. This mirrors
+// claude-code's collectSurfacedMemories approach: scanning messages means
+// compact naturally resets both — old memory content is gone from the
+// compacted transcript, so re-surfacing is valid again.
 func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, sessionID string) (map[string]bool, int) {
 	msgs, err := messagesSvc.List(ctx, sessionID)
 	if err != nil {
@@ -326,8 +326,8 @@ func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, s
 	totalBytes := 0
 
 	for _, msg := range msgs {
-		// auto_recall content is injected as system messages.
-		if msg.Role != message.System {
+		// Memory content is now injected as user messages (wrapped in system-reminder).
+		if msg.Role != message.User {
 			continue
 		}
 		for _, part := range msg.Parts {
@@ -336,7 +336,7 @@ func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, s
 				continue
 			}
 			content := text.Text
-			if !strings.Contains(content, "<auto_recall>") {
+			if !strings.Contains(content, "<system-reminder>") {
 				continue
 			}
 			totalBytes += len(content)
@@ -357,6 +357,36 @@ func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, s
 		}
 	}
 	return surfaced, totalBytes
+}
+
+// buildRecentConversation extracts the last N user/assistant message turns
+// from the session history to provide context for short-query expansion.
+// This mirrors claude-code's approach of enriching terse prompts like
+// "continue" or "fix it" with surrounding conversation context.
+func buildRecentConversation(ctx context.Context, messagesSvc message.Service, sessionID string, maxTurns int) string {
+	msgs, err := messagesSvc.List(ctx, sessionID)
+	if err != nil {
+		slog.Debug("Failed to list messages for conversation context", "error", err, "session_id", sessionID)
+		return ""
+	}
+
+	var lines []string
+	turns := 0
+	for i := len(msgs) - 1; i >= 0 && turns < maxTurns; i-- {
+		msg := msgs[i]
+		switch msg.Role {
+		case message.User, message.Assistant:
+			text := msg.Content().Text
+			if text = strings.TrimSpace(text); text != "" {
+				lines = append(lines, fmt.Sprintf("%s: %s", msg.Role, text))
+				if msg.Role == message.User {
+					turns++
+				}
+			}
+		}
+	}
+	slices.Reverse(lines)
+	return strings.Join(lines, "\n")
 }
 
 // Run implements Coordinator.
@@ -423,10 +453,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	// This allows the memory recall to happen in parallel with other setup work.
 	// Modeled after Claude Code's approach: start prefetch, cache result when
 	// settled, and check readiness non-blocking at consume time.
-	// Note: DisableAutoMemory only disables automatic memory writes (dreaming),
-	// not recall. Users should still get relevant memories in their context.
+	// Memories are merged into existing user messages (not prepended),
+	// preserving prompt cache by keeping the system prompt prefix stable.
 	recentTools := collectRecentSuccessfulTools(ctx, c.messages, sessionID)
 	alreadySurfaced, surfacedBytes := collectSurfacedMemories(ctx, c.messages, sessionID)
+	recentConversation := buildRecentConversation(ctx, c.messages, sessionID, shortQueryExpansionMaxTurns)
 	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
 	defer prefetchCancel()
 	memoryPrefetch := &MemoryPrefetch{}
@@ -436,7 +467,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		// Skip prefetch if cumulative surfaced bytes exceed the session cap.
 		// Mirrors claude-code's MAX_SESSION_BYTES throttle.
 		if surfacedBytes < maxSessionRecallBytes {
-			recall = buildAutoRecallBlock(prefetchCtx, c.longTermMemory, bgModel, sessionID, prompt, recentTools, alreadySurfaced)
+			recall = buildAutoRecallBlock(prefetchCtx, c.longTermMemory, bgModel, sessionID, prompt, recentTools, alreadySurfaced, recentConversation)
 		}
 		memoryPrefetch.Settle(recall)
 		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)

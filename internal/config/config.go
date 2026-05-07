@@ -683,12 +683,6 @@ func (c *Config) BackgroundModel() *catwalk.Model {
 	return c.GetModel(model.Provider, model.Model)
 }
 
-// HandoffModel returns the model used for handoff draft generation.
-// Deprecated: use BackgroundModel instead.
-func (c *Config) HandoffModel() *catwalk.Model {
-	return c.BackgroundModel()
-}
-
 func (c *Config) AutoClassifierModel() *catwalk.Model {
 	model, ok := c.Models[SelectedModelTypeAutoClassifier]
 	if !ok {
@@ -708,6 +702,8 @@ func allToolNames() []string {
 		"job_kill",
 		"download",
 		"edit",
+		"hashline_edit",
+		"multiedit",
 		"lsp_diagnostics",
 		"lsp_references",
 		"lsp_declaration",
@@ -725,8 +721,9 @@ func allToolNames() []string {
 		"agentic_fetch",
 		"glob",
 		"grep",
+		"ls",
 		"request_user_input",
-		"history_search",
+
 		"crush_info",
 		"crush_logs",
 		"long_term_memory",
@@ -735,7 +732,7 @@ func allToolNames() []string {
 		"send_message",
 		"task_stop",
 		"subtask_result",
-		"read",
+		"view",
 		"write",
 	}
 }
@@ -749,7 +746,7 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"bash", "glob", "grep", "read", "tool_search"}
+	readOnlyTools := []string{"bash", "glob", "grep", "ls", "tool_search", "view"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }

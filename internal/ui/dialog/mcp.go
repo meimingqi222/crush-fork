@@ -176,7 +176,10 @@ func (d *MCP) Cursor() *tea.Cursor {
 func (d *MCP) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := d.com.Styles
 	width := max(0, min(defaultDialogMaxWidth+20, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
-	height := max(0, min(defaultDialogHeight+6, area.Dy()-t.Dialog.View.GetVerticalBorderSize()))
+	// Cap the dialog height to 75% of the screen so it never dominates the terminal.
+	maxTotalHeight := min(area.Dy(), (area.Dy()*3)/4)
+	maxInnerHeight := maxTotalHeight - t.Dialog.View.GetVerticalBorderSize()
+	height := max(0, min(defaultDialogHeight+4, maxInnerHeight))
 	innerWidth := width - t.Dialog.View.GetHorizontalFrameSize()
 	heightOffset := t.Dialog.Title.GetVerticalFrameSize() + titleContentHeight +
 		t.Dialog.InputPrompt.GetVerticalFrameSize() + inputContentHeight +

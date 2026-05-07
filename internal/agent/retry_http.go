@@ -107,36 +107,36 @@ func isRetriableError(err error) bool {
 		return true
 	}
 
-		errStr := strings.ToLower(err.Error())
-		// Server overloaded errors should be retried even if the message
-		// contains other non-retriable indicators like 'bad request'.
-		// Use more specific patterns to avoid false positives (e.g., field names containing 'overloaded').
-		// Check for overload-related phrases. These patterns match common
-		// server overload messages while avoiding false positives on field names.
-		overloadedPatterns := []string{
-			"server overloaded", "server is overloaded", "the server is overloaded",
-			"service overloaded", "service is overloaded",
-			"capacity overloaded", "capacity is overloaded",
-			"temporarily overloaded",
+	errStr := strings.ToLower(err.Error())
+	// Server overloaded errors should be retried even if the message
+	// contains other non-retriable indicators like 'bad request'.
+	// Use more specific patterns to avoid false positives (e.g., field names containing 'overloaded').
+	// Check for overload-related phrases. These patterns match common
+	// server overload messages while avoiding false positives on field names.
+	overloadedPatterns := []string{
+		"server overloaded", "server is overloaded", "the server is overloaded",
+		"service overloaded", "service is overloaded",
+		"capacity overloaded", "capacity is overloaded",
+		"temporarily overloaded",
+	}
+	for _, pattern := range overloadedPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
 		}
-		for _, pattern := range overloadedPatterns {
-			if strings.Contains(errStr, pattern) {
-				return true
-			}
+	}
+	// Rate limit errors should be retried even if the message contains
+	// other non-retriable indicators like 'bad request'. Use patterns
+	// that match actual rate limit error messages.
+	rateLimitPatterns := []string{
+		"too many requests", "rate limit exceeded", "rate limit reached",
+		"rate_limited", "ratelimit exceeded",
+	}
+	for _, pattern := range rateLimitPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
 		}
-		// Rate limit errors should be retried even if the message contains
-		// other non-retriable indicators like 'bad request'. Use patterns
-		// that match actual rate limit error messages.
-		rateLimitPatterns := []string{
-			"too many requests", "rate limit exceeded", "rate limit reached",
-			"rate_limited", "ratelimit exceeded",
-		}
-		for _, pattern := range rateLimitPatterns {
-			if strings.Contains(errStr, pattern) {
-				return true
-			}
-		}
-		if strings.Contains(errStr, "status: 400") ||
+	}
+	if strings.Contains(errStr, "status: 400") ||
 		strings.Contains(errStr, "status: 401") ||
 		strings.Contains(errStr, "status: 403") ||
 		strings.Contains(errStr, "status: 404") ||

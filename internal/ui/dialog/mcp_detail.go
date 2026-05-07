@@ -106,7 +106,10 @@ func (d *MCPDetail) Cursor() *tea.Cursor {
 func (d *MCPDetail) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := d.com.Styles
 	width := max(0, min(defaultDialogMaxWidth+20, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
-	height := max(0, min(defaultDialogHeight+6, area.Dy()-t.Dialog.View.GetVerticalBorderSize()))
+	// Cap the dialog height to 75% of the screen so it never dominates the terminal.
+	maxTotalHeight := min(area.Dy(), (area.Dy()*3)/4)
+	maxInnerHeight := maxTotalHeight - t.Dialog.View.GetVerticalBorderSize()
+	height := max(0, min(defaultDialogHeight+4, maxInnerHeight))
 	innerWidth := width - t.Dialog.View.GetHorizontalFrameSize()
 	heightOffset := t.Dialog.Title.GetVerticalFrameSize() + titleContentHeight +
 		t.Dialog.HelpView.GetVerticalFrameSize() +
@@ -289,4 +292,19 @@ func (d *MCPDetail) statusText() string {
 
 func (d *MCPDetail) refreshItems() {
 	// Detail dialog doesn't have a list to refresh, but we keep this for consistency.
+}
+
+// Name returns the MCP server name shown by this detail dialog.
+func (d *MCPDetail) Name() string {
+	return d.name
+}
+
+// SetState updates the runtime state shown in the detail dialog.
+func (d *MCPDetail) SetState(state agentmcp.ClientInfo) {
+	d.state = state
+}
+
+// SetConfig updates the config shown in the detail dialog (e.g. after toggling disabled).
+func (d *MCPDetail) SetConfig(cfg config.MCPConfig) {
+	d.config = cfg
 }

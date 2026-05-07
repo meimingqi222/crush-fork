@@ -95,6 +95,21 @@ func TestIsContextWindowExceededError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "request entity too large status",
+			err:  &fantasy.ProviderError{StatusCode: 413, Message: "Request Entity Too Large"},
+			want: true,
+		},
+		{
+			name: "exceeded model token limit phrase",
+			err:  &fantasy.ProviderError{StatusCode: 400, Message: "exceeded model token limit"},
+			want: true,
+		},
+		{
+			name: "greater than context length phrase",
+			err:  &fantasy.ProviderError{StatusCode: 400, Message: "prompt is greater than the context length"},
+			want: true,
+		},
+		{
 			name: "openai model context window exceeded code",
 			err:  &fantasy.ProviderError{StatusCode: 400, Message: `{"error":{"code":"model_context_window_exceeded","message":"The request exceeds the model's context window."}}`},
 			want: true,

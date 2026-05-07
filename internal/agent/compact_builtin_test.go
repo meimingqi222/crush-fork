@@ -10,12 +10,16 @@ import (
 )
 
 func makeToolMsg(content string) message.Message {
+	return makeNamedToolMsg("bash", content)
+}
+
+func makeNamedToolMsg(name string, content string) message.Message {
 	return message.Message{
 		Role: message.Tool,
 		Parts: []message.ContentPart{
 			message.ToolResult{
 				ToolCallID: "call-1",
-				Name:       "bash",
+				Name:       name,
 				Content:    content,
 			},
 		},
@@ -27,6 +31,16 @@ func makeAssistantMsg() message.Message {
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: "I'll help."},
+		},
+	}
+}
+
+func makeSummaryMsg() message.Message {
+	return message.Message{
+		Role:             message.Assistant,
+		IsSummaryMessage: true,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "Summary."},
 		},
 	}
 }
@@ -84,6 +98,56 @@ func TestBuiltinPruneToolResults_PrunesOldLargeToolResults(t *testing.T) {
 	require.Contains(t, firstTR.Content, "characters omitted")
 }
 
+func TestBuiltinPruneToolResults_StopsAtSummaryBoundary(t *testing.T) {
+	t.Parallel()
+	bigContent := strings.Repeat("x", 200_000)
+
+	msgs := []message.Message{
+		makeUserMsg(),
+		makeAssistantMsg(),
+		makeToolMsg("before-summary: " + bigContent),
+		makeSummaryMsg(),
+		makeUserMsg(),
+		makeAssistantMsg(),
+		makeToolMsg("after-summary-1: " + bigContent),
+		makeAssistantMsg(),
+		makeUserMsg(),
+		makeAssistantMsg(),
+		makeToolMsg("after-summary-2: " + bigContent),
+		makeAssistantMsg(),
+	}
+
+	result := builtinPruneToolResults(msgs)
+	oldTR := result[2].Parts[0].(message.ToolResult)
+	require.Contains(t, oldTR.Content, "before-summary")
+	require.NotContains(t, oldTR.Content, "Old tool result content cleared")
+}
+
+func TestBuiltinPruneToolResults_ProtectsSkillTool(t *testing.T) {
+	t.Parallel()
+	bigContent := strings.Repeat("x", 200_000)
+
+	var msgs []message.Message
+	for i := range 8 {
+		msgs = append(msgs, makeUserMsg())
+		msgs = append(msgs, makeAssistantMsg())
+		if i == 0 {
+			msgs = append(msgs, makeNamedToolMsg("skill", "skill-output: "+bigContent))
+		} else {
+			msgs = append(msgs, makeToolMsg(fmt.Sprintf("large-output-%d: %s", i, bigContent)))
+		}
+		msgs = append(msgs, makeAssistantMsg())
+	}
+
+	result := builtinPruneToolResults(msgs)
+	skillTR := result[2].Parts[0].(message.ToolResult)
+	require.Contains(t, skillTR.Content, "skill-output")
+	require.NotContains(t, skillTR.Content, "Old tool result content cleared")
+
+	olderBashTR := result[6].Parts[0].(message.ToolResult)
+	require.Contains(t, olderBashTR.Content, "Old tool result content cleared")
+}
+
 func TestBuiltinPruneToolResults_EmptyMessages(t *testing.T) {
 	t.Parallel()
 	result := builtinPruneToolResults(nil)
@@ -125,23 +189,4 @@ func TestBuiltinPruneToolResults_PreservesErrorToolResults(t *testing.T) {
 			require.Equal(t, bigContent, tr.Content, "error content at %d should be preserved", i)
 		}
 	}
-}
-
-func TestAssistantTurnCutoff(t *testing.T) {
-	t.Parallel()
-	msgs := []message.Message{
-		makeUserMsg(),      // 0
-		makeAssistantMsg(), // 1
-		makeToolMsg("a"),   // 2
-		makeAssistantMsg(), // 3
-		makeUserMsg(),      // 4
-		makeAssistantMsg(), // 5
-		makeToolMsg("b"),   // 6
-		makeAssistantMsg(), // 7
-	}
-	require.Equal(t, 7, assistantTurnCutoff(msgs, 1))
-	require.Equal(t, 5, assistantTurnCutoff(msgs, 2))
-	require.Equal(t, 3, assistantTurnCutoff(msgs, 3))
-	require.Equal(t, 1, assistantTurnCutoff(msgs, 4))
-	require.Equal(t, 0, assistantTurnCutoff(msgs, 5))
 }

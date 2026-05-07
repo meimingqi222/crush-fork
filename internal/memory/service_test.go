@@ -437,3 +437,44 @@ func TestMemoryServiceNewEntryLastAccessedAt(t *testing.T) {
 	require.Greater(t, entry.LastAccessedAt, int64(0),
 		"LastAccessedAt should be a valid timestamp, not Unix epoch")
 }
+
+func TestMemoryServiceStoreDetectsDuplicates(t *testing.T) {
+	t.Parallel()
+
+	service, err := NewService(t.TempDir())
+	require.NoError(t, err)
+
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "project/auth-flow",
+		Value: "Use JWT tokens for authentication with a 24-hour expiration",
+		Scope: "project",
+		Type:  "decision",
+	}))
+
+	// Storing with a different key but very similar value should be rejected.
+	err = service.Store(context.Background(), StoreParams{
+		Key:   "project/auth-decision",
+		Value: "Use JWT tokens for authentication with a 24 hour expiration",
+		Scope: "project",
+		Type:  "decision",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "similar memory already exists")
+	require.Contains(t, err.Error(), "project/auth-flow")
+
+	// Storing a clearly different value should succeed.
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "project/db-choice",
+		Value: "Use PostgreSQL for the primary database",
+		Scope: "project",
+		Type:  "decision",
+	}))
+
+	// Updating the existing key (same key) should succeed regardless of similarity.
+	require.NoError(t, service.Store(context.Background(), StoreParams{
+		Key:   "project/auth-flow",
+		Value: "Use JWT tokens for authentication with a 24-hour expiration and refresh tokens",
+		Scope: "project",
+		Type:  "decision",
+	}))
+}

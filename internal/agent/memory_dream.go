@@ -23,6 +23,7 @@ const (
 	memoryDreamMinHours            = 24
 	memoryDreamStaleLockWindow     = time.Hour
 	memoryDreamMaxSessions         = 24
+	memoryDreamMinSessions         = 3
 	memoryDreamMaxChars            = 24000
 	memoryFreshnessWarnAfter       = 30 * 24 * time.Hour
 	memoryDreamSessionScanInterval = 10 * time.Minute
@@ -44,7 +45,8 @@ Rules:
 - Avoid transient implementation details, temporary file state, and one-off logs.
 - Reuse existing keys when refining the same memory; create new keys only when needed.
 - If an existing memory is stale, contradicted, or superseded, delete it instead of leaving overlapping entries behind.
-- Return JSON with array entries shaped like {"action":"store|update|delete|noop","key":"...","description":"...","content":"...","type":"user|feedback|project|reference","scope":"project|session"}.
+- Return JSON with array entries shaped like {"action":"store|update|delete|noop","key":"...","description":"...","content":"...","type":"user|feedback|project|reference","scope":"project|session|user"}.
+- Use scope:user for memories that should persist across all projects (e.g., user identity, preferences, working style).
 - store/update require key + description + content. delete requires key only. noop is optional and will be ignored.
 - Return [] when there is nothing worth saving.`
 
@@ -68,7 +70,7 @@ func shouldRunMemoryDream(now, lastAt time.Time, candidateCount int, force bool)
 	if !lastAt.IsZero() && now.Sub(lastAt) < time.Duration(memoryDreamMinHours)*time.Hour {
 		return false
 	}
-	return candidateCount > 0
+	return candidateCount >= memoryDreamMinSessions
 }
 
 func selectDreamCandidateSessions(sessions []session.Session, lastAt time.Time, currentSessionID string) []session.Session {

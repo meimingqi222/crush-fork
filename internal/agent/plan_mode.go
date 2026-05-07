@@ -87,7 +87,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.GrepToolName:                toolRiskRead,
 
 	tools.SourcegraphToolName:         toolRiskNetwork,
-	tools.HistorySearchToolName:       toolRiskRead,
 	tools.LongTermMemoryToolName:      toolRiskWrite,
 	tools.TodosToolName:               toolRiskWrite,
 	tools.SendMessageToolName:         toolRiskWrite,
@@ -115,8 +114,8 @@ var toolRiskLevels = map[string]toolRiskLevel{
 var planModeReadToolNames = map[string]struct{}{
 	tools.GlobToolName:                {},
 	tools.GrepToolName:                {},
-	tools.ReadToolName:                {},
-	tools.HistorySearchToolName:       {},
+	tools.LSToolName:                  {},
+	tools.ViewToolName:                {},
 	tools.DiagnosticsToolName:         {},
 	tools.ReferencesToolName:          {},
 	tools.LSPDeclarationToolName:      {},

@@ -6,7 +6,7 @@ Reads and displays file contents with line numbers for examining code, logs, or 
 - Optional limit: control lines read (default 2000)
 - Optional hashline: include hashline anchors for line-addressable editing
 - Optional wait_for_diagnostics: wait for LSP diagnostics before returning (default true; set false to prefer lower latency)
-- Directories return a formatted listing of their contents
+- Don't use for directories (use the 'ls' tool instead)
 - Supports image files (PNG, JPEG, GIF, BMP, SVG, WebP)
 </usage>
 
