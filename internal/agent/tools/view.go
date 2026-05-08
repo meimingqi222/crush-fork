@@ -83,6 +83,13 @@ type textViewLine struct {
 	Display string
 }
 
+type textViewResult struct {
+	Lines      []textViewLine
+	HasMore    bool
+	Total      int
+	TotalKnown bool
+}
+
 var errViewOffsetBeyondEOF = errors.New("offset is beyond end of file")
 
 // NewViewTool is an alias for NewReadTool for backward compatibility.
@@ -229,13 +236,16 @@ func NewReadTool(
 			}
 
 			// Read the file content.
-			lines, hasMore, err := readTextFileLines(filePath, params.Offset, params.Limit)
+			readResult, err := readTextFileLines(filePath, params.Offset, params.Limit)
 			if err != nil {
 				if errors.Is(err, errViewOffsetBeyondEOF) {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Offset %d is beyond end of file", params.Offset)), nil
+					return fantasy.NewTextErrorResponse(
+						fmt.Sprintf("Offset %d is beyond end of file (%d lines)", params.Offset, readResult.Total),
+					), nil
 				}
 				return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
 			}
+			lines := readResult.Lines
 			content := joinDisplayLines(lines)
 			if !utf8.ValidString(content) {
 				return fantasy.NewTextErrorResponse("File content is not valid UTF-8"), nil
@@ -252,9 +262,19 @@ func NewReadTool(
 				output += addLineNumbers(lines, params.Offset+1)
 			}
 
-			if hasMore {
-				output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)",
-					params.Offset+len(strings.Split(content, "\n")))
+			nextOffset := params.Offset + len(lines)
+			if len(lines) > 0 {
+				startLine := params.Offset + 1
+				endLine := params.Offset + len(lines)
+				if readResult.HasMore {
+					output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use offset=%d to continue.)",
+						startLine, endLine, nextOffset)
+				} else if readResult.TotalKnown {
+					output += fmt.Sprintf("\n\n(Showing lines %d-%d. End of file - total %d lines.)",
+						startLine, endLine, readResult.Total)
+				}
+			} else if readResult.TotalKnown {
+				output += fmt.Sprintf("\n\n(End of file - total %d lines.)", readResult.Total)
 			}
 			output += "\n</file>\n"
 			output += getDiagnostics(filePath, lspManager)
@@ -366,18 +386,18 @@ func joinDisplayLines(lines []textViewLine) string {
 }
 
 func readTextFile(filePath string, offset, limit int) (string, bool, error) {
-	lines, hasMore, err := readTextFileLines(filePath, offset, limit)
+	result, err := readTextFileLines(filePath, offset, limit)
 	if err != nil {
 		return "", false, err
 	}
 
-	return joinDisplayLines(lines), hasMore, nil
+	return joinDisplayLines(result.Lines), result.HasMore, nil
 }
 
-func readTextFileLines(filePath string, offset, limit int) ([]textViewLine, bool, error) {
+func readTextFileLines(filePath string, offset, limit int) (textViewResult, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, false, err
+		return textViewResult{}, err
 	}
 	defer file.Close()
 
@@ -388,10 +408,10 @@ func readTextFileLines(filePath string, offset, limit int) ([]textViewLine, bool
 			skipped++
 		}
 		if err = scanner.Err(); err != nil {
-			return nil, false, err
+			return textViewResult{}, err
 		}
 		if skipped < offset {
-			return nil, false, errViewOffsetBeyondEOF
+			return textViewResult{Total: skipped, TotalKnown: true}, errViewOffsetBeyondEOF
 		}
 	}
 
@@ -414,10 +434,19 @@ func readTextFileLines(filePath string, offset, limit int) ([]textViewLine, bool
 	hasMore := len(lines) == limit && scanner.Scan()
 
 	if err := scanner.Err(); err != nil {
-		return nil, false, err
+		return textViewResult{}, err
 	}
 
-	return lines, hasMore, nil
+	result := textViewResult{
+		Lines:      lines,
+		HasMore:    hasMore,
+		TotalKnown: !hasMore,
+	}
+	if result.TotalKnown {
+		result.Total = offset + len(lines)
+	}
+
+	return result, nil
 }
 
 func getImageMimeType(filePath string) (bool, string) {

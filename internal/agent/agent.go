@@ -1492,6 +1492,31 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			currentAssistant = nil
 			currentStepToolMessageIDs = nil
 			currentStepToolResultChars = 0
+			if completedStepsThisRun > 0 {
+				retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+				if getMsgsErr != nil {
+					return nil, getMsgsErr
+				}
+				retryMsgs = excludeCurrentUserMessage(retryMsgs, call.UserMessage)
+				retryState, buildErr := a.buildChatRequestState(genCtx, chatRequestStateInput{
+					SessionID:      call.SessionID,
+					Agent:          "session",
+					Model:          largeModel,
+					Provider:       providerCtx,
+					Purpose:        requestPurpose,
+					RequestPurpose: requestPurpose,
+					Messages:       retryMsgs,
+					Message:        userMessage,
+					Attachments:    call.Attachments,
+					SystemPrompt:   systemPrompt,
+					PromptPrefix:   promptPrefix,
+					PermissionMode: currentSession.PermissionMode,
+				})
+				if buildErr != nil {
+					return nil, buildErr
+				}
+				requestState = retryState
+			}
 			if emptyStreamRetryAttempt >= maxRetriableAttempts {
 				err = fmt.Errorf("received empty response stream after %d retries; the upstream model may be temporarily unavailable", maxRetriableAttempts)
 				break

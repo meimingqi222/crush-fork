@@ -147,12 +147,12 @@ func TestReadTextFileLinesPreservesRawLongLinesForHashline(t *testing.T) {
 	longLine := strings.Repeat("a", MaxLineLength+10)
 	require.NoError(t, os.WriteFile(filePath, []byte(longLine), 0o644))
 
-	lines, hasMore, err := readTextFileLines(filePath, 0, 1)
+	result, err := readTextFileLines(filePath, 0, 1)
 	require.NoError(t, err)
-	require.False(t, hasMore)
-	require.Len(t, lines, 1)
-	require.Equal(t, longLine, lines[0].Raw)
-	require.Equal(t, strings.Repeat("a", MaxLineLength)+"...", lines[0].Display)
+	require.False(t, result.HasMore)
+	require.Len(t, result.Lines, 1)
+	require.Equal(t, longLine, result.Lines[0].Raw)
+	require.Equal(t, strings.Repeat("a", MaxLineLength)+"...", result.Lines[0].Display)
 }
 
 func TestViewHashlineSupportsEditingTruncatedLongLines(t *testing.T) {
@@ -236,6 +236,61 @@ func TestViewTool_AllowsReadingLargeFilesWithLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "a") // Should contain some content
+}
+
+func TestViewTool_IncludesPreciseContinuationOffset(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "sample.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("one\ntwo\nthree\nfour"), 0o644))
+
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "sample.txt", Offset: 1, Limit: 2})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "     2|two")
+	require.Contains(t, resp.Content, "     3|three")
+	require.Contains(t, resp.Content, "(Showing lines 2-3. Use offset=3 to continue.)")
+}
+
+func TestViewTool_IncludesEndOfFileTotal(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "sample.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("one\ntwo\nthree"), 0o644))
+
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "sample.txt", Offset: 1, Limit: 5})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "     2|two")
+	require.Contains(t, resp.Content, "     3|three")
+	require.Contains(t, resp.Content, "(Showing lines 2-3. End of file - total 3 lines.)")
+}
+
+func TestViewTool_OffsetBeyondEndIncludesTotalLines(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "sample.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("one\ntwo\nthree"), 0o644))
+
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "sample.txt", Offset: 10, Limit: 5})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "Offset 10 is beyond end of file (3 lines)")
 }
 
 func TestViewTool_MissingFileUsesConciseError(t *testing.T) {

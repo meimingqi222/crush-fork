@@ -196,6 +196,77 @@ func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentS
 	return &fantasy.AgentResult{}, nil
 }
 
+type emptyStreamRetryAfterToolTestAgent struct {
+	t                      *testing.T
+	runCalls               int
+	sawRetryWithToolResult bool
+}
+
+func (a *emptyStreamRetryAfterToolTestAgent) Generate(context.Context, fantasy.AgentCall) (*fantasy.AgentResult, error) {
+	return &fantasy.AgentResult{}, nil
+}
+
+func (a *emptyStreamRetryAfterToolTestAgent) Stream(ctx context.Context, call fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
+	a.runCalls++
+	if hasToolResultMessage(call.Messages) {
+		a.sawRetryWithToolResult = true
+		if call.PrepareStep != nil {
+			_, _, err := call.PrepareStep(ctx, fantasy.PrepareStepFunctionOptions{Messages: call.Messages})
+			require.NoError(a.t, err)
+		}
+		if call.OnTextDelta != nil {
+			require.NoError(a.t, call.OnTextDelta("text", "done"))
+		}
+		if call.OnStepFinish != nil {
+			require.NoError(a.t, call.OnStepFinish(fantasy.StepResult{
+				Response: fantasy.Response{FinishReason: fantasy.FinishReasonStop},
+			}))
+		}
+		return &fantasy.AgentResult{}, nil
+	}
+
+	if call.PrepareStep != nil {
+		_, _, err := call.PrepareStep(ctx, fantasy.PrepareStepFunctionOptions{Messages: call.Messages})
+		require.NoError(a.t, err)
+	}
+	if call.OnToolCall != nil {
+		require.NoError(a.t, call.OnToolCall(fantasy.ToolCallContent{
+			ToolCallID: "empty-retry-tool-call",
+			ToolName:   "view",
+			Input:      `{"file_path":"README.md"}`,
+		}))
+	}
+	if call.OnToolResult != nil {
+		require.NoError(a.t, call.OnToolResult(fantasy.ToolResultContent{
+			ToolCallID: "empty-retry-tool-call",
+			ToolName:   "view",
+			Result:     fantasy.ToolResultOutputContentText{Text: "README"},
+		}))
+	}
+	if call.OnStepFinish != nil {
+		require.NoError(a.t, call.OnStepFinish(fantasy.StepResult{
+			Response: fantasy.Response{FinishReason: fantasy.FinishReasonToolCalls},
+		}))
+	}
+	if call.PrepareStep != nil {
+		_, _, err := call.PrepareStep(ctx, fantasy.PrepareStepFunctionOptions{Messages: call.Messages})
+		require.NoError(a.t, err)
+	}
+	if call.OnStepFinish != nil {
+		require.NoError(a.t, call.OnStepFinish(fantasy.StepResult{}))
+	}
+	return &fantasy.AgentResult{}, nil
+}
+
+func hasToolResultMessage(msgs []fantasy.Message) bool {
+	for _, msg := range msgs {
+		if msg.Role == fantasy.MessageRoleTool {
+			return true
+		}
+	}
+	return false
+}
+
 type failOnceMessageService struct {
 	message.Service
 	mu           sync.Mutex
@@ -743,6 +814,28 @@ func TestRunTransientRetryNearContextLimitSummarizesInsteadOfRetrying(t *testing
 	require.NoError(t, err)
 	require.NotEmpty(t, savedSession.SummaryMessageID)
 	require.Equal(t, int64(100), savedSession.LastInputTokens())
+}
+
+func TestRunEmptyStreamRetryAfterCompletedStepRebuildsRequestState(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "empty stream retry after tool")
+	require.NoError(t, err)
+
+	fakeAgent := &emptyStreamRetryAfterToolTestAgent{t: t}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 200_000)
+
+	result, err := sessionAgent.Run(t.Context(), SessionAgentCall{
+		Prompt:          "inspect README then answer",
+		SessionID:       testSession.ID,
+		MaxOutputTokens: 50_000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 2, fakeAgent.runCalls)
+	require.True(t, fakeAgent.sawRetryWithToolResult)
 }
 
 func TestRunStreamingContextWindowErrorStringForcesSummarizeRecovery(t *testing.T) {

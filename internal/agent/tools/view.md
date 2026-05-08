@@ -14,6 +14,8 @@ Reads and displays file contents with line numbers for examining code, logs, or 
 - Displays contents with line numbers
 - Can read from any file position using offset
 - Handles large files by limiting lines read
+- Reports the exact next offset when more lines are available
+- Reports the total line count when the end of the file is reached
 - Auto-truncates very long lines for display
 - Suggests similar filenames when file not found
 - Renders image files directly in terminal
@@ -45,6 +47,7 @@ When file_path is a directory:
 - Use with Glob to find files first
 - For code exploration: Grep to find relevant files, then read to examine
 - For large files: use offset parameter for specific sections
+- When output says `Use offset=<n> to continue`, pass that exact offset in the next call
 - Set `hashline=true` when preparing line-addressable edits or when exact text matching looks brittle
 - Tool automatically detects and renders image files
 - Pass a directory path to get a directory tree listing
