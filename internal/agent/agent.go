@@ -643,6 +643,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		completedStepsThisRun = 0
 		runToolUses = 0
 		runLastTool = ""
+		emptyStreamRetryAttempt = 0
 		firstRequestStep = billFirstStepAsUser
 
 		if err := a.plugins().TriggerChatBeforeRequest(genCtx, plugin.ChatBeforeRequestInput{
