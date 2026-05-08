@@ -47,9 +47,10 @@ func promptTokenBudgetForModel(model Model, maxOutputTokens int64) promptTokenBu
 
 	effectiveWindow := EffectiveContextWindow(model.CatwalkCfg)
 	return promptTokenBudget{
-		ContextWindow:     effectiveWindow,
-		MaxOutputTokens:   maxOutputTokens,
-		UsableInputTokens: effectiveWindow - maxOutputTokens,
+		ContextWindow:       effectiveWindow,
+		MaxOutputTokens:     maxOutputTokens,
+		ReservedInputTokens: reserved,
+		UsableInputTokens:   effectiveWindow - reserved,
 	}
 }
 

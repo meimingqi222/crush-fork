@@ -320,6 +320,9 @@ After significant changes:
 
 <bash_commands>
 **CRITICAL**: The `description` parameter is REQUIRED for all bash tool calls. Always provide it.
+The bash tool is already a shell, including on Windows. Never wrap commands in
+`bash -lc`, `sh -c`, `cmd /c`, `powershell -Command`, or `pwsh -c`; run direct
+POSIX-style commands or use View/Grep/Glob for file inspection.
 
 When running non-trivial bash commands (especially those that modify the system):
 - Briefly explain what the command does and why you're running it

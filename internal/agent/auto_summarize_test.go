@@ -468,7 +468,7 @@ func TestRunPreflightAutoSummarizesWhenLastInputTokensAlreadyNearThreshold(t *te
 	})
 	require.NoError(t, err)
 
-	testSession.LastPromptTokens = 168_000
+	testSession.LastPromptTokens = 180_000
 	_, err = env.sessions.Save(t.Context(), testSession)
 	require.NoError(t, err)
 
@@ -528,7 +528,7 @@ func TestRunPreflightEstimateTrustsPluginCompactionForRequestPurpose(t *testing.
 	// LastInputTokens (9_500) is the observed API count and must always
 	// serve as the floor for compaction decisions, regardless of whether
 	// a plugin transform reduced the character-based estimate. With a
-	// 10_000 window, usable budget is 5_000, so 9_500 triggers summarization.
+	// 10_000 window, usable budget is 9_000, so 9_500 triggers summarization.
 	require.Equal(t, 1, fakeAgent.summaryCalls)
 	require.Equal(t, 1, fakeAgent.runCalls)
 
@@ -558,7 +558,7 @@ func TestRunPreflightEstimateKeepsLastInputFallbackWhenTransformDoesNotReduceEst
 	})
 	require.NoError(t, err)
 
-	testSession.LastPromptTokens = 168_000
+	testSession.LastPromptTokens = 180_000
 	_, err = env.sessions.Save(t.Context(), testSession)
 	require.NoError(t, err)
 
@@ -709,7 +709,7 @@ func TestRunTransientRetryNearContextLimitSummarizesInsteadOfRetrying(t *testing
 		t: t,
 		stepUsages: []fantasy.Usage{
 			{
-				InputTokens:  168_000,
+				InputTokens:  180_000,
 				OutputTokens: 10,
 			},
 			{

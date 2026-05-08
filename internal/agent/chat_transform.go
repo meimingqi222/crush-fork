@@ -212,6 +212,22 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 	history, files := a.preparePrompt(transformedMessages, input.Attachments...)
 	transformedEstimate := estimatePromptStateTokens(history, systemPrompt, promptPrefix)
 	slog.Debug("[PERF] buildChatRequestState: preparePrompt done", "duration", time.Since(start), "session_id", input.SessionID)
+	slog.Debug("Built chat request token estimate",
+		"session_id", input.SessionID,
+		"agent", input.Agent,
+		"purpose", input.Purpose,
+		"request_purpose", input.RequestPurpose,
+		"model", input.Model.ModelCfg.Model,
+		"provider", input.Model.ModelCfg.Provider,
+		"original_messages", len(input.Messages),
+		"transformed_messages", len(transformedMessages),
+		"history_messages", len(history),
+		"original_estimate_tokens", originalEstimate,
+		"transformed_estimate_tokens", transformedEstimate,
+		"estimate_reduced", transformedEstimate < originalEstimate,
+		"system_prompt_tokens", estimateStringTokens(systemPrompt),
+		"prompt_prefix_tokens", estimateStringTokens(promptPrefix),
+	)
 	return chatRequestState{
 		Messages:     transformedMessages,
 		History:      history,

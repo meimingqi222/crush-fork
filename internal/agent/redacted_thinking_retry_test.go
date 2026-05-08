@@ -32,6 +32,14 @@ func TestStripRedactedThinkingParts(t *testing.T) {
 						},
 					},
 				},
+				&fantasy.ReasoningPart{
+					Text: "",
+					ProviderOptions: fantasy.ProviderOptions{
+						anthropic.Name: &anthropic.ReasoningOptionMetadata{
+							RedactedData: "cG9pbnRlcg==",
+						},
+					},
+				},
 				fantasy.TextPart{Text: "answer"},
 				fantasy.ToolCallPart{ToolCallID: "t1", ToolName: "x"},
 			},

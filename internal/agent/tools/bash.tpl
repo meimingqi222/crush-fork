@@ -5,6 +5,8 @@ Uses mvdan/sh interpreter (Bash-compatible on all platforms including Windows).
 Use forward slashes for paths: "ls C:/foo/bar" not "ls C:\foo\bar".
 Common shell builtins and core utils available on Windows.
 For null redirection, always use `/dev/null`, never `nul` or `$null`.
+Do not wrap commands in another shell: never use `bash -lc`, `sh -c`, `cmd /c`, `powershell -Command`, or `pwsh -c`.
+This tool is not PowerShell. Use direct POSIX-style commands or the dedicated View/Grep/Glob tools instead.
 </cross_platform>
 
 <execution_steps>

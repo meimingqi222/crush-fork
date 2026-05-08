@@ -77,7 +77,6 @@ var (
 	titleWhitespaceRegex = regexp.MustCompile(`\s+`)
 )
 
-
 const autoResumePromptPrefix = "The previous session was interrupted because it got too long, the initial user request was: `"
 
 type pendingExtraction struct {
@@ -512,7 +511,24 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// This prevents double-counting the output reservation for large context models.
 		estimatedInput := a.estimateSessionPromptTokens(preflightState.History, call.Prompt, call.Attachments, agentTools, preflightState.SystemPrompt, preflightState.PromptPrefix)
 		estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
-		if trigger := proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens); trigger != sessionCompactionTriggerNone {
+		trigger := proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens)
+		budget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
+		slog.Info("Auto-summarize preflight decision",
+			"session_id", call.SessionID,
+			"model", largeModel.ModelCfg.Model,
+			"provider", largeModel.ModelCfg.Provider,
+			"estimated_input_tokens", estimatedInput,
+			"last_prompt_tokens", currentSession.LastPromptTokens,
+			"context_window", budget.ContextWindow,
+			"input_limit", budget.InputLimit,
+			"max_output_tokens", budget.MaxOutputTokens,
+			"reserved_input_tokens", budget.ReservedInputTokens,
+			"usable_input_tokens", budget.UsableInputTokens,
+			"uses_explicit_input_limit", budget.UsesExplicitInputLimit,
+			"estimate_reduced", preflightState.EstimateReduced,
+			"trigger", trigger,
+		)
+		if trigger != sessionCompactionTriggerNone {
 			if truncErr := a.truncateOversizedToolResults(ctx, call.SessionID); truncErr != nil {
 				slog.Warn("Failed to truncate oversized tool results before preflight summarization", "error", truncErr, "session_id", call.SessionID)
 			}
@@ -611,6 +627,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	var completedStepsThisRun int
 	var runToolUses int
 	var runLastTool string
+	var emptyStreamRetryAttempt int
 	// stripRedactedThinking is flipped on when a proxy rejects the
 	// Anthropic `redacted_thinking` content block, so subsequent
 	// prepareStep invocations strip those blocks from the history.
@@ -1025,11 +1042,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					requestState.SystemPrompt,
 					"",
 				)
+				promptBudget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
+				wouldAutoSummarize := promptBudget.UsableInputTokens > 0 && estimatedPromptTokens >= promptBudget.UsableInputTokens
 				slog.Debug("Prepared provider prompt usage estimate",
 					"session_id", call.SessionID,
 					"model", largeModel.ModelCfg.Model,
 					"provider", largeModel.ModelCfg.Provider,
 					"estimated_prompt_tokens", estimatedPromptTokens,
+					"context_window", promptBudget.ContextWindow,
+					"input_limit", promptBudget.InputLimit,
+					"max_output_tokens", promptBudget.MaxOutputTokens,
+					"reserved_input_tokens", promptBudget.ReservedInputTokens,
+					"usable_input_tokens", promptBudget.UsableInputTokens,
+					"would_auto_summarize", wouldAutoSummarize,
 					"prepared_messages", len(prepared.Messages),
 					"prepared_tools", len(prepared.Tools),
 					"has_current_user_message", hasCurrentUserMessage,
@@ -1248,7 +1273,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			},
 			StopWhen: []fantasy.StopCondition{
 				func(_ []fantasy.StepResult) bool {
-					projectedPromptTokens, _, estimateErr := a.estimateNextStepPromptTokens(genCtx, call.SessionID, agentTools, systemPrompt, promptPrefix, largeModel, providerCtx, requestPurpose)
+					projectedPromptTokens, estimateReduced, estimateErr := a.estimateNextStepPromptTokens(genCtx, call.SessionID, agentTools, systemPrompt, promptPrefix, largeModel, providerCtx, requestPurpose)
 					if estimateErr != nil {
 						slog.Warn("Failed to estimate next-step prompt tokens", "error", estimateErr, "session_id", call.SessionID)
 						// Fallback: use the higher of LastInputTokens or the current step's estimatedPromptTokens.
@@ -1272,7 +1297,28 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					// prevent double summarization in the same Run call.
 					// Context-window-exceeded errors are handled separately and
 					// will still trigger recovery summarization.
-					if shouldAutoSummarize(largeModel, projectedPromptTokens, call.MaxOutputTokens) && !a.disableAutoSummarize && !preflightSummarized {
+					shouldStepSummarize := shouldAutoSummarize(largeModel, projectedPromptTokens, call.MaxOutputTokens)
+					budget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
+					slog.Debug("Auto-summarize step decision",
+						"session_id", call.SessionID,
+						"model", largeModel.ModelCfg.Model,
+						"provider", largeModel.ModelCfg.Provider,
+						"projected_prompt_tokens", projectedPromptTokens,
+						"last_prompt_tokens", currentSession.LastPromptTokens,
+						"estimated_prompt_tokens", estimatedPromptTokens,
+						"context_window", budget.ContextWindow,
+						"input_limit", budget.InputLimit,
+						"max_output_tokens", budget.MaxOutputTokens,
+						"reserved_input_tokens", budget.ReservedInputTokens,
+						"usable_input_tokens", budget.UsableInputTokens,
+						"uses_explicit_input_limit", budget.UsesExplicitInputLimit,
+						"estimate_reduced", estimateReduced,
+						"estimate_error", estimateErr != nil,
+						"should_summarize", shouldStepSummarize,
+						"preflight_summarized", preflightSummarized,
+						"auto_summarize_disabled", a.disableAutoSummarize,
+					)
+					if shouldStepSummarize && !a.disableAutoSummarize && !preflightSummarized {
 						shouldSummarize = true
 						return true
 					}
@@ -1436,6 +1482,52 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				"attempt", textualToolProtocolRetryAttempt,
 				"max_attempts", maxTextualToolProtocolRetries,
 			)
+			continue
+		}
+
+		if err == nil && shouldRetryForEmptyStreamResponse(currentAssistant) {
+			if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
+				return nil, cleanupErr
+			}
+			currentAssistant = nil
+			currentStepToolMessageIDs = nil
+			currentStepToolResultChars = 0
+			if emptyStreamRetryAttempt >= maxRetriableAttempts {
+				err = fmt.Errorf("received empty response stream after %d retries; the upstream model may be temporarily unavailable", maxRetriableAttempts)
+				break
+			}
+			emptyStreamRetryAttempt++
+			delay := a.retryDelayFunc(emptyStreamRetryAttempt, 0)
+			slog.Warn("Retrying after empty response stream",
+				"session_id", call.SessionID,
+				"model", largeModel.ModelCfg.Model,
+				"provider", largeModel.ModelCfg.Provider,
+				"attempt", emptyStreamRetryAttempt,
+				"max_attempts", maxRetriableAttempts,
+				"delay", delay,
+			)
+			retryText := fmt.Sprintf(
+				"Service temporarily unavailable. Retrying in %d seconds... (attempt %d/%d)",
+				int(delay.Seconds()), emptyStreamRetryAttempt, maxRetriableAttempts,
+			)
+			retryMsg, retryMsgErr := a.messages.Create(genCtx, call.SessionID, message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.TextContent{Text: retryText},
+				},
+				Model:    largeModel.ModelCfg.Model,
+				Provider: largeModel.ModelCfg.Provider,
+			})
+			waitErr := a.retryWaitFunc(genCtx, delay)
+			if waitErr != nil {
+				if retryMsgErr == nil {
+					_ = a.messages.Delete(genCtx, retryMsg.ID)
+				}
+				return nil, waitErr
+			}
+			if retryMsgErr == nil {
+				_ = a.messages.Delete(genCtx, retryMsg.ID)
+			}
 			continue
 		}
 
@@ -2978,4 +3070,3 @@ func excludeCurrentUserMessage(msgs []message.Message, userMessage *message.Mess
 	}
 	return filtered
 }
-

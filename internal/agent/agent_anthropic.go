@@ -152,6 +152,10 @@ func stripRedactedThinkingParts(messages []fantasy.Message) ([]fantasy.Message, 
 				stripped = true
 				continue
 			}
+			if rp, ok := p.(*fantasy.ReasoningPart); ok && rp != nil && isAnthropicRedactedReasoning(*rp) {
+				stripped = true
+				continue
+			}
 			filtered = append(filtered, p)
 		}
 		if stripped {

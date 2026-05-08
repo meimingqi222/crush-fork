@@ -413,6 +413,16 @@ func TestBashTool_BlocksWrapperShellCommands(t *testing.T) {
 	}
 }
 
+func TestBashToolDescriptionWarnsAgainstWrapperShells(t *testing.T) {
+	t.Parallel()
+
+	description := bashDescription(&config.Attribution{TrailerStyle: config.TrailerStyleNone}, "test-model")
+	require.Contains(t, description, "This tool is not PowerShell")
+	require.Contains(t, description, "powershell -Command")
+	require.Contains(t, description, "cmd /c")
+	require.Contains(t, description, "bash -lc")
+}
+
 func initGitRepoForTest(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

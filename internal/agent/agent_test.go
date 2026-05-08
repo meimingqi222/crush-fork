@@ -393,7 +393,7 @@ func TestCoderAgent(t *testing.T) {
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:         "use view to list the files in the current directory",
+					Prompt:          "use view to list the files in the current directory",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 					NonInteractive:  true,
@@ -522,7 +522,7 @@ func TestCoderAgent(t *testing.T) {
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:         "use glob to find all .go files and use view to list the current directory, it is very important that you run both tool calls in parallel",
+					Prompt:          "use glob to find all .go files and use view to list the current directory, it is very important that you run both tool calls in parallel",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 					NonInteractive:  true,
@@ -734,22 +734,22 @@ func TestShouldAutoSummarize(t *testing.T) {
 		want            bool
 	}{
 		{
-			name: "fallback context budget reserves full max output like opencode",
+			name: "fallback context budget reserves bounded buffer instead of full max output",
 			model: Model{CatwalkCfg: catwalk.Model{
 				ContextWindow:    200_000,
 				DefaultMaxTokens: 50_000,
 			}},
-			contextUsed:     150_000,
+			contextUsed:     180_000,
 			maxOutputTokens: 50_000,
 			want:            true,
 		},
 		{
-			name: "fallback context budget stays below full output threshold",
+			name: "fallback context budget stays below reserved buffer threshold",
 			model: Model{CatwalkCfg: catwalk.Model{
 				ContextWindow:    200_000,
 				DefaultMaxTokens: 50_000,
 			}},
-			contextUsed:     149_999,
+			contextUsed:     179_999,
 			maxOutputTokens: 50_000,
 			want:            false,
 		},
@@ -761,6 +761,16 @@ func TestShouldAutoSummarize(t *testing.T) {
 			}},
 			contextUsed:     60_000,
 			maxOutputTokens: 0,
+			want:            false,
+		},
+		{
+			name: "anthropic 200k model does not summarize at 140k because max output is large",
+			model: Model{CatwalkCfg: catwalk.Model{
+				ContextWindow:    200_000,
+				DefaultMaxTokens: 64_000,
+			}},
+			contextUsed:     140_000,
+			maxOutputTokens: 64_000,
 			want:            false,
 		},
 		{

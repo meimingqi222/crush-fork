@@ -388,3 +388,33 @@ func (a *sessionAgent) cleanupFailedAttempt(ctx context.Context, assistant *mess
 	}
 	return a.messages.Delete(ctx, assistant.ID)
 }
+
+// shouldRetryForEmptyStreamResponse detects the case where the upstream API
+// returned HTTP 200 but the SSE stream contained no content — just a [DONE]
+// sentinel or an immediately-terminated stream that maps to
+// finish_reason=unknown with zero output. This is distinct from a legitimate
+// end_turn or tool_use completion: the response has no text, no reasoning, and
+// no tool calls. Retrying is safe because no tool side-effects occurred.
+func shouldRetryForEmptyStreamResponse(assistant *message.Message) bool {
+	if assistant == nil {
+		return false
+	}
+	if assistant.FinishReason() != message.FinishReasonUnknown {
+		return false
+	}
+	if assistant.Content().Text != "" {
+		return false
+	}
+	if assistant.ReasoningContent().Thinking != "" {
+		return false
+	}
+	if len(assistant.ToolCalls()) > 0 {
+		return false
+	}
+	slog.Warn("Detected empty response stream (finish_reason=unknown, no content); will retry",
+		"message_id", assistant.ID,
+		"model", assistant.Model,
+		"provider", assistant.Provider,
+	)
+	return true
+}
