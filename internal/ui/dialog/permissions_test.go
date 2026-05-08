@@ -8,22 +8,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPermissionsHasDiffViewForHashlineEdit(t *testing.T) {
+func TestPermissionsHasDiffViewForEdit(t *testing.T) {
 	t.Parallel()
 
 	d := &Permissions{
-		permission: permission.PermissionRequest{ToolName: tools.HashlineEditToolName},
+		permission: permission.PermissionRequest{ToolName: tools.EditToolName},
 	}
 
 	require.True(t, d.hasDiffView())
 }
 
-func TestPermissionsRenderHeaderIncludesHashlineEditFile(t *testing.T) {
+func TestPermissionsRenderHeaderIncludesEditFile(t *testing.T) {
 	com := testCommon(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
 	d := NewPermissions(com, permission.PermissionRequest{
-		ToolName: tools.HashlineEditToolName,
+		ToolName: tools.EditToolName,
 		Path:     "/workspace",
-		Params: tools.HashlineEditPermissionsParams{
+		Params: tools.EditPermissionsParams{
 			FilePath: "/workspace/internal/agent/tools/hashline.go",
 		},
 	})

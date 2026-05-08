@@ -817,10 +817,10 @@ func TestIsSafeWorkspaceWrite(t *testing.T) {
 		{
 			name: "safe hashline edit in workspace",
 			req: permission.PermissionRequest{
-				ToolName: tools.HashlineEditToolName,
+				ToolName: tools.EditToolName,
 				Action:   "write",
 				Path:     workingDir,
-				Params: tools.HashlineEditPermissionsParams{
+				Params: tools.EditPermissionsParams{
 					FilePath: insideFile,
 				},
 			},
@@ -1151,9 +1151,9 @@ func TestIsAlwaysManual(t *testing.T) {
 		{
 			name: "sensitive hashline edit manual",
 			req: permission.PermissionRequest{
-				ToolName: tools.HashlineEditToolName,
+				ToolName: tools.EditToolName,
 				Action:   "write",
-				Params: tools.HashlineEditPermissionsParams{
+				Params: tools.EditPermissionsParams{
 					FilePath: sensitivePath,
 				},
 			},
@@ -1162,9 +1162,9 @@ func TestIsAlwaysManual(t *testing.T) {
 		{
 			name: "safe hashline edit not always manual",
 			req: permission.PermissionRequest{
-				ToolName: tools.HashlineEditToolName,
+				ToolName: tools.EditToolName,
 				Action:   "write",
-				Params: tools.HashlineEditPermissionsParams{
+				Params: tools.EditPermissionsParams{
 					FilePath: safePath,
 				},
 			},

@@ -48,7 +48,7 @@ func NewJobWaitTool() fantasy.AgentTool {
 				return fantasy.ToolResponse{}, ctx.Err()
 			}
 
-			result, metadata := formatJobToolResponse(bgShell, params.ShellID, false)
+			result, metadata := formatJobToolResponse(bgShell, params.ShellID)
 			jobWaitMetadata := JobWaitResponseMetadata{
 				ShellID:          metadata.ShellID,
 				Command:          metadata.Command,

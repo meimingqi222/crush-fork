@@ -195,7 +195,7 @@ func newBaseToolMessageItem(
 	canceled bool,
 ) *baseToolMessageItem {
 	// we only do full width for diffs (as far as I know)
-	hasCappedWidth := toolCall.Name != tools.EditToolName && toolCall.Name != tools.HashlineEditToolName
+	hasCappedWidth := toolCall.Name != tools.EditToolName
 
 	status := ToolStatusRunning
 	if canceled {
@@ -254,8 +254,6 @@ func NewToolMessageItem(
 		item = NewWriteToolMessageItem(sty, toolCall, result, canceled)
 	case tools.EditToolName:
 		item = NewEditToolMessageItem(sty, toolCall, result, canceled)
-	case tools.HashlineEditToolName:
-		item = NewHashlineEditToolMessageItem(sty, toolCall, result, canceled)
 	case tools.GlobToolName:
 		item = NewGlobToolMessageItem(sty, toolCall, result, canceled)
 	case tools.GrepToolName:
@@ -966,11 +964,6 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			return fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.FilePath))
 		}
-	case tools.HashlineEditToolName:
-		var params tools.HashlineEditParams
-		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
-			return fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.FilePath))
-		}
 	case tools.WriteToolName:
 		var params tools.WriteParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
@@ -1101,8 +1094,6 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatViewResultForCopy()
 	case tools.EditToolName:
 		return t.formatEditResultForCopy()
-	case tools.HashlineEditToolName:
-		return t.formatHashlineEditResultForCopy()
 	case tools.WriteToolName:
 		return t.formatWriteResultForCopy()
 	case tools.FetchToolName:
@@ -1226,40 +1217,6 @@ func (t *baseToolMessageItem) formatEditResultForCopy() string {
 
 	var result strings.Builder
 
-	if meta.OldContent != "" || meta.NewContent != "" {
-		fileName := params.FilePath
-		if fileName != "" {
-			fileName = fsext.PrettyPath(fileName)
-		}
-		diffContent, additions, removals := diff.GenerateDiff(meta.OldContent, meta.NewContent, fileName)
-
-		fmt.Fprintf(&result, "Changes: +%d -%d\n", additions, removals)
-		result.WriteString("```diff\n")
-		result.WriteString(diffContent)
-		result.WriteString("\n```")
-	}
-
-	return result.String()
-}
-
-// formatHashlineEditResultForCopy formats hashline-edit tool results for clipboard.
-func (t *baseToolMessageItem) formatHashlineEditResultForCopy() string {
-	if t.result == nil || t.result.Metadata == "" {
-		if t.result != nil {
-			return t.result.Content
-		}
-		return ""
-	}
-
-	var meta tools.HashlineEditResponseMetadata
-	if json.Unmarshal([]byte(t.result.Metadata), &meta) != nil {
-		return t.result.Content
-	}
-
-	var params tools.HashlineEditParams
-	json.Unmarshal([]byte(t.toolCall.Input), &params)
-
-	var result strings.Builder
 	if meta.OldContent != "" || meta.NewContent != "" {
 		fileName := params.FilePath
 		if fileName != "" {
@@ -1443,8 +1400,6 @@ func prettifyToolName(name string) string {
 		return "Download"
 	case tools.EditToolName:
 		return "Edit"
-	case tools.HashlineEditToolName:
-		return "Hashline Edit"
 	case tools.FetchToolName:
 		return "Fetch"
 	case tools.AgenticFetchToolName:

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
@@ -21,6 +23,31 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
 )
+
+type inMemoryFileTracker struct {
+	mu    sync.Mutex
+	reads map[string]time.Time
+}
+
+func newHashlineEditFileTracker() *inMemoryFileTracker {
+	return &inMemoryFileTracker{reads: make(map[string]time.Time)}
+}
+
+func (m *inMemoryFileTracker) RecordRead(_ context.Context, sessionID, path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reads[sessionID+":"+path] = time.Now()
+}
+
+func (m *inMemoryFileTracker) LastReadTime(_ context.Context, sessionID, path string) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reads[sessionID+":"+path]
+}
+
+func (m *inMemoryFileTracker) ListReadFiles(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
 
 func TestReadTextFileBoundaryCases(t *testing.T) {
 	t.Parallel()
@@ -151,7 +178,7 @@ func TestViewHashlineSupportsEditingTruncatedLongLines(t *testing.T) {
 	lineRef := formatHashlineReference(1, longLine)
 	require.Contains(t, viewResp.Content, lineRef)
 
-	editResp, err := runHashlineEditTool(t, hashlineTool, ctx, EditParams{
+	editResp, err := runEditTool(t, hashlineTool, ctx, EditParams{
 		FilePath: filePath,
 		Operations: []HashlineEditOperation{
 			{
@@ -288,6 +315,19 @@ func runViewTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, para
 	return tool.Run(ctx, fantasy.ToolCall{
 		ID:    "test-call",
 		Name:  ViewToolName,
+		Input: string(input),
+	})
+}
+
+func runEditTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params EditParams) (fantasy.ToolResponse, error) {
+	t.Helper()
+
+	input, err := json.Marshal(params)
+	require.NoError(t, err)
+
+	return tool.Run(ctx, fantasy.ToolCall{
+		ID:    "test-call",
+		Name:  EditToolName,
 		Input: string(input),
 	})
 }

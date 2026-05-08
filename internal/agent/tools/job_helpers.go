@@ -13,10 +13,9 @@ type jobToolResponseMetadata struct {
 	Done             bool
 	ExitCode         int
 	WorkingDirectory string
-	DeprecationNotes []string
 }
 
-func formatJobToolResponse(bgShell *shell.BackgroundShell, shellID string, deprecatedWait bool) (string, jobToolResponseMetadata) {
+func formatJobToolResponse(bgShell *shell.BackgroundShell, shellID string) (string, jobToolResponseMetadata) {
 	stdout, stderr, done, execErr := bgShell.GetOutput()
 	output := formatJobOutput(stdout, stderr, execErr, done)
 	if output == "" {
@@ -36,12 +35,6 @@ func formatJobToolResponse(bgShell *shell.BackgroundShell, shellID string, depre
 		ExitCode:         exitCode,
 		WorkingDirectory: bgShell.WorkingDir,
 	}
-	if deprecatedWait {
-		metadata.DeprecationNotes = []string{
-			"`job_output.wait` is deprecated. Use `job_wait` when you need to block for completion.",
-		}
-	}
-
 	result := fmt.Sprintf("Status: %s\n\n%s", jobStatusText(done), output)
 	return result, metadata
 }

@@ -1,27 +1,11 @@
 package tools
 
 import (
-	"cmp"
-	"context"
-	_ "embed"
 	"fmt"
-	"log/slog"
-	"os"
 	"strings"
-	"time"
 
-	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/diff"
-	"github.com/charmbracelet/crush/internal/filepathext"
-	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
-	"github.com/charmbracelet/crush/internal/history"
-	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/permission"
 )
-
-//go:embed hashline_edit.md
-var hashlineEditDescription []byte
 
 type parsedHashlineOperation struct {
 	Operation    string
@@ -31,161 +15,58 @@ type parsedHashlineOperation struct {
 	ContentLines []string
 }
 
-func NewHashlineEditTool(
-	lspManager *lsp.Manager,
-	permissions permission.Service,
-	files history.Service,
-	filetracker filetracker.Service,
-	workingDir string,
-) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
-		HashlineEditToolName,
-		string(hashlineEditDescription),
-		func(ctx context.Context, params HashlineEditParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			if params.FilePath == "" {
-				return fantasy.NewTextErrorResponse("file_path is required"), nil
-			}
-			if len(params.Operations) == 0 {
-				return fantasy.NewTextErrorResponse("at least one operation is required"), nil
-			}
+func splitHashlineFileLines(content string) ([]string, bool) {
+	if content == "" {
+		return []string{}, false
+	}
 
-			sessionID := GetSessionFromContext(ctx)
-			if sessionID == "" {
-				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for hashline edit")
-			}
+	hasTrailingNewline := strings.HasSuffix(content, "\n")
+	lines := strings.Split(content, "\n")
+	if hasTrailingNewline {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, hasTrailingNewline
+}
 
-			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
-			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
+func joinHashlineFileLines(lines []string, trailingNewline bool) string {
+	if len(lines) == 0 {
+		return ""
+	}
 
-			// Check if file is outside working directory
-			isOutside, err := filepathext.IsOutsideWorkDir(params.FilePath, effectiveWorkingDir)
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("error checking file path: %w", err)
-			}
-			if isOutside {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("file path is outside working directory: %s", params.FilePath)), nil
-			}
+	content := strings.Join(lines, "\n")
+	if trailingNewline {
+		content += "\n"
+	}
+	return content
+}
 
-			fileInfo, err := os.Stat(params.FilePath)
-			if err != nil {
-				if os.IsNotExist(err) {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", params.FilePath)), nil
-				}
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to access file: %w", err)
-			}
-			if fileInfo.IsDir() {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", params.FilePath)), nil
-			}
+func splitHashlineContent(content string) []string {
+	normalized, _ := fsext.ToUnixLineEndings(content)
+	if normalized == "" {
+		return nil
+	}
+	lines := strings.Split(normalized, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
 
-			lastRead := filetracker.LastReadTime(ctx, sessionID, params.FilePath)
+func parseAndValidateHashlineReference(reference string, lines []string) (hashlineRef, error) {
+	parsedRef, err := parseHashlineReference(reference)
+	if err != nil {
+		return hashlineRef{}, err
+	}
 
-			modTime := fileInfo.ModTime().Truncate(time.Second)
-			if !lastRead.IsZero() && modTime.After(lastRead) {
-				return fantasy.NewTextErrorResponse(
-					fmt.Sprintf("file %s has been modified since it was last read (mod time: %s, last read: %s)",
-						params.FilePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339),
-					)), nil
-			}
+	currentHash, err := validateHashlineReference(parsedRef, lines)
+	if err != nil {
+		if currentHash != "" {
+			return hashlineRef{}, fmt.Errorf("%w (current hash is %s). Re-run read with hashline=true and retry", err, currentHash)
+		}
+		return hashlineRef{}, err
+	}
 
-			content, err := os.ReadFile(params.FilePath)
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
-			}
-
-			oldContent, isCrlf := fsext.ToUnixLineEndings(string(content))
-			oldLines, hadTrailingNewline := splitHashlineFileLines(oldContent)
-
-			operations, err := parseHashlineOperations(params.Operations, oldLines)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(err.Error()), nil
-			}
-
-			newLines, err := applyHashlineOperations(oldLines, operations)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(err.Error()), nil
-			}
-
-			newContent := joinHashlineFileLines(newLines, hadTrailingNewline)
-			if newContent == oldContent {
-				return fantasy.NewTextErrorResponse("new content is the same as old content. No changes made."), nil
-			}
-
-			_, additions, removals := diff.GenerateDiff(
-				oldContent,
-				newContent,
-				strings.TrimPrefix(params.FilePath, effectiveWorkingDir),
-			)
-
-			permissionResponse, err := RequestPermission(ctx, permissions,
-				permission.CreatePermissionRequest{
-					SessionID:          sessionID,
-					AuthoritySessionID: ResolveAuthoritySessionID(ctx, sessionID),
-					Path:               fsext.PathOrPrefix(params.FilePath, effectiveWorkingDir),
-					ToolCallID:         call.ID,
-					ToolName:           HashlineEditToolName,
-					Action:             "write",
-					Description:        fmt.Sprintf("Apply %d hashline operations to file %s", len(operations), params.FilePath),
-					Params: HashlineEditPermissionsParams{
-						FilePath:   params.FilePath,
-						OldContent: oldContent,
-						NewContent: newContent,
-					},
-				},
-			)
-			if err != nil {
-				return fantasy.ToolResponse{}, err
-			}
-			if permissionResponse != nil {
-				return *permissionResponse, nil
-			}
-
-			if isCrlf {
-				newContent, _ = fsext.ToWindowsLineEndings(newContent)
-			}
-
-			err = os.WriteFile(params.FilePath, []byte(newContent), 0o644)
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
-			}
-
-			file, err := files.GetByPathAndSession(ctx, params.FilePath, sessionID)
-			if err != nil {
-				_, err = files.Create(ctx, sessionID, params.FilePath, oldContent)
-				if err != nil {
-					return fantasy.ToolResponse{}, fmt.Errorf("error creating file history: %w", err)
-				}
-			}
-			if file.Content != oldContent {
-				_, err = files.CreateVersion(ctx, sessionID, params.FilePath, oldContent)
-				if err != nil {
-					slog.Error("Error creating file history version", "error", err)
-				}
-			}
-			_, err = files.CreateVersion(ctx, sessionID, params.FilePath, newContent)
-			if err != nil {
-				slog.Error("Error creating file history version", "error", err)
-			}
-
-			filetracker.RecordRead(ctx, sessionID, params.FilePath)
-			notifyLSPs(ctx, lspManager, params.FilePath)
-
-			response := fantasy.WithResponseMetadata(
-				fantasy.NewTextResponse(fmt.Sprintf("Applied %d hashline operation(s) to file: %s", len(operations), params.FilePath)),
-				HashlineEditResponseMetadata{
-					FilePath:   params.FilePath,
-					OldContent: oldContent,
-					NewContent: newContent,
-					Additions:  additions,
-					Removals:   removals,
-				},
-			)
-
-			text := fmt.Sprintf("<result>\n%s\n</result>\n", response.Content)
-			text += getDiagnostics(params.FilePath, lspManager)
-			response.Content = text
-			return response, nil
-		},
-	)
+	return parsedRef, nil
 }
 
 func parseHashlineOperations(operations []HashlineEditOperation, originalLines []string) ([]parsedHashlineOperation, error) {
@@ -242,60 +123,6 @@ func parseHashlineOperations(operations []HashlineEditOperation, originalLines [
 	}
 
 	return parsed, nil
-}
-
-func parseAndValidateHashlineReference(reference string, lines []string) (hashlineRef, error) {
-	parsedRef, err := parseHashlineReference(reference)
-	if err != nil {
-		return hashlineRef{}, err
-	}
-
-	currentHash, err := validateHashlineReference(parsedRef, lines)
-	if err != nil {
-		if currentHash != "" {
-			return hashlineRef{}, fmt.Errorf("%w (current hash is %s). Re-run read with hashline=true and retry", err, currentHash)
-		}
-		return hashlineRef{}, err
-	}
-
-	return parsedRef, nil
-}
-
-func splitHashlineFileLines(content string) ([]string, bool) {
-	if content == "" {
-		return []string{}, false
-	}
-
-	hasTrailingNewline := strings.HasSuffix(content, "\n")
-	lines := strings.Split(content, "\n")
-	if hasTrailingNewline {
-		lines = lines[:len(lines)-1]
-	}
-	return lines, hasTrailingNewline
-}
-
-func joinHashlineFileLines(lines []string, trailingNewline bool) string {
-	if len(lines) == 0 {
-		return ""
-	}
-
-	content := strings.Join(lines, "\n")
-	if trailingNewline {
-		content += "\n"
-	}
-	return content
-}
-
-func splitHashlineContent(content string) []string {
-	normalized, _ := fsext.ToUnixLineEndings(content)
-	if normalized == "" {
-		return nil
-	}
-	lines := strings.Split(normalized, "\n")
-	if lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
 }
 
 func applyHashlineOperations(originalLines []string, operations []parsedHashlineOperation) ([]string, error) {
@@ -386,7 +213,7 @@ func insertRelativeToOriginalLine(lines []string, mapping []int, prependOffsets 
 		return lines, mapping, appendOffsets, nil
 	}
 
-	// Check if the anchor line was deleted
+	// Check if the anchor line was deleted.
 	if originalLine >= len(mapping) || mapping[originalLine] == 0 {
 		return nil, nil, nil, fmt.Errorf("line %d no longer exists after previous operations", originalLine)
 	}

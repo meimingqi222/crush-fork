@@ -702,7 +702,6 @@ func allToolNames() []string {
 		"job_kill",
 		"download",
 		"edit",
-		"hashline_edit",
 		"lsp_diagnostics",
 		"lsp_references",
 		"lsp_declaration",

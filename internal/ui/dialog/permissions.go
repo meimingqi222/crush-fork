@@ -331,7 +331,7 @@ func (p *Permissions) respond(action PermissionAction) tea.Msg {
 
 func (p *Permissions) hasDiffView() bool {
 	switch p.permission.ToolName {
-	case tools.EditToolName, tools.WriteToolName, tools.HashlineEditToolName:
+	case tools.EditToolName, tools.WriteToolName, tools.ViewToolName:
 		return true
 	}
 	return false
@@ -478,14 +478,12 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 			lines = append(lines, p.renderKeyValue("URL", params.URL, contentWidth))
 			lines = append(lines, p.renderKeyValue("File", fsext.PrettyPath(params.FilePath), contentWidth))
 		}
-	case tools.EditToolName, tools.WriteToolName, tools.HashlineEditToolName, tools.ViewToolName:
+	case tools.EditToolName, tools.WriteToolName, tools.ViewToolName:
 		var filePath string
 		switch params := p.permission.Params.(type) {
 		case tools.EditPermissionsParams:
 			filePath = params.FilePath
 		case tools.WritePermissionsParams:
-			filePath = params.FilePath
-		case tools.HashlineEditPermissionsParams:
 			filePath = params.FilePath
 		case tools.ViewPermissionsParams:
 			filePath = params.FilePath
@@ -561,8 +559,6 @@ func (p *Permissions) renderContent(width int) string {
 		return p.renderEditContent(width)
 	case tools.WriteToolName:
 		return p.renderWriteContent(width)
-	case tools.HashlineEditToolName:
-		return p.renderHashlineEditContent(width)
 	case tools.DownloadToolName:
 		return p.renderDownloadContent(width)
 	case tools.FetchToolName:
@@ -595,14 +591,6 @@ func (p *Permissions) renderEditContent(contentWidth int) string {
 
 func (p *Permissions) renderWriteContent(contentWidth int) string {
 	params, ok := p.permission.Params.(tools.WritePermissionsParams)
-	if !ok {
-		return ""
-	}
-	return p.renderDiff(params.FilePath, params.OldContent, params.NewContent, contentWidth)
-}
-
-func (p *Permissions) renderHashlineEditContent(contentWidth int) string {
-	params, ok := p.permission.Params.(tools.HashlineEditPermissionsParams)
 	if !ok {
 		return ""
 	}

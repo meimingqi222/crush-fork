@@ -18,17 +18,15 @@ var jobOutputDescription []byte
 
 type JobOutputParams struct {
 	ShellID string `json:"shell_id" description:"The ID of the background shell to retrieve output from"`
-	Wait    bool   `json:"wait" description:"If true, block until the background shell completes before returning output"`
 }
 
 type JobOutputResponseMetadata struct {
-	ShellID          string   `json:"shell_id"`
-	Command          string   `json:"command"`
-	Description      string   `json:"description"`
-	Done             bool     `json:"done"`
-	ExitCode         int      `json:"exit_code,omitempty"`
-	WorkingDirectory string   `json:"working_directory"`
-	DeprecationNotes []string `json:"deprecation_notes,omitempty"`
+	ShellID          string `json:"shell_id"`
+	Command          string `json:"command"`
+	Description      string `json:"description"`
+	Done             bool   `json:"done"`
+	ExitCode         int    `json:"exit_code,omitempty"`
+	WorkingDirectory string `json:"working_directory"`
 }
 
 func NewJobOutputTool() fantasy.AgentTool {
@@ -46,16 +44,7 @@ func NewJobOutputTool() fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("background shell not found: %s", params.ShellID)), nil
 			}
 
-			if params.Wait {
-				if !bgShell.WaitContext(ctx) {
-					// Context was cancelled while waiting; propagate the
-					// cancellation so the agent's error handler creates
-					// the required tool-result message.
-					return fantasy.ToolResponse{}, ctx.Err()
-				}
-			}
-
-			result, meta := formatJobToolResponse(bgShell, params.ShellID, params.Wait)
+			result, meta := formatJobToolResponse(bgShell, params.ShellID)
 			metadata := JobOutputResponseMetadata(meta)
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 		})
