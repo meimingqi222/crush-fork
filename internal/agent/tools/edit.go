@@ -98,15 +98,6 @@ func NewEditTool(
 
 			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
 
-			// Check if file is outside working directory
-			isOutside, err := filepathext.IsOutsideWorkDir(params.FilePath, effectiveWorkingDir)
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("error checking file path: %w", err)
-			}
-			if isOutside {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("file path is outside working directory: %s", params.FilePath)), nil
-			}
-
 			var response fantasy.ToolResponse
 			var opErr error
 

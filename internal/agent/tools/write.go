@@ -73,15 +73,6 @@ func NewWriteTool(
 
 			filePath := filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
 
-			// Check if file is outside working directory
-			isOutside, err := filepathext.IsOutsideWorkDir(filePath, effectiveWorkingDir)
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("error checking file path: %w", err)
-			}
-			if isOutside {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("file path is outside working directory: %s", filePath)), nil
-			}
-
 			fileInfo, err := os.Stat(filePath)
 			if err == nil {
 				if fileInfo.IsDir() {
