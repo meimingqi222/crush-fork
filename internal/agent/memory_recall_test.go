@@ -155,7 +155,7 @@ func TestSelectRelevantMemoriesUsesExpandedCandidatePool(t *testing.T) {
 	for i := range memoryRelevanceMaxFiles + 5 {
 		require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{
 			Key:   "project/memory-" + string(rune('a'+(i%26))) + "-" + string(rune('0'+(i%10))),
-			Value: fmt.Sprintf("Memory value for entry index %d unique", i),
+			Value: fmt.Sprintf("uniquetoken%d", i),
 			Scope: "project",
 			Type:  "project",
 		}))
