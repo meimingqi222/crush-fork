@@ -103,6 +103,7 @@ type Coordinator interface {
 	GenerateHandoff(ctx context.Context, sourceSessionID, goal string) (HandoffDraft, error)
 	ClassifyPermission(ctx context.Context, req permission.PermissionRequest) (permission.AutoClassification, error)
 	Model() Model
+	ModelForSession(sessionID string) (Model, bool)
 	PrepareModelSwitch(ctx context.Context, sessionID string, modelType config.SelectedModelType, selectedModel config.SelectedModel) error
 	UpdateModels(ctx context.Context) error
 	RefreshTools(ctx context.Context) error
@@ -139,6 +140,10 @@ type coordinator struct {
 
 	activeSubAgentsMu sync.Mutex
 	activeSubAgents   map[string]map[SessionAgent]struct{}
+
+	// childSessionAgents maps child session IDs to the SessionAgent running
+	// that child session, for model lookup when viewing subagent sessions.
+	childSessionAgents sync.Map
 
 	deferredMu                 sync.Mutex
 	activatedDeferredBySession map[string]map[string]struct{}
@@ -1712,6 +1717,15 @@ func (c *coordinator) Model() Model {
 	return c.currentAgent.Model()
 }
 
+func (c *coordinator) ModelForSession(sessionID string) (Model, bool) {
+	if v, ok := c.childSessionAgents.Load(sessionID); ok {
+		if sa, ok := v.(SessionAgent); ok {
+			return sa.Model(), true
+		}
+	}
+	return Model{}, false
+}
+
 func filterAttachmentsForModelSupport(attachments []message.Attachment, supportsImages bool) []message.Attachment {
 	if supportsImages || attachments == nil {
 		return attachments
@@ -2751,6 +2765,9 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		}
 	}
 	defer c.clearDeferredToolActivationsForSession(subSession.ID)
+
+	c.childSessionAgents.Store(subSession.ID, params.Agent)
+	defer c.childSessionAgents.Delete(subSession.ID)
 
 	if params.SessionSetup != nil {
 		params.SessionSetup(subSession.ID)

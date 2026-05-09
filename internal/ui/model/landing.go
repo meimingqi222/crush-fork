@@ -7,14 +7,20 @@ import (
 	"github.com/charmbracelet/ultraviolet/layout"
 )
 
-// selectedLargeModel returns the currently selected large language model from
-// the agent coordinator, if one exists.
+// selectedLargeModel returns the large language model for the current session.
+// When viewing a subagent session, it returns the model used by that subagent
+// if it is currently running; otherwise it falls back to the main agent model.
 func (m *UI) selectedLargeModel() *agent.Model {
-	if m.com.App.AgentCoordinator != nil {
-		model := m.com.App.AgentCoordinator.Model()
-		return &model
+	if m.com.App.AgentCoordinator == nil {
+		return nil
 	}
-	return nil
+	if m.session != nil && m.session.ParentSessionID != "" {
+		if model, ok := m.com.App.AgentCoordinator.ModelForSession(m.session.ID); ok {
+			return &model
+		}
+	}
+	model := m.com.App.AgentCoordinator.Model()
+	return &model
 }
 
 // landingView renders the landing page view showing the current working

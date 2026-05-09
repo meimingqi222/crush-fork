@@ -285,7 +285,8 @@ func (f *fakeCoordinator) GenerateHandoff(_ context.Context, _ string, _ string)
 func (f *fakeCoordinator) ClassifyPermission(_ context.Context, _ permission.PermissionRequest) (permission.AutoClassification, error) {
 	return permission.AutoClassification{}, nil
 }
-func (f *fakeCoordinator) Model() agent.Model { return agent.Model{} }
+func (f *fakeCoordinator) Model() agent.Model                           { return agent.Model{} }
+func (f *fakeCoordinator) ModelForSession(_ string) (agent.Model, bool) { return agent.Model{}, false }
 func (f *fakeCoordinator) EscalationBridge() *permission.EscalationBridge {
 	return nil
 }
