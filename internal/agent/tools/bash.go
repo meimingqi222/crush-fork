@@ -26,7 +26,7 @@ type BashParams struct {
 	Command             string `json:"command" description:"The command to execute"`
 	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in (defaults to current directory)"`
 	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true to run this command in the background. Use job_output for snapshots, job_wait to block until it finishes, and job_kill to terminate it."`
-	TimeoutSeconds      *int   `json:"timeout_seconds,omitempty" description:"Maximum time to allow the command to run in the foreground before it is terminated. Defaults to 120 seconds. Set to 0 to disable timeout."`
+	TimeoutSeconds      *int   `json:"timeout_seconds,omitempty" description:"Maximum time to allow the command to run in the foreground before it is terminated. Defaults to 120 seconds. Set to 0 to disable timeout. Maximum allowed value is 600 seconds."`
 	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Deprecated compatibility field. If provided and timeout_seconds is omitted, its value is interpreted as timeout_seconds."`
 }
 
