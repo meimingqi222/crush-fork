@@ -22,7 +22,7 @@ import (
 )
 
 type BashParams struct {
-	Description         string `json:"description" description:"A brief description of what the command does, try to keep it under 30 characters or so"`
+	Description         string `json:"description,omitempty" description:"A brief description of what the command does, try to keep it under 30 characters or so"`
 	Command             string `json:"command" description:"The command to execute"`
 	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in (defaults to current directory)"`
 	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true to run this command in the background. Use job_output for snapshots, job_wait to block until it finishes, and job_kill to terminate it."`
@@ -163,6 +163,14 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.Command == "" {
 				return fantasy.NewTextErrorResponse("missing command"), nil
+			}
+
+			if params.Description == "" {
+				runes := []rune(params.Command)
+				if len(runes) > 30 {
+					runes = runes[:30]
+				}
+				params.Description = string(runes)
 			}
 
 			execWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), params.WorkingDir, workingDir)

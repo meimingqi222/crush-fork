@@ -112,6 +112,8 @@ func (m *APIKeyInput) HandleMsg(msg tea.Msg) Action {
 		case APIKeyInputStateVerifying:
 			cmd := tea.Batch(m.spinner.Tick, m.verifyAPIKey)
 			return ActionCmd{cmd}
+		case APIKeyInputStateVerified:
+			return m.saveKeyAndContinue()
 		}
 	case spinner.TickMsg:
 		switch m.state {

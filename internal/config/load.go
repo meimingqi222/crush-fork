@@ -1028,6 +1028,13 @@ func GlobalConfig() string {
 	if xdgConfigHome := os.Getenv("XDG_CONFIG_HOME"); xdgConfigHome != "" {
 		return filepath.Join(xdgConfigHome, appName, fmt.Sprintf("%s.json", appName))
 	}
+	if runtime.GOOS == "windows" {
+		appData := cmp.Or(
+			os.Getenv("APPDATA"),
+			filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming"),
+		)
+		return filepath.Join(appData, appName, fmt.Sprintf("%s.json", appName))
+	}
 	return filepath.Join(home.Dir(), ".config", appName, fmt.Sprintf("%s.json", appName))
 }
 
@@ -1235,6 +1242,13 @@ func GlobalAgentsMD() string {
 	}
 	if xdgConfigHome := os.Getenv("XDG_CONFIG_HOME"); xdgConfigHome != "" {
 		return filepath.Join(xdgConfigHome, appName, "AGENTS.md")
+	}
+	if runtime.GOOS == "windows" {
+		appData := cmp.Or(
+			os.Getenv("APPDATA"),
+			filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming"),
+		)
+		return filepath.Join(appData, appName, "AGENTS.md")
 	}
 	return filepath.Join(home.Dir(), ".config", appName, "AGENTS.md")
 }
