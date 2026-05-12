@@ -2996,7 +2996,7 @@ func (c *coordinator) createSubagentWorktreeDir(baseDir, subSessionID string) (s
 		slug = slug[:40]
 	}
 	branchName := fmt.Sprintf("crush-agent-%s", slug)
-	worktreeRoot := filepath.Join(gitRoot, ".crush", "worktrees")
+	worktreeRoot := c.subagentWorktreeRoot(gitRoot)
 	worktreeDir := filepath.Join(worktreeRoot, branchName)
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
 		return "", fmt.Errorf("create worktree root: %w", err)
@@ -3012,6 +3012,26 @@ func (c *coordinator) createSubagentWorktreeDir(baseDir, subSessionID string) (s
 		return "", fmt.Errorf("create worktree: %w: %s", addErr, strings.TrimSpace(string(addOutput)))
 	}
 	return worktreeDir, nil
+}
+
+func (c *coordinator) subagentWorktreeRoot(gitRoot string) string {
+	projectDataDir := ""
+	if c != nil && c.cfg != nil {
+		projectDataDir = strings.TrimSpace(c.cfg.ProjectDataDir())
+	}
+	if projectDataDir == "" {
+		projectDataDir = config.ProjectDataDir(gitRoot)
+	}
+	return filepath.Join(projectDataDir, "worktrees")
+}
+
+func (c *coordinator) subagentWorktreeCleanupRoots(gitRoot string) []string {
+	primary := c.subagentWorktreeRoot(gitRoot)
+	legacy := filepath.Join(gitRoot, ".crush", "worktrees")
+	if primary == legacy {
+		return []string{primary}
+	}
+	return []string{primary, legacy}
 }
 
 // removeSubagentWorktree removes a worktree directory and its branch.
@@ -3108,7 +3128,15 @@ func (c *coordinator) CleanupStaleWorktrees(ctx context.Context, cutoffDays int)
 	}
 	gitRoot := strings.TrimSpace(string(output))
 
-	worktreesDir := filepath.Join(gitRoot, ".crush", "worktrees")
+	for _, worktreesDir := range c.subagentWorktreeCleanupRoots(gitRoot) {
+		if err := c.cleanupStaleWorktreesInDir(worktreesDir, cutoffDays); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *coordinator) cleanupStaleWorktreesInDir(worktreesDir string, cutoffDays int) error {
 	entries, err := os.ReadDir(worktreesDir)
 	if os.IsNotExist(err) {
 		return nil

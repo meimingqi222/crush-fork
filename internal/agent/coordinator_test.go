@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -1003,6 +1007,39 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 		_, err := coord.resolveCoderModelSupportsImages()
 		require.ErrorContains(t, err, "model \"missing-model\" not found")
 	})
+}
+
+func TestCreateSubagentWorktreeDirUsesProjectDataDir(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("test\n"), 0o644))
+	runGit(t, repoDir, "add", "README.md")
+	runGit(t, repoDir, "-c", "user.email=test@example.com", "-c", "user.name=Test User", "commit", "-m", "init")
+
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(t.TempDir(), "global-data"))
+	cfg, err := config.Init(repoDir, "", false)
+	require.NoError(t, err)
+
+	coord := &coordinator{cfg: cfg}
+	worktreeDir, err := coord.createSubagentWorktreeDir(repoDir, "session/abc$$123")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, coord.removeSubagentWorktree(worktreeDir))
+	})
+
+	expectedRoot := filepath.Join(cfg.ProjectDataDir(), "worktrees")
+	require.True(t, strings.HasPrefix(worktreeDir, expectedRoot+string(os.PathSeparator)), "worktree %q should be under %q", worktreeDir, expectedRoot)
+	require.DirExists(t, worktreeDir)
+	require.NoDirExists(t, filepath.Join(repoDir, ".crush", "worktrees"))
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmdArgs := append([]string{"-C", dir}, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git %s failed: %s", strings.Join(args, " "), string(output))
 }
 
 func TestUpdateParentSessionCost(t *testing.T) {
