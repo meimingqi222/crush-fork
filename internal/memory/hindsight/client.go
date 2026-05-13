@@ -92,10 +92,10 @@ type RecallRequest struct {
 
 // RecallResult is a single recalled memory.
 type RecallResult struct {
-	ID          string    `json:"id"`
+	ID          string    `json:"id,omitempty"`
 	Text        string    `json:"text"`
-	Type        string    `json:"type"`
-	MentionedAt time.Time `json:"mentioned_at"`
+	Type        string    `json:"type,omitempty"`
+	MentionedAt time.Time `json:"mentioned_at,omitempty"`
 }
 
 // Recall queries the remote bank for memories relevant to query.

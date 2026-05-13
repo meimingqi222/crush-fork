@@ -3,7 +3,6 @@ package hindsight
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -71,16 +70,12 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, opts map[string]
 		return nil, remoteErr
 	}
 
+	// Convert results preserving API order (results are already sorted by relevance).
 	events := make([]engine.MemoryEvent, 0, len(remoteResults))
 	for _, result := range remoteResults {
 		events = append(events, remoteResultToEvent(result))
 	}
-	sort.SliceStable(events, func(i, j int) bool {
-		if events[i].Importance == events[j].Importance {
-			return events[i].UpdatedAt.After(events[j].UpdatedAt)
-		}
-		return events[i].Importance > events[j].Importance
-	})
+	// Apply limit if specified, preserving API's relevance order.
 	if limit, ok := opts["limit"].(int); ok && limit > 0 && len(events) > limit {
 		events = events[:limit]
 	}
@@ -119,14 +114,18 @@ func remoteResultToEvent(result RecallResult) engine.MemoryEvent {
 	if result.Type != "" {
 		kind = engine.MemoryKind(result.Type)
 	}
+	id := result.ID
+	if id == "" {
+		id = fmt.Sprintf("%d", updatedAt.UnixNano())
+	}
 	return engine.MemoryEvent{
-		ID:         "hindsight:" + result.ID,
+		ID:         "hindsight:" + id,
 		Scope:      engine.MemoryScopeGlobal,
 		Kind:       kind,
 		Content:    result.Text,
 		Summary:    truncateSummary(result.Text),
 		Confidence: 0.8,
-		Importance: 0.75,
+		Importance: 0.5,
 		CreatedAt:  updatedAt,
 		UpdatedAt:  updatedAt,
 		Tags:       []string{"source:hindsight"},

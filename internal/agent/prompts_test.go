@@ -121,11 +121,11 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 
 	// hashline_edit functionality is now integrated into the edit tool via
 	// its operations[] parameter, so the AllowedTools list only needs the
-	// core editing tools. The read tool (formerly "view") provides hashline
-	// anchors via read(hashline=true).
+	// core editing tools. The view tool provides hashline anchors via
+	// view(hashline=true).
 	promptBuilder, err := promptForAgent(config.Agent{
 		ID:           config.AgentGeneral,
-		AllowedTools: []string{"read", "edit", "write"},
+		AllowedTools: []string{"view", "edit", "write"},
 	}, true)
 	require.NoError(t, err)
 
@@ -133,8 +133,8 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 	require.NoError(t, err)
 	// Guidance about hashline-anchored edits via the edit tool's operations[]
 	assert.Contains(t, built, "operations[]")
-	// The read tool's hashline mode should be referenced
-	assert.Contains(t, built, "read(hashline=true)")
+	// The view tool's hashline mode should be referenced
+	assert.Contains(t, built, "view(hashline=true)")
 	// Should explain when hashline mode is preferred
 	assert.Contains(t, built, "brittle")
 }

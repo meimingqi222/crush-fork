@@ -530,7 +530,7 @@ func (s *service) isExplicitlyAllowed(opts permission.CreatePermissionRequest, r
 
 func isAutoModeAllowlistedRequest(req permission.PermissionRequest) bool {
 	switch req.ToolName {
-	case tools.ReadToolName:
+	case tools.ViewToolName:
 		return req.Action == "read"
 	case tools.GrepToolName, tools.GlobToolName:
 		return req.Action == "search"

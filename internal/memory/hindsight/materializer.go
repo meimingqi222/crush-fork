@@ -78,7 +78,7 @@ func (m *Materializer) Materialize(ctx context.Context, _ string, _ []engine.Mem
 		item := RetainItem{
 			Content:    content,
 			Context:    "crush",
-			DocumentID: evt.Source.SessionID,
+			DocumentID: evt.ID,
 			Tags:       eventTags(evt),
 			Metadata: map[string]string{
 				"event_id":   evt.ID,

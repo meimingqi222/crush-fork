@@ -94,7 +94,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.TodosToolName:               toolRiskWrite,
 	tools.SendMessageToolName:         toolRiskWrite,
 	tools.TaskStopToolName:            toolRiskWrite,
-	tools.ReadToolName:                toolRiskRead,
 	tools.ViewToolName:                toolRiskRead,
 	tools.WriteToolName:               toolRiskWrite,
 	tools.DiagnosticsToolName:         toolRiskRead,
@@ -115,11 +114,10 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.ToolSearchToolName:          toolRiskRead,
 }
 
-var planModeReadToolNames = map[string]struct{}{
+var planModeFileInspectToolNames = map[string]struct{}{
 	tools.GlobToolName:                {},
 	tools.GrepToolName:                {},
 	tools.ViewToolName:                {},
-	tools.ReadToolName:                {},
 	tools.DiagnosticsToolName:         {},
 	tools.ReferencesToolName:          {},
 	tools.LSPDeclarationToolName:      {},
@@ -188,7 +186,7 @@ func isPlanModeToolAllowed(toolName string) bool {
 	if riskLevelForTool(toolName) != toolRiskRead {
 		return false
 	}
-	_, ok := planModeReadToolNames[toolName]
+	_, ok := planModeFileInspectToolNames[toolName]
 	return ok
 }
 

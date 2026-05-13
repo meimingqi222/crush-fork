@@ -202,7 +202,7 @@ func TestAutoPermission_AutoModeReadOnlyRequestSkipsClassifier(t *testing.T) {
 
 	base := &mockPermissionService{
 		Broker:      pubsub.NewBroker[permission.PermissionRequest](),
-		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: tools.ReadToolName, Action: "read"}},
+		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: tools.ViewToolName, Action: "read"}},
 		promptGrant: true,
 	}
 	classifier := &mockClassifier{}

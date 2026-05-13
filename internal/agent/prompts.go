@@ -187,7 +187,7 @@ func isReadOnlyAgent(agentCfg config.Agent) bool {
 		agenttools.BashToolName:                {},
 		agenttools.GlobToolName:                {},
 		agenttools.GrepToolName:                {},
-		agenttools.ReadToolName:                {},
+		agenttools.ViewToolName:                {},
 		agenttools.SourcegraphToolName:         {},
 		agenttools.ToolSearchToolName:          {},
 		agenttools.DiagnosticsToolName:         {},

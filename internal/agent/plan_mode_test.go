@@ -118,7 +118,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		AgentToolName,
 		"bash",
 		"grep",
-		tools.ReadToolName,
+		tools.ViewToolName,
 		tools.GlobToolName,
 		tools.FetchToolName,
 		tools.AgenticFetchToolName,
@@ -140,7 +140,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		AgentToolName,
 		"bash",
 		"grep",
-		tools.ReadToolName,
+		tools.ViewToolName,
 		tools.GlobToolName,
 		tools.FetchToolName,
 		tools.AgenticFetchToolName,
@@ -160,7 +160,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 
 	require.Equal(t, []string{
 		"grep",
-		tools.ReadToolName,
+		tools.ViewToolName,
 		tools.GlobToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,

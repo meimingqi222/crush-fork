@@ -106,7 +106,7 @@ func TestMaterializerReplicatesDurableEventsOnly(t *testing.T) {
 	require.Contains(t, retained[0].Tags, "scope:project")
 	require.Contains(t, retained[0].Tags, "kind:decision")
 	require.Contains(t, retained[0].Tags, "session:sess-1")
-	require.Equal(t, "sess-1", retained[0].DocumentID)
+	require.Equal(t, "durable-1", retained[0].DocumentID)
 
 	var watermark int64
 	require.NoError(t, db.QueryRow(

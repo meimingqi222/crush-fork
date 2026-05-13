@@ -162,8 +162,8 @@ func TestGetToolInteractionSignature(t *testing.T) {
 
 	t.Run("tool call with result produces signature", func(t *testing.T) {
 		content := fantasy.ResponseContent{
-			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "read", Input: `{"file":"a.go"}`},
-			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "read", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
+			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "view", Input: `{"file":"a.go"}`},
+			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "view", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
 		}
 		sig := getToolInteractionSignature(content)
 		if sig == "" {
@@ -173,12 +173,12 @@ func TestGetToolInteractionSignature(t *testing.T) {
 
 	t.Run("same interactions produce same signature", func(t *testing.T) {
 		content1 := fantasy.ResponseContent{
-			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "read", Input: `{"file":"a.go"}`},
-			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "read", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
+			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "view", Input: `{"file":"a.go"}`},
+			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "view", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
 		}
 		content2 := fantasy.ResponseContent{
-			fantasy.ToolCallContent{ToolCallID: "2", ToolName: "read", Input: `{"file":"a.go"}`},
-			fantasy.ToolResultContent{ToolCallID: "2", ToolName: "read", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
+			fantasy.ToolCallContent{ToolCallID: "2", ToolName: "view", Input: `{"file":"a.go"}`},
+			fantasy.ToolResultContent{ToolCallID: "2", ToolName: "view", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
 		}
 		sig1 := getToolInteractionSignature(content1)
 		sig2 := getToolInteractionSignature(content2)
@@ -189,12 +189,12 @@ func TestGetToolInteractionSignature(t *testing.T) {
 
 	t.Run("different inputs produce different signatures", func(t *testing.T) {
 		content1 := fantasy.ResponseContent{
-			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "read", Input: `{"file":"a.go"}`},
-			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "read", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
+			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "view", Input: `{"file":"a.go"}`},
+			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "view", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
 		}
 		content2 := fantasy.ResponseContent{
-			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "read", Input: `{"file":"b.go"}`},
-			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "read", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
+			fantasy.ToolCallContent{ToolCallID: "1", ToolName: "view", Input: `{"file":"b.go"}`},
+			fantasy.ToolResultContent{ToolCallID: "1", ToolName: "view", Result: fantasy.ToolResultOutputContentText{Text: "content"}},
 		}
 		sig1 := getToolInteractionSignature(content1)
 		sig2 := getToolInteractionSignature(content2)

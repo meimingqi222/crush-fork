@@ -152,7 +152,7 @@ When using the edit tool:
 Tool selection rules:
 - Single replacement: `edit` with `old_string`/`new_string`
 - Multiple replacements in one file: `edit` with `edits[]` array
-- Text matching brittle (heavy escaping, repeated snippets): `read(hashline=true)` then `edit` with `operations[]`
+- Text matching brittle (heavy escaping, repeated snippets): `view(hashline=true)` then `edit` with `operations[]`
 - New files or whole-file rewrites: `write`
 
 **Whitespace matters**:
@@ -201,7 +201,7 @@ The Edit tool is extremely literal. "Close enough" will fail.
 - Check for tabs vs spaces
 - Verify line endings
 - Try including the entire function/block if needed
-- If the text is still brittle to copy exactly, use `read(hashline=true)` then `edit` with `operations[]` instead of `old_string`/`new_string`
+- If the text is still brittle to copy exactly, use `view(hashline=true)` then `edit` with `operations[]` instead of `old_string`/`new_string`
 - Never retry with guessed changes - get the exact text first
 </whitespace_and_exact_matching>
 

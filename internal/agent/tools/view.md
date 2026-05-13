@@ -45,7 +45,7 @@ When file_path is a directory:
 
 <tips>
 - Use with Glob to find files first
-- For code exploration: Grep to find relevant files, then read to examine
+- For code exploration: Grep to find relevant files, then view to examine
 - For large files: use offset parameter for specific sections
 - When output says `Use offset=<n> to continue`, pass that exact offset in the next call
 - Set `hashline=true` when preparing line-addressable edits or when exact text matching looks brittle

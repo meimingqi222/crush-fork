@@ -100,7 +100,7 @@ func applyLocalAutoToolOutputReview(toolResult message.ToolResult) (message.Tool
 
 func isTrustedLocalReadOnlyToolResult(toolResult message.ToolResult) bool {
 	switch toolResult.Name {
-	case tools.ReadToolName,
+	case tools.ViewToolName,
 		tools.GlobToolName,
 		tools.GrepToolName,
 		tools.DiagnosticsToolName,
