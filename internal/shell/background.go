@@ -277,3 +277,8 @@ func (bs *BackgroundShell) KillByUser() {
 func (bs *BackgroundShell) WasKilled() bool {
 	return bs.killed.Load()
 }
+
+// Done returns a channel that is closed when the background shell completes.
+func (bs *BackgroundShell) Done() <-chan struct{} {
+	return bs.done
+}

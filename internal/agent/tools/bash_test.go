@@ -103,12 +103,17 @@ func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
 	require.False(t, resp.IsError)
 	var meta BashResponseMetadata
 	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
-	require.False(t, meta.Background)
-	require.Empty(t, meta.ShellID)
+	// Timed-out foreground commands are promoted to background jobs.
+	require.True(t, meta.Background)
+	require.NotEmpty(t, meta.ShellID)
 	require.True(t, meta.TimedOut)
 	require.Equal(t, 1, meta.TimeoutSeconds)
 	require.NotEmpty(t, meta.DeprecationNotes)
 	require.Contains(t, resp.Content, "Command timed out after 1 seconds")
+	require.Contains(t, resp.Content, meta.ShellID)
+
+	bgManager := shell.GetBackgroundShellManager()
+	require.NoError(t, bgManager.Kill(meta.ShellID))
 }
 
 func TestBashTool_ExplicitBackgroundReturnsShellID(t *testing.T) {

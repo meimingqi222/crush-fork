@@ -287,7 +287,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 			commandToRun := params.Command
 			attemptedFallback := false
 			for {
-				output, execErr, timedOut, runErr := runForegroundBashCommand(ctx, call.ID, execWorkingDir, runningBlockFuncs, commandToRun, timeoutSeconds)
+				output, execErr, timedOut, promotedShellID, runErr := runForegroundBashCommand(ctx, call.ID, execWorkingDir, runningBlockFuncs, commandToRun, timeoutSeconds, sessionID, params.Description)
 				if runErr != nil {
 					return fantasy.ToolResponse{}, runErr
 				}
@@ -317,7 +317,17 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				appendDeprecationNotes(&metadata, deprecationNotes)
 
 				responseText := buildBashResponseText(output, execWorkingDir)
-				if timedOut {
+				if timedOut && promotedShellID != "" {
+					metadata.Background = true
+					metadata.ShellID = promotedShellID
+					msg := fmt.Sprintf("Command timed out after %d seconds. The process is still running in the background (shell ID: %s).", timeoutSeconds, promotedShellID)
+					if output != "" {
+						msg += "\n\nOutput so far:\n" + output
+					}
+					msg += "\n\nUse job_output to check current output, job_wait to wait for completion, or job_kill to terminate it."
+					metadata.Output = msg
+					responseText = msg
+				} else if timedOut {
 					timeoutNote := fmt.Sprintf("Command timed out after %d seconds", timeoutSeconds)
 					if output == "" {
 						metadata.Output = timeoutNote
@@ -391,26 +401,22 @@ func runBackgroundBash(ctx context.Context, call fantasy.ToolCall, params BashPa
 	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 }
 
-func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkingDir string, execBlockFuncs []shell.BlockFunc, command string, timeoutSeconds int) (string, error, bool, error) {
-	execCtx := ctx
-	cancel := func() {}
-	if timeoutSeconds > 0 {
-		execCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkingDir string, execBlockFuncs []shell.BlockFunc, command string, timeoutSeconds int, sessionID string, description string) (output string, execErr error, timedOut bool, promotedShellID string, runErr error) {
+	bgManager := shell.GetBackgroundShellManager()
+	bgManager.Cleanup()
+	bgShell, err := bgManager.StartWithMetadata(context.Background(), execWorkingDir, execBlockFuncs, command, description, sessionID, toolCallID, BashToolName)
+	if err != nil {
+		return "", nil, false, "", fmt.Errorf("error starting foreground shell: %w", err)
 	}
-	defer cancel()
-
-	runner := shell.NewShell(&shell.Options{
-		WorkingDir: execWorkingDir,
-		BlockFuncs: execBlockFuncs,
-	})
-	stdout := &liveOutputBuffer{}
-	stderr := &liveOutputBuffer{}
-	errCh := make(chan error, 1)
 
 	publishBashRuntime(ctx, toolCallID, toolruntime.StatusRunning, "", nil)
-	go func() {
-		errCh <- runner.ExecStream(execCtx, command, stdout, stderr)
-	}()
+
+	var timer <-chan time.Time
+	if timeoutSeconds > 0 {
+		t := time.NewTimer(time.Duration(timeoutSeconds) * time.Second)
+		defer t.Stop()
+		timer = t.C
+	}
 
 	ticker := time.NewTicker(bashStreamThrottle)
 	defer ticker.Stop()
@@ -418,26 +424,42 @@ func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkin
 	lastSnapshot := ""
 	for {
 		select {
-		case execErr := <-errCh:
-			timedOut := execCtx.Err() == context.DeadlineExceeded
-			if ctx.Err() != nil && !timedOut {
-				publishBashRuntime(ctx, toolCallID, toolruntime.StatusCanceled, truncateOutput(combinedOutputSnapshot(stdout.String(), stderr.String())), nil)
-				return "", nil, false, ctx.Err()
+		case <-bgShell.Done():
+			stdout, stderr, _, exitErr := bgShell.GetOutput()
+			if ctx.Err() != nil {
+				_ = bgManager.Remove(bgShell.ID)
+				publishBashRuntime(ctx, toolCallID, toolruntime.StatusCanceled, truncateOutput(combinedOutputSnapshot(stdout, stderr)), nil)
+				return "", nil, false, "", ctx.Err()
 			}
-			output := finalShellOutput(stdout.String(), stderr.String(), execErr)
+			_ = bgManager.Remove(bgShell.ID)
+			out := finalShellOutput(stdout, stderr, exitErr)
 			status := toolruntime.StatusCompleted
 			switch {
-			case timedOut:
-				status = toolruntime.StatusFailed
-			case shell.IsInterrupt(execErr):
+			case shell.IsInterrupt(exitErr):
 				status = toolruntime.StatusCanceled
-			case execErr != nil && shell.ExitCode(execErr) != 0:
+			case exitErr != nil && shell.ExitCode(exitErr) != 0:
 				status = toolruntime.StatusFailed
 			}
-			publishBashRuntime(ctx, toolCallID, status, output, nil)
-			return output, execErr, timedOut, nil
+			publishBashRuntime(ctx, toolCallID, status, out, nil)
+			return out, exitErr, false, "", nil
+
+		case <-timer:
+			stdout, stderr, _, _ := bgShell.GetOutput()
+			partialOut := truncateOutput(combinedOutputSnapshot(stdout, stderr))
+			publishBashRuntime(ctx, toolCallID, toolruntime.StatusBackgroundRunning, partialOut, map[string]any{
+				"shell_id":   bgShell.ID,
+				"background": true,
+			})
+			go watchBackgroundShellRuntime(detachedToolRuntimeContext(ctx), bgShell)
+			return partialOut, nil, true, bgShell.ID, nil
+
+		case <-ctx.Done():
+			_ = bgManager.Kill(bgShell.ID)
+			return "", nil, false, "", ctx.Err()
+
 		case <-ticker.C:
-			snapshot := truncateOutput(combinedOutputSnapshot(stdout.String(), stderr.String()))
+			stdout, stderr, _, _ := bgShell.GetOutput()
+			snapshot := truncateOutput(combinedOutputSnapshot(stdout, stderr))
 			if snapshot == lastSnapshot {
 				continue
 			}

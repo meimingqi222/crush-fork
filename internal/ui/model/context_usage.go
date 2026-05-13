@@ -87,9 +87,7 @@ func latestAssistantUsageSnapshot(messages []message.Message, cfg *config.Config
 }
 
 func contextWindowForUsageMessage(msg message.Message, cfg *config.Config, selected *agent.Model) int64 {
-	if selected != nil &&
-		selected.ModelCfg.Provider == msg.Provider &&
-		selected.ModelCfg.Model == msg.Model {
+	if selected != nil {
 		return agent.EffectiveContextWindow(selected.CatwalkCfg)
 	}
 	if cfg == nil {
