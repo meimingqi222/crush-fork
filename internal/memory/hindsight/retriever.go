@@ -13,12 +13,29 @@ import (
 // service. It intentionally does not merge local memory summaries so the
 // selected backend remains unambiguous.
 type Retriever struct {
-	client *Client
+	client          *Client
+	recallTags      []string
+	recallTagsMatch string
+}
+
+// RetrieverOption configures a Hindsight retriever.
+type RetrieverOption func(*Retriever)
+
+// WithRecallTags applies tags to every remote recall and reflect request.
+func WithRecallTags(tags []string, tagsMatch string) RetrieverOption {
+	return func(r *Retriever) {
+		r.recallTags = append([]string(nil), tags...)
+		r.recallTagsMatch = strings.TrimSpace(tagsMatch)
+	}
 }
 
 // NewRetriever creates a remote-only Retriever backed by Hindsight.
-func NewRetriever(client *Client) *Retriever {
-	return &Retriever{client: client}
+func NewRetriever(client *Client, opts ...RetrieverOption) *Retriever {
+	r := &Retriever{client: client}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Recall implements engine.Retriever by asking Hindsight for broad project and
@@ -29,7 +46,7 @@ func (r *Retriever) Recall(ctx context.Context, opts map[string]any) (string, er
 		Budget:    "mid",
 		MaxTokens: 1024,
 	}
-	if tags, match := recallTags(opts); len(tags) > 0 {
+	if tags, match := r.recallTagsFor(opts, false); len(tags) > 0 {
 		req.Tags = tags
 		req.TagsMatch = match
 	}
@@ -61,7 +78,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, opts map[string]
 		Budget:    recallBudget(opts),
 		MaxTokens: recallMaxTokens(opts),
 	}
-	if tags, match := recallTags(opts); len(tags) > 0 {
+	if tags, match := r.recallTagsFor(opts, true); len(tags) > 0 {
 		req.Tags = tags
 		req.TagsMatch = match
 	}
@@ -88,7 +105,16 @@ func (r *Retriever) Reflect(ctx context.Context, query string, opts map[string]a
 	ctxStr, _ := opts["context"].(string)
 	budget, _ := opts["budget"].(string)
 
-	remoteText, err := r.client.Reflect(ctx, query, ctxStr, budget)
+	req := ReflectRequest{
+		Query:   query,
+		Context: ctxStr,
+		Budget:  budget,
+	}
+	if tags, match := r.recallTagsFor(opts, true); len(tags) > 0 {
+		req.Tags = tags
+		req.TagsMatch = match
+	}
+	remoteText, err := r.client.Reflect(ctx, req)
 	if err == nil && remoteText != "" {
 		return remoteText, nil
 	}
@@ -165,33 +191,48 @@ func hasRecallFilters(opts map[string]any) bool {
 	return false
 }
 
-func recallTags(opts map[string]any) ([]string, string) {
-	if opts == nil {
-		return nil, ""
-	}
-
+func (r *Retriever) recallTagsFor(opts map[string]any, includeSession bool) ([]string, string) {
 	tags := make([]string, 0, 4)
+	tags = appendUniqueTags(tags, r.recallTags...)
 	requireAll := false
+	match := strings.TrimSpace(r.recallTagsMatch)
+	if opts == nil {
+		if len(tags) == 0 {
+			return nil, ""
+		}
+		if match == "" {
+			match = "any"
+		}
+		return tags, match
+	}
 	if configuredTags, ok := opts["tags"].([]string); ok {
-		tags = append(tags, configuredTags...)
+		tags = appendUniqueTags(tags, configuredTags...)
 	}
 	if scope, ok := opts["scope"].(string); ok && strings.TrimSpace(scope) != "" {
-		tags = append(tags, "scope:"+strings.TrimSpace(scope))
+		tags = appendUniqueTags(tags, "scope:"+strings.TrimSpace(scope))
 		requireAll = true
 	}
 	if kind, ok := opts["kind"].(string); ok && strings.TrimSpace(kind) != "" {
-		tags = append(tags, "kind:"+strings.TrimSpace(kind))
+		tags = appendUniqueTags(tags, "kind:"+strings.TrimSpace(kind))
 		requireAll = true
 	}
-	if sessionID, ok := opts["session_id"].(string); ok && strings.TrimSpace(sessionID) != "" {
-		tags = append(tags, "session:"+strings.TrimSpace(sessionID))
-		requireAll = true
+	if includeSession {
+		if sessionID, ok := opts["session_id"].(string); ok && strings.TrimSpace(sessionID) != "" {
+			tags = appendUniqueTags(tags, "session:"+strings.TrimSpace(sessionID))
+			requireAll = true
+		}
 	}
 	if len(tags) == 0 {
 		return nil, ""
 	}
 	if requireAll {
 		return tags, "all"
+	}
+	if match != "" {
+		return tags, match
+	}
+	if len(r.recallTags) > 0 {
+		return tags, "any"
 	}
 	return tags, "any"
 }

@@ -15,14 +15,14 @@ func TestRetrieverUsesRemoteOnlyRecall(t *testing.T) {
 	t.Parallel()
 
 	var seenPath string
+	var gotReq RecallRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		require.Equal(t, http.MethodPost, r.Method)
 		require.Equal(t, "Bearer token-1", r.Header.Get("Authorization"))
 
-		var req RecallRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		require.Contains(t, req.Query, "project context")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+		require.Contains(t, gotReq.Query, "project context")
 
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 			"results": []map[string]any{
@@ -32,10 +32,15 @@ func TestRetrieverUsesRemoteOnlyRecall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	retriever := NewRetriever(NewClient(server.URL+"/", "bank-1", "token-1"))
-	recall, err := retriever.Recall(context.Background(), nil)
+	retriever := NewRetriever(
+		NewClient(server.URL+"/", "bank-1", "token-1"),
+		WithRecallTags([]string{"project:crush-abc123"}, "any"),
+	)
+	recall, err := retriever.Recall(context.Background(), map[string]any{"session_id": "sess-1"})
 	require.NoError(t, err)
 	require.Equal(t, "/v1/default/banks/bank-1/memories/recall", seenPath)
+	require.Equal(t, []string{"project:crush-abc123"}, gotReq.Tags)
+	require.Equal(t, "any", gotReq.TagsMatch)
 	require.Contains(t, recall, "<hindsight_memories>")
 	require.Contains(t, recall, "Use SQLite for local storage.")
 }
@@ -94,7 +99,10 @@ func TestRetrieverRetrieveForwardsFiltersAsTags(t *testing.T) {
 	}))
 	defer server.Close()
 
-	retriever := NewRetriever(NewClient(server.URL, "", ""))
+	retriever := NewRetriever(
+		NewClient(server.URL, "", ""),
+		WithRecallTags([]string{"project:crush-abc123"}, "any"),
+	)
 	events, err := retriever.Retrieve(context.Background(), "", map[string]any{
 		"scope":      "project",
 		"kind":       "pitfall",
@@ -106,6 +114,7 @@ func TestRetrieverRetrieveForwardsFiltersAsTags(t *testing.T) {
 	require.Contains(t, gotReq.Query, "project context")
 	require.Equal(t, "all", gotReq.TagsMatch)
 	require.ElementsMatch(t, []string{
+		"project:crush-abc123",
 		"repo:crush",
 		"scope:project",
 		"kind:pitfall",
@@ -116,16 +125,23 @@ func TestRetrieverRetrieveForwardsFiltersAsTags(t *testing.T) {
 func TestRetrieverReflectDoesNotFallbackToLocal(t *testing.T) {
 	t.Parallel()
 
+	var gotReq ReflectRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/default/banks/crush/reflect", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 			"text": "Remote synthesis only.",
 		}))
 	}))
 	defer server.Close()
 
-	retriever := NewRetriever(NewClient(server.URL, "", ""))
+	retriever := NewRetriever(
+		NewClient(server.URL, "", ""),
+		WithRecallTags([]string{"project:crush-abc123"}, "any"),
+	)
 	text, err := retriever.Reflect(context.Background(), "what do we know?", nil)
 	require.NoError(t, err)
 	require.Equal(t, "Remote synthesis only.", text)
+	require.Equal(t, []string{"project:crush-abc123"}, gotReq.Tags)
+	require.Equal(t, "any", gotReq.TagsMatch)
 }

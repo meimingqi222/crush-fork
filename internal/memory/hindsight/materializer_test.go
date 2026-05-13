@@ -98,13 +98,19 @@ func TestMaterializerReplicatesDurableEventsOnly(t *testing.T) {
 		},
 	}}
 
-	materializer := NewMaterializer(NewClient(server.URL, "", ""), db, store)
+	materializer := NewMaterializer(
+		NewClient(server.URL, "", ""),
+		db,
+		store,
+		WithRetainTags([]string{"project:crush-abc123"}),
+	)
 	require.NoError(t, materializer.Materialize(context.Background(), hindsightViewName, nil))
 
 	require.Len(t, retained, 1)
 	require.Contains(t, retained[0].Content, "SQLite memory storage")
 	require.Contains(t, retained[0].Tags, "scope:project")
 	require.Contains(t, retained[0].Tags, "kind:decision")
+	require.Contains(t, retained[0].Tags, "project:crush-abc123")
 	require.Contains(t, retained[0].Tags, "session:sess-1")
 	require.Equal(t, "durable-1", retained[0].DocumentID)
 

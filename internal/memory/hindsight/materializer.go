@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/memory/engine"
@@ -19,18 +20,33 @@ const hindsightViewName = "hindsight_replicate"
 // Only project-, user-, and global-scoped events with confidence >= 0.5 are
 // sent; session-scoped and working-memory events are skipped.
 type Materializer struct {
-	client *Client
-	db     *sql.DB
-	store  engine.EventStore
+	client     *Client
+	db         *sql.DB
+	store      engine.EventStore
+	retainTags []string
+}
+
+// MaterializerOption configures a Hindsight materializer.
+type MaterializerOption func(*Materializer)
+
+// WithRetainTags adds tags to every retained Hindsight item.
+func WithRetainTags(tags []string) MaterializerOption {
+	return func(m *Materializer) {
+		m.retainTags = append([]string(nil), tags...)
+	}
 }
 
 // NewMaterializer creates a Materializer that replicates events via client.
-func NewMaterializer(client *Client, db *sql.DB, store engine.EventStore) *Materializer {
-	return &Materializer{
+func NewMaterializer(client *Client, db *sql.DB, store engine.EventStore, opts ...MaterializerOption) *Materializer {
+	m := &Materializer{
 		client: client,
 		db:     db,
 		store:  store,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // ListViews implements engine.Materializer.
@@ -79,7 +95,7 @@ func (m *Materializer) Materialize(ctx context.Context, _ string, _ []engine.Mem
 			Content:    content,
 			Context:    "crush",
 			DocumentID: evt.ID,
-			Tags:       eventTags(evt),
+			Tags:       eventTags(evt, m.retainTags),
 			Metadata: map[string]string{
 				"event_id":   evt.ID,
 				"scope":      string(evt.Scope),
@@ -118,15 +134,35 @@ func shouldReplicate(evt engine.MemoryEvent) bool {
 	return evt.Confidence >= 0.5
 }
 
-func eventTags(evt engine.MemoryEvent) []string {
+func eventTags(evt engine.MemoryEvent, baseTags []string) []string {
 	tags := []string{
 		"scope:" + string(evt.Scope),
 		"kind:" + string(evt.Kind),
 	}
+	tags = appendUniqueTags(tags, baseTags...)
 	if evt.Source.SessionID != "" {
-		tags = append(tags, "session:"+evt.Source.SessionID)
+		tags = appendUniqueTags(tags, "session:"+evt.Source.SessionID)
 	}
-	tags = append(tags, evt.Tags...)
+	tags = appendUniqueTags(tags, evt.Tags...)
+	return tags
+}
+
+func appendUniqueTags(tags []string, additions ...string) []string {
+	seen := make(map[string]struct{}, len(tags)+len(additions))
+	for _, tag := range tags {
+		seen[tag] = struct{}{}
+	}
+	for _, tag := range additions {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		tags = append(tags, tag)
+	}
 	return tags
 }
 

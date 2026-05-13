@@ -955,8 +955,14 @@ func hasAWSCredentials(env env.Env) bool {
 // where project-slug is based on the git root (if available) or working directory.
 func ProjectDataDir(workingDir string) string {
 	root := filepath.Dir(GlobalConfigData())
-	projectSlug := projectSlugFromDir(workingDir)
+	projectSlug := ProjectSlug(workingDir)
 	return filepath.Join(root, "projects", projectSlug)
+}
+
+// ProjectSlug returns the stable project identity used for project-scoped
+// application data. It is based on the git root when available.
+func ProjectSlug(workingDir string) string {
+	return projectSlugFromDir(workingDir)
 }
 
 // projectSlugFromDir generates a unique, readable slug for a project directory.

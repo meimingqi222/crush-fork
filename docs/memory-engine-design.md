@@ -448,7 +448,8 @@ Recall 只负责补充细节。
     "memory": {
       "backend": "hindsight",
       "remote": "http://localhost:8888",
-      "remote_bank_id": "crush"
+      "remote_bank_id": "crush",
+      "remote_scoping": "per-project-tagged"
     }
   }
 }
@@ -470,6 +471,17 @@ Recall 只负责补充细节。
 
 不提供 local 和 Hindsight 混查模式。需要切换来源时，用户必须显式切换
 `memory.backend`。
+
+Hindsight 远程模式支持三种项目作用域，参考 oh-my-pi 的 scoping 语义：
+
+- `global`: 使用一个共享 bank，不自动附加项目过滤。
+- `per-project`: 在 `remote_bank_id` 后追加当前项目 slug，形成独立 bank。
+- `per-project-tagged`: 默认值。使用共享 bank，但 retain 自动写入
+  `project:<slug>` tag，recall/reflect 自动携带同一 tag 且使用
+  `tags_match=any`，让当前项目记忆和未打 tag 的全局记忆一起可见。
+
+如果希望完全隔离项目，使用 `remote_scoping=per-project`；如果希望保留
+共享全局记忆，同时区分项目，使用默认的 `per-project-tagged`。
 
 ## 命令和可观测性
 

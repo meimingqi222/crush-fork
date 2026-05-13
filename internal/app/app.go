@@ -213,9 +213,19 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			if token == "" {
 				token = os.Getenv("HINDSIGHT_API_TOKEN")
 			}
-			hsClient := hindsight.NewClient(memCfg.Remote, memCfg.RemoteBankID, token)
-			eng.SetMaterializer(hindsight.NewMaterializer(hsClient, conn, eng.EventStore()))
-			eng.SetRetriever(hindsight.NewRetriever(hsClient))
+			projectLabel := config.ProjectSlug(store.WorkingDir())
+			scope := hindsight.ResolveScope(memCfg.RemoteBankID, memCfg.RemoteScopingName(), projectLabel)
+			hsClient := hindsight.NewClient(memCfg.Remote, scope.BankID, token)
+			eng.SetMaterializer(hindsight.NewMaterializer(
+				hsClient,
+				conn,
+				eng.EventStore(),
+				hindsight.WithRetainTags(scope.RetainTags),
+			))
+			eng.SetRetriever(hindsight.NewRetriever(
+				hsClient,
+				hindsight.WithRecallTags(scope.RecallTags, scope.RecallTagsMatch),
+			))
 			startupMaterialization = false
 			go func() {
 				if err := hsClient.EnsureBank(context.Background(), ""); err != nil {
@@ -226,7 +236,13 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 					slog.Warn("Startup memory materialization failed", "error", err)
 				}
 			}()
-			slog.Info("Hindsight remote memory enabled", "url", memCfg.Remote, "bank", hsClient.BankID())
+			slog.Info(
+				"Hindsight remote memory enabled",
+				"url", memCfg.Remote,
+				"bank", hsClient.BankID(),
+				"scoping", memCfg.RemoteScopingName(),
+				"project", projectLabel,
+			)
 		default:
 			writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
 			eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))

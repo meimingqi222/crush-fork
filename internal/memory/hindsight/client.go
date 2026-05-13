@@ -90,6 +90,15 @@ type RecallRequest struct {
 	Types     []string `json:"types,omitempty"`
 }
 
+// ReflectRequest parameters for reflect.
+type ReflectRequest struct {
+	Query     string   `json:"query"`
+	Context   string   `json:"context,omitempty"`
+	Budget    string   `json:"budget,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
+	TagsMatch string   `json:"tags_match,omitempty"`
+}
+
 // RecallResult is a single recalled memory.
 type RecallResult struct {
 	ID          string    `json:"id,omitempty"`
@@ -110,21 +119,17 @@ func (c *Client) Recall(ctx context.Context, req RecallRequest) ([]RecallResult,
 }
 
 // Reflect synthesizes across memories to answer query.
-func (c *Client) Reflect(ctx context.Context, query, context_ string, budget string) (string, error) {
-	if budget == "" {
-		budget = "low"
+func (c *Client) Reflect(ctx context.Context, req ReflectRequest) (string, error) {
+	if req.Budget == "" {
+		req.Budget = "low"
 	}
-	body := map[string]any{
-		"query":  query,
-		"budget": budget,
-	}
-	if context_ != "" {
-		body["context"] = context_
+	if req.Query == "" {
+		req.Query = "project context, recent work, decisions, pitfalls, procedures, and user preferences"
 	}
 	var resp struct {
 		Text string `json:"text"`
 	}
-	if _, err := c.post(ctx, c.bankPath("reflect"), body, &resp); err != nil {
+	if _, err := c.post(ctx, c.bankPath("reflect"), req, &resp); err != nil {
 		return "", err
 	}
 	return resp.Text, nil

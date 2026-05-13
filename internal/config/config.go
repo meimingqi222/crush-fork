@@ -311,6 +311,10 @@ type MemoryConfig struct {
 	// RemoteBankID is the memory bank identifier on the remote service.
 	// Defaults to "crush" when empty.
 	RemoteBankID string `json:"remote_bank_id,omitempty" jsonschema:"description=Memory bank ID on the remote service,default=crush"`
+	// RemoteScoping controls how Hindsight memory is partitioned.
+	// "global" uses one shared bank, "per-project" appends the project slug to
+	// the bank ID, and "per-project-tagged" uses one bank with project tags.
+	RemoteScoping string `json:"remote_scoping,omitempty" jsonschema:"description=Remote Hindsight scoping mode,enum=global,enum=per-project,enum=per-project-tagged,default=per-project-tagged"`
 }
 
 // BackendName returns the effective memory backend.
@@ -331,6 +335,24 @@ func (m *MemoryConfig) BackendName() string {
 		return "hindsight"
 	}
 	return "local"
+}
+
+// RemoteScopingName returns the effective Hindsight scoping mode.
+func (m *MemoryConfig) RemoteScopingName() string {
+	if m == nil {
+		return "per-project-tagged"
+	}
+	scoping := strings.ToLower(strings.TrimSpace(m.RemoteScoping))
+	switch scoping {
+	case "global":
+		return "global"
+	case "per-project", "project":
+		return "per-project"
+	case "per-project-tagged", "project-tagged", "tagged", "":
+		return "per-project-tagged"
+	default:
+		return "per-project-tagged"
+	}
 }
 
 // IsEnabled reports whether the memory engine should run. The local engine is

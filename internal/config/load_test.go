@@ -92,6 +92,17 @@ func TestMemoryConfigBackendName(t *testing.T) {
 	require.Equal(t, "off", (&MemoryConfig{Backend: "off"}).BackendName())
 }
 
+func TestMemoryConfigRemoteScopingName(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "per-project-tagged", (*MemoryConfig)(nil).RemoteScopingName())
+	require.Equal(t, "per-project-tagged", (&MemoryConfig{}).RemoteScopingName())
+	require.Equal(t, "global", (&MemoryConfig{RemoteScoping: "GLOBAL"}).RemoteScopingName())
+	require.Equal(t, "per-project", (&MemoryConfig{RemoteScoping: "project"}).RemoteScopingName())
+	require.Equal(t, "per-project-tagged", (&MemoryConfig{RemoteScoping: "tagged"}).RemoteScopingName())
+	require.Equal(t, "per-project-tagged", (&MemoryConfig{RemoteScoping: "invalid"}).RemoteScopingName())
+}
+
 func TestMemoryConfigBackendOffDisablesMemory(t *testing.T) {
 	t.Parallel()
 
