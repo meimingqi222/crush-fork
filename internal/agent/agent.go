@@ -1654,6 +1654,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// previous attempt made progress, so this is a new
 				// transient failure that deserves full retries.
 				retryAttempt = 0
+				emptyStreamRetryAttempt = 0
 			} else {
 				// No steps completed — clean up all messages so the
 				// retry starts from a clean slate.
