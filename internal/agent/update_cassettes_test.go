@@ -30,7 +30,6 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -43,14 +42,14 @@ import (
 // Duration is kept as interface{} to preserve the original string value
 // (e.g., "580.853041ms") without re-serializing through time.Duration.
 type ucCassette struct {
-	Version      int               `yaml:"version"`
-	Interactions []*ucInteraction  `yaml:"interactions"`
+	Version      int              `yaml:"version"`
+	Interactions []*ucInteraction `yaml:"interactions"`
 }
 
 type ucInteraction struct {
-	ID       int          `yaml:"id"`
-	Request  ucRequest    `yaml:"request"`
-	Response ucResponse   `yaml:"response"`
+	ID       int        `yaml:"id"`
+	Request  ucRequest  `yaml:"request"`
+	Response ucResponse `yaml:"response"`
 }
 
 type ucRequest struct {
@@ -142,8 +141,6 @@ func testEnvWithDir(t *testing.T, workingDir string) fakeEnv {
 	messages := message.NewService(q)
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
 	histSvc := history.NewService(q, conn)
-	memSvc, err := memory.NewService(t.TempDir())
-	require.NoError(t, err)
 	ftSvc := filetracker.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
 
@@ -158,7 +155,6 @@ func testEnvWithDir(t *testing.T, workingDir string) fakeEnv {
 		messages:    messages,
 		permissions: permissions,
 		history:     histSvc,
-		memory:      memSvc,
 		filetracker: &ftSvc,
 		lspClients:  lspClients,
 	}

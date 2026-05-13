@@ -67,6 +67,32 @@ func TestConfig_LoadFromBytesIncludesTaskGovernance(t *testing.T) {
 	require.Equal(t, "delegation", governance.FailureDomainName())
 }
 
+func TestMemoryConfigIsEnabled(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, (*MemoryConfig)(nil).IsEnabled())
+	require.True(t, (&MemoryConfig{}).IsEnabled())
+
+	enabled := true
+	require.True(t, (&MemoryConfig{Enabled: &enabled}).IsEnabled())
+
+	enabled = false
+	require.False(t, (&MemoryConfig{Enabled: &enabled}).IsEnabled())
+}
+
+func TestConfig_LoadFromBytesMemoryEnabledExplicitFalse(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadFromBytes([][]byte{
+		[]byte(`{"options":{"memory":{"enabled":false}}}`),
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Options)
+	require.NotNil(t, cfg.Options.Memory)
+	require.False(t, cfg.Options.Memory.IsEnabled())
+}
+
 func TestConfig_LoadFromBytesPreferredPermissionModeFallback(t *testing.T) {
 	t.Run("deprecated preferred_collaboration_mode is used as fallback", func(t *testing.T) {
 		cfg, err := loadFromBytes([][]byte{

@@ -30,8 +30,14 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect local files", SearchTags: []string{"read", "filesystem"}, Direct: true}
 	case tools.SourcegraphToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "search public repositories", SearchTags: []string{"code-search", "network", "deferred"}, Exposure: tools.ToolExposureDeferred, Direct: true}
-	case tools.LongTermMemoryToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "manage long-term memory entries", SearchTags: []string{"memory", "state"}}
+	case tools.RetainToolName:
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "retain a memory event in the event log", SearchTags: []string{"memory", "state", "event"}}
+	case tools.RecallToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "recall materialized memory summaries and events", SearchTags: []string{"memory", "read", "recall"}}
+	case tools.ReflectToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "reflect on memories across sessions", SearchTags: []string{"memory", "read", "synthesis"}}
+	case tools.MemoryStatusToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory engine pipeline status", SearchTags: []string{"memory", "status", "observability"}}
 	case tools.TodosToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track structured task progress", SearchTags: []string{"task", "progress"}, Direct: true}
 	case tools.SendMessageToolName:

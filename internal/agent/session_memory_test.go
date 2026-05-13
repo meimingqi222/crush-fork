@@ -7,7 +7,8 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,7 +50,7 @@ func (m *sessionMemoryLanguageModel) Model() string {
 	return "session-memory"
 }
 
-func TestUpdateSessionMemoryStoresSessionScopedEntry(t *testing.T) {
+func TestUpdateSessionMemoryStoresWorkingMemoryEvent(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
@@ -58,75 +59,25 @@ func TestUpdateSessionMemoryStoresSessionScopedEntry(t *testing.T) {
 	}
 	bgModel := &backgroundModel{model: Model{Model: model}, provider: config.ProviderConfig{ID: "test"}}
 
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	eng := engine.New(conn, engine.Config{Enabled: true})
+
 	sess, err := env.sessions.Create(t.Context(), "session-memory")
 	require.NoError(t, err)
 	(*env.filetracker).RecordRead(t.Context(), sess.ID, env.workingDir+"/internal/agent/recall.go")
 
-	updateSessionMemory(t.Context(), env.memory, bgModel, *env.filetracker, sess.ID, "continue memory work", []string{
+	updateSessionMemoryEventStore(t.Context(), eng.EventStore(), bgModel, *env.filetracker, sess.ID, "continue memory work", []string{
 		"USER: continue memory work",
-		"ASSISTANT: updated dream cleanup",
+		"ASSISTANT: updated memory cleanup",
 	})
 
-	entry, err := env.memory.Get(t.Context(), sessionMemoryKey(sess.ID))
-	require.NoError(t, err)
-	require.Equal(t, "session", entry.Scope)
-	require.Equal(t, "project", entry.Type)
-	require.Contains(t, entry.Value, "Current goal: finish memory cleanup")
+	content := readWorkingMemoryContent(t.Context(), eng.EventStore(), sess.ID)
+	require.Contains(t, content, "Current goal: finish memory cleanup")
 	require.Contains(t, model.prompt, "Recent conversation:")
 	require.Contains(t, model.prompt, "Recently read files:")
 	require.Contains(t, model.prompt, "internal/agent/recall.go")
-}
-
-func TestRecallEntriesForSessionPrependsSessionMemory(t *testing.T) {
-	t.Parallel()
-
-	memorySvc, err := memory.NewService(t.TempDir())
-	require.NoError(t, err)
-	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: "project/general", Value: "# General\n\nsearch memory", Scope: "project"}))
-	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey("sess-1"), Value: "# Current session state\n\ncontinue search migration", Scope: "session"}))
-
-	model := &memoryRelevanceLanguageModel{
-		response: `["project/general"]`,
-	}
-	bgModel := &backgroundModel{
-		model:    Model{Model: model},
-		provider: config.ProviderConfig{ID: "test"},
-	}
-
-	entries := recallEntriesForSession(t.Context(), memorySvc, bgModel, "sess-1", "search", "", nil, nil)
-	require.NotEmpty(t, entries)
-	require.Equal(t, sessionMemoryKey("sess-1"), entries[0].Key)
-	found := false
-	for _, entry := range entries {
-		if entry.Key == "project/general" {
-			found = true
-			break
-		}
-	}
-	require.True(t, found)
-}
-
-func TestRecallEntriesForSessionSkipsSessionMemoryForProjectScope(t *testing.T) {
-	t.Parallel()
-
-	memorySvc, err := memory.NewService(t.TempDir())
-	require.NoError(t, err)
-	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: "project/general", Value: "# General\n\nsearch memory", Scope: "project"}))
-	require.NoError(t, memorySvc.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey("sess-1"), Value: "# Current session state\n\ncontinue search migration", Scope: "session"}))
-
-	model := &memoryRelevanceLanguageModel{
-		response: `["project/general"]`,
-	}
-	bgModel := &backgroundModel{
-		model:    Model{Model: model},
-		provider: config.ProviderConfig{ID: "test"},
-	}
-
-	entries := recallEntriesForSession(t.Context(), memorySvc, bgModel, "sess-1", "search", "project", nil, nil)
-	require.NotEmpty(t, entries)
-	for _, entry := range entries {
-		require.NotEqual(t, sessionMemoryKey("sess-1"), entry.Key)
-	}
 }
 
 func TestFinishPendingExtractionRemovesOnlyMatchingEntry(t *testing.T) {
@@ -149,128 +100,19 @@ func TestFinishPendingExtractionRemovesOnlyMatchingEntry(t *testing.T) {
 	require.Contains(t, agent.pendingExtractions, "session-1")
 	require.Len(t, agent.pendingExtractions["session-1"], 1)
 	require.Equal(t, secondID, agent.pendingExtractions["session-1"][0].id)
+
+	agent.finishPendingExtraction("session-1", secondID)
+	require.NotContains(t, agent.pendingExtractions, "session-1")
 }
 
-func TestBuildSessionMemoryHistoryTrimsToRecentTurns(t *testing.T) {
+func TestBuildSessionMemoryHistoryCapsRecentMessages(t *testing.T) {
 	t.Parallel()
 
-	history := make([]string, 0, sessionMemoryMaxHistory+2)
-	for i := range sessionMemoryMaxHistory + 2 {
-		history = append(history, "turn "+strings.Repeat("x", i+1))
+	history := make([]string, 0, sessionMemoryMaxHistory+3)
+	for i := 0; i < sessionMemoryMaxHistory+3; i++ {
+		history = append(history, "msg")
 	}
+
 	block := buildSessionMemoryHistory(history)
-	require.NotContains(t, block, history[0]+"\n\n")
-	require.Contains(t, block, history[len(history)-1])
-}
-
-func TestShouldUpdateSessionMemory(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                    string
-		initialized             bool
-		currentPromptTokens     int64
-		tokensAtLastExtraction  int64
-		toolCallsSinceLast      int
-		currentRunToolUses      int
-		wantShouldUpdate        bool
-		wantInitializedAfterRun bool
-		wantNewTokensAtLast     int64
-	}{
-		{
-			name:                    "does not initialize below token threshold",
-			currentPromptTokens:     sessionMemoryInitializationTokens - 1,
-			wantShouldUpdate:        false,
-			wantInitializedAfterRun: false,
-			wantNewTokensAtLast:     0,
-		},
-		{
-			name:                    "initializes and updates at first natural break",
-			currentPromptTokens:     sessionMemoryInitializationTokens,
-			wantShouldUpdate:        true,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
-		},
-		{
-			name:                    "updates at natural break after enough growth",
-			initialized:             true,
-			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
-			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
-			currentRunToolUses:      0,
-			wantShouldUpdate:        true,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
-		},
-		{
-			name:                    "waits during tool-heavy turn until tool threshold met",
-			initialized:             true,
-			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
-			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
-			currentRunToolUses:      2,
-			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates - 1,
-			wantShouldUpdate:        false,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
-		},
-		{
-			name:                    "updates during tool-heavy turn after tool threshold",
-			initialized:             true,
-			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
-			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
-			currentRunToolUses:      2,
-			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
-			wantShouldUpdate:        true,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns,
-		},
-		{
-			name:                    "requires token growth even if tool threshold met",
-			initialized:             true,
-			currentPromptTokens:     sessionMemoryInitializationTokens + sessionMemoryMinimumTokensBetweenTurns - 1,
-			tokensAtLastExtraction:  sessionMemoryInitializationTokens,
-			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
-			currentRunToolUses:      1,
-			wantShouldUpdate:        false,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens,
-		},
-		{
-			name:                    "handles token underflow after compaction by requiring growth from new baseline",
-			initialized:             true,
-			currentPromptTokens:     sessionMemoryInitializationTokens - 1000,
-			tokensAtLastExtraction:  sessionMemoryInitializationTokens + 1000,
-			toolCallsSinceLast:      sessionMemoryToolCallsBetweenUpdates,
-			currentRunToolUses:      0,
-			wantShouldUpdate:        false,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens - 1000,
-		},
-		{
-			name:                    "updates after compaction once enough tokens accumulate from new baseline",
-			initialized:             true,
-			currentPromptTokens:     sessionMemoryInitializationTokens + 1000 + sessionMemoryMinimumTokensBetweenTurns,
-			tokensAtLastExtraction:  sessionMemoryInitializationTokens + 1000,
-			toolCallsSinceLast:      0,
-			currentRunToolUses:      0,
-			wantShouldUpdate:        true,
-			wantInitializedAfterRun: true,
-			wantNewTokensAtLast:     sessionMemoryInitializationTokens + 1000 + sessionMemoryMinimumTokensBetweenTurns,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			gotShouldUpdate, gotInitialized, gotNewTokensAtLast := shouldUpdateSessionMemory(
-				tt.initialized,
-				tt.currentPromptTokens,
-				tt.tokensAtLastExtraction,
-				tt.toolCallsSinceLast,
-				tt.currentRunToolUses,
-			)
-			require.Equal(t, tt.wantShouldUpdate, gotShouldUpdate)
-			require.Equal(t, tt.wantInitializedAfterRun, gotInitialized)
-			require.Equal(t, tt.wantNewTokensAtLast, gotNewTokensAtLast)
-		})
-	}
+	require.Len(t, strings.Split(block, "\n\n"), sessionMemoryMaxHistory)
 }

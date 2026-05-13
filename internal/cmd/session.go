@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
@@ -19,7 +18,6 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/history"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/chat"
@@ -136,16 +134,8 @@ func sessionSetup(cmd *cobra.Command) (context.Context, *sessionServices, func()
 	}
 
 	queries := db.New(conn)
-	memorySvc, err := memory.NewService(dataDir)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to initialize memory service: %w", err)
-	}
 	svc := &sessionServices{
-		sessions: session.NewServiceWithDeleteCallback(queries, conn, func(sessionID string) {
-			if deleteErr := memorySvc.Delete(context.Background(), "session/"+sessionID+"/current"); deleteErr != nil && !errors.Is(deleteErr, memory.ErrNotFound) {
-				slog.Warn("Failed to delete session memory", "session_id", sessionID, "error", deleteErr)
-			}
-		}),
+		sessions: session.NewService(queries, conn),
 		messages: message.NewService(queries),
 		history:  history.NewService(queries, conn),
 	}

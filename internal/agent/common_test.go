@@ -24,7 +24,6 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -41,7 +40,6 @@ type fakeEnv struct {
 	messages    message.Service
 	permissions permission.Service
 	history     history.Service
-	memory      memory.Service
 	filetracker *filetracker.Service
 	lspClients  *csync.Map[string, *lsp.Client]
 }
@@ -150,8 +148,6 @@ func testEnv(t *testing.T) fakeEnv {
 
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
 	history := history.NewService(q, conn)
-	memoryService, err := memory.NewService(t.TempDir())
-	require.NoError(t, err)
 	filetrackerService := filetracker.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
 
@@ -166,7 +162,6 @@ func testEnv(t *testing.T) fakeEnv {
 		messages,
 		permissions,
 		history,
-		memoryService,
 		&filetrackerService,
 		lspClients,
 	}

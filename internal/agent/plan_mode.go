@@ -87,7 +87,10 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.GrepToolName:         toolRiskRead,
 
 	tools.SourcegraphToolName:         toolRiskNetwork,
-	tools.LongTermMemoryToolName:      toolRiskWrite,
+	tools.RetainToolName:              toolRiskWrite,
+	tools.RecallToolName:              toolRiskRead,
+	tools.ReflectToolName:             toolRiskRead,
+	tools.MemoryStatusToolName:        toolRiskRead,
 	tools.TodosToolName:               toolRiskWrite,
 	tools.SendMessageToolName:         toolRiskWrite,
 	tools.TaskStopToolName:            toolRiskWrite,
@@ -126,6 +129,9 @@ var planModeReadToolNames = map[string]struct{}{
 	tools.LSPHoverToolName:            {},
 	tools.LSPDocumentSymbolsToolName:  {},
 	tools.LSPWorkspaceSymbolsToolName: {},
+	tools.RecallToolName:              {},
+	tools.ReflectToolName:             {},
+	tools.MemoryStatusToolName:        {},
 }
 
 func collaborationModePrompt(mode session.CollaborationMode) string {

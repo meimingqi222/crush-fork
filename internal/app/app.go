@@ -32,7 +32,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -59,17 +59,17 @@ type UpdateAvailableMsg struct {
 }
 
 type App struct {
-	Sessions       session.Service
-	Messages       message.Service
-	History        history.Service
-	LongTermMemory memory.Service
-	UserInput      userinput.Service
-	Permissions    permission.Service
-	FileTracker    filetracker.Service
-	Checkpoint     checkpoint.Service
-	ToolRuntime    toolruntime.Service
-	Timeline       timeline.Service
-	PluginRuntime  *plugin.Runtime
+	Sessions      session.Service
+	Messages      message.Service
+	History       history.Service
+	UserInput     userinput.Service
+	Permissions   permission.Service
+	FileTracker   filetracker.Service
+	Checkpoint    checkpoint.Service
+	ToolRuntime   toolruntime.Service
+	Timeline      timeline.Service
+	PluginRuntime *plugin.Runtime
+	MemoryEngine  *engine.Engine
 
 	AgentCoordinator agent.Coordinator
 
@@ -95,15 +95,14 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	cfg := store.Config()
 	runtimeService := toolruntime.NewService()
 	timelineService := timeline.NewService()
-	userMemoryDir := filepath.Join(filepath.Dir(config.GlobalConfigData()), "memory")
-	longTermMemory, err := memory.NewService(cfg.Options.DataDirectory, memory.WithUserMemoryDir(userMemoryDir))
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
-	}
+
+	var memoryEngine *engine.Engine
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
 		runtimeService.DeleteSession(sessionID)
-		if deleteErr := longTermMemory.Delete(context.Background(), "session/"+sessionID+"/current"); deleteErr != nil && !errors.Is(deleteErr, memory.ErrNotFound) {
-			slog.Warn("Failed to delete session memory", "session_id", sessionID, "error", deleteErr)
+		if memoryEngine != nil {
+			if err := memoryEngine.OnSessionClosed(context.Background(), sessionID); err != nil {
+				slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
+			}
 		}
 	}, session.CollaborationModeDefault)
 	preferredPermissionMode := session.NormalizePermissionMode(cfg.Options.PreferredPermissionMode)
@@ -124,11 +123,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 
 	var app *App
 	app = &App{
-		Sessions:       sessions,
-		Messages:       messages,
-		History:        files,
-		LongTermMemory: longTermMemory,
-		UserInput:      userinput.NewService(),
+		Sessions:  sessions,
+		Messages:  messages,
+		History:   files,
+		UserInput: userinput.NewService(),
 		Permissions: autopermission.New(basePermissions, sessions, pluginRuntime, func() permission.Classifier {
 			if app == nil || app.AgentCoordinator == nil {
 				return nil
@@ -194,6 +192,22 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		},
 		func(ctx context.Context) error { return mcp.Close(ctx) },
 	)
+
+	// Wire the local memory engine before creating the coder agent so the
+	// agent receives working-memory stores and compaction hooks at construction.
+	if cfg.Options != nil && cfg.Options.Memory.IsEnabled() {
+		eng := engine.New(conn, engine.Config{Enabled: true})
+		writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
+		eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))
+		eng.SetMaterializer(engine.NewMemoryMDMaterializer(conn, eng.EventStore(), writer))
+		eng.SetMaterializer(engine.NewSkillsMaterializer(conn, eng.EventStore(), writer))
+		eng.SetRetriever(engine.NewSummaryRetriever(eng.EventStore(), writer.OutputDir()))
+		memoryEngine = eng
+		app.MemoryEngine = eng
+		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+			return eng.Close()
+		})
+	}
 
 	// TODO: remove the concept of agent config, most likely.
 	if !cfg.IsConfigured() {
@@ -721,7 +735,6 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.Permissions,
 		app.UserInput,
 		app.History,
-		app.LongTermMemory,
 		app.FileTracker,
 		app.Checkpoint,
 		app.LSPManager,
@@ -729,6 +742,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.ToolRuntime,
 		app.Timeline,
 		app.PluginRuntime,
+		app.MemoryEngine,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
