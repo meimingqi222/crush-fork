@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -357,130 +356,6 @@ func parseMemorySelectionResponse(content string) []string {
 		return nil
 	}
 	return result
-}
-
-const memoryExtractionThrottleTurns = 1
-
-var memoryStoreActionPattern = regexp.MustCompile(`(?i)(^|[^a-z0-9_])["']?action["']?\s*[:=]\s*["']?store["']?([^a-z0-9_]|$)`)
-
-const memoryExtractPrompt = `You are a memory extraction agent. Analyze the conversation transcript and maintain long-term memory files for future sessions.
-
-Memory types:
-- user: persistent user preferences, identity, constraints, working style.
-- feedback: corrections about how the assistant should work.
-- project: durable project context, architecture, repeated workflows, key decisions.
-- reference: pointers to external systems or resources that are costly to rediscover.
-
-Rules:
-- Extract only durable knowledge. Prefer stable preferences, project context, commands that were confirmed to work, and repeated decisions.
-- Do NOT save transient task state, one-off logs, temporary file contents, or information already obvious in the codebase.
-- Before creating a new key, prefer updating an existing durable memory when the idea matches.
-- If an existing memory is now stale, contradicted, or superseded, you may delete it instead of creating another overlapping memory.
-- Return JSON with array entries shaped like {"action":"store|update|delete|noop","key":"...","description":"...","content":"...","type":"user|feedback|project|reference","scope":"project|session"}.
-- store/update require key + description + content. delete requires key only. noop is optional and will be ignored.
-- Return [] if nothing should change.
-
-Example output:
-[{"action":"update","key":"user/preferred-style","description":"User prefers concise code","content":"The user prefers concise code and short explanations.","type":"user"},{"action":"delete","key":"project/old-workflow"}]`
-
-func shouldExtractMemories(turnsSinceLastExtraction int) bool {
-	return turnsSinceLastExtraction >= memoryExtractionThrottleTurns
-}
-
-func isMemoryStoreToolCallLine(line string) bool {
-	if line == "" {
-		return false
-	}
-
-	if !strings.Contains(strings.ToLower(line), "long_term_memory") {
-		return false
-	}
-
-	return memoryStoreActionPattern.MatchString(line)
-}
-
-func hasMemoryWritesInHistory(history []string) bool {
-	for _, h := range history {
-		if isMemoryStoreToolCallLine(h) {
-			return true
-		}
-	}
-	return false
-}
-
-func extractMemories(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, prompt string, history []string) {
-	if memorySvc == nil || bgModel == nil {
-		return
-	}
-
-	if len(history) < 2 {
-		slog.Debug("Not enough conversation history for memory extraction", "session_id", sessionID)
-		return
-	}
-
-	if hasMemoryWritesInHistory(history) {
-		slog.Debug("Skipping extraction - memory writes detected in conversation", "session_id", sessionID)
-		return
-	}
-
-	historyStr := strings.Join(history, "\n\n")
-	if len(historyStr) < 200 {
-		slog.Debug("Conversation too short for memory extraction", "session_id", sessionID, "chars", len(historyStr))
-		return
-	}
-
-	existingMemories, err := memorySvc.ListMemoryFiles()
-	if err != nil {
-		slog.Warn("Failed to list existing memories for context", "error", err)
-	} else if len(existingMemories) > 0 {
-		manifest := buildMemoryManifest(existingMemories[:min(len(existingMemories), 20)])
-		historyStr = "Existing memories:\n" + manifest + "\n\nConversation:\n" + historyStr
-	}
-
-	extractPrompt := fmt.Sprintf("Initial prompt: %s\n\nConversation transcript:\n%s\n\nExtract any durable memories worth saving (avoid duplicates with existing memories):", prompt, historyStr)
-
-	agent := fantasy.NewAgent(
-		bgModel.model.Model,
-		fantasy.WithSystemPrompt(memoryExtractPrompt),
-		fantasy.WithMaxOutputTokens(2048),
-		fantasy.WithUserAgent(memoryUserAgent),
-	)
-
-	extractCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := agent.Stream(copilot.ContextWithInitiatorType(extractCtx, copilot.InitiatorAgent), fantasy.AgentStreamCall{
-		Prompt:          extractPrompt,
-		ProviderOptions: getProviderOptions(bgModel.model, bgModel.provider),
-		PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-			callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
-			prepared.Messages = options.Messages
-			if bgModel.provider.SystemPromptPrefix != "" {
-				prepared.Messages = append([]fantasy.Message{
-					fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix),
-				}, prepared.Messages...)
-			}
-			return callCtx, prepared, nil
-		},
-	})
-	if err != nil {
-		slog.Warn("Memory extraction failed", "error", err, "session_id", sessionID)
-		return
-	}
-	if resp == nil {
-		return
-	}
-
-	content := resp.Response.Content.Text()
-	memories := parseExtractedMemories(content)
-	if len(memories) == 0 {
-		slog.Debug("No memories extracted from conversation", "session_id", sessionID)
-		return
-	}
-
-	if err := applyExtractedMemories(ctx, memorySvc, memories, "session_id", sessionID); err != nil {
-		slog.Warn("Failed to apply extracted memories", "error", err, "session_id", sessionID)
-	}
 }
 
 func parseExtractedMemories(content string) []extractedMemory {

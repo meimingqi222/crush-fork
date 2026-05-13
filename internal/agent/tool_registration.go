@@ -114,6 +114,10 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 			}
 			return bgModel.semanticSearch(callCtx, c.longTermMemory, params)
 		}),
+		agenttools.NewRetainTool(c.memoryEngineEventStore(), c.permissions, c.cfg.WorkingDir()),
+		agenttools.NewRecallTool(c.memoryEngineRetriever(), c.memoryEngineEventStore()),
+		agenttools.NewReflectTool(c.memoryEngineRetriever()),
+		agenttools.NewMemoryStatusTool(c.memoryEngine),
 		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),

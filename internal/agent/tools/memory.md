@@ -1,3 +1,6 @@
+> Deprecated: Use `retain` for storing, `recall` for reading, `reflect` for
+> synthesis, and `memory_status` for observability instead.
+
 Manages persistent long-term memory entries across sessions.
 
 <usage>

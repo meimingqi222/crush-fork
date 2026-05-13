@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 )
 
@@ -51,38 +52,47 @@ func (b *backgroundModel) semanticSearch(ctx context.Context, memorySvc memory.S
 	return entries, nil
 }
 
-func buildAutoRecallBlock(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, prompt string, recentTools []string, alreadySurfaced map[string]bool, recentConversation string) string {
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
-		return ""
+func buildAutoRecallBlock(ctx context.Context, memorySvc memory.Service, eventStore engine.EventStore, retriever engine.Retriever, bgModel *backgroundModel, sessionID, prompt string, recentTools []string, alreadySurfaced map[string]bool, recentConversation string) string {
+	sections := make([]string, 0, 2)
+
+	// Primary path: use Retriever.Recall() for summary injection.
+	// Retriever reads from materialized views (memory_summary.md) and
+	// EventStore to produce a prompt-ready summary block. This replaces
+	// the old query-first auto recall as the main recall mechanism.
+	if retriever != nil {
+		recallOpts := map[string]any{"session_id": sessionID}
+		if recall, err := retriever.Recall(ctx, recallOpts); err == nil && recall != "" {
+			sections = append(sections, recall)
+		}
 	}
 
-	// Short prompts lack enough context for meaningful term extraction.
-	// When a background model and recent conversation are available,
-	// expand the query into a semantically richer search query.
-	// If expansion fails and the query still has at least two words,
-	// fall back to the original query rather than skipping entirely.
-	wordCount := len(strings.Fields(prompt))
-	if wordCount < shortQueryWordThreshold {
-		if bgModel != nil && strings.TrimSpace(recentConversation) != "" {
-			expanded, err := expandShortQuery(ctx, bgModel, prompt, recentConversation)
-			if err == nil && strings.TrimSpace(expanded) != "" {
-				prompt = strings.TrimSpace(expanded)
-				wordCount = len(strings.Fields(prompt))
-			}
-		}
-		// Single-word queries remain too ambiguous even after expansion.
-		if wordCount < 2 {
+	// Supplementary path: targeted recall for history queries, pitfall
+	// matching, or explicit model invocation. Only runs when the primary
+	// summary injection is not available (e.g. before first materialization).
+	if len(sections) == 0 && memorySvc != nil {
+		prompt = strings.TrimSpace(prompt)
+		if prompt == "" {
 			return ""
 		}
-	}
 
-	sections := make([]string, 0, 1)
+		// Short prompts lack enough context for meaningful term extraction.
+		wordCount := len(strings.Fields(prompt))
+		if wordCount < shortQueryWordThreshold {
+			if bgModel != nil && strings.TrimSpace(recentConversation) != "" {
+				expanded, err := expandShortQuery(ctx, bgModel, prompt, recentConversation)
+				if err == nil && strings.TrimSpace(expanded) != "" {
+					prompt = strings.TrimSpace(expanded)
+					wordCount = len(strings.Fields(prompt))
+				}
+			}
+			if wordCount < 2 {
+				return ""
+			}
+		}
 
-	if memorySvc != nil {
 		scope, includeMemory := autoRecallMemoryScope(ctx)
 		if includeMemory {
-			entries := recallEntriesForSession(ctx, memorySvc, bgModel, sessionID, prompt, scope, recentTools, alreadySurfaced)
+			entries := recallEntriesForSession(ctx, memorySvc, eventStore, bgModel, sessionID, prompt, scope, recentTools, alreadySurfaced)
 			if len(entries) > 0 {
 				sections = append(sections, formatAutoRecallMemory(entries))
 			}
@@ -136,12 +146,18 @@ func expandShortQuery(ctx context.Context, bgModel *backgroundModel, query, rece
 	return strings.TrimSpace(resp.Response.Content.Text()), nil
 }
 
-func recallEntriesForSession(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, sessionID, query, scope string, recentTools []string, alreadySurfaced map[string]bool) []memory.Entry {
+func recallEntriesForSession(ctx context.Context, memorySvc memory.Service, eventStore engine.EventStore, bgModel *backgroundModel, sessionID, query, scope string, recentTools []string, alreadySurfaced map[string]bool) []memory.Entry {
 	entries := make([]memory.Entry, 0, autoRecallMemoryLimit)
 	seen := make(map[string]bool)
 
 	if shouldInjectSessionMemory(scope) && strings.TrimSpace(sessionID) != "" {
-		if entry, err := memorySvc.Get(ctx, sessionMemoryKey(sessionID)); err == nil {
+		if eventStore != nil {
+			entry := readWorkingMemoryAsEntry(ctx, eventStore, sessionID)
+			if entry != nil {
+				entries = append(entries, *entry)
+				seen[entry.Key] = true
+			}
+		} else if entry, err := memorySvc.Get(ctx, sessionMemoryKey(sessionID)); err == nil {
 			entries = append(entries, entry)
 			seen[entry.Key] = true
 		}

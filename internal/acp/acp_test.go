@@ -272,8 +272,6 @@ func (f *fakeCoordinator) IsQueuePaused(_ string) bool             { return fals
 func (f *fakeCoordinator) Summarize(_ context.Context, _ string, _ fantasy.ProviderOptions) error {
 	return nil
 }
-func (f *fakeCoordinator) Dream(_ context.Context, _ string, _ bool) error { return nil }
-
 func (f *fakeCoordinator) EnhancePrompt(_ context.Context, _ string, _ string) (string, error) {
 	return "", nil
 }

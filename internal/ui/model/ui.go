@@ -157,9 +157,6 @@ type (
 		SessionID string
 		Status    string
 	}
-	memoryDreamStartedMsg struct {
-		SessionID string
-	}
 
 	// closeDialogMsg is sent to close the current dialog.
 	closeDialogMsg struct{}
@@ -652,11 +649,6 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionUsageRefreshedMsg:
 		if msg.session != nil && m.session != nil && msg.session.ID == m.session.ID {
 			m.session = msg.session
-		}
-
-	case memoryDreamStartedMsg:
-		if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
-			cmds = append(cmds, m.loadSession(msg.SessionID))
 		}
 
 	case sendMessageMsg:
@@ -2186,13 +2178,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			}
 			return nil
 		})
-		m.dialog.CloseDialog(dialog.CommandsID)
-	case dialog.ActionDream:
-		if m.isAgentBusy() {
-			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before dreaming..."))
-			break
-		}
-		cmds = append(cmds, m.startMemoryDream(msg.SessionID, msg.Force))
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionGenerateHandoff:
 		if m.isAgentBusy() {
@@ -4291,20 +4276,6 @@ func (m *UI) cacheSidebarLogo(width int) {
 	m.sidebarLogo = renderLogo(m.com.Styles, true, width)
 }
 
-// startMemoryDream triggers a memory dream consolidation for the given session.
-func (m *UI) startMemoryDream(sessionID string, force bool) tea.Cmd {
-	if m.com == nil || m.com.App == nil || m.com.App.AgentCoordinator == nil {
-		return util.ReportError(fmt.Errorf("coder agent is not initialized"))
-	}
-	return func() tea.Msg {
-		err := m.com.App.AgentCoordinator.Dream(context.Background(), sessionID, force)
-		if err != nil {
-			return util.ReportError(err)()
-		}
-		return memoryDreamStartedMsg{SessionID: sessionID}
-	}
-}
-
 func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.Cmd {
 	if m.com.App.AgentCoordinator == nil {
 		return util.ReportError(fmt.Errorf("coder agent is not initialized"))
@@ -4316,13 +4287,6 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	}
 
 	trimmedContent := strings.TrimSpace(content)
-	if len(attachments) == 0 && trimmedContent == "/dream" {
-		sessionID := ""
-		if m.hasSession() {
-			sessionID = m.session.ID
-		}
-		return m.startMemoryDream(sessionID, true)
-	}
 
 	if !m.hasSession() {
 		newSession, err := m.com.App.Sessions.Create(context.Background(), "New Session")
@@ -4826,31 +4790,6 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 			Title:   "Crush finished turn",
 			Message: fmt.Sprintf("Agent's turn completed in \"%s\"", n.SessionTitle),
 		})
-	case notify.TypeMemoryDreamStarted:
-		return tea.Batch(
-			util.ReportInfo("Memory dream started"),
-			util.CmdHandler(memoryDreamStartedMsg{SessionID: n.SessionID}),
-			m.sendNotification(notification.Notification{
-				Title:   "Memory dream started",
-				Message: fmt.Sprintf("Consolidating memories for \"%s\"", n.SessionTitle),
-			}),
-		)
-	case notify.TypeMemoryDreamFinished:
-		return tea.Batch(
-			util.ReportInfo("Memory dream finished"),
-			m.sendNotification(notification.Notification{
-				Title:   "Memory dream finished",
-				Message: fmt.Sprintf("Consolidated memories for \"%s\"", n.SessionTitle),
-			}),
-		)
-	case notify.TypeMemoryDreamFailed:
-		return tea.Batch(
-			util.ReportWarn("Memory dream failed"),
-			m.sendNotification(notification.Notification{
-				Title:   "Memory dream failed",
-				Message: fmt.Sprintf("Could not consolidate memories for \"%s\"", n.SessionTitle),
-			}),
-		)
 	default:
 		return nil
 	}

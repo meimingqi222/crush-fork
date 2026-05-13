@@ -42,6 +42,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -188,6 +189,18 @@ type Model struct {
 	ModelCfg   config.SelectedModel
 }
 
+// MemoryEngineHooks bundles lifecycle callbacks that the coordinator
+// provides to the agent when the memory engine is enabled. All hooks
+// are optional (nil when engine is disabled).
+type MemoryEngineHooks struct {
+	// OnBeforeCompaction is called before session summarization/compaction.
+	OnBeforeCompaction func(ctx context.Context, sessionID string)
+	// AfterTurnIdle is called after each successful LLM turn.
+	AfterTurnIdle func(ctx context.Context, sessionID string)
+	// OnSessionClosed is called when a session is closed/deleted.
+	OnSessionClosed func(ctx context.Context, sessionID string)
+}
+
 type deferredToolRuntime interface {
 	activateDeferredToolsForSession(sessionID string, toolNames []string) []string
 	activatedDeferredToolsForSession(sessionID string) map[string]struct{}
@@ -211,7 +224,6 @@ type sessionAgent struct {
 	backgroundModel      *backgroundModel
 	reviewToolResult     func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
 	disableAutoSummarize bool
-	disableAutoMemory    bool
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
 	hookManager          *hooks.Manager
@@ -229,11 +241,19 @@ type sessionAgent struct {
 	extractionMu             sync.Mutex
 	pendingExtractions       map[string][]pendingExtraction
 	nextExtractionID         uint64
-	extractionTurnCount      map[string]int
 	sessionMemoryTurns       map[string]int
 	sessionMemoryTokens      map[string]int64
 	sessionMemoryInitialized map[string]bool
 	sessionMemoryEnabled     bool
+	memoryEngineEnabled      bool
+
+	// memoryEngineEventStore provides direct EventStore access when the memory
+	// engine is enabled. Used for Working Memory read/write operations.
+	memoryEngineEventStore engine.EventStore
+
+	// memoryEngineHooks holds lifecycle callbacks provided by the coordinator
+	// when the memory engine is enabled. Nil when engine is disabled.
+	memoryEngineHooks *MemoryEngineHooks
 }
 
 type SessionAgentOptions struct {
@@ -247,7 +267,6 @@ type SessionAgentOptions struct {
 	DeferredToolRuntime  deferredToolRuntime
 	IsSubAgent           bool
 	DisableAutoSummarize bool
-	DisableAutoMemory    bool
 	IsYolo               bool
 	Sessions             session.Service
 	Messages             message.Service
@@ -262,6 +281,9 @@ type SessionAgentOptions struct {
 	Checkpoint           checkpoint.Service
 	RetryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
 	EnableSessionMemory  bool
+	MemoryEngineEnabled  bool
+	MemoryEngineEventStore engine.EventStore
+	MemoryEngineHooks    *MemoryEngineHooks
 	RetryWaitFunc        func(context.Context, time.Duration) error
 }
 
@@ -314,7 +336,6 @@ func NewSessionAgent(
 		backgroundModel:          opts.BackgroundModel,
 		reviewToolResult:         opts.ReviewToolResult,
 		disableAutoSummarize:     opts.DisableAutoSummarize,
-		disableAutoMemory:        opts.DisableAutoMemory,
 		tools:                    csync.NewSliceFrom(opts.Tools),
 		isYolo:                   opts.IsYolo,
 		notify:                   opts.Notify,
@@ -328,11 +349,13 @@ func NewSessionAgent(
 		activeRequests:           csync.NewMap[string, context.CancelFunc](),
 		pausedQueues:             csync.NewMap[string, bool](),
 		pendingExtractions:       make(map[string][]pendingExtraction),
-		extractionTurnCount:      make(map[string]int),
 		sessionMemoryTurns:       make(map[string]int),
 		sessionMemoryTokens:      make(map[string]int64),
 		sessionMemoryInitialized: make(map[string]bool),
-		sessionMemoryEnabled:     opts.EnableSessionMemory,
+		sessionMemoryEnabled:      opts.EnableSessionMemory,
+		memoryEngineEnabled:       opts.MemoryEngineEnabled,
+		memoryEngineEventStore:    opts.MemoryEngineEventStore,
+		memoryEngineHooks:        opts.MemoryEngineHooks,
 	}
 }
 
@@ -2074,6 +2097,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if compactionTrigger == sessionCompactionTriggerNone {
 			compactionTrigger = sessionCompactionTriggerNormal
 		}
+		if a.memoryEngineHooks != nil && a.memoryEngineHooks.OnBeforeCompaction != nil {
+			a.memoryEngineHooks.OnBeforeCompaction(context.Background(), call.SessionID)
+		}
 		if summarizeErr := a.Summarize(withSessionCompactingPurpose(copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent), compactionTrigger.Purpose()), call.SessionID, call.ProviderOptions); summarizeErr != nil {
 			return nil, summarizeErr
 		}
@@ -2117,22 +2143,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.activeRequests.Del(call.SessionID)
 	cancel()
 	wg.Wait()
-	if !a.isSubAgent && a.memory != nil && a.backgroundModel != nil && !a.disableAutoMemory && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
+	if !a.isSubAgent && a.memory != nil && a.backgroundModel != nil && !a.memoryEngineEnabled && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
 		historyForExtraction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
 		a.extractionMu.Lock()
-		a.extractionTurnCount[call.SessionID]++
-		extractionTurns := a.extractionTurnCount[call.SessionID]
 		a.sessionMemoryTurns[call.SessionID]++
 		sessionMemoryTurns := a.sessionMemoryTurns[call.SessionID]
-		if shouldExtractMemories(extractionTurns) {
-			a.extractionTurnCount[call.SessionID] = 0
-			extractionCtx, extractionCancel := context.WithCancel(context.Background())
-			extractionID := a.trackPendingExtractionLocked(call.SessionID, extractionCancel)
-			go func(history []string, pendingID uint64) {
-				defer a.finishPendingExtraction(call.SessionID, pendingID)
-				extractMemories(extractionCtx, a.memory, a.backgroundModel, call.SessionID, call.Prompt, history)
-			}(historyForExtraction, extractionID)
-		}
 		if a.enableSessionMemory() {
 			shouldUpdate, initialized, newTokensAtLastExtraction := shouldUpdateSessionMemory(
 				a.sessionMemoryInitialized[call.SessionID],
@@ -2149,7 +2164,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
 				go func(history []string, pendingID uint64) {
 					defer a.finishPendingExtraction(call.SessionID, pendingID)
-					updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
+					if a.memoryEngineEnabled && a.memoryEngineEventStore != nil {
+						updateSessionMemoryEventStore(sessionMemoryCtx, a.memoryEngineEventStore, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
+					} else {
+						updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
+					}
 				}(historyForExtraction, sessionMemoryID)
 			}
 		}

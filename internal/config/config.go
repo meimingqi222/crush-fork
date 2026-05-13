@@ -293,6 +293,14 @@ type TUIOptions struct {
 	Transparent *bool       `json:"transparent,omitempty" jsonschema:"description=Enable transparent background for the TUI interface,default=false"`
 }
 
+// MemoryConfig defines configuration for the memory engine.
+type MemoryConfig struct {
+	// Enabled enables the event-sourced memory engine.
+	Enabled bool `json:"enabled,omitempty" jsonschema:"description=Enable the event-sourced memory engine,default=false"`
+	// Remote is the URL of a remote memory service (empty for local SQLite only).
+	Remote string `json:"remote,omitempty" jsonschema:"description=Remote memory service URL (empty for local SQLite only)"`
+}
+
 // Completions defines options for the completions UI.
 type Completions struct {
 	MaxDepth *int `json:"max_depth,omitempty" jsonschema:"description=Maximum depth for the ls tool,default=0,example=10"`
@@ -348,12 +356,12 @@ type Options struct {
 	Debug                      bool         `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
 	DebugLSP                   bool         `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
 	DisableAutoSummarize       bool         `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
-	DisableAutoMemory          bool         `json:"disable_auto_memory,omitempty" jsonschema:"description=Disable automatic long-term memory extraction and background consolidation,default=false"`
 	DataDirectory              string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing project-scoped application data (defaults to .crush in the working directory; falls back to a safe global workspace path when startup cwd is unsafe),default=.crush,example=.crush"`
 	DisabledTools              []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate  bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
 	DisableDefaultProviders    bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs,default=false"`
-	Attribution                *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
+	Memory                     *MemoryConfig `json:"memory,omitempty" jsonschema:"description=Memory engine configuration"`
+	Attribution                *Attribution   `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics             bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
 	InitializeAs               string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
 	AutoLSP                    *bool        `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`

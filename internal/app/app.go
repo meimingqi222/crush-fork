@@ -33,6 +33,7 @@ import (
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -70,6 +71,7 @@ type App struct {
 	ToolRuntime    toolruntime.Service
 	Timeline       timeline.Service
 	PluginRuntime  *plugin.Runtime
+	MemoryEngine   *engine.Engine
 
 	AgentCoordinator agent.Coordinator
 
@@ -100,10 +102,17 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize long-term memory service: %w", err)
 	}
+
+	var memoryEngine *engine.Engine
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
 		runtimeService.DeleteSession(sessionID)
 		if deleteErr := longTermMemory.Delete(context.Background(), "session/"+sessionID+"/current"); deleteErr != nil && !errors.Is(deleteErr, memory.ErrNotFound) {
 			slog.Warn("Failed to delete session memory", "session_id", sessionID, "error", deleteErr)
+		}
+		if memoryEngine != nil {
+			if err := memoryEngine.OnSessionClosed(context.Background(), sessionID); err != nil {
+				slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
+			}
 		}
 	}, session.CollaborationModeDefault)
 	preferredPermissionMode := session.NormalizePermissionMode(cfg.Options.PreferredPermissionMode)
@@ -216,6 +225,19 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		} else {
 			return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
 		}
+	}
+
+	// Wire memory engine if configured and enabled.
+	if cfg.Options != nil && cfg.Options.Memory != nil && cfg.Options.Memory.Enabled {
+		eng := engine.New(conn, engine.Config{Enabled: true})
+		memoryEngine = eng
+		app.MemoryEngine = eng
+		if cem, ok := app.AgentCoordinator.(interface{ SetMemoryEngine(*engine.Engine) }); ok {
+			cem.SetMemoryEngine(eng)
+		}
+		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+			return eng.Close()
+		})
 	}
 
 	// Set up callback for LSP state updates.

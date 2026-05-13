@@ -44,8 +44,6 @@ func (m *mockQueueCoordinator) IsQueuePaused(string) bool           { return m.p
 func (m *mockQueueCoordinator) Summarize(context.Context, string, fantasy.ProviderOptions) error {
 	return nil
 }
-func (m *mockQueueCoordinator) Dream(context.Context, string, bool) error { return nil }
-
 func (m *mockQueueCoordinator) EnhancePrompt(context.Context, string, string) (string, error) {
 	return "", nil
 }

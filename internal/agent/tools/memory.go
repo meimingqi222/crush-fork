@@ -16,6 +16,10 @@ import (
 //go:embed memory.md
 var longTermMemoryDescription []byte
 
+// Deprecated: Use retain/recall/reflect/memory_status instead.
+// long_term_memory writes directly to the old file-based memory service.
+// The new event-sourced pipeline uses retain (write), recall (read),
+// reflect (synthesis), and memory_status (observability).
 const LongTermMemoryToolName = "long_term_memory"
 
 type LongTermMemoryParams struct {

@@ -93,7 +93,7 @@ func TestRecallEntriesForSessionPrependsSessionMemory(t *testing.T) {
 		provider: config.ProviderConfig{ID: "test"},
 	}
 
-	entries := recallEntriesForSession(t.Context(), memorySvc, bgModel, "sess-1", "search", "", nil, nil)
+	entries := recallEntriesForSession(t.Context(), memorySvc, nil, bgModel, "sess-1", "search", "", nil, nil)
 	require.NotEmpty(t, entries)
 	require.Equal(t, sessionMemoryKey("sess-1"), entries[0].Key)
 	found := false
@@ -122,7 +122,7 @@ func TestRecallEntriesForSessionSkipsSessionMemoryForProjectScope(t *testing.T) 
 		provider: config.ProviderConfig{ID: "test"},
 	}
 
-	entries := recallEntriesForSession(t.Context(), memorySvc, bgModel, "sess-1", "search", "project", nil, nil)
+	entries := recallEntriesForSession(t.Context(), memorySvc, nil, bgModel, "sess-1", "search", "project", nil, nil)
 	require.NotEmpty(t, entries)
 	for _, entry := range entries {
 		require.NotEqual(t, sessionMemoryKey("sess-1"), entry.Key)

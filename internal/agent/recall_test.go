@@ -29,7 +29,7 @@ func TestBuildAutoRecallBlockIncludesMemory(t *testing.T) {
 		provider: config.ProviderConfig{ID: "test"},
 	}
 
-	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search implementation", nil, nil, "")
+	block := buildAutoRecallBlock(context.Background(), env.memory, nil, nil, bgModel, sess.ID, "search implementation", nil, nil, "")
 	require.Contains(t, block, "Relevant long-term memory:")
 	require.Contains(t, block, sessionMemoryKey(sess.ID))
 	require.Contains(t, block, "project/goal")
@@ -44,7 +44,7 @@ func TestBuildAutoRecallBlockSkipsEmptyResults(t *testing.T) {
 	sess, err := env.sessions.Create(t.Context(), "recall-empty")
 	require.NoError(t, err)
 
-	block := buildAutoRecallBlock(context.Background(), env.memory, nil, sess.ID, "unmatched query test", nil, nil, "")
+	block := buildAutoRecallBlock(context.Background(), env.memory, nil, nil, nil, sess.ID, "unmatched query test", nil, nil, "")
 	require.Empty(t, block)
 }
 
@@ -59,12 +59,12 @@ func TestBuildAutoRecallBlockFiltersMemoryByAgentPolicy(t *testing.T) {
 	require.NoError(t, env.memory.Store(t.Context(), memory.StoreParams{Key: sessionMemoryKey(sess.ID), Value: "Session memory", Scope: "session"}))
 
 	ctx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "isolated")
-	block := buildAutoRecallBlock(ctx, env.memory, nil, sess.ID, "check memory", nil, nil, "")
+	block := buildAutoRecallBlock(ctx, env.memory, nil, nil, nil, sess.ID, "check memory", nil, nil, "")
 	require.Contains(t, block, sessionMemoryKey(sess.ID))
 	require.NotContains(t, block, "scope/project")
 
 	ephemeralCtx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "ephemeral")
-	ephemeralBlock := buildAutoRecallBlock(ephemeralCtx, env.memory, nil, sess.ID, "check memory", nil, nil, "")
+	ephemeralBlock := buildAutoRecallBlock(ephemeralCtx, env.memory, nil, nil, nil, sess.ID, "check memory", nil, nil, "")
 	require.NotContains(t, ephemeralBlock, "Relevant long-term memory:")
 }
 
@@ -97,7 +97,7 @@ func TestBuildAutoRecallBlockWithBackgroundModelSkipsOtherSessionMemory(t *testi
 		provider: config.ProviderConfig{ID: "test"},
 	}
 
-	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search query", nil, nil, "")
+	block := buildAutoRecallBlock(context.Background(), env.memory, nil, nil, bgModel, sess.ID, "search query", nil, nil, "")
 	require.Contains(t, model.prompt, "project/goal")
 	require.Contains(t, block, "project/goal")
 	require.NotContains(t, block, sessionMemoryKey(otherSession.ID))
@@ -130,7 +130,7 @@ func TestBuildAutoRecallBlockWithBackgroundModelHonorsProjectScope(t *testing.T)
 	}
 
 	ctx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "project")
-	block := buildAutoRecallBlock(ctx, env.memory, bgModel, sess.ID, "search query", nil, nil, "")
+	block := buildAutoRecallBlock(ctx, env.memory, nil, nil, bgModel, sess.ID, "search query", nil, nil, "")
 	require.Contains(t, model.prompt, "project/goal")
 	require.NotContains(t, model.prompt, sessionMemoryKey(sess.ID))
 	require.Contains(t, block, "project/goal")
@@ -177,7 +177,7 @@ func TestBuildAutoRecallBlockFiltersAlreadySurfaced(t *testing.T) {
 
 	// Simulate project/goal already surfaced in a prior turn.
 	alreadySurfaced := map[string]bool{"project/goal": true}
-	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search query", nil, alreadySurfaced, "")
+	block := buildAutoRecallBlock(context.Background(), env.memory, nil, nil, bgModel, sess.ID, "search query", nil, alreadySurfaced, "")
 
 	// The manifest sent to the LLM should not include the already-surfaced key.
 	require.NotContains(t, model.prompt, "project/goal")
@@ -234,7 +234,7 @@ func TestBuildAutoRecallBlockIncludesStalenessCaveat(t *testing.T) {
 		provider: config.ProviderConfig{ID: "test"},
 	}
 
-	block := buildAutoRecallBlock(context.Background(), env.memory, bgModel, sess.ID, "search query", nil, nil, "")
+	block := buildAutoRecallBlock(context.Background(), env.memory, nil, nil, bgModel, sess.ID, "search query", nil, nil, "")
 	require.Contains(t, block, "project/old-decision")
 	// The memory was just created so it should be fresh — no staleness caveat.
 	require.NotContains(t, block, "days old")
