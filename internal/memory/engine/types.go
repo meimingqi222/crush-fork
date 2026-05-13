@@ -16,12 +16,12 @@ const (
 type MemoryKind string
 
 const (
-	MemoryKindPreference  MemoryKind = "preference"
-	MemoryKindDecision    MemoryKind = "decision"
-	MemoryKindProcedure   MemoryKind = "procedure"
-	MemoryKindPitfall     MemoryKind = "pitfall"
-	MemoryKindReference   MemoryKind = "reference"
-	MemoryKindTaskState    MemoryKind = "task_state"
+	MemoryKindPreference    MemoryKind = "preference"
+	MemoryKindDecision      MemoryKind = "decision"
+	MemoryKindProcedure     MemoryKind = "procedure"
+	MemoryKindPitfall       MemoryKind = "pitfall"
+	MemoryKindReference     MemoryKind = "reference"
+	MemoryKindTaskState     MemoryKind = "task_state"
 	MemoryKindWorkingMemory MemoryKind = "working_memory"
 )
 
@@ -62,6 +62,7 @@ type DegradedModeInfo struct {
 
 // EngineStatus represents the current state of the memory engine pipeline.
 type EngineStatus struct {
+	Backend              string                   `json:"backend"`
 	EventStoreStatus     string                   `json:"event_store_status"`
 	ExtractionStatus     MemoryPipelineStatus     `json:"extraction_status"`
 	ConsolidationStatus  MemoryPipelineStatus     `json:"consolidation_status"`
@@ -72,10 +73,10 @@ type EngineStatus struct {
 
 // MemoryPipelineStatus tracks one stage of the memory pipeline.
 type MemoryPipelineStatus struct {
-	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
-	LastWatermark int64     `json:"last_watermark"`
-	State        string     `json:"state"` // idle, running, failed
-	Error        string     `json:"error,omitempty"`
+	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
+	LastWatermark int64      `json:"last_watermark"`
+	State         string     `json:"state"` // idle, running, failed
+	Error         string     `json:"error,omitempty"`
 }
 
 // MaterializedViewStatus tracks a single materialized view.
@@ -89,14 +90,14 @@ type MaterializedViewStatus struct {
 
 // MemoryJobStatus tracks a single background job.
 type MemoryJobStatus struct {
-	ID              string     `json:"id"`
-	JobType         string     `json:"job_type"`
-	Status          string     `json:"status"` // pending, running, completed, failed
-	Owner           string     `json:"owner,omitempty"`
-	LeaseExpiresAt  *time.Time `json:"lease_expires_at,omitempty"`
-	RetryCount      int        `json:"retry_count"`
-	MaxRetries      int        `json:"max_retries"`
-	ErrorMessage    string     `json:"error_message,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID             string     `json:"id"`
+	JobType        string     `json:"job_type"`
+	Status         string     `json:"status"` // pending, running, completed, failed
+	Owner          string     `json:"owner,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	RetryCount     int        `json:"retry_count"`
+	MaxRetries     int        `json:"max_retries"`
+	ErrorMessage   string     `json:"error_message,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }

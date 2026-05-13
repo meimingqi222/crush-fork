@@ -81,7 +81,7 @@ func (m *SummaryMaterializer) ListViews(_ context.Context) ([]string, error) {
 func (m *SummaryMaterializer) renderSummary(events []MemoryEvent) string {
 	filtered := make([]MemoryEvent, 0, len(events))
 	for _, evt := range events {
-		if evt.Scope == MemoryScopeSession || evt.Kind == MemoryKindWorkingMemory || evt.Kind == MemoryKindTaskState {
+		if !IsMaterializableEvent(evt) {
 			continue
 		}
 		filtered = append(filtered, evt)

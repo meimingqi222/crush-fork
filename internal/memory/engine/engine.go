@@ -22,6 +22,7 @@ type Engine struct {
 	store   EventStore
 	db      *sql.DB
 	enabled bool
+	backend string
 
 	extractor     Extractor
 	consolidator  Consolidator
@@ -51,6 +52,7 @@ const consolidationCheckpointView = "_pipeline_consolidation"
 // Config holds configuration for the memory engine.
 type Config struct {
 	Enabled               bool
+	Backend               string
 	WorkingMemoryThrottle time.Duration
 }
 
@@ -60,10 +62,15 @@ func New(db *sql.DB, cfg Config) *Engine {
 	if throttle <= 0 {
 		throttle = 30 * time.Second
 	}
+	backend := cfg.Backend
+	if backend == "" {
+		backend = "local"
+	}
 	return &Engine{
 		store:                 NewSQLiteEventStore(db),
 		db:                    db,
 		enabled:               cfg.Enabled,
+		backend:               backend,
 		sessionStates:         make(map[string]*sessionState),
 		workingMemoryThrottle: throttle,
 	}
@@ -285,6 +292,11 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 			slog.Warn("Failed to append memory event", "error", err, "session_id", sessionID)
 		}
 	}
+	if hasMaterializableEvents(events) {
+		if err := e.TriggerMaterialization(ctx); err != nil {
+			slog.Warn("Turn-end memory materialization failed", "error", err, "session_id", sessionID)
+		}
+	}
 	e.sessionMu.Lock()
 	if state, ok := e.sessionStates[sessionID]; ok {
 		state.pendingWrites += len(events)
@@ -322,6 +334,12 @@ func (e *Engine) OnBeforeCompaction(ctx context.Context, sessionID string) error
 		return nil
 	}
 	slog.Debug("Memory engine preparing for compaction", "session_id", sessionID)
+	if err := e.AfterTurnIdle(ctx, sessionID, nil); err != nil {
+		slog.Warn("Pre-compaction memory extraction failed", "error", err, "session_id", sessionID)
+	}
+	if err := e.TriggerMaterialization(ctx); err != nil {
+		return fmt.Errorf("pre-compaction memory materialization: %w", err)
+	}
 	return nil
 }
 
@@ -388,6 +406,7 @@ func (e *Engine) Status(ctx context.Context) (*EngineStatus, error) {
 	}
 
 	return &EngineStatus{
+		Backend:          e.backend,
 		EventStoreStatus: eventStoreStatus,
 		ExtractionStatus: MemoryPipelineStatus{
 			LastRunAt: lastExtractionRun,
@@ -436,6 +455,21 @@ outer:
 		filtered = append(filtered, evt)
 	}
 	return filtered
+}
+
+func hasMaterializableEvents(events []MemoryEvent) bool {
+	for _, evt := range events {
+		if IsMaterializableEvent(evt) {
+			return true
+		}
+	}
+	return false
+}
+
+func IsMaterializableEvent(evt MemoryEvent) bool {
+	return evt.Scope != MemoryScopeSession &&
+		evt.Kind != MemoryKindWorkingMemory &&
+		evt.Kind != MemoryKindTaskState
 }
 
 func (e *Engine) pipelineWatermark(ctx context.Context, name string) (int64, error) {

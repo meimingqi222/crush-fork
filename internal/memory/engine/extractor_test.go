@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -301,6 +303,127 @@ func TestEngine_AfterTurnIdleWithExtractor(t *testing.T) {
 	// Verify extraction timestamp recorded
 	require.NotNil(t, eng.lastExtractionRun)
 	require.False(t, eng.lastExtractionRun.IsZero())
+}
+
+func TestEngine_AfterTurnIdleMaterializesExtractedEvents(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	dir := t.TempDir()
+	writer := NewArtifactWriter(dir)
+	eng.SetMaterializer(NewSummaryMaterializer(db, eng.store, writer))
+	eng.SetMaterializer(NewMemoryMDMaterializer(db, eng.store, writer))
+
+	extractor := newMockExtractor(mockExtractorDeps{
+		transcriptFn: defaultTranscriptFn(t,
+			"USER: use postgres\nASSISTANT: ok",
+			[]string{"msg-1"},
+		),
+		analyzeFn: defaultAnalyzeFn(t, []ExtractedEvent{
+			{
+				Kind:       MemoryKindDecision,
+				Scope:      MemoryScopeProject,
+				Content:    "Use Postgres for persistence.",
+				Summary:    "Use Postgres",
+				Confidence: 0.9,
+				Importance: 0.8,
+			},
+		}),
+		filesFn: defaultFilesFn([]string{"db.go"}),
+		clock:   fixedClock,
+	})
+	eng.SetExtractor(extractor)
+
+	err := eng.AfterTurnIdle(context.Background(), "sess-ext-materialize", nil)
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(dir, "memory_summary.md"))
+	require.NoError(t, err, "turn-end extraction should refresh memory_summary.md")
+	_, err = os.Stat(filepath.Join(dir, "MEMORY.md"))
+	require.NoError(t, err, "turn-end extraction should refresh MEMORY.md")
+
+	views, err := eng.queryViewStatuses(context.Background())
+	require.NoError(t, err)
+	require.Len(t, views, 2)
+	for _, view := range views {
+		require.Equal(t, int64(1), view.Watermark)
+	}
+}
+
+func TestEngine_AfterTurnIdleSkipsMaterializationForSessionEvents(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	dir := t.TempDir()
+	writer := NewArtifactWriter(dir)
+	eng.SetMaterializer(NewSummaryMaterializer(db, eng.store, writer))
+	eng.SetMaterializer(NewMemoryMDMaterializer(db, eng.store, writer))
+
+	extractor := newMockExtractor(mockExtractorDeps{
+		transcriptFn: defaultTranscriptFn(t,
+			"USER: continue current task\nASSISTANT: ok",
+			[]string{"msg-1"},
+		),
+		analyzeFn: defaultAnalyzeFn(t, []ExtractedEvent{
+			{
+				Kind:       MemoryKindTaskState,
+				Scope:      MemoryScopeSession,
+				Content:    "Transient task state.",
+				Summary:    "Transient task state",
+				Confidence: 0.9,
+				Importance: 0.8,
+			},
+		}),
+		filesFn: defaultFilesFn(nil),
+		clock:   fixedClock,
+	})
+	eng.SetExtractor(extractor)
+
+	err := eng.AfterTurnIdle(context.Background(), "sess-session-only", nil)
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(dir, "memory_summary.md"))
+	require.True(t, os.IsNotExist(err), "session-only events should not refresh memory_summary.md")
+	_, err = os.Stat(filepath.Join(dir, "MEMORY.md"))
+	require.True(t, os.IsNotExist(err), "session-only events should not refresh MEMORY.md")
+}
+
+func TestEngine_OnBeforeCompactionExtractsAndMaterializes(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	dir := t.TempDir()
+	writer := NewArtifactWriter(dir)
+	eng.SetMaterializer(NewSummaryMaterializer(db, eng.store, writer))
+	eng.SetMaterializer(NewMemoryMDMaterializer(db, eng.store, writer))
+
+	extractor := newMockExtractor(mockExtractorDeps{
+		transcriptFn: defaultTranscriptFn(t,
+			"USER: remember this before compaction\nASSISTANT: ok",
+			[]string{"msg-1"},
+		),
+		analyzeFn: defaultAnalyzeFn(t, []ExtractedEvent{
+			{
+				Kind:       MemoryKindPreference,
+				Scope:      MemoryScopeUser,
+				Content:    "User wants memory saved before compaction.",
+				Summary:    "Save memory before compaction",
+				Confidence: 0.9,
+				Importance: 0.8,
+			},
+		}),
+		filesFn: defaultFilesFn(nil),
+		clock:   fixedClock,
+	})
+	eng.SetExtractor(extractor)
+
+	err := eng.OnBeforeCompaction(context.Background(), "sess-pre-compact")
+	require.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(dir, "memory_summary.md"))
+	require.NoError(t, err, "pre-compaction should refresh memory_summary.md")
+	_, err = os.Stat(filepath.Join(dir, "MEMORY.md"))
+	require.NoError(t, err, "pre-compaction should refresh MEMORY.md")
 }
 
 func TestEngine_AfterTurnIdleWithExtractorEmptyTranscript(t *testing.T) {

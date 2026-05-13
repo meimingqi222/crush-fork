@@ -297,20 +297,56 @@ type TUIOptions struct {
 type MemoryConfig struct {
 	// Enabled enables the event-sourced memory engine.
 	Enabled *bool `json:"enabled,omitempty" jsonschema:"description=Enable the event-sourced memory engine,default=true"`
-	// Remote is the URL of a remote memory service (empty for local SQLite only).
-	Remote string `json:"remote,omitempty" jsonschema:"description=Remote memory service URL (empty for local SQLite only)"`
+	// Backend selects the memory backend. "local" uses the local event log and
+	// materialized files. "hindsight" uses Hindsight as the recall/reflect
+	// backend and uses the local event log only as a replication queue. "off"
+	// disables memory. When empty, Remote implies "hindsight"; otherwise "local".
+	Backend string `json:"backend,omitempty" jsonschema:"description=Memory backend to use,enum=local,enum=hindsight,enum=off,default=local"`
+	// Remote is the base URL of a remote Hindsight memory service (e.g. http://localhost:8888).
+	// Required when backend is "hindsight".
+	Remote string `json:"remote,omitempty" jsonschema:"description=Remote Hindsight memory service base URL (e.g. http://localhost:8888),format=uri"`
+	// RemoteToken is the Bearer token for authenticating with the remote service.
+	// Reads from HINDSIGHT_API_TOKEN environment variable when empty.
+	RemoteToken string `json:"remote_token,omitempty" jsonschema:"description=Bearer token for the remote memory service (or set HINDSIGHT_API_TOKEN env var)"`
+	// RemoteBankID is the memory bank identifier on the remote service.
+	// Defaults to "crush" when empty.
+	RemoteBankID string `json:"remote_bank_id,omitempty" jsonschema:"description=Memory bank ID on the remote service,default=crush"`
+}
+
+// BackendName returns the effective memory backend.
+func (m *MemoryConfig) BackendName() string {
+	if m == nil {
+		return "local"
+	}
+	backend := strings.ToLower(strings.TrimSpace(m.Backend))
+	switch backend {
+	case "off", "none", "disabled":
+		return "off"
+	case "hindsight", "remote":
+		return "hindsight"
+	case "local":
+		return "local"
+	}
+	if strings.TrimSpace(m.Remote) != "" {
+		return "hindsight"
+	}
+	return "local"
 }
 
 // IsEnabled reports whether the memory engine should run. The local engine is
-// on by default; users can explicitly disable it with memory.enabled=false.
+// on by default; users can explicitly disable it with memory.enabled=false or
+// memory.backend=off.
 func (m *MemoryConfig) IsEnabled() bool {
-	return m == nil || m.Enabled == nil || *m.Enabled
+	if m != nil && m.Enabled != nil && !*m.Enabled {
+		return false
+	}
+	return m.BackendName() != "off"
 }
 
 // Completions defines options for the completions UI.
 type Completions struct {
-	MaxDepth *int `json:"max_depth,omitempty" jsonschema:"description=Maximum depth for the ls tool,default=0,example=10"`
-	MaxItems *int `json:"max_items,omitempty" jsonschema:"description=Maximum number of items to return for the ls tool,default=1000,example=100"`
+	MaxDepth *int `json:"max_depth,omitempty" jsonschema:"description=Maximum depth for directory listings,default=0,example=10"`
+	MaxItems *int `json:"max_items,omitempty" jsonschema:"description=Maximum number of items to return for directory listings,default=1000,example=100"`
 }
 
 func (c Completions) Limits() (depth, items int) {
@@ -554,8 +590,8 @@ type Tools struct {
 }
 
 type ToolLs struct {
-	MaxDepth *int `json:"max_depth,omitempty" jsonschema:"description=Maximum depth for the ls tool,default=0,example=10"`
-	MaxItems *int `json:"max_items,omitempty" jsonschema:"description=Maximum number of items to return for the ls tool,default=1000,example=100"`
+	MaxDepth *int `json:"max_depth,omitempty" jsonschema:"description=Maximum depth for directory listings,default=0,example=10"`
+	MaxItems *int `json:"max_items,omitempty" jsonschema:"description=Maximum number of items to return for directory listings,default=1000,example=100"`
 }
 
 // Limits returns the user-defined max-depth and max-items, or their defaults.

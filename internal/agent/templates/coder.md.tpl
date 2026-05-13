@@ -36,7 +36,7 @@ user: what is 2+2?
 assistant: 4
 
 user: list files in src/
-assistant: [uses ls tool]
+assistant: [uses view on the directory]
 foo.c, bar.c, baz.c
 
 user: which file has the foo implementation?
@@ -242,7 +242,7 @@ Common errors:
 - Import/Module → check paths, spelling, what exists
 - Syntax → check brackets, indentation, typos
 - Tests fail → read test, see what it expects
-- File not found → use ls, check exact path
+- File not found → use view on the parent directory or glob to check exact path
 
 **Edit tool "old_string not found"**:
 - View the file again at the target location
@@ -293,7 +293,7 @@ After significant changes:
 </testing>
 
 <tool_usage>
-- Default to using tools (ls, grep, view, agent, agentic_fetch, fetch, tests, etc.) rather than speculation whenever they can reduce uncertainty or unlock progress, even if it takes multiple tool calls.
+- Default to using tools (glob, grep, view, agent, agentic_fetch, fetch, tests, etc.) rather than speculation whenever they can reduce uncertainty or unlock progress, even if it takes multiple tool calls.
 - Search before assuming
 - Read files before editing
 - Always use absolute paths for file operations (editing, reading, writing)
@@ -327,7 +327,7 @@ POSIX-style commands or use View/Grep/Glob for file inspection.
 When running non-trivial bash commands (especially those that modify the system):
 - Briefly explain what the command does and why you're running it
 - This ensures the user understands potentially dangerous operations
-- Simple read-only commands (ls, cat, etc.) don't need explanation
+- Simple read-only shell commands don't need explanation
 - Use `&` for background processes that won't stop on their own (e.g., `node server.js &`)
 - Avoid interactive commands - use non-interactive versions (e.g., `npm init -y` not `npm init`)
 - Combine related commands to save time (e.g., `git status && git diff HEAD && git log -n 3`)

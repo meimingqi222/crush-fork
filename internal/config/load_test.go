@@ -80,6 +80,25 @@ func TestMemoryConfigIsEnabled(t *testing.T) {
 	require.False(t, (&MemoryConfig{Enabled: &enabled}).IsEnabled())
 }
 
+func TestMemoryConfigBackendName(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "local", (*MemoryConfig)(nil).BackendName())
+	require.Equal(t, "local", (&MemoryConfig{}).BackendName())
+	require.Equal(t, "local", (&MemoryConfig{Backend: "LOCAL"}).BackendName())
+	require.Equal(t, "hindsight", (&MemoryConfig{Backend: "remote"}).BackendName())
+	require.Equal(t, "hindsight", (&MemoryConfig{Remote: "http://localhost:8888"}).BackendName())
+	require.Equal(t, "off", (&MemoryConfig{Backend: "disabled"}).BackendName())
+	require.Equal(t, "off", (&MemoryConfig{Backend: "off"}).BackendName())
+}
+
+func TestMemoryConfigBackendOffDisablesMemory(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, (&MemoryConfig{Backend: "off"}).IsEnabled())
+	require.True(t, (&MemoryConfig{Backend: "hindsight"}).IsEnabled())
+}
+
 func TestConfig_LoadFromBytesMemoryEnabledExplicitFalse(t *testing.T) {
 	t.Parallel()
 
@@ -749,7 +768,6 @@ func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
 				"bash",
 				"glob",
 				"grep",
-				"ls",
 				"sourcegraph",
 				"view",
 			},

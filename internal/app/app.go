@@ -33,6 +33,7 @@ import (
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memory/engine"
+	"github.com/charmbracelet/crush/internal/memory/hindsight"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -196,12 +197,52 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	// Wire the local memory engine before creating the coder agent so the
 	// agent receives working-memory stores and compaction hooks at construction.
 	if cfg.Options != nil && cfg.Options.Memory.IsEnabled() {
-		eng := engine.New(conn, engine.Config{Enabled: true})
-		writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
-		eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))
-		eng.SetMaterializer(engine.NewMemoryMDMaterializer(conn, eng.EventStore(), writer))
-		eng.SetMaterializer(engine.NewSkillsMaterializer(conn, eng.EventStore(), writer))
-		eng.SetRetriever(engine.NewSummaryRetriever(eng.EventStore(), writer.OutputDir()))
+		memCfg := cfg.Options.Memory
+		backend := memCfg.BackendName()
+		eng := engine.New(conn, engine.Config{Enabled: true, Backend: backend})
+		startupMaterialization := true
+
+		switch backend {
+		case "hindsight":
+			if memCfg.Remote == "" {
+				eng.SetDegraded(true, "hindsight backend configured without memory.remote")
+				slog.Warn("Hindsight memory backend requires memory.remote")
+				break
+			}
+			token := memCfg.RemoteToken
+			if token == "" {
+				token = os.Getenv("HINDSIGHT_API_TOKEN")
+			}
+			hsClient := hindsight.NewClient(memCfg.Remote, memCfg.RemoteBankID, token)
+			eng.SetMaterializer(hindsight.NewMaterializer(hsClient, conn, eng.EventStore()))
+			eng.SetRetriever(hindsight.NewRetriever(hsClient))
+			startupMaterialization = false
+			go func() {
+				if err := hsClient.EnsureBank(context.Background(), ""); err != nil {
+					slog.Warn("Hindsight EnsureBank failed", "error", err)
+					return
+				}
+				if err := eng.TriggerMaterialization(context.Background()); err != nil {
+					slog.Warn("Startup memory materialization failed", "error", err)
+				}
+			}()
+			slog.Info("Hindsight remote memory enabled", "url", memCfg.Remote, "bank", hsClient.BankID())
+		default:
+			writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
+			eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))
+			eng.SetMaterializer(engine.NewMemoryMDMaterializer(conn, eng.EventStore(), writer))
+			eng.SetMaterializer(engine.NewSkillsMaterializer(conn, eng.EventStore(), writer))
+			eng.SetRetriever(engine.NewSummaryRetriever(eng.EventStore(), writer.OutputDir()))
+		}
+
+		if startupMaterialization {
+			go func() {
+				if err := eng.TriggerMaterialization(context.Background()); err != nil {
+					slog.Warn("Startup memory materialization failed", "error", err)
+				}
+			}()
+		}
+
 		memoryEngine = eng
 		app.MemoryEngine = eng
 		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {

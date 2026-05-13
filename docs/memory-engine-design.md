@@ -26,28 +26,32 @@ Crush 现有记忆链路由多套机制叠加而成：
 - 消除 `dream`、自动抽取、显式 store 之间的长期写入冗余。
 - 不依赖 query recall 才想起基础项目和用户记忆。
 - 保留当前会话恢复能力，但将其限定为短期 Working Memory。
-- 让本地记忆成为权威事实源，远程服务只作为可选索引、同步或检索适配器。
+- 明确区分 `local`、`hindsight`、`off` 三种互斥 backend，避免本地和远程
+  召回混查。
 - 每条长期记忆都带来源、时间、置信度、验证状态和过期信息。
-- 让 `MEMORY.md`、`memory_summary.md`、skills 和向量索引成为可重建的
-  materialized views，而不是事实源。
+- 让 `MEMORY.md`、`memory_summary.md`、skills 和本地检索索引成为可重建的
+  派生产物，而不是事实源。
 
 ## 非目标
 
 - 不保持旧 `dream` 语义。
 - 不让模型直接修改最终 `MEMORY.md`。
-- 不把远程 Hindsight 类服务作为唯一事实源。
-- 不允许 local pipeline 和 remote backend 各自总结同一批 transcript。
+- 不在一次召回中混合 local 和 Hindsight 结果。
+- 不允许 local pipeline 和 remote backend 各自总结同一批 transcript 后再
+  合并注入。
 - 不为兼容旧命令牺牲架构边界。
 
 ## 核心原则
 
-1. **单一事实源**
-   长期记忆的权威来源是 `MemoryEventLog`。所有自动提取、手动 retain、
-   compaction rescue 都写入 event log。
+1. **单一写入入口**
+   所有自动提取、手动 retain、compaction rescue 都先写入
+   `MemoryEventLog`。在 `local` backend 中它是本地长期记忆的事实源；在
+   `hindsight` backend 中它是可靠复制队列和审计缓存，远程 bank 是召回源。
 
 2. **派生产物可重建**
-   `memory_summary.md`、`MEMORY.md`、`skills/`、本地向量索引和远程索引
-   都从 event log 重建。
+   在 `local` backend 中，`memory_summary.md`、`MEMORY.md` 和 `skills/`
+   都从 event log 重建。在 `hindsight` backend 中，本地 event log 只作为
+   可靠写入队列和审计缓存，不参与召回。
 
 3. **写入和召回分离**
    写入由 pipeline 控制。召回只读取记忆，不直接修改长期记忆。
@@ -56,9 +60,10 @@ Crush 现有记忆链路由多套机制叠加而成：
    记忆系统由 session lifecycle 触发，而不是由若干独立 goroutine 随机
    扫描和写入。
 
-5. **本地优先，远程可插拔**
-   本地 event log 是权威源。远程 API 可以作为 `Retriever`、`Replicator`
-   或 `VectorIndex`，但不能绕过本地事件流水线。
+5. **单一 backend 生效**
+   如果选择 `local`，召回只读本地 materialized views 和 event log。如果
+   选择 `hindsight`，召回和 reflect 只走 Hindsight；本地事件只用于可靠
+   retain/replication，不和远程结果 merge。
 
 ## 整体架构
 
@@ -89,13 +94,13 @@ flowchart TD
     Materializers --> Summary["memory_summary.md"]
     Materializers --> MemoryMD["MEMORY.md"]
     Materializers --> Skills["skills/"]
-    Materializers --> LocalIndex["local vector index"]
-    Materializers --> RemoteIndex["optional remote index"]
+    Materializers --> LocalIndex["local search index"]
+    Materializers --> Hindsight["Hindsight retain queue"]
 
     Summary --> Prompt["startup prompt injection"]
     MemoryMD --> Recall["targeted recall"]
     LocalIndex --> Recall
-    RemoteIndex --> Recall
+    Hindsight --> RemoteRecall["Hindsight recall / reflect"]
 ```
 
 ## 记忆层次
@@ -256,17 +261,25 @@ Consolidator 从 event log 中选取 project/user/global 范围内的事件，�
 
 ### Materializer
 
-Materializer 负责把事件转成不同消费形态：
+Materializer 负责把事件转成不同消费形态。具体启用哪些 materializer 由
+backend 决定：
 
 - `memory_summary.md`: prompt-time compact summary。
 - `MEMORY.md`: 人类可读的完整长期记忆。
 - `skills/`: 程序化流程。
-- local vector index: 精准召回。
-- remote index: 可选同步。
+- `hindsight_replicate`: 将 durable events 复制到 Hindsight。
+
+`local` backend 启用前三类本地 materializer。`hindsight` backend 只启用
+Hindsight replication materializer，不生成本地 summary 作为召回来源。
 
 ### Retriever
 
-Retriever 只读取 materialized views 和索引。它不参与长期写入。
+Retriever 只读取当前 backend 的召回来源。它不参与长期写入：
+
+- `local`: 读取 `memory_summary.md`、当前 session working memory 和本地
+  event log。
+- `hindsight`: 调用 Hindsight `recall` / `reflect`，不 fallback 到本地
+  summary。
 
 ## 生命周期
 
@@ -351,33 +364,34 @@ Targeted recall 只作为补充：
 
 ## 远程记忆和 Hindsight
 
-远程 API 不应作为另一套独立 backend。推荐抽象：
+Hindsight 是一个独立 backend，而不是 local backend 的附加检索层。选择
+`hindsight` 后：
 
-- 本地 EventStore 是权威源。
-- 远程服务实现 `Retriever`、`Replicator` 或 `VectorIndex`。
-- 本地 events 同步到远程。
-- 召回时 local 和 remote merge。
-- 冲突时本地 verified、新近、project-scoped 事件优先。
+- 本地 SQLite EventStore 仍然接收 extractor、manual `retain` 和
+  compaction rescue 产生的 events。
+- Hindsight materializer 按 watermark 将 durable events 复制到远程 bank。
+- `recall` 和 `reflect` 只调用远程 Hindsight。
+- 本地 `memory_summary.md`、`MEMORY.md`、`skills/` 不参与 prompt injection
+  或 targeted recall。
+- 远程不可用时状态应降级并暴露错误，不静默 fallback 到 local，避免用户误以为
+  正在使用远程记忆。
 
 ```mermaid
 flowchart LR
-    EventLog["Local EventStore"] --> Replicator["Remote Replicator"]
-    Replicator --> Remote["Hindsight / remote vector memory"]
-    EventLog --> LocalRetriever["Local Retriever"]
-    Remote --> RemoteRetriever["Remote Retriever"]
-    LocalRetriever --> Merger["Recall Merger"]
-    RemoteRetriever --> Merger
-    Merger --> Prompt["Recall result"]
+    EventLog["Local EventStore<br/>queue / audit cache"] --> Replicator["Hindsight Materializer"]
+    Replicator --> Remote["Hindsight Bank"]
+    Remote --> RemoteRetriever["Hindsight Retriever"]
+    RemoteRetriever --> Prompt["Recall / reflect result"]
 ```
 
-这样可以吸收 Hindsight 的优势：
+这样保留 Hindsight 的优势：
 
 - first-turn recall。
 - idle retain。
 - compaction rescue。
 - `retain` / `recall` / `reflect` 工具模型。
 
-但不会让远程服务绕过本地 provenance 和重建能力。
+同时避免 local summary 和 remote recall 对同一批 transcript 产生双重解释。
 
 ## 删除和替换现有机制
 
@@ -416,30 +430,53 @@ Recall 只负责补充细节。
 
 ## 配置建议
 
-第一版配置保持简单：
+当前实现使用互斥 backend：
 
 ```json
 {
-  "memory": {
-    "enabled": true,
-    "remote": {
-      "enabled": false,
-      "provider": "hindsight",
-      "api_url": "http://localhost:8888"
+  "options": {
+    "memory": {
+      "backend": "local"
     }
   }
 }
 ```
 
-不提供 `dream`、`local`、`hindsight` 三套并列逻辑。只有一个 Memory Engine。
-远程只是 Engine 的可选适配器。
+```json
+{
+  "options": {
+    "memory": {
+      "backend": "hindsight",
+      "remote": "http://localhost:8888",
+      "remote_bank_id": "crush"
+    }
+  }
+}
+```
+
+```json
+{
+  "options": {
+    "memory": {
+      "backend": "off"
+    }
+  }
+}
+```
+
+`memory.enabled=false` 仍然兼容，效果等同禁用 memory。为了兼容早期配置，
+如果只配置了 `memory.remote` 且没有显式 `backend`，会按 `hindsight`
+处理；不会自动启用 local + remote 混合召回。
+
+不提供 local 和 Hindsight 混查模式。需要切换来源时，用户必须显式切换
+`memory.backend`。
 
 ## 命令和可观测性
 
 需要提供统一管理入口：
 
-- `/memory status`: extraction、consolidation、materialization、remote sync
-  的最近状态。
+- `/memory status`: 当前 backend、extraction、consolidation、
+  materialization、remote sync 的最近状态。
 - `/memory view summary`: 查看当前 prompt 注入内容。
 - `/memory view events`: 查看事件源。
 - `/memory rebuild`: 从 event log 重建 materialized views。
@@ -462,7 +499,8 @@ Recall 只负责补充细节。
 7. 用 summary injection 替换当前 query-first auto recall 主路径。
 8. 用 `retain` / `recall` / `reflect` 替换 `long_term_memory`。
 9. 删除 `dream` 和直接长期写入式 `extractMemories`。
-10. 增加可选 Hindsight remote replicator/retriever。
+10. 增加互斥的 `hindsight` backend: remote materializer、remote-only retriever
+    和配置降级状态。
 
 ## 最终形态
 
@@ -475,8 +513,8 @@ session transcript / manual retain / compaction rescue
         -> Episodic Memory
         -> Consolidator
         -> Semantic + Procedural Memory
-        -> materialized views
-        -> prompt injection + recall + reflect
+        -> local backend: materialized views -> prompt injection + recall + reflect
+        -> hindsight backend: remote retain -> Hindsight recall + reflect
 ```
 
 这套设计消除了现有 `dream`、`extractMemories`、`auto recall` 之间的职责

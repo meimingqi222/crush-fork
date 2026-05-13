@@ -24,7 +24,7 @@ Creates or updates files in filesystem for saving/modifying text content.
 
 <tips>
 - Use View tool first to examine existing files before modifying
-- Use LS tool to verify location when creating new files
+- Use View on the parent directory to verify location when creating new files
 - Combine with Glob/Grep to find and modify multiple files
 - Include descriptive comments when changing existing code
 </tips>

@@ -53,6 +53,9 @@ func formatEngineStatus(status *engine.EngineStatus, viewFilter string) string {
 	b.WriteString("\n\n")
 
 	b.WriteString(fmt.Sprintf("Event Store: %s\n", status.EventStoreStatus))
+	if status.Backend != "" {
+		b.WriteString(fmt.Sprintf("Backend: %s\n", status.Backend))
+	}
 
 	if status.DegradedMode != nil && status.DegradedMode.Active {
 		b.WriteString(fmt.Sprintf("Degraded Mode: YES (%s)\n", status.DegradedMode.Reason))

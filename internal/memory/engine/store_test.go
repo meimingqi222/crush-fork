@@ -304,9 +304,20 @@ func TestEngine_Status(t *testing.T) {
 	status, err := engine.Status(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, status)
+	require.Equal(t, "local", status.Backend)
 	require.Equal(t, "ok", status.EventStoreStatus)
 	require.Empty(t, status.Jobs)
 	require.Empty(t, status.MaterializationViews)
+}
+
+func TestEngine_StatusReportsBackend(t *testing.T) {
+	db := setupTestDB(t)
+	engine := New(db, Config{Enabled: true, Backend: "hindsight"})
+	ctx := context.Background()
+
+	status, err := engine.Status(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "hindsight", status.Backend)
 }
 
 func TestEngine_Disabled(t *testing.T) {

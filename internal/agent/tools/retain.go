@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"charm.land/fantasy"
@@ -26,7 +27,15 @@ type RetainParams struct {
 	Importance float64  `json:"importance,omitempty" description:"Importance from 0.0 to 1.0 (default 0.5)"`
 }
 
-func NewRetainTool(eventStore engine.EventStore, permissions permission.Service, workingDir string) fantasy.AgentTool {
+type memoryMaterializer interface {
+	TriggerMaterialization(ctx context.Context) error
+}
+
+func NewRetainTool(eventStore engine.EventStore, permissions permission.Service, workingDir string, materializers ...memoryMaterializer) fantasy.AgentTool {
+	var materializer memoryMaterializer
+	if len(materializers) > 0 {
+		materializer = materializers[0]
+	}
 	return fantasy.NewAgentTool(
 		RetainToolName,
 		string(retainDescription),
@@ -82,6 +91,11 @@ func NewRetainTool(eventStore engine.EventStore, permissions permission.Service,
 
 			if err := eventStore.Append(ctx, event); err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to retain memory: %s", err.Error())), nil
+			}
+			if materializer != nil && engine.IsMaterializableEvent(event) {
+				if err := materializer.TriggerMaterialization(ctx); err != nil {
+					slog.Warn("Retain memory materialization failed", "error", err, "session_id", sessionID)
+				}
 			}
 
 			return fantasy.NewTextResponse(

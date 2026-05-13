@@ -72,7 +72,6 @@ type ViewResponseMetadata struct {
 const (
 	ReadToolName     = "read"
 	ViewToolName     = "view"
-	LSToolName       = "ls"
 	MaxViewSize      = 1 * 1024 * 1024 // 1MB
 	DefaultReadLimit = 2000
 	MaxLineLength    = 2000

@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -53,6 +55,95 @@ Return a JSON array of objects with this exact shape:
 [{"kind":"decision|preference|procedure|pitfall|reference","scope":"project|user|global","content":"Detailed durable memory","summary":"Brief summary","confidence":0.8,"importance":0.6,"tags":["relevant","tags"],"supersedes":"optional-existing-id"}]
 
 Return [] if nothing worth saving.`
+
+// bgProviderOptions returns provider options with reasoning disabled (params
+// deleted) for background LLM tasks. This is the fastest path — no thinking
+// overhead — but some providers reject a missing reasoning_effort parameter.
+func bgProviderOptionsNoThink(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {
+	noThink := false
+	model.ModelCfg.Think = &noThink
+	return getProviderOptions(model, providerCfg)
+}
+
+// bgProviderOptionsLow returns provider options with reasoning_effort="low"
+// (or equivalent). This is the safe fallback when no-think fails.
+func bgProviderOptionsLow(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {
+	model.CatwalkCfg.DefaultReasoningEffort = "low"
+	return getProviderOptions(model, providerCfg)
+}
+
+// backgroundLLMCall tries a background LLM call first with no thinking, then
+// falls back to "low" reasoning effort if the first attempt times out. This
+// two-step strategy is the fastest path for providers that accept missing
+// reasoning params, while being safe for those that require an explicit value.
+func (c *coordinator) backgroundLLMCall(ctx context.Context, bgModel *backgroundModel, systemPrompt, userPrompt string, timeout time.Duration) (*fantasy.AgentResult, error) {
+	agent := fantasy.NewAgent(
+		bgModel.model.Model,
+		fantasy.WithSystemPrompt(systemPrompt),
+		fantasy.WithMaxOutputTokens(2048),
+		fantasy.WithUserAgent(memoryUserAgent),
+	)
+
+	// Step 1: try without thinking (fastest).
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resp, err := agent.Generate(
+		copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent),
+		fantasy.AgentCall{
+			Prompt:          userPrompt,
+			ProviderOptions: bgProviderOptionsNoThink(bgModel.model, bgModel.provider),
+			PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+				callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
+				prepared.Messages = options.Messages
+				if bgModel.provider.SystemPromptPrefix != "" {
+					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix)}, prepared.Messages...)
+				}
+				return callCtx, prepared, nil
+			},
+		},
+	)
+	if err == nil {
+		return resp, nil
+	}
+
+	// Step 2: if timeout or provider rejected missing reasoning param, retry with "low".
+	if errors.Is(err, context.DeadlineExceeded) || isReasoningParamError(err) {
+		slog.Debug("Background LLM call failed without thinking, retrying with low effort",
+			"error", err)
+
+		callCtx2, cancel2 := context.WithTimeout(ctx, timeout)
+		defer cancel2()
+		resp, err := agent.Generate(
+			copilot.ContextWithInitiatorType(callCtx2, copilot.InitiatorAgent),
+			fantasy.AgentCall{
+				Prompt:          userPrompt,
+				ProviderOptions: bgProviderOptionsLow(bgModel.model, bgModel.provider),
+				PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+					callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
+					prepared.Messages = options.Messages
+					if bgModel.provider.SystemPromptPrefix != "" {
+						prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix)}, prepared.Messages...)
+					}
+					return callCtx, prepared, nil
+				},
+			},
+		)
+		return resp, err
+	}
+
+	return nil, err
+}
+
+// isReasoningParamError checks if the error is related to a missing or invalid
+// reasoning_effort/thinking parameter — some providers reject the omission.
+func isReasoningParamError(err error) bool {
+	// Match common provider error messages about reasoning/thinking params.
+	msg := err.Error()
+	return strings.Contains(msg, "reasoning") ||
+		strings.Contains(msg, "thinking") ||
+		strings.Contains(msg, "effort") ||
+		strings.Contains(msg, "budget_tokens")
+}
 
 // parseExtractedEvents parses a JSON array of ExtractedEvent from an LLM response.
 func parseExtractedEvents(content string) ([]engine.ExtractedEvent, error) {
@@ -186,28 +277,8 @@ func (c *coordinator) extractEventsFromTranscript(ctx context.Context, bgModel *
 		return nil, nil
 	}
 
-	agent := fantasy.NewAgent(
-		bgModel.model.Model,
-		fantasy.WithSystemPrompt(episodicExtractPrompt),
-		fantasy.WithMaxOutputTokens(2048),
-		fantasy.WithUserAgent(memoryUserAgent),
-	)
-
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resp, err := agent.Generate(copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent), fantasy.AgentCall{
-		Prompt:          "Extract episodic memories from this conversation:\n\n" + transcript,
-		ProviderOptions: getProviderOptions(bgModel.model, bgModel.provider),
-		PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-			callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
-			prepared.Messages = options.Messages
-			if bgModel.provider.SystemPromptPrefix != "" {
-				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix)}, prepared.Messages...)
-			}
-			return callCtx, prepared, nil
-		},
-	})
+	resp, err := c.backgroundLLMCall(ctx, bgModel, episodicExtractPrompt,
+		"Extract episodic memories from this conversation:\n\n"+transcript, 30*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("LLM extraction failed: %w", err)
 	}
@@ -223,33 +294,12 @@ func (c *coordinator) consolidateEventsWithModel(ctx context.Context, bgModel *b
 		return nil, nil
 	}
 
-	agent := fantasy.NewAgent(
-		bgModel.model.Model,
-		fantasy.WithSystemPrompt(memoryConsolidationPrompt),
-		fantasy.WithMaxOutputTokens(2048),
-		fantasy.WithUserAgent(memoryUserAgent),
-	)
-
-	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-
 	prompt := "Episodic events:\n\n" + episodes
 	if strings.TrimSpace(existing) != "" {
 		prompt += "\n\nExisting consolidated memories:\n\n" + existing
 	}
 
-	resp, err := agent.Generate(copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent), fantasy.AgentCall{
-		Prompt:          prompt,
-		ProviderOptions: getProviderOptions(bgModel.model, bgModel.provider),
-		PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-			callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
-			prepared.Messages = options.Messages
-			if bgModel.provider.SystemPromptPrefix != "" {
-				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix)}, prepared.Messages...)
-			}
-			return callCtx, prepared, nil
-		},
-	})
+	resp, err := c.backgroundLLMCall(ctx, bgModel, memoryConsolidationPrompt, prompt, 45*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("LLM consolidation failed: %w", err)
 	}

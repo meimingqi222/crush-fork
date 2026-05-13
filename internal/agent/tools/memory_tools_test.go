@@ -66,12 +66,18 @@ func (m *mockRetriever) Reflect(_ context.Context, _ string, _ map[string]any) (
 
 // mockEngine wraps engine.Engine for testing memory_status.
 type mockEngine struct {
-	status    *engine.EngineStatus
-	statusErr error
+	status              *engine.EngineStatus
+	statusErr           error
+	materializationRuns int
 }
 
 func (m *mockEngine) Status(ctx context.Context) (*engine.EngineStatus, error) {
 	return m.status, m.statusErr
+}
+
+func (m *mockEngine) TriggerMaterialization(context.Context) error {
+	m.materializationRuns++
+	return nil
 }
 
 // --- retain tests ---
@@ -81,7 +87,8 @@ func TestRetainTool(t *testing.T) {
 
 	eventStore := &mockEventStore{}
 	permissions := permission.NewPermissionService("/workspace", true, nil)
-	tool := NewRetainTool(eventStore, permissions, "/workspace")
+	materializer := &mockEngine{}
+	tool := NewRetainTool(eventStore, permissions, "/workspace", materializer)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
 	resp, err := runRetainTool(t, tool, ctx, RetainParams{
@@ -106,6 +113,7 @@ func TestRetainTool(t *testing.T) {
 	require.Equal(t, []string{"go", "tech-stack"}, evt.Tags)
 	require.Equal(t, "session-1", evt.Source.SessionID)
 	require.NotEmpty(t, evt.ID)
+	require.Equal(t, 1, materializer.materializationRuns)
 }
 
 func TestRetainToolRequiresSession(t *testing.T) {
@@ -156,6 +164,25 @@ func TestRetainToolDefaultImportance(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, eventStore.appended, 1)
 	require.Equal(t, float64(0.5), eventStore.appended[0].Importance)
+}
+
+func TestRetainToolSkipsMaterializationForSessionMemory(t *testing.T) {
+	t.Parallel()
+
+	eventStore := &mockEventStore{}
+	permissions := permission.NewPermissionService("/workspace", true, nil)
+	materializer := &mockEngine{}
+	tool := NewRetainTool(eventStore, permissions, "/workspace", materializer)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
+
+	_, err := runRetainTool(t, tool, ctx, RetainParams{
+		Scope:   "session",
+		Kind:    "task_state",
+		Content: "temporary task state",
+	})
+	require.NoError(t, err)
+	require.Len(t, eventStore.appended, 1)
+	require.Equal(t, 0, materializer.materializationRuns)
 }
 
 // --- recall tests ---

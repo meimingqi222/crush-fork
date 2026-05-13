@@ -26,7 +26,7 @@ Always choose tools in this order for file exploration:
 |-------------------------------|---------------|-----------------------------------|
 | Find files by name/pattern    | `glob`        | faster and scoped to working dir  |
 | Search file contents          | `grep`        | faster than bash grep             |
-| Read a file or list directory | `view`        | use `ls` for directory listing    |
+| Read a file or list directory | `view`        | pass a directory path to list it  |
 | Git history / diff / blame    | `bash`        | git read-only commands preferred  |
 
 Prefer `glob`, `grep`, and `view` over equivalent bash one-liners — they are

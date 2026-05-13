@@ -96,7 +96,20 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	largeModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
-	const maxOutputTokens int64 = 40
+	// Thinking-capable models require a larger token budget because thinking
+	// tokens count against max_tokens. 40 tokens is too small for a model that
+	// reasons: the thinking content fills the budget, leaving nothing for the
+	// visible title text. Use 1200 when the model can reason (1000 for thinking
+	// + ~200 for the title), unless thinking is explicitly disabled by config.
+	titleMaxOutputTokens := func(m Model) int64 {
+		if m.CatwalkCfg.CanReason {
+			thinkingDisabled := m.ModelCfg.Think != nil && !*m.ModelCfg.Think
+			if !thinkingDisabled {
+				return 1200
+			}
+		}
+		return 40
+	}
 
 	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
 		return fantasy.NewAgent(m,
@@ -128,7 +141,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 
 	// Use the small model to generate the title.
 	model := smallModel
-	agent := newAgent(model.Model, titlePrompt, maxOutputTokens)
+	agent := newAgent(model.Model, titlePrompt, titleMaxOutputTokens(model))
 	titleCtx := copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent)
 	resp, err := agent.Stream(titleCtx, streamCall)
 	if err == nil {
@@ -138,7 +151,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		// It didn't work. Let's try with the big model.
 		slog.Error("Error generating title with small model; trying big model", "err", err)
 		model = largeModel
-		agent = newAgent(model.Model, titlePrompt, maxOutputTokens)
+		agent = newAgent(model.Model, titlePrompt, titleMaxOutputTokens(model))
 		streamedTitle.Reset()
 		resp, err = agent.Stream(titleCtx, streamCall)
 		if err == nil {

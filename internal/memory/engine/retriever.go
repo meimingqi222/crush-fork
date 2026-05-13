@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // SummaryRetriever implements the Retriever interface by reading from
@@ -120,8 +121,13 @@ func (r *SummaryRetriever) Reflect(ctx context.Context, query string, opts map[s
 // Retrieve returns the most relevant memory events for a given context.
 // opts may include "scope", "kind", "session_id", "limit" to filter results.
 func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[string]any) ([]MemoryEvent, error) {
+	limit := 20
+	if configuredLimit, ok := opts["limit"].(int); ok && configuredLimit > 0 {
+		limit = configuredLimit
+	}
+
 	filter := EventFilter{
-		Limit: 20,
+		Limit: limit,
 	}
 	if scope, ok := opts["scope"].(string); ok && scope != "" {
 		s := MemoryScope(scope)
@@ -134,11 +140,91 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 	if sessionID, ok := opts["session_id"].(string); ok && sessionID != "" {
 		filter.SessionID = &sessionID
 	}
-	if limit, ok := opts["limit"].(int); ok && limit > 0 {
-		filter.Limit = limit
+
+	if strings.TrimSpace(query) == "" {
+		return r.store.Query(ctx, filter)
 	}
 
-	return r.store.Query(ctx, filter)
+	filter.Limit = 1000
+	events, err := r.store.Query(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	ranked := rankMemoryEvents(query, events)
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	return ranked, nil
+}
+
+type scoredMemoryEvent struct {
+	event MemoryEvent
+	score float64
+}
+
+func rankMemoryEvents(query string, events []MemoryEvent) []MemoryEvent {
+	terms := queryTerms(query)
+	if len(terms) == 0 {
+		return events
+	}
+	queryLower := strings.ToLower(strings.TrimSpace(query))
+	scored := make([]scoredMemoryEvent, 0, len(events))
+	for _, evt := range events {
+		text := strings.ToLower(strings.Join([]string{
+			evt.Summary,
+			evt.Content,
+			string(evt.Scope),
+			string(evt.Kind),
+			strings.Join(evt.Tags, " "),
+		}, " "))
+		score := 0.0
+		if queryLower != "" && strings.Contains(text, queryLower) {
+			score += 5
+		}
+		for _, term := range terms {
+			if strings.Contains(text, term) {
+				score++
+			}
+		}
+		if score == 0 {
+			continue
+		}
+		score += evt.Importance
+		score += evt.Confidence * 0.25
+		scored = append(scored, scoredMemoryEvent{event: evt, score: score})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].event.Watermark > scored[j].event.Watermark
+		}
+		return scored[i].score > scored[j].score
+	})
+	ranked := make([]MemoryEvent, 0, len(scored))
+	for _, item := range scored {
+		ranked = append(ranked, item.event)
+	}
+	return ranked
+}
+
+func queryTerms(query string) []string {
+	seen := make(map[string]struct{})
+	rawTerms := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	terms := make([]string, 0, len(rawTerms))
+	for _, term := range rawTerms {
+		if len([]rune(term)) < 2 {
+			continue
+		}
+		if _, ok := seen[term]; ok {
+			continue
+		}
+		seen[term] = struct{}{}
+		terms = append(terms, term)
+	}
+	return terms
 }
 
 func (r *SummaryRetriever) readFile(name string) (string, error) {

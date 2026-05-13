@@ -10,7 +10,7 @@ This tool is not PowerShell. Use direct POSIX-style commands or the dedicated Vi
 </cross_platform>
 
 <execution_steps>
-1. Directory Verification: If creating directories/files, use LS tool to verify parent exists
+1. Directory Verification: If creating directories/files, use View on the parent directory to verify it exists
 2. Security Check: Banned commands ({{ .BannedCommands }}) return error - explain to user. Safe read-only commands execute without prompts
 3. Command Execution: Execute with proper quoting, capture output
 4. Auto-Background: commands that exceed their timeout are automatically promoted to background jobs; use run_in_background=true upfront for commands you know will run long
@@ -21,7 +21,7 @@ This tool is not PowerShell. Use direct POSIX-style commands or the dedicated Vi
 <usage_notes>
 - Command required, working_dir optional (defaults to current directory)
 - IMPORTANT: Always provide a brief `description` parameter (under 30 chars) summarizing what the command does, try to keep it under 30 characters or so
-- IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use View/LS tools instead of 'cat'/'head'/'tail'/'ls'
+- IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use View instead of 'cat'/'head'/'tail'/'ls'
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)
 - Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)

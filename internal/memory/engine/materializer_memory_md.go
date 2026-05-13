@@ -95,7 +95,7 @@ func (m *MemoryMDMaterializer) renderMemoryMD(events []MemoryEvent) string {
 	byScope := make(map[MemoryScope]scopeGroup)
 
 	for _, evt := range events {
-		if evt.Scope == MemoryScopeSession || evt.Kind == MemoryKindWorkingMemory || evt.Kind == MemoryKindTaskState {
+		if !IsMaterializableEvent(evt) {
 			continue
 		}
 		if byScope[evt.Scope] == nil {
