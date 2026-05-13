@@ -31,15 +31,9 @@ func buildAutoRecallBlock(ctx context.Context, retriever engine.Retriever, sessi
 
 func autoRecallMemoryEnabled(ctx context.Context) bool {
 	memoryPolicy := strings.ToLower(strings.TrimSpace(tools.GetAgentMemoryFromContext(ctx)))
-	isolationPolicy := strings.ToLower(strings.TrimSpace(tools.GetAgentIsolationFromContext(ctx)))
 
 	switch memoryPolicy {
 	case "ephemeral":
-		return false
-	}
-
-	switch isolationPolicy {
-	case "process":
 		return false
 	}
 

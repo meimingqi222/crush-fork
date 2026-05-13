@@ -379,7 +379,7 @@ func (e *Engine) Status(ctx context.Context) (*EngineStatus, error) {
 
 	// Degraded mode
 	var degradedInfo *DegradedModeInfo
-	if e.degraded {
+	if e.IsDegraded() {
 		reason := e.DegradedReason()
 		degradedInfo = &DegradedModeInfo{
 			Active: true,
