@@ -276,6 +276,10 @@ func (c *coordinator) wireMemoryExtractor(eng *engine.Engine) {
 			return c.buildTranscript(ctx, sessionID)
 		},
 		func(ctx context.Context, transcript string) ([]engine.ExtractedEvent, error) {
+			bgModel := c.resolveBackgroundModel(ctx)
+			if bgModel == nil {
+				return nil, nil
+			}
 			return c.extractEventsFromTranscript(ctx, bgModel, transcript)
 		},
 		func(ctx context.Context, sessionID string) []string {
@@ -310,6 +314,10 @@ func (c *coordinator) wireMemoryConsolidator(eng *engine.Engine) {
 			return existing, nil
 		},
 		func(ctx context.Context, episodes, existing string) ([]engine.ConsolidatedEvent, error) {
+			bgModel := c.resolveBackgroundModel(ctx)
+			if bgModel == nil {
+				return nil, nil
+			}
 			return c.consolidateEventsWithModel(ctx, bgModel, episodes, existing)
 		},
 	)

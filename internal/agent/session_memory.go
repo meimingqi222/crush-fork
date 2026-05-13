@@ -26,7 +26,7 @@ const (
 const sessionMemoryPrompt = `You maintain a single session memory entry that helps future turns quickly recover the current working state.
 
 Return JSON with exactly one array entry using this shape:
-[{"action":"update","key":"session/<session-id>/current","description":"Current session state","content":"...","type":"project","scope":"session"}]
+[{"content":"..."}]
 
 Rules:
 - Summarize only the current durable session state that would help the next turn continue work.
