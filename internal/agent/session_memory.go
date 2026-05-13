@@ -246,7 +246,7 @@ func readWorkingMemoryContent(ctx context.Context, store engine.EventStore, sess
 		Scope:     &scope,
 		Kind:      &kind,
 		SessionID: &sessionID,
-		Limit:     1,
+		Limit:     50,
 	})
 	if err != nil {
 		slog.Warn("Failed to read working memory", "error", err, "session_id", sessionID)

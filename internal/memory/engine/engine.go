@@ -31,6 +31,7 @@ type Engine struct {
 	lastExtractionRun         *time.Time
 	lastConsolidationRun      *time.Time
 	lastConsolidatedWatermark int64
+	pipelineMu                sync.RWMutex
 
 	// session lifecycle state
 	sessionStates map[string]*sessionState
@@ -138,6 +139,9 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		slog.Debug("Memory engine in degraded mode, skipping consolidation")
 		return nil
 	}
+
+	e.pipelineMu.Lock()
+	defer e.pipelineMu.Unlock()
 
 	watermark, err := e.pipelineWatermark(ctx, consolidationCheckpointView)
 	if err != nil {
@@ -270,7 +274,9 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 		} else {
 			events = extracted
 			now := time.Now()
+			e.pipelineMu.Lock()
 			e.lastExtractionRun = &now
+			e.pipelineMu.Unlock()
 		}
 	}
 
@@ -357,6 +363,7 @@ func (e *Engine) Status(ctx context.Context) (*EngineStatus, error) {
 		return nil, fmt.Errorf("querying view statuses: %w", err)
 	}
 
+	e.pipelineMu.RLock()
 	extractionState := "idle"
 	if e.lastExtractionRun != nil {
 		extractionState = "completed"
@@ -365,6 +372,10 @@ func (e *Engine) Status(ctx context.Context) (*EngineStatus, error) {
 	if e.lastConsolidationRun != nil {
 		consolidationState = "completed"
 	}
+	lastExtractionRun := e.lastExtractionRun
+	lastConsolidationRun := e.lastConsolidationRun
+	lastConsolidatedWatermark := e.lastConsolidatedWatermark
+	e.pipelineMu.RUnlock()
 
 	// Degraded mode
 	var degradedInfo *DegradedModeInfo
@@ -379,12 +390,12 @@ func (e *Engine) Status(ctx context.Context) (*EngineStatus, error) {
 	return &EngineStatus{
 		EventStoreStatus: eventStoreStatus,
 		ExtractionStatus: MemoryPipelineStatus{
-			LastRunAt: e.lastExtractionRun,
+			LastRunAt: lastExtractionRun,
 			State:     extractionState,
 		},
 		ConsolidationStatus: MemoryPipelineStatus{
-			LastRunAt:     e.lastConsolidationRun,
-			LastWatermark: e.lastConsolidatedWatermark,
+			LastRunAt:     lastConsolidationRun,
+			LastWatermark: lastConsolidatedWatermark,
 			State:         consolidationState,
 		},
 		MaterializationViews: views,
