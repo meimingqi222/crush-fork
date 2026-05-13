@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// tagConsolidatedOutput is appended to every event produced by consolidation
+// so that subsequent consolidation passes can skip already-consolidated events
+// and avoid infinite re-processing.
+const tagConsolidatedOutput = "consolidated_output"
+
 // ConsolidatedEvent is the structured output from LLM consolidation analysis.
 // It represents a higher-level semantic or procedural memory synthesized from
 // episodic events across one or more sessions. The Supersedes field allows the
@@ -92,7 +97,7 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, events []MemoryEvent)
 			CreatedAt:  now,
 			UpdatedAt:  now,
 			Supersedes: ce.Supersedes,
-			Tags:       ce.Tags,
+			Tags:       append(ce.Tags, tagConsolidatedOutput),
 		}
 		if event.Confidence <= 0 {
 			event.Confidence = 0.7

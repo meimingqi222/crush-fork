@@ -131,7 +131,7 @@ func TestConsolidator_SingleConsolidation(t *testing.T) {
 	require.Equal(t, "Storage decision", evt.Summary)
 	require.Equal(t, 0.9, evt.Confidence)
 	require.Equal(t, 0.8, evt.Importance)
-	require.Equal(t, []string{"database", "sqlite"}, evt.Tags)
+	require.Equal(t, []string{"database", "sqlite", tagConsolidatedOutput}, evt.Tags)
 	require.Equal(t, fixedClock(), evt.CreatedAt)
 	require.Equal(t, fixedClock(), evt.UpdatedAt)
 	require.Contains(t, evt.ID, "con-decision-")

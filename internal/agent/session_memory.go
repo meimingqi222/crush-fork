@@ -183,12 +183,12 @@ func updateSessionMemoryEventStore(ctx context.Context, store engine.EventStore,
 
 	now := time.Now()
 	expiresAt := now.Add(workingMemoryTTL)
-	for _, mem := range memories {
+	for i, mem := range memories {
 		if mem.Content == "" {
 			continue
 		}
 
-		eventID := fmt.Sprintf("wm-%s-%d", sessionID, now.UnixNano())
+		eventID := fmt.Sprintf("wm-%s-%d-%d", sessionID, now.UnixNano(), i)
 		event := engine.MemoryEvent{
 			ID:      eventID,
 			Scope:   engine.MemoryScopeSession,

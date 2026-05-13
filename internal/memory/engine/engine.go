@@ -147,10 +147,8 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		e.lastConsolidatedWatermark = watermark
 	}
 
-	sessionScope := MemoryScopeSession
 	events, err := e.store.Query(ctx, EventFilter{
 		MinWatermark: e.lastConsolidatedWatermark,
-		Scope:        &sessionScope,
 		Limit:        500,
 	})
 	if err != nil {
@@ -413,13 +411,18 @@ func (e *Engine) RebuildView(ctx context.Context, viewName string) error {
 
 func filterConsolidatableEvents(events []MemoryEvent) []MemoryEvent {
 	filtered := events[:0]
+outer:
 	for _, evt := range events {
 		switch evt.Kind {
 		case MemoryKindWorkingMemory, MemoryKindTaskState:
 			continue
-		default:
-			filtered = append(filtered, evt)
 		}
+		for _, tag := range evt.Tags {
+			if tag == tagConsolidatedOutput {
+				continue outer
+			}
+		}
+		filtered = append(filtered, evt)
 	}
 	return filtered
 }

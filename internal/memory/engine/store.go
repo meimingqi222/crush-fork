@@ -269,7 +269,7 @@ func (s *sqliteEventStore) GetMaxWatermark(ctx context.Context) (int64, error) {
 }
 
 func (s *sqliteEventStore) Close() error {
-	return s.db.Close()
+	return nil
 }
 
 // sourceHash produces a deterministic hash for event-level idempotency.
