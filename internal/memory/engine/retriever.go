@@ -159,7 +159,7 @@ func (r *SummaryRetriever) readWorkingMemory(ctx context.Context, sessionID stri
 		Scope:     &scope,
 		Kind:      &kind,
 		SessionID: &sessionID,
-		Limit:     1,
+		Limit:     50,
 	})
 	if err != nil || len(events) == 0 {
 		return ""

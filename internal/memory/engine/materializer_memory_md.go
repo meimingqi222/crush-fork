@@ -48,14 +48,10 @@ func (m *MemoryMDMaterializer) Materialize(ctx context.Context, viewName string,
 	}
 
 	events, err := m.store.Query(ctx, EventFilter{
-		MinWatermark: watermark,
-		Limit:        1000,
+		Limit: 1000,
 	})
 	if err != nil {
 		return fmt.Errorf("querying events for MEMORY.md: %w", err)
-	}
-	if len(events) == 0 {
-		return nil
 	}
 
 	content := m.renderMemoryMD(events)
@@ -99,6 +95,9 @@ func (m *MemoryMDMaterializer) renderMemoryMD(events []MemoryEvent) string {
 	byScope := make(map[MemoryScope]scopeGroup)
 
 	for _, evt := range events {
+		if evt.Scope == MemoryScopeSession || evt.Kind == MemoryKindWorkingMemory || evt.Kind == MemoryKindTaskState {
+			continue
+		}
 		if byScope[evt.Scope] == nil {
 			byScope[evt.Scope] = make(scopeGroup)
 		}
@@ -174,7 +173,7 @@ func (m *MemoryMDMaterializer) renderMemoryMD(events []MemoryEvent) string {
 	}
 
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("_Watermark: %d_\n", events[len(events)-1].Watermark))
+	b.WriteString(fmt.Sprintf("_Watermark: %d_\n", maxWatermark(events)))
 
 	return b.String()
 }
@@ -192,4 +191,14 @@ func scopeLabel(s MemoryScope) string {
 	default:
 		return string(s)
 	}
+}
+
+func maxWatermark(events []MemoryEvent) int64 {
+	var max int64
+	for _, evt := range events {
+		if evt.Watermark > max {
+			max = evt.Watermark
+		}
+	}
+	return max
 }

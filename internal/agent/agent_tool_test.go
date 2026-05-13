@@ -134,7 +134,6 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	}
 	assert.Contains(t, generalNames, "bash")
 	assert.Contains(t, generalNames, "edit")
-	assert.Contains(t, generalNames, tools.LongTermMemoryToolName)
 	assert.Contains(t, generalNames, tools.SendMessageToolName)
 	assert.Contains(t, generalNames, tools.TaskStopToolName)
 	assert.Contains(t, generalNames, tools.LSPCodeActionToolName)
@@ -189,7 +188,10 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"lsp_references",
 		"lsp_type_definition",
 		"lsp_workspace_symbols",
+		"memory_status",
 		"plan_exit",
+		"recall",
+		"reflect",
 		"request_user_input",
 		"view",
 	}, planNames)
@@ -200,7 +202,7 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	assert.NotContains(t, planNames, "sourcegraph")
 	assert.NotContains(t, planNames, "tool_search")
 	assert.NotContains(t, planNames, "edit")
-	assert.NotContains(t, planNames, tools.LongTermMemoryToolName)
+	assert.NotContains(t, planNames, tools.RetainToolName)
 	assert.NotContains(t, planNames, "write")
 	assert.NotContains(t, planNames, "todos")
 }

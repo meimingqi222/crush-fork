@@ -41,7 +41,6 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/hooks"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -220,7 +219,6 @@ type sessionAgent struct {
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
-	memory               memory.Service
 	backgroundModel      *backgroundModel
 	reviewToolResult     func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
 	disableAutoSummarize bool
@@ -257,34 +255,33 @@ type sessionAgent struct {
 }
 
 type SessionAgentOptions struct {
-	LargeModel           Model
-	SmallModel           Model
-	SystemPromptPrefix   string
-	SystemPrompt         string
-	WorkingDir           string
-	AgentFactory         func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
-	RefreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
-	DeferredToolRuntime  deferredToolRuntime
-	IsSubAgent           bool
-	DisableAutoSummarize bool
-	IsYolo               bool
-	Sessions             session.Service
-	Messages             message.Service
-	Memory               memory.Service
-	BackgroundModel      *backgroundModel
-	ReviewToolResult     func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
-	Tools                []fantasy.AgentTool
-	Notify               pubsub.Publisher[notify.Notification]
-	HookManager          *hooks.Manager
-	PluginRuntime        *plugin.Runtime
-	Filetracker          filetracker.Service
-	Checkpoint           checkpoint.Service
-	RetryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
-	EnableSessionMemory  bool
-	MemoryEngineEnabled  bool
+	LargeModel             Model
+	SmallModel             Model
+	SystemPromptPrefix     string
+	SystemPrompt           string
+	WorkingDir             string
+	AgentFactory           func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
+	RefreshCallConfig      func(context.Context) (sessionAgentRuntimeConfig, error)
+	DeferredToolRuntime    deferredToolRuntime
+	IsSubAgent             bool
+	DisableAutoSummarize   bool
+	IsYolo                 bool
+	Sessions               session.Service
+	Messages               message.Service
+	BackgroundModel        *backgroundModel
+	ReviewToolResult       func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
+	Tools                  []fantasy.AgentTool
+	Notify                 pubsub.Publisher[notify.Notification]
+	HookManager            *hooks.Manager
+	PluginRuntime          *plugin.Runtime
+	Filetracker            filetracker.Service
+	Checkpoint             checkpoint.Service
+	RetryDelayFunc         func(attempt int, serverRetryAfter time.Duration) time.Duration
+	EnableSessionMemory    bool
+	MemoryEngineEnabled    bool
 	MemoryEngineEventStore engine.EventStore
-	MemoryEngineHooks    *MemoryEngineHooks
-	RetryWaitFunc        func(context.Context, time.Duration) error
+	MemoryEngineHooks      *MemoryEngineHooks
+	RetryWaitFunc          func(context.Context, time.Duration) error
 }
 
 type sessionAgentRuntimeConfig struct {
@@ -332,7 +329,6 @@ func NewSessionAgent(
 		isSubAgent:               opts.IsSubAgent,
 		sessions:                 opts.Sessions,
 		messages:                 opts.Messages,
-		memory:                   opts.Memory,
 		backgroundModel:          opts.BackgroundModel,
 		reviewToolResult:         opts.ReviewToolResult,
 		disableAutoSummarize:     opts.DisableAutoSummarize,
@@ -352,9 +348,9 @@ func NewSessionAgent(
 		sessionMemoryTurns:       make(map[string]int),
 		sessionMemoryTokens:      make(map[string]int64),
 		sessionMemoryInitialized: make(map[string]bool),
-		sessionMemoryEnabled:      opts.EnableSessionMemory,
-		memoryEngineEnabled:       opts.MemoryEngineEnabled,
-		memoryEngineEventStore:    opts.MemoryEngineEventStore,
+		sessionMemoryEnabled:     opts.EnableSessionMemory,
+		memoryEngineEnabled:      opts.MemoryEngineEnabled,
+		memoryEngineEventStore:   opts.MemoryEngineEventStore,
 		memoryEngineHooks:        opts.MemoryEngineHooks,
 	}
 }
@@ -2143,7 +2139,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.activeRequests.Del(call.SessionID)
 	cancel()
 	wg.Wait()
-	if !a.isSubAgent && a.memory != nil && a.backgroundModel != nil && !a.memoryEngineEnabled && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
+	if !a.isSubAgent && a.enableSessionMemory() && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
 		historyForExtraction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
 		a.extractionMu.Lock()
 		a.sessionMemoryTurns[call.SessionID]++
@@ -2164,11 +2160,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
 				go func(history []string, pendingID uint64) {
 					defer a.finishPendingExtraction(call.SessionID, pendingID)
-					if a.memoryEngineEnabled && a.memoryEngineEventStore != nil {
-						updateSessionMemoryEventStore(sessionMemoryCtx, a.memoryEngineEventStore, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
-					} else {
-						updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
-					}
+					updateSessionMemoryEventStore(sessionMemoryCtx, a.memoryEngineEventStore, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
 				}(historyForExtraction, sessionMemoryID)
 			}
 		}

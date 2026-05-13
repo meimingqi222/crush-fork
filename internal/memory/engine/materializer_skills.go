@@ -16,10 +16,10 @@ import (
 //
 // Output: <outputDir>/skills/SKILL.md
 type SkillsMaterializer struct {
-	base             materializerBase
-	store            EventStore
-	minEvents        int
-	minConfidence    float64
+	base          materializerBase
+	store         EventStore
+	minEvents     int
+	minConfidence float64
 }
 
 // NewSkillsMaterializer creates a SkillsMaterializer.
@@ -55,9 +55,8 @@ func (m *SkillsMaterializer) Materialize(ctx context.Context, viewName string, _
 
 	procKind := MemoryKindProcedure
 	events, err := m.store.Query(ctx, EventFilter{
-		MinWatermark: watermark,
-		Kind:         &procKind,
-		Limit:        500,
+		Kind:  &procKind,
+		Limit: 500,
 	})
 	if err != nil {
 		return fmt.Errorf("querying procedure events: %w", err)
@@ -88,7 +87,7 @@ func (m *SkillsMaterializer) renderSkills(events []MemoryEvent) string {
 	// Filter by confidence stability.
 	var stable []MemoryEvent
 	for _, evt := range events {
-		if evt.Confidence >= m.minConfidence {
+		if evt.Scope != MemoryScopeSession && evt.Confidence >= m.minConfidence {
 			stable = append(stable, evt)
 		}
 	}
@@ -160,7 +159,7 @@ func (m *SkillsMaterializer) renderSkills(events []MemoryEvent) string {
 
 	b.WriteString("---\n")
 	b.WriteString(fmt.Sprintf("_Watermark: %d | %d total, %d stable_\n",
-		stable[len(stable)-1].Watermark,
+		maxWatermark(events),
 		len(events),
 		len(stable)))
 

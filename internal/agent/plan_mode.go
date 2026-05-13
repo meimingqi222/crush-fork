@@ -87,7 +87,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.GrepToolName:         toolRiskRead,
 
 	tools.SourcegraphToolName:         toolRiskNetwork,
-	tools.LongTermMemoryToolName:      toolRiskWrite,
 	tools.RetainToolName:              toolRiskWrite,
 	tools.RecallToolName:              toolRiskRead,
 	tools.ReflectToolName:             toolRiskRead,

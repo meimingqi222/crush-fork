@@ -52,7 +52,7 @@ func TestRiskLevelForTool(t *testing.T) {
 	require.Equal(t, toolRiskRead, riskLevelForTool(tools.ViewToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.WriteToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.EditToolName))
-	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.LongTermMemoryToolName))
+	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.RetainToolName))
 	require.Equal(t, toolRiskExecute, riskLevelForTool(tools.BashToolName))
 	require.Equal(t, toolRiskExecute, riskLevelForTool("unknown_tool"))
 }
@@ -63,7 +63,7 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 	baseTools := []string{
 		tools.ViewToolName,
 		tools.BashToolName,
-		tools.LongTermMemoryToolName,
+		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 		tools.ViewToolName,
@@ -72,14 +72,14 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 	require.Equal(t, []string{
 		tools.ViewToolName,
 		tools.BashToolName,
-		tools.LongTermMemoryToolName,
+		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModeDefault, nil))
 
 	require.Equal(t, []string{
 		tools.ViewToolName,
-		tools.LongTermMemoryToolName,
+		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModeDefault, []string{tools.BashToolName}))
@@ -124,7 +124,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.AgenticFetchToolName,
 		tools.EditToolName,
 		tools.WriteToolName,
-		tools.LongTermMemoryToolName,
+		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 		tools.DiagnosticsToolName,
@@ -146,7 +146,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.AgenticFetchToolName,
 		tools.EditToolName,
 		tools.WriteToolName,
-		tools.LongTermMemoryToolName,
+		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 		tools.DiagnosticsToolName,

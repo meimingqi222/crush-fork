@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -29,7 +31,10 @@ func (s *sqliteEventStore) Append(ctx context.Context, event MemoryEvent) error 
 		return fmt.Errorf("marshaling source: %w", err)
 	}
 
-	sourceHash := sourceHash(event.Source)
+	sourceHash, err := sourceHash(event)
+	if err != nil {
+		return fmt.Errorf("hashing source: %w", err)
+	}
 	tagsJSON, err := json.Marshal(event.Tags)
 	if err != nil {
 		return fmt.Errorf("marshaling tags: %w", err)
@@ -267,13 +272,27 @@ func (s *sqliteEventStore) Close() error {
 	return s.db.Close()
 }
 
-// sourceHash produces a deterministic hash from a MemorySourceRef for dedup.
-func sourceHash(ref MemorySourceRef) string {
-	// Simple hash from the concatenation of session_id and message_ids.
-	// This is sufficient for idempotency within a session.
-	h := ref.SessionID
-	for _, mid := range ref.MessageIDs {
-		h += ":" + mid
+// sourceHash produces a deterministic hash for event-level idempotency.
+func sourceHash(event MemoryEvent) (string, error) {
+	payload := struct {
+		Source  MemorySourceRef `json:"source"`
+		Scope   MemoryScope     `json:"scope"`
+		Kind    MemoryKind      `json:"kind"`
+		Content string          `json:"content"`
+		Summary string          `json:"summary"`
+		Tags    []string        `json:"tags,omitempty"`
+	}{
+		Source:  event.Source,
+		Scope:   event.Scope,
+		Kind:    event.Kind,
+		Content: strings.TrimSpace(event.Content),
+		Summary: strings.TrimSpace(event.Summary),
+		Tags:    event.Tags,
 	}
-	return h
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }

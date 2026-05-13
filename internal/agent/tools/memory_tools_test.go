@@ -9,7 +9,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/permission"
-	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,12 +44,12 @@ func (m *mockEventStore) Close() error {
 
 // mockRetriever implements engine.Retriever for testing.
 type mockRetriever struct {
-	recallResult  string
-	recallErr     error
+	recallResult   string
+	recallErr      error
 	retrieveResult []engine.MemoryEvent
 	retrieveErr    error
-	reflectResult string
-	reflectErr    error
+	reflectResult  string
+	reflectErr     error
 }
 
 func (m *mockRetriever) Recall(_ context.Context, _ map[string]any) (string, error) {
@@ -67,7 +66,7 @@ func (m *mockRetriever) Reflect(_ context.Context, _ string, _ map[string]any) (
 
 // mockEngine wraps engine.Engine for testing memory_status.
 type mockEngine struct {
-	status *engine.EngineStatus
+	status    *engine.EngineStatus
 	statusErr error
 }
 
@@ -81,7 +80,7 @@ func TestRetainTool(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := &memoryPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true}
+	permissions := permission.NewPermissionService("/workspace", true, nil)
 	tool := NewRetainTool(eventStore, permissions, "/workspace")
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
@@ -113,7 +112,7 @@ func TestRetainToolRequiresSession(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := &memoryPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true}
+	permissions := permission.NewPermissionService("/workspace", true, nil)
 	tool := NewRetainTool(eventStore, permissions, "/workspace")
 
 	_, err := runRetainTool(t, tool, context.Background(), RetainParams{
@@ -127,7 +126,7 @@ func TestRetainToolRequiresSession(t *testing.T) {
 func TestRetainToolNilEventStore(t *testing.T) {
 	t.Parallel()
 
-	permissions := &memoryPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true}
+	permissions := permission.NewPermissionService("/workspace", true, nil)
 	tool := NewRetainTool(nil, permissions, "/workspace")
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
@@ -145,7 +144,7 @@ func TestRetainToolDefaultImportance(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := &memoryPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true}
+	permissions := permission.NewPermissionService("/workspace", true, nil)
 	tool := NewRetainTool(eventStore, permissions, "/workspace")
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
@@ -182,15 +181,15 @@ func TestRecallToolWithQuery(t *testing.T) {
 
 	events := []engine.MemoryEvent{
 		{
-			ID:      "evt-1",
-			Scope:   engine.MemoryScopeProject,
-			Kind:    engine.MemoryKindDecision,
-			Content: "Use SQLite for persistence",
-			Summary: "Database decision",
-			Source:  engine.MemorySourceRef{SessionID: "sess-1"},
+			ID:         "evt-1",
+			Scope:      engine.MemoryScopeProject,
+			Kind:       engine.MemoryKindDecision,
+			Content:    "Use SQLite for persistence",
+			Summary:    "Database decision",
+			Source:     engine.MemorySourceRef{SessionID: "sess-1"},
 			Confidence: 0.9,
 			Importance: 0.8,
-			Tags:    []string{"database", "sqlite"},
+			Tags:       []string{"database", "sqlite"},
 		},
 	}
 	retriever := &mockRetriever{
@@ -303,7 +302,7 @@ func TestMemoryStatusTool(t *testing.T) {
 		status: &engine.EngineStatus{
 			EventStoreStatus: "ok",
 			ExtractionStatus: engine.MemoryPipelineStatus{
-				State:    "completed",
+				State:     "completed",
 				LastRunAt: &now,
 			},
 			ConsolidationStatus: engine.MemoryPipelineStatus{

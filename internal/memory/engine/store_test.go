@@ -155,6 +155,29 @@ func TestEventStore_IdempotentAppend(t *testing.T) {
 	require.Len(t, events, 1, "should have exactly one event after idempotent append")
 }
 
+func TestEventStore_AllowsMultipleEventsFromSameTranscript(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewSQLiteEventStore(db)
+	ctx := context.Background()
+
+	source := MemorySourceRef{
+		SessionID:  "sess-shared",
+		MessageIDs: []string{"msg-1", "msg-2"},
+		CWD:        "/test",
+	}
+	evt1 := testEvent(MemoryScopeProject, MemoryKindDecision, "use event sourcing")
+	evt1.Source = source
+	evt2 := testEvent(MemoryScopeProject, MemoryKindPitfall, "avoid dual memory writes")
+	evt2.Source = source
+
+	require.NoError(t, store.Append(ctx, evt1))
+	require.NoError(t, store.Append(ctx, evt2))
+
+	events, err := store.Query(ctx, EventFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, events, 2, "different facts from one transcript should not collapse into one row")
+}
+
 func TestEventStore_QueryByScope(t *testing.T) {
 	db := setupTestDB(t)
 	store := NewSQLiteEventStore(db)

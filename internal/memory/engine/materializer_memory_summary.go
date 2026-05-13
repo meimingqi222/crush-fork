@@ -54,14 +54,10 @@ func (m *SummaryMaterializer) Materialize(ctx context.Context, viewName string, 
 	}
 
 	events, err := m.store.Query(ctx, EventFilter{
-		MinWatermark: watermark,
-		Limit:        1000,
+		Limit: 1000,
 	})
 	if err != nil {
 		return fmt.Errorf("querying events for summary: %w", err)
-	}
-	if len(events) == 0 {
-		return nil
 	}
 
 	content := m.renderSummary(events)
@@ -83,9 +79,21 @@ func (m *SummaryMaterializer) ListViews(_ context.Context) ([]string, error) {
 }
 
 func (m *SummaryMaterializer) renderSummary(events []MemoryEvent) string {
+	filtered := make([]MemoryEvent, 0, len(events))
+	for _, evt := range events {
+		if evt.Scope == MemoryScopeSession || evt.Kind == MemoryKindWorkingMemory || evt.Kind == MemoryKindTaskState {
+			continue
+		}
+		filtered = append(filtered, evt)
+	}
+
+	if len(filtered) == 0 {
+		return "# Memory Summary\n\n> No durable memory events yet.\n"
+	}
+
 	// Sort by importance descending, take top N.
-	sorted := make([]MemoryEvent, len(events))
-	copy(sorted, events)
+	sorted := make([]MemoryEvent, len(filtered))
+	copy(sorted, filtered)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Importance > sorted[j].Importance
 	})
@@ -132,7 +140,7 @@ func (m *SummaryMaterializer) renderSummary(events []MemoryEvent) string {
 	}
 
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("_Last updated: watermark %d_\n", events[len(events)-1].Watermark))
+	b.WriteString(fmt.Sprintf("_Last updated: watermark %d_\n", maxWatermark(events)))
 
 	return b.String()
 }

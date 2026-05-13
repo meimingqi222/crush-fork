@@ -12,7 +12,10 @@ import (
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	"github.com/charmbracelet/crush/internal/version"
 )
+
+var memoryUserAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
 
 const episodicExtractPrompt = `You are an episodic memory extraction agent. Analyze the conversation transcript and extract durable episodic memories.
 
@@ -34,6 +37,20 @@ Rules:
 
 Return a JSON array of objects with this exact shape:
 [{"kind":"decision|preference|procedure|pitfall|reference|task_state","scope":"session|project|user","content":"Detailed description","summary":"Brief summary","confidence":0.8,"importance":0.6,"tags":["relevant","tags"]}]
+
+Return [] if nothing worth saving.`
+
+const memoryConsolidationPrompt = `You are a long-term memory consolidation agent. Merge episodic memory events into durable semantic memories.
+
+Rules:
+- Keep only stable knowledge that should survive across sessions.
+- Merge duplicates and prefer concise, self-contained memories.
+- Do not preserve working memory, transient task progress, logs, or temporary files.
+- Use scope "project" for repository/project knowledge, "user" for user preferences, and "global" only for broadly reusable facts.
+- If a new memory replaces an existing one, set supersedes to the existing event ID.
+
+Return a JSON array of objects with this exact shape:
+[{"kind":"decision|preference|procedure|pitfall|reference","scope":"project|user|global","content":"Detailed durable memory","summary":"Brief summary","confidence":0.8,"importance":0.6,"tags":["relevant","tags"],"supersedes":"optional-existing-id"}]
 
 Return [] if nothing worth saving.`
 
@@ -63,6 +80,43 @@ func parseExtractedEvents(content string) ([]engine.ExtractedEvent, error) {
 		}
 		if e.Confidence <= 0 {
 			e.Confidence = 0.5
+		}
+		if e.Importance <= 0 {
+			e.Importance = 0.5
+		}
+		result = append(result, e)
+	}
+
+	return result, nil
+}
+
+func parseConsolidatedEvents(content string) ([]engine.ConsolidatedEvent, error) {
+	content = strings.TrimSpace(content)
+	start := strings.Index(content, "[")
+	end := strings.LastIndex(content, "]")
+	if start == -1 || end == -1 || end <= start {
+		return nil, nil
+	}
+
+	jsonArray := content[start : end+1]
+	var events []engine.ConsolidatedEvent
+	if err := json.Unmarshal([]byte(jsonArray), &events); err != nil {
+		return nil, nil
+	}
+
+	result := make([]engine.ConsolidatedEvent, 0, len(events))
+	for _, e := range events {
+		if e.Kind == "" || e.Content == "" {
+			continue
+		}
+		if e.Scope == "" {
+			e.Scope = engine.MemoryScopeProject
+		}
+		if e.Scope == engine.MemoryScopeSession || e.Kind == engine.MemoryKindTaskState || e.Kind == engine.MemoryKindWorkingMemory {
+			continue
+		}
+		if e.Confidence <= 0 {
+			e.Confidence = 0.7
 		}
 		if e.Importance <= 0 {
 			e.Importance = 0.5
@@ -164,14 +218,58 @@ func (c *coordinator) extractEventsFromTranscript(ctx context.Context, bgModel *
 	return parseExtractedEvents(resp.Response.Content.Text())
 }
 
+func (c *coordinator) consolidateEventsWithModel(ctx context.Context, bgModel *backgroundModel, episodes, existing string) ([]engine.ConsolidatedEvent, error) {
+	if bgModel == nil || strings.TrimSpace(episodes) == "" {
+		return nil, nil
+	}
+
+	agent := fantasy.NewAgent(
+		bgModel.model.Model,
+		fantasy.WithSystemPrompt(memoryConsolidationPrompt),
+		fantasy.WithMaxOutputTokens(2048),
+		fantasy.WithUserAgent(memoryUserAgent),
+	)
+
+	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	prompt := "Episodic events:\n\n" + episodes
+	if strings.TrimSpace(existing) != "" {
+		prompt += "\n\nExisting consolidated memories:\n\n" + existing
+	}
+
+	resp, err := agent.Generate(copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent), fantasy.AgentCall{
+		Prompt:          prompt,
+		ProviderOptions: getProviderOptions(bgModel.model, bgModel.provider),
+		PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+			callCtx = copilot.ContextWithInitiatorType(callCtx, copilot.InitiatorAgent)
+			prepared.Messages = options.Messages
+			if bgModel.provider.SystemPromptPrefix != "" {
+				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(bgModel.provider.SystemPromptPrefix)}, prepared.Messages...)
+			}
+			return callCtx, prepared, nil
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("LLM consolidation failed: %w", err)
+	}
+	if resp == nil {
+		return nil, nil
+	}
+
+	return parseConsolidatedEvents(resp.Response.Content.Text())
+}
+
 // wireMemoryExtractor creates and attaches the Extractor to the engine.
 // Called during engine setup in SetMemoryEngine.
 func (c *coordinator) wireMemoryExtractor(eng *engine.Engine) {
 	bgModel := c.resolveBackgroundModel(context.Background())
 	if bgModel == nil {
 		slog.Warn("No background model available, memory extraction disabled")
+		eng.SetDegraded(true, "background model unavailable")
 		return
 	}
+	eng.SetDegraded(false, "")
 
 	extractor := engine.NewLLMExtractor(
 		func(ctx context.Context, sessionID string) (engine.Transcript, error) {
@@ -186,4 +284,35 @@ func (c *coordinator) wireMemoryExtractor(eng *engine.Engine) {
 	)
 	eng.SetExtractor(extractor)
 	slog.Debug("Memory extractor wired to engine")
+}
+
+func (c *coordinator) wireMemoryConsolidator(eng *engine.Engine) {
+	bgModel := c.resolveBackgroundModel(context.Background())
+	if bgModel == nil {
+		slog.Warn("No background model available, memory consolidation disabled")
+		eng.SetDegraded(true, "background model unavailable")
+		return
+	}
+
+	consolidator := engine.NewLLMConsolidator(
+		func(ctx context.Context) ([]engine.MemoryEvent, error) {
+			events, err := eng.EventStore().Query(ctx, engine.EventFilter{Limit: 1000})
+			if err != nil {
+				return nil, err
+			}
+			existing := events[:0]
+			for _, evt := range events {
+				if evt.Scope == engine.MemoryScopeSession || evt.Kind == engine.MemoryKindWorkingMemory || evt.Kind == engine.MemoryKindTaskState {
+					continue
+				}
+				existing = append(existing, evt)
+			}
+			return existing, nil
+		},
+		func(ctx context.Context, episodes, existing string) ([]engine.ConsolidatedEvent, error) {
+			return c.consolidateEventsWithModel(ctx, bgModel, episodes, existing)
+		},
+	)
+	eng.SetConsolidator(consolidator)
+	slog.Debug("Memory consolidator wired to engine")
 }

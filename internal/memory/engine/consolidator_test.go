@@ -455,6 +455,103 @@ func TestEngine_TriggerConsolidationWatermarkAdvance(t *testing.T) {
 	require.Equal(t, 1, callCount, "should not call consolidator again with no new events")
 }
 
+func TestEngine_TriggerConsolidationPersistsWatermark(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	eng := New(db, Config{Enabled: true})
+	require.NoError(t, eng.store.Append(ctx, testEvent(MemoryScopeSession, MemoryKindDecision, "persist watermark")))
+
+	callCount := 0
+	con := newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			callCount++
+			return []ConsolidatedEvent{
+				{Kind: MemoryKindDecision, Scope: MemoryScopeProject, Content: "persisted consolidation checkpoint", Confidence: 0.8, Importance: 0.6},
+			}, nil
+		},
+		clock: fixedClock,
+	})
+	eng.SetConsolidator(con)
+
+	require.NoError(t, eng.TriggerConsolidation(ctx))
+	require.Equal(t, 1, callCount)
+
+	restarted := New(db, Config{Enabled: true})
+	restarted.SetConsolidator(con)
+	require.NoError(t, restarted.TriggerConsolidation(ctx))
+	require.Equal(t, 1, callCount, "new engine instances should not reprocess consolidated events")
+}
+
+func TestEngine_TriggerConsolidationSkipsWorkingMemory(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	ctx := context.Background()
+
+	evt := testEvent(MemoryScopeSession, MemoryKindWorkingMemory, "transient session state")
+	require.NoError(t, eng.store.Append(ctx, evt))
+
+	callCount := 0
+	con := newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			callCount++
+			return nil, nil
+		},
+		clock: fixedClock,
+	})
+	eng.SetConsolidator(con)
+
+	require.NoError(t, eng.TriggerConsolidation(ctx))
+	require.Equal(t, 0, callCount, "working memory should not be promoted into long-term consolidation")
+	require.Equal(t, int64(1), eng.lastConsolidatedWatermark)
+}
+
+func TestEngine_TriggerConsolidationDoesNotSkipDurableAfterTransientBatch(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	ctx := context.Background()
+
+	for i := 0; i < 500; i++ {
+		require.NoError(t, eng.store.Append(ctx, testEvent(
+			MemoryScopeSession,
+			MemoryKindWorkingMemory,
+			fmt.Sprintf("transient state %d", i),
+		)))
+	}
+	require.NoError(t, eng.store.Append(ctx, testEvent(
+		MemoryScopeSession,
+		MemoryKindDecision,
+		"durable decision after transient batch",
+	)))
+
+	callCount := 0
+	con := newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, episodes, _ string) ([]ConsolidatedEvent, error) {
+			callCount++
+			require.Contains(t, episodes, "durable decision after transient batch")
+			return []ConsolidatedEvent{
+				{Kind: MemoryKindDecision, Scope: MemoryScopeProject, Content: "durable decision retained", Confidence: 0.8, Importance: 0.6},
+			}, nil
+		},
+		clock: fixedClock,
+	})
+	eng.SetConsolidator(con)
+
+	require.NoError(t, eng.TriggerConsolidation(ctx))
+	require.Equal(t, 0, callCount)
+	require.Equal(t, int64(500), eng.lastConsolidatedWatermark)
+
+	require.NoError(t, eng.TriggerConsolidation(ctx))
+	require.Equal(t, 1, callCount)
+	require.Equal(t, int64(501), eng.lastConsolidatedWatermark)
+}
+
 func TestEngine_TriggerConsolidationDisabled(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t)

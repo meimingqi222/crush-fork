@@ -45,6 +45,8 @@ type Engine struct {
 	workingMemoryThrottle time.Duration
 }
 
+const consolidationCheckpointView = "_pipeline_consolidation"
+
 // Config holds configuration for the memory engine.
 type Config struct {
 	Enabled               bool
@@ -137,6 +139,14 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		return nil
 	}
 
+	watermark, err := e.pipelineWatermark(ctx, consolidationCheckpointView)
+	if err != nil {
+		return fmt.Errorf("reading consolidation watermark: %w", err)
+	}
+	if watermark > e.lastConsolidatedWatermark {
+		e.lastConsolidatedWatermark = watermark
+	}
+
 	sessionScope := MemoryScopeSession
 	events, err := e.store.Query(ctx, EventFilter{
 		MinWatermark: e.lastConsolidatedWatermark,
@@ -147,6 +157,16 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		return fmt.Errorf("querying events for consolidation: %w", err)
 	}
 	if len(events) == 0 {
+		return nil
+	}
+
+	queriedWatermark := events[len(events)-1].Watermark
+	events = filterConsolidatableEvents(events)
+	if len(events) == 0 {
+		if err := e.setPipelineWatermark(ctx, consolidationCheckpointView, queriedWatermark); err != nil {
+			return fmt.Errorf("advancing consolidation watermark: %w", err)
+		}
+		e.lastConsolidatedWatermark = queriedWatermark
 		return nil
 	}
 
@@ -167,7 +187,10 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 	}
 
 	// Advance watermark past processed events so they are not re-analyzed.
-	e.lastConsolidatedWatermark = events[len(events)-1].Watermark
+	e.lastConsolidatedWatermark = queriedWatermark
+	if err := e.setPipelineWatermark(ctx, consolidationCheckpointView, e.lastConsolidatedWatermark); err != nil {
+		return fmt.Errorf("persisting consolidation watermark: %w", err)
+	}
 
 	slog.Debug("Consolidation complete",
 		"events_processed", len(events),
@@ -183,8 +206,7 @@ func (e *Engine) Enabled() bool {
 }
 
 // SetEnabled controls whether the memory engine is active at runtime.
-// When disabled, old memory paths continue to operate. When enabled, the
-// engine takes over all memory lifecycle responsibilities.
+// When disabled, memory lifecycle hooks and background pipelines are paused.
 func (e *Engine) SetEnabled(enabled bool) {
 	e.enabled = enabled
 }
@@ -236,6 +258,10 @@ func (e *Engine) OnSessionCreated(ctx context.Context, sessionID string) error {
 // automatically to produce events from the session transcript.
 func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []MemoryEvent) error {
 	if !e.enabled {
+		return nil
+	}
+	if e.IsDegraded() {
+		slog.Debug("Memory engine in degraded mode, skipping extraction", "session_id", sessionID)
 		return nil
 	}
 
@@ -382,7 +408,52 @@ func (e *Engine) RebuildView(ctx context.Context, viewName string) error {
 		return fmt.Errorf("resetting view watermark: %w", err)
 	}
 
-	return nil
+	return e.TriggerMaterialization(ctx)
+}
+
+func filterConsolidatableEvents(events []MemoryEvent) []MemoryEvent {
+	filtered := events[:0]
+	for _, evt := range events {
+		switch evt.Kind {
+		case MemoryKindWorkingMemory, MemoryKindTaskState:
+			continue
+		default:
+			filtered = append(filtered, evt)
+		}
+	}
+	return filtered
+}
+
+func (e *Engine) pipelineWatermark(ctx context.Context, name string) (int64, error) {
+	var watermark int64
+	err := e.db.QueryRowContext(ctx,
+		"SELECT COALESCE(watermark, 0) FROM memory_materialized_views WHERE view_name = ?",
+		name).Scan(&watermark)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return watermark, nil
+}
+
+func (e *Engine) setPipelineWatermark(ctx context.Context, name string, watermark int64) error {
+	now := time.Now().Unix()
+	_, err := e.db.ExecContext(ctx, `
+		INSERT INTO memory_materialized_views (id, view_name, watermark, schema_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(view_name) DO UPDATE SET
+			watermark = excluded.watermark,
+			updated_at = excluded.updated_at`,
+		"mvs-"+name,
+		name,
+		watermark,
+		1,
+		now,
+		now,
+	)
+	return err
 }
 
 func (e *Engine) queryJobStatuses(ctx context.Context) ([]MemoryJobStatus, error) {

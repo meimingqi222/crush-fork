@@ -7,9 +7,8 @@ import (
 )
 
 // ArtifactWriter handles filesystem I/O for materialized views.
-// It is a pure file writer without any memory.Service semantics (TTL, access
-// counter, Store/Search, etc.). Each materializer uses one ArtifactWriter to
-// write its output files.
+// It is a pure file writer without store/search semantics. Each materializer
+// uses one ArtifactWriter to write its output files.
 type ArtifactWriter struct {
 	outputDir string
 }

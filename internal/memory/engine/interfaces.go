@@ -43,7 +43,7 @@ type Extractor interface {
 }
 
 // Consolidator groups and generalizes episodic events into semantic and
-// procedural memory events (analogous to the old "dream" step).
+// procedural memory events.
 type Consolidator interface {
 	// Consolidate processes episodic events and returns consolidated events.
 	Consolidate(ctx context.Context, events []MemoryEvent) ([]MemoryEvent, error)

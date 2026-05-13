@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/filetracker"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 )
@@ -72,6 +72,10 @@ func buildSessionMemoryFiles(ctx context.Context, tracker filetracker.Service) s
 }
 
 type sessionMemoryContextKey struct{}
+
+type sessionMemoryUpdate struct {
+	Content string `json:"content"`
+}
 
 func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLastExtraction int64, toolCallsSinceLastExtraction, currentRunToolUses int) (bool, bool, int64) {
 	if currentPromptTokens <= 0 {
@@ -149,51 +153,6 @@ func generateSessionMemory(ctx context.Context, bgModel *backgroundModel, prompt
 	return resp.Response.Content.Text(), nil
 }
 
-func updateSessionMemory(ctx context.Context, memorySvc memory.Service, bgModel *backgroundModel, tracker filetracker.Service, sessionID, prompt string, history []string) {
-	if memorySvc == nil || bgModel == nil {
-		return
-	}
-
-	historyBlock := buildSessionMemoryHistory(history)
-	if historyBlock == "" {
-		return
-	}
-
-	ctx = context.WithValue(ctx, sessionMemoryContextKey{}, sessionID)
-	filesBlock := buildSessionMemoryFiles(ctx, tracker)
-
-	memoryPrompt := buildSessionMemoryPrompt(sessionID, prompt, historyBlock, filesBlock)
-	content, err := generateSessionMemory(ctx, bgModel, memoryPrompt)
-	if err != nil {
-		slog.Warn("Session memory update failed", "error", err, "session_id", sessionID)
-		return
-	}
-	if content == "" {
-		return
-	}
-
-	memories := parseExtractedMemories(content)
-	if len(memories) == 0 {
-		return
-	}
-	for i := range memories {
-		memories[i].Key = sessionMemoryKey(sessionID)
-		if memories[i].Description == "" {
-			memories[i].Description = "Current session state"
-		}
-		memories[i].Scope = "session"
-		if memories[i].Type == "" {
-			memories[i].Type = "project"
-		}
-		if memories[i].Action == "" || memories[i].Action == string(memoryOperationStore) {
-			memories[i].Action = string(memoryOperationUpdate)
-		}
-	}
-	if err := applyExtractedMemories(ctx, memorySvc, memories, "session_id", sessionID, "source", "session_memory"); err != nil {
-		slog.Warn("Failed to apply session memory", "error", err, "session_id", sessionID)
-	}
-}
-
 func updateSessionMemoryEventStore(ctx context.Context, store engine.EventStore, bgModel *backgroundModel, tracker filetracker.Service, sessionID, prompt string, history []string) {
 	if store == nil || bgModel == nil {
 		return
@@ -217,7 +176,7 @@ func updateSessionMemoryEventStore(ctx context.Context, store engine.EventStore,
 		return
 	}
 
-	memories := parseExtractedMemories(content)
+	memories := parseSessionMemoryUpdates(content)
 	if len(memories) == 0 {
 		return
 	}
@@ -253,6 +212,29 @@ func updateSessionMemoryEventStore(ctx context.Context, store engine.EventStore,
 	}
 }
 
+func parseSessionMemoryUpdates(content string) []sessionMemoryUpdate {
+	content = strings.TrimSpace(content)
+	startIdx := strings.Index(content, "[")
+	endIdx := strings.LastIndex(content, "]")
+	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
+		return nil
+	}
+
+	var updates []sessionMemoryUpdate
+	if err := json.Unmarshal([]byte(content[startIdx:endIdx+1]), &updates); err != nil {
+		return nil
+	}
+
+	result := make([]sessionMemoryUpdate, 0, len(updates))
+	for _, update := range updates {
+		update.Content = strings.TrimSpace(update.Content)
+		if update.Content != "" {
+			result = append(result, update)
+		}
+	}
+	return result
+}
+
 func readWorkingMemoryContent(ctx context.Context, store engine.EventStore, sessionID string) string {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return ""
@@ -276,32 +258,6 @@ func readWorkingMemoryContent(ctx context.Context, store engine.EventStore, sess
 
 	latest := events[len(events)-1]
 	return latest.Content
-}
-
-func readWorkingMemoryAsEntry(ctx context.Context, store engine.EventStore, sessionID string) *memory.Entry {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
-		return nil
-	}
-
-	scope := engine.MemoryScopeSession
-	kind := engine.MemoryKindWorkingMemory
-	events, err := store.Query(ctx, engine.EventFilter{
-		Scope:     &scope,
-		Kind:      &kind,
-		SessionID: &sessionID,
-		Limit:     1,
-	})
-	if err != nil || len(events) == 0 {
-		return nil
-	}
-
-	latest := events[len(events)-1]
-	return &memory.Entry{
-		Key:       sessionMemoryKey(sessionID),
-		Value:     latest.Content,
-		Scope:     "session",
-		UpdatedAt: latest.CreatedAt.UnixNano(),
-	}
 }
 
 func listFilesFromTracker(ctx context.Context, tracker filetracker.Service, sessionID string) []string {

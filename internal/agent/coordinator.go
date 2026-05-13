@@ -37,7 +37,6 @@ import (
 	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -118,22 +117,21 @@ type Coordinator interface {
 }
 
 type coordinator struct {
-	cfg            *config.ConfigStore
-	sessions       session.Service
-	messages       message.Service
-	permissions    permission.Service
-	userInput      userinput.Service
-	history        history.Service
-	longTermMemory memory.Service
-	filetracker    filetracker.Service
-	lspManager     *lsp.Manager
-	notify         pubsub.Publisher[notify.Notification]
-	toolRuntime    toolruntime.Service
-	timeline       timeline.Service
-	hookManager    *hooks.Manager
-	checkpoint     checkpoint.Service
-	mailbox        mailbox.Service
-	pluginRuntime  *plugin.Runtime
+	cfg           *config.ConfigStore
+	sessions      session.Service
+	messages      message.Service
+	permissions   permission.Service
+	userInput     userinput.Service
+	history       history.Service
+	filetracker   filetracker.Service
+	lspManager    *lsp.Manager
+	notify        pubsub.Publisher[notify.Notification]
+	toolRuntime   toolruntime.Service
+	timeline      timeline.Service
+	hookManager   *hooks.Manager
+	checkpoint    checkpoint.Service
+	mailbox       mailbox.Service
+	pluginRuntime *plugin.Runtime
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -160,7 +158,6 @@ type coordinator struct {
 	escalationBridge *permission.EscalationBridge
 
 	// memoryEngine is the event-sourced memory pipeline orchestrator.
-	// When enabled, it replaces the old dream and extractMemories paths.
 	memoryEngine *engine.Engine
 }
 
@@ -172,7 +169,6 @@ func NewCoordinator(
 	permissions permission.Service,
 	userInput userinput.Service,
 	history history.Service,
-	longTermMemory memory.Service,
 	filetracker filetracker.Service,
 	checkpointSvc checkpoint.Service,
 	lspManager *lsp.Manager,
@@ -180,6 +176,7 @@ func NewCoordinator(
 	toolRuntime toolruntime.Service,
 	timeline timeline.Service,
 	pluginRuntime *plugin.Runtime,
+	memoryEngine *engine.Engine,
 ) (Coordinator, error) {
 	hookMgr, err := hooks.NewManager(cfg.Config().Hooks)
 	if err != nil {
@@ -196,7 +193,6 @@ func NewCoordinator(
 		permissions:                permissions,
 		userInput:                  userInput,
 		history:                    history,
-		longTermMemory:             longTermMemory,
 		filetracker:                filetracker,
 		checkpoint:                 checkpointSvc,
 		pluginRuntime:              pluginRuntime,
@@ -213,6 +209,9 @@ func NewCoordinator(
 	}
 	if c.pluginRuntime == nil {
 		c.pluginRuntime = plugin.DefaultRuntime()
+	}
+	if memoryEngine != nil {
+		c.SetMemoryEngine(memoryEngine)
 	}
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
 	if !ok {
@@ -242,13 +241,13 @@ func (c *coordinator) plugins() *plugin.Runtime {
 }
 
 // SetMemoryEngine attaches the memory engine to the coordinator.
-// When the engine is enabled, the old dream and extractMemories paths
-// are disabled to avoid dual-write. If the engine is enabled, the
-// episodic memory extractor is also wired automatically.
+// If the engine is enabled, the episodic memory extractor is also wired
+// automatically.
 func (c *coordinator) SetMemoryEngine(eng *engine.Engine) {
 	c.memoryEngine = eng
 	if eng != nil && eng.Enabled() {
 		c.wireMemoryExtractor(eng)
+		c.wireMemoryConsolidator(eng)
 	}
 }
 
@@ -514,25 +513,18 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	// settled, and check readiness non-blocking at consume time.
 	// Memories are merged into existing user messages (not prepended),
 	// preserving prompt cache by keeping the system prompt prefix stable.
-	recentTools := collectRecentSuccessfulTools(ctx, c.messages, sessionID)
-	alreadySurfaced, surfacedBytes := collectSurfacedMemories(ctx, c.messages, sessionID)
-	recentConversation := buildRecentConversation(ctx, c.messages, sessionID, shortQueryExpansionMaxTurns)
+	_, surfacedBytes := collectSurfacedMemories(ctx, c.messages, sessionID)
 	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
 	defer prefetchCancel()
 	memoryPrefetch := &MemoryPrefetch{}
-	bgModel := c.resolveBackgroundModel(ctx)
 	go func() {
 		var recall string
-		// Skip prefetch if cumulative surfaced bytes exceed the session cap.
-		// Mirrors claude-code's MAX_SESSION_BYTES throttle.
 		if surfacedBytes < maxSessionRecallBytes {
-			var eventStore engine.EventStore
 			var retriever engine.Retriever
 			if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-				eventStore = c.memoryEngine.EventStore()
 				retriever = c.memoryEngine.Retriever()
 			}
-			recall = buildAutoRecallBlock(prefetchCtx, c.longTermMemory, eventStore, retriever, bgModel, sessionID, prompt, recentTools, alreadySurfaced, recentConversation)
+			recall = buildAutoRecallBlock(prefetchCtx, retriever, sessionID)
 		}
 		memoryPrefetch.Settle(recall)
 		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)
@@ -1012,7 +1004,6 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
-		Memory:               c.longTermMemory,
 		BackgroundModel:      bgModel,
 		ReviewToolResult: func(callCtx context.Context, sessionID string, toolResult message.ToolResult, permissionMode session.PermissionMode) (message.ToolResult, error) {
 			return c.reviewToolResultForPromptInjection(callCtx, sessionID, toolResult, permissionMode)

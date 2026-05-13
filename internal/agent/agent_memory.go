@@ -57,5 +57,5 @@ func (a *sessionAgent) finishPendingExtraction(sessionID string, pendingID uint6
 }
 
 func (a *sessionAgent) enableSessionMemory() bool {
-	return a.sessionMemoryEnabled && a.memory != nil && a.backgroundModel != nil
+	return a.sessionMemoryEnabled && a.memoryEngineEnabled && a.memoryEngineEventStore != nil && a.backgroundModel != nil
 }
