@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
@@ -68,9 +69,10 @@ func TestMCPDialogItemsPreferAuthenticateForAuthNeededServers(t *testing.T) {
 	require.Equal(t, "notion", action.Name)
 
 	rendered := item.Render(120)
-	require.Contains(t, rendered, "Authentication required")
+	require.Contains(t, rendered, "Needs auth")
 	require.Contains(t, rendered, "OAuth")
-	require.Contains(t, rendered, "Last error: login required")
+	require.Contains(t, rendered, "Press a to authenticate")
+	require.NotContains(t, rendered, "Last error")
 }
 
 func TestMCPDialogItemsAllowAuthenticateWithoutOAuthBlock(t *testing.T) {
@@ -102,6 +104,28 @@ func TestMCPDialogItemsAllowAuthenticateWithoutOAuthBlock(t *testing.T) {
 	action, ok := item.DefaultAction().(ActionOpenMCPDetail)
 	require.True(t, ok)
 	require.Equal(t, "notion", action.Name)
+}
+
+func TestMCPDetailNeedsAuthUsesActionableStatus(t *testing.T) {
+	com := testCommon(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
+	detail := NewMCPDetail(com, "notion", mcp.ClientInfo{
+		Name:  "notion",
+		State: mcp.StateNeedsAuth,
+		Error: errors.New(`calling "initialize": sending "initialize": rejected by transport`),
+	}, config.MCPConfig{
+		Type: config.MCPHttp,
+		URL:  "https://example.com/mcp",
+	})
+
+	require.Equal(t, "Needs authentication. Press a to authenticate.", detail.statusText())
+	rendered := detail.buildContent(com.Styles, 120)
+	require.Contains(t, rendered, "Needs authentication. Press a to authenticate.")
+	require.NotContains(t, rendered, "rejected by transport")
+
+	action := detail.HandleMsg(tea.KeyPressMsg{Code: 'a'})
+	authAction, ok := action.(ActionAuthenticateMCP)
+	require.True(t, ok)
+	require.Equal(t, "notion", authAction.Name)
 }
 
 func testCommon(t *testing.T, configContent string) *common.Common {

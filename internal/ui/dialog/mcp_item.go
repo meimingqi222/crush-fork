@@ -95,7 +95,10 @@ func (i *MCPItem) Render(width int) string {
 	if inventory := i.inventoryLine(); inventory != "" {
 		lines = append(lines, inventory)
 	}
-	if i.state.Error != nil {
+	if hint := i.authHintLine(); hint != "" {
+		lines = append(lines, hint)
+	}
+	if i.state.Error != nil && i.state.State != agentmcp.StateNeedsAuth {
 		lines = append(lines, "Last error: "+i.state.Error.Error())
 	}
 
@@ -126,7 +129,7 @@ func (i *MCPItem) icon() string {
 	case agentmcp.StateConnected:
 		return i.t.ResourceOnlineIcon.String()
 	case agentmcp.StateNeedsAuth:
-		return i.t.ResourceErrorIcon.String()
+		return i.t.ResourceBusyIcon.String()
 	case agentmcp.StateError:
 		return i.t.ResourceErrorIcon.String()
 	case agentmcp.StateDisabled:
@@ -168,7 +171,7 @@ func (i *MCPItem) stateLabel() string {
 	case agentmcp.StateConnected:
 		return "Connected"
 	case agentmcp.StateNeedsAuth:
-		return "Authentication required"
+		return "Needs auth"
 	case agentmcp.StateError:
 		return "Error"
 	case agentmcp.StateDisabled:
@@ -176,6 +179,16 @@ func (i *MCPItem) stateLabel() string {
 	default:
 		return "Unknown"
 	}
+}
+
+func (i *MCPItem) authHintLine() string {
+	if i.state.State != agentmcp.StateNeedsAuth {
+		return ""
+	}
+	if i.supportsInteractiveAuth {
+		return "Press a to authenticate"
+	}
+	return "Authentication required"
 }
 
 func mcpDialogItems(t *styles.Styles, cfg config.MCPs, states map[string]agentmcp.ClientInfo) []list.FilterableItem {

@@ -31,9 +31,10 @@ type MCPDetail struct {
 	config config.MCPConfig
 
 	keyMap struct {
-		Back      key.Binding
-		Reconnect key.Binding
-		Toggle    key.Binding
+		Back         key.Binding
+		Authenticate key.Binding
+		Reconnect    key.Binding
+		Toggle       key.Binding
 	}
 }
 
@@ -60,6 +61,10 @@ func NewMCPDetail(com *common.Common, name string, state agentmcp.ClientInfo, cf
 		key.WithKeys("esc", "q"),
 		key.WithHelp("esc", "back"),
 	)
+	d.keyMap.Authenticate = key.NewBinding(
+		key.WithKeys("a"),
+		key.WithHelp("a", "authenticate"),
+	)
 	d.keyMap.Reconnect = key.NewBinding(
 		key.WithKeys("ctrl+r"),
 		key.WithHelp("ctrl+r", "reconnect"),
@@ -85,6 +90,11 @@ func (d *MCPDetail) HandleMsg(msg tea.Msg) Action {
 		switch {
 		case key.Matches(msg, d.keyMap.Back):
 			return ActionClose{}
+		case key.Matches(msg, d.keyMap.Authenticate):
+			if !d.config.SupportsInteractiveAuth() || d.config.Disabled {
+				return ActionCmd{Cmd: util.ReportWarn("This MCP server cannot authenticate interactively.")}
+			}
+			return ActionAuthenticateMCP{Name: d.name}
 		case key.Matches(msg, d.keyMap.Reconnect):
 			if d.config.Disabled {
 				return ActionCmd{Cmd: util.ReportWarn("Cannot reconnect a disabled MCP server.")}
@@ -137,6 +147,7 @@ func (d *MCPDetail) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 func (d *MCPDetail) ShortHelp() []key.Binding {
 	return []key.Binding{
 		d.keyMap.Back,
+		d.keyMap.Authenticate,
 		d.keyMap.Reconnect,
 		d.keyMap.Toggle,
 	}
@@ -145,7 +156,7 @@ func (d *MCPDetail) ShortHelp() []key.Binding {
 // FullHelp implements help.KeyMap.
 func (d *MCPDetail) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{d.keyMap.Back, d.keyMap.Reconnect, d.keyMap.Toggle},
+		{d.keyMap.Back, d.keyMap.Authenticate, d.keyMap.Reconnect, d.keyMap.Toggle},
 	}
 }
 
@@ -243,7 +254,7 @@ func (d *MCPDetail) buildContent(t *styles.Styles, width int) string {
 	}
 
 	// Error section
-	if d.state.Error != nil {
+	if d.state.Error != nil && d.state.State != agentmcp.StateNeedsAuth {
 		sections = append(sections, "")
 		sections = append(sections, t.Dialog.TitleError.Render("Error"))
 		sections = append(sections, t.Base.Render(d.state.Error.Error()))
@@ -259,7 +270,7 @@ func (d *MCPDetail) statusIcon(t *styles.Styles) string {
 	case agentmcp.StateConnected:
 		return t.ResourceOnlineIcon.String()
 	case agentmcp.StateNeedsAuth:
-		return t.ResourceErrorIcon.String()
+		return t.ResourceBusyIcon.String()
 	case agentmcp.StateError:
 		return t.ResourceErrorIcon.String()
 	case agentmcp.StateDisabled:
@@ -279,7 +290,10 @@ func (d *MCPDetail) statusText() string {
 	case agentmcp.StateConnected:
 		return "Connected"
 	case agentmcp.StateNeedsAuth:
-		return "Authentication required"
+		if d.config.SupportsInteractiveAuth() {
+			return "Needs authentication. Press a to authenticate."
+		}
+		return "Needs authentication"
 	case agentmcp.StateError:
 		if d.state.Error != nil {
 			return fmt.Sprintf("Error: %s", d.state.Error.Error())

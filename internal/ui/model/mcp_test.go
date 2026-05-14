@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMCPListShowsAuthenticationRequiredError(t *testing.T) {
+func TestMCPListShowsAuthenticationRequiredStatusWithoutTransportError(t *testing.T) {
 	t.Parallel()
 
 	theme := styles.DefaultStyles()
@@ -21,7 +21,8 @@ func TestMCPListShowsAuthenticationRequiredError(t *testing.T) {
 	}}, 120, 5)
 
 	require.Contains(t, rendered, "notion")
-	require.Contains(t, rendered, "authentication required: login required")
+	require.Contains(t, rendered, "needs auth")
+	require.NotContains(t, rendered, "login required")
 }
 
 func TestMCPHTTPConfigSupportsInteractiveAuth(t *testing.T) {
