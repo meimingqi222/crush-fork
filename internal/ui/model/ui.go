@@ -2350,6 +2350,9 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 
+		m.dialog.CloseDialog(dialog.APIKeyInputID)
+		m.dialog.CloseDialog(dialog.OAuthID)
+
 		sessionID := ""
 		if m.session != nil {
 			sessionID = m.session.ID
