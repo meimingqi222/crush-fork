@@ -1018,18 +1018,44 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 		if err == nil {
 			options[google.Name] = parsed
 		}
-	case openaicompat.Name:
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			delete(mergedOptions, "reasoning_effort")
-		} else {
-			_, hasReasoningEffort := mergedOptions["reasoning_effort"]
-			if !hasReasoningEffort && model.CatwalkCfg.CanReason {
-				// Default: enable reasoning for models that support it.
-				if reasoningEffort != "" {
-					mergedOptions["reasoning_effort"] = reasoningEffort
+	case openaicompat.Name, hyper.Name:
+		extraBody := make(map[string]any)
+
+		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
+		if !hasReasoningEffort && model.ModelCfg.ReasoningEffort != "" {
+			switch providerCfg.ID {
+			case string(catwalk.InferenceProviderIoNet):
+				extraBody["reasoning"] = map[string]string{"effort": model.ModelCfg.ReasoningEffort}
+			default:
+				mergedOptions["reasoning_effort"] = model.ModelCfg.ReasoningEffort
+			}
+		}
+
+		thinkEnabled := model.ModelCfg.Think != nil && *model.ModelCfg.Think
+
+		// "reasoning effort" is a standard OpenAI field, but "thinking" is not.
+		// Setting it in the right way for each provider.
+		// TODO: Abstract this in Fantasy somehow?
+		// TODO: Allow custom providers to specify how to set this?
+		switch providerCfg.ID {
+		case hyper.Name:
+			extraBody["thinking"] = thinkEnabled
+		case string(catwalk.InferenceProviderIoNet):
+			if _, ok := extraBody["reasoning"]; !ok && model.CatwalkCfg.CanReason {
+				if thinkEnabled {
+					extraBody["reasoning"] = map[string]string{"effort": "medium"}
 				} else {
-					mergedOptions["reasoning_effort"] = "high"
+					extraBody["reasoning"] = map[string]string{"effort": "none"}
+				}
+			}
+		case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
+			if thinkEnabled {
+				extraBody["thinking"] = map[string]any{
+					"type": "enabled",
+				}
+			} else {
+				extraBody["thinking"] = map[string]any{
+					"type": "disabled",
 				}
 			}
 		}
