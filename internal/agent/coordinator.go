@@ -2172,6 +2172,7 @@ type subAgentParams struct {
 	AgentMemory       string
 	AgentIsolation    string
 	AgentBackground   *bool
+	SkipHandoffReview bool
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
 	SessionSetup func(sessionID string)
@@ -2453,6 +2454,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 						AgentMemory:       agentCfg.Memory,
 						AgentIsolation:    agentCfg.Isolation,
 						AgentBackground:   agentCfg.Background,
+						SkipHandoffReview: true,
 					})
 					taskRunCh <- struct {
 						response fantasy.ToolResponse
@@ -2488,6 +2490,9 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 					}
 				} else {
 					result = taskGraphNodeResultFromResponse(task, response)
+					if parentSession, err := c.sessions.Get(ctx, params.SessionID); err == nil && parentSession.PermissionMode == session.PermissionModeAuto {
+						result.Content = message.SanitizedToolResultStub
+					}
 					if result.ChildSessionID != "" {
 						artifacts, filesTouched, patchPlan, testResults, followups := c.collectTaskGraphArtifacts(ctx, result.ChildSessionID)
 						result.Artifacts = artifacts
@@ -2884,7 +2889,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("get parent session: %w", err)
 	}
-	if parentSession.PermissionMode == session.PermissionModeAuto {
+	if parentSession.PermissionMode == session.PermissionModeAuto && !params.SkipHandoffReview {
 		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, params.Prompt)
 		if reviewErr != nil {
 			return withSubtaskToolResponseMetadata(
@@ -3042,7 +3047,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		slog.Warn("Sub-agent returned empty response", "session", subSession.ID, "prompt", params.Prompt)
 		content = subAgentNoContentText(subSession.ID)
 	}
-	if parentSession.PermissionMode == session.PermissionModeAuto {
+	if parentSession.PermissionMode == session.PermissionModeAuto && !params.SkipHandoffReview {
 		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, content)
 		if reviewErr != nil {
 			return withSubtaskToolResponseMetadata(
@@ -3671,6 +3676,7 @@ func (c *coordinator) runBackgroundTaskNode(
 			AgentMemory:       agentCfg.Memory,
 			AgentIsolation:    agentCfg.Isolation,
 			AgentBackground:   agentCfg.Background,
+			SkipHandoffReview: true,
 		}
 		response, runErr := c.runSubAgent(attemptCtx, runParams)
 		cancel()

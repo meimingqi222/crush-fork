@@ -238,35 +238,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				return fantasy.NewTextErrorResponse("background execution is disabled for this bash tool"), nil
 			}
 
-			isSafeReadOnly := false
-			if toolOpts.RestrictedToGitReadOnly {
-				isSafeReadOnly = true
-			} else {
-				cmdLower := strings.ToLower(params.Command)
-				for _, safe := range safeCommands {
-					if strings.HasPrefix(cmdLower, safe) {
-						if len(cmdLower) == len(safe) || cmdLower[len(safe)] == ' ' || cmdLower[len(safe)] == '-' {
-							isSafeReadOnly = true
-							break
-						}
-					}
-				}
-			}
-
-			fallbackNeedsPermission := false
-			if fallbackCommand != "" && !toolOpts.RestrictedToGitReadOnly {
-				fallbackLower := strings.ToLower(fallbackCommand)
-				fallbackIsSafe := false
-				for _, safe := range safeCommands {
-					if strings.HasPrefix(fallbackLower, safe) {
-						if len(fallbackLower) == len(safe) || fallbackLower[len(safe)] == ' ' || fallbackLower[len(safe)] == '-' {
-							fallbackIsSafe = true
-							break
-						}
-					}
-				}
-				fallbackNeedsPermission = !fallbackIsSafe
-			}
+			isSafeReadOnly := toolOpts.RestrictedToGitReadOnly
 
 			if sessionID == "" {
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for executing shell command")
@@ -293,7 +265,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				}
 
 				if shouldRetryOriginalCommand(execErr, commandToRun, fallbackCommand, attemptedFallback) {
-					if fallbackNeedsPermission && !attemptedFallback {
+					if !toolOpts.RestrictedToGitReadOnly && !attemptedFallback {
 						fallbackParams := BashParams{Command: fallbackCommand}
 						if err := requestBashPermission(ctx, permissions, sessionID, call.ID, execWorkingDir, fallbackParams); err != nil {
 							return fantasy.ToolResponse{}, err

@@ -128,6 +128,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {
 		allowedTools = cfg.Permissions.AllowedTools
 	}
+	var autoModeConfig *config.AutoMode
+	if cfg.Permissions != nil {
+		autoModeConfig = cfg.Permissions.AutoMode
+	}
 	basePermissions := permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, nil)
 	pluginRuntime := plugin.NewRuntime()
 
@@ -145,7 +149,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 				return nil
 			}
 			return classifier
-		}, store.WorkingDir(), cfg.Permissions != nil && cfg.Permissions.FailClosedOnClassifierError, allowedTools),
+		}, store.WorkingDir(), cfg.Permissions != nil && cfg.Permissions.FailClosedOnClassifierError, allowedTools, autoModeConfig),
 		FileTracker:   filetracker.NewService(q),
 		Checkpoint:    checkpointSvc,
 		ToolRuntime:   runtimeService,

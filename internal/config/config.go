@@ -397,10 +397,40 @@ type Permissions struct {
 	AutoMode                    *AutoMode `json:"auto_mode,omitempty" jsonschema:"description=Auto Mode policy customization"`
 }
 
+type ApprovalPolicy string
+
+const (
+	ApprovalPolicyUntrusted ApprovalPolicy = "untrusted"
+	ApprovalPolicyOnFailure ApprovalPolicy = "on-failure"
+	ApprovalPolicyOnRequest ApprovalPolicy = "on-request"
+	ApprovalPolicyGranular  ApprovalPolicy = "granular"
+	ApprovalPolicyNever     ApprovalPolicy = "never"
+)
+
 type AutoMode struct {
-	Environment     []string `json:"environment,omitempty" jsonschema:"description=Additional environment facts injected into Auto Mode classifier prompts"`
-	BlockRules      []string `json:"block_rules,omitempty" jsonschema:"description=Additional block rules for Auto Mode guards"`
-	AllowExceptions []string `json:"allow_exceptions,omitempty" jsonschema:"description=Additional allow-list exceptions for Auto Mode guards"`
+	Environment        []string                `json:"environment,omitempty" jsonschema:"description=Additional environment facts injected into Auto Mode classifier prompts"`
+	BlockRules         []string                `json:"block_rules,omitempty" jsonschema:"description=Additional block rules for Auto Mode guards"`
+	AllowExceptions    []string                `json:"allow_exceptions,omitempty" jsonschema:"description=Additional allow-list exceptions for Auto Mode guards"`
+	ApprovalPolicy     ApprovalPolicy          `json:"approval_policy,omitempty" jsonschema:"description=Codex-style approval policy for Auto Mode decisions,enum=untrusted,enum=on-failure,enum=on-request,enum=granular,enum=never,default=untrusted"`
+	Granular           *GranularApprovalConfig `json:"granular,omitempty" jsonschema:"description=Fine-grained approval gates used when approval_policy is granular"`
+	ExecPolicyRules    []ExecPolicyRule        `json:"exec_policy_rules,omitempty" jsonschema:"description=Deterministic shell command approval rules evaluated before Auto Mode guardian review"`
+	UseGuardianReview  *bool                   `json:"use_guardian_review,omitempty" jsonschema:"description=Use Auto Mode guardian review for policy prompts instead of directly prompting the user,default=true"`
+	WorkspaceWriteMode string                  `json:"workspace_write_mode,omitempty" jsonschema:"description=How Auto Mode handles non-sensitive workspace edits,enum=allow,enum=ask,enum=forbid,default=allow"`
+}
+
+type GranularApprovalConfig struct {
+	SandboxApproval    bool `json:"sandbox_approval,omitempty" jsonschema:"description=Allow shell/sandbox approval prompts in granular Auto Mode,default=true"`
+	Rules              bool `json:"rules,omitempty" jsonschema:"description=Allow exec policy rule approval prompts in granular Auto Mode,default=true"`
+	SkillApproval      bool `json:"skill_approval,omitempty" jsonschema:"description=Allow skill approval prompts in granular Auto Mode,default=true"`
+	RequestPermissions bool `json:"request_permissions,omitempty" jsonschema:"description=Allow request-permissions approval prompts in granular Auto Mode,default=true"`
+	MCPElicitations    bool `json:"mcp_elicitations,omitempty" jsonschema:"description=Allow MCP elicitation approval prompts in granular Auto Mode,default=true"`
+}
+
+type ExecPolicyRule struct {
+	Decision string   `json:"decision" jsonschema:"required,description=Rule decision,enum=allow,enum=prompt,enum=forbid"`
+	Exact    []string `json:"exact,omitempty" jsonschema:"description=Exact command names or full command lines matched case-insensitively"`
+	Prefix   []string `json:"prefix,omitempty" jsonschema:"description=Command-line prefixes matched case-insensitively"`
+	Reason   string   `json:"reason,omitempty" jsonschema:"description=Reason shown when this rule matches"`
 }
 
 type TrailerStyle string

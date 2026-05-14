@@ -151,7 +151,8 @@ func TestRunTaskGraphDirect_ParallelAndDependencies(t *testing.T) {
 	require.Contains(t, resp.Content, "b (completed): msg-1$$call-1::b")
 	require.Contains(t, resp.Content, "c (completed): msg-1$$call-1::c")
 	require.Contains(t, resp.Content, "Task outputs:")
-	require.Contains(t, resp.Content, "- c (completed): done")
+	require.Contains(t, resp.Content, message.SanitizedToolResultStub)
+	require.NotContains(t, resp.Content, "- c (completed): done")
 
 	loadedSession, err := env.sessions.Get(context.Background(), rootSession.ID)
 	require.NoError(t, err)
@@ -438,6 +439,45 @@ func TestRunTaskGraphDirect_ReadyQueueStartsDependentsBeforePeerRootsFinish(t *t
 	require.NotEqual(t, -1, cIdx)
 	require.NotEqual(t, -1, bDoneIdx)
 	require.Less(t, cIdx, bDoneIdx)
+}
+
+func TestRunTaskGraphDirect_SkipsPerChildHandoffReview(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Agents[config.AgentGeneral] = config.Agent{
+		ID:          config.AgentGeneral,
+		Description: "general",
+		Mode:        config.AgentModeSubagent,
+	}
+	parentSession, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+	_, err = env.sessions.UpdatePermissionMode(t.Context(), parentSession.ID, session.PermissionModeAuto)
+	require.NoError(t, err)
+	coord := &coordinator{cfg: cfg, mailbox: mailbox.NewService(), sessions: env.sessions}
+
+	coord.subAgentFactory = func(_ context.Context, requestedType string) (SessionAgent, config.Agent, error) {
+		require.Equal(t, config.AgentGeneral, requestedType)
+		return &taskGraphMockSessionAgent{model: Model{CatwalkCfg: catwalk.Model{DefaultMaxTokens: 1000}, ModelCfg: config.SelectedModel{Provider: "test-provider", Model: "test-model"}}}, cfg.Config().Agents[config.AgentGeneral], nil
+	}
+	coord.subAgentScheduler = func(_ context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
+		require.True(t, params.SkipHandoffReview)
+		return withSubtaskToolResponseMetadata(fantasy.NewTextResponse("ok"), params.ToolCallID, "child-1", params.ParentMessageID, message.ToolResultSubtaskStatusCompleted), nil
+	}
+
+	resp, err := coord.runTaskGraphDirect(t.Context(), taskGraphParams{
+		SessionID:      parentSession.ID,
+		AgentMessageID: "msg-1",
+		ToolCallID:     "call-1",
+		Tasks: []taskGraphTask{
+			{ID: "a", Prompt: "task-a", SubagentType: config.AgentGeneral},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "- a: completed")
+	require.Contains(t, resp.Content, message.SanitizedToolResultStub)
+	require.NotContains(t, resp.Content, "ok")
 }
 
 func TestRunTaskGraphDirect_RetriesFailuresWithinBudget(t *testing.T) {

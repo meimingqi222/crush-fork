@@ -14,6 +14,24 @@
         "description": {
           "type": "string"
         },
+        "role": {
+          "type": "string",
+          "description": "Optional role hint used to specialize this agent",
+          "examples": [
+            "orchestrator",
+            "planner",
+            "reviewer",
+            "executor"
+          ]
+        },
+        "additional_prompt": {
+          "type": "string",
+          "description": "Additional prompt instructions appended to this agent's system prompt"
+        },
+        "initial_prompt": {
+          "type": "string",
+          "description": "Additional initial instructions injected into this agent's system prompt before it runs"
+        },
         "mode": {
           "type": "string",
           "enum": [
@@ -23,6 +41,33 @@
           ],
           "description": "Where this agent can run",
           "default": "all"
+        },
+        "background": {
+          "type": "boolean",
+          "description": "Whether this agent is expected to run as a background-style worker hint"
+        },
+        "memory": {
+          "type": "string",
+          "description": "Memory scope hint for this agent",
+          "examples": [
+            "inherit",
+            "isolated",
+            "ephemeral"
+          ]
+        },
+        "isolation": {
+          "type": "string",
+          "description": "Isolation hint for this agent",
+          "examples": [
+            "workspace",
+            "session",
+            "process"
+          ]
+        },
+        "omit_context_files": {
+          "type": "boolean",
+          "description": "Skip project and global context file injection for this agent",
+          "default": false
         },
         "disabled": {
           "type": "boolean"
@@ -116,6 +161,44 @@
           },
           "type": "array",
           "description": "Additional allow-list exceptions for Auto Mode guards"
+        },
+        "approval_policy": {
+          "type": "string",
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "granular",
+            "never"
+          ],
+          "description": "Codex-style approval policy for Auto Mode decisions",
+          "default": "untrusted"
+        },
+        "granular": {
+          "$ref": "#/$defs/GranularApprovalConfig",
+          "description": "Fine-grained approval gates used when approval_policy is granular"
+        },
+        "exec_policy_rules": {
+          "items": {
+            "$ref": "#/$defs/ExecPolicyRule"
+          },
+          "type": "array",
+          "description": "Deterministic shell command approval rules evaluated before Auto Mode guardian review"
+        },
+        "use_guardian_review": {
+          "type": "boolean",
+          "description": "Use Auto Mode guardian review for policy prompts instead of directly prompting the user",
+          "default": true
+        },
+        "workspace_write_mode": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "ask",
+            "forbid"
+          ],
+          "description": "How Auto Mode handles non-sensitive workspace edits",
+          "default": "allow"
         }
       },
       "additionalProperties": false,
@@ -149,7 +232,7 @@
       "properties": {
         "max_depth": {
           "type": "integer",
-          "description": "Maximum depth for the ls tool",
+          "description": "Maximum depth for directory listings",
           "default": 0,
           "examples": [
             10
@@ -157,7 +240,7 @@
         },
         "max_items": {
           "type": "integer",
-          "description": "Maximum number of items to return for the ls tool",
+          "description": "Maximum number of items to return for directory listings",
           "default": 1000,
           "examples": [
             100
@@ -231,6 +314,73 @@
         "tools"
       ]
     },
+    "ExecPolicyRule": {
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "prompt",
+            "forbid"
+          ],
+          "description": "Rule decision"
+        },
+        "exact": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Exact command names or full command lines matched case-insensitively"
+        },
+        "prefix": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Command-line prefixes matched case-insensitively"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason shown when this rule matches"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "decision"
+      ]
+    },
+    "GranularApprovalConfig": {
+      "properties": {
+        "sandbox_approval": {
+          "type": "boolean",
+          "description": "Allow shell/sandbox approval prompts in granular Auto Mode",
+          "default": true
+        },
+        "rules": {
+          "type": "boolean",
+          "description": "Allow exec policy rule approval prompts in granular Auto Mode",
+          "default": true
+        },
+        "skill_approval": {
+          "type": "boolean",
+          "description": "Allow skill approval prompts in granular Auto Mode",
+          "default": true
+        },
+        "request_permissions": {
+          "type": "boolean",
+          "description": "Allow request-permissions approval prompts in granular Auto Mode",
+          "default": true
+        },
+        "mcp_elicitations": {
+          "type": "boolean",
+          "description": "Allow MCP elicitation approval prompts in granular Auto Mode",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "HTTPConfig": {
       "properties": {
         "url": {
@@ -277,6 +427,9 @@
         },
         "http": {
           "$ref": "#/$defs/HTTPConfig"
+        },
+        "prompt": {
+          "$ref": "#/$defs/PromptConfig"
         }
       },
       "additionalProperties": false,
@@ -562,6 +715,57 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "MemoryConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the event-sourced memory engine",
+          "default": true
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "local",
+            "hindsight",
+            "transcript",
+            "off"
+          ],
+          "description": "Memory backend to use",
+          "default": "local"
+        },
+        "remote": {
+          "type": "string",
+          "format": "uri",
+          "description": "Remote Hindsight memory service base URL (e.g. http://localhost:8888)"
+        },
+        "remote_token": {
+          "type": "string",
+          "description": "Bearer token for the remote memory service (or set HINDSIGHT_API_TOKEN env var)"
+        },
+        "remote_bank_id": {
+          "type": "string",
+          "description": "Memory bank ID on the remote service",
+          "default": "crush"
+        },
+        "remote_scoping": {
+          "type": "string",
+          "enum": [
+            "global",
+            "per-project",
+            "per-project-tagged"
+          ],
+          "description": "Remote Hindsight scoping mode",
+          "default": "per-project-tagged"
+        },
+        "retain_every_n_turns": {
+          "type": "integer",
+          "description": "Retain transcript window every N turns (hindsight/transcript backends)",
+          "default": 3
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Options": {
       "properties": {
         "context_paths": {
@@ -643,6 +847,10 @@
           "type": "boolean",
           "description": "Ignore all default/embedded providers. When enabled",
           "default": false
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryConfig",
+          "description": "Memory engine configuration"
         },
         "attribution": {
           "$ref": "#/$defs/Attribution",
@@ -784,6 +992,21 @@
         "command"
       ]
     },
+    "PromptConfig": {
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "prompt"
+      ]
+    },
     "SelectedModel": {
       "properties": {
         "model": {
@@ -806,6 +1029,13 @@
           "description": "Maximum number of tokens for model responses",
           "examples": [
             4096
+          ]
+        },
+        "context_window": {
+          "type": "integer",
+          "description": "Context window override for this model",
+          "examples": [
+            400000
           ]
         },
         "temperature": {
@@ -846,6 +1076,13 @@
             "high"
           ],
           "description": "Deprecated: Use model's default_reasoning_effort in provider config instead"
+        },
+        "max_prompt_tokens": {
+          "type": "integer",
+          "description": "Maximum prompt/input token budget override for this model",
+          "examples": [
+            262144
+          ]
         },
         "think": {
           "type": "boolean",
@@ -940,7 +1177,7 @@
           "type": "integer",
           "description": "Maximum number of failures allowed within the configured failure domain before remaining delegated work is canceled",
           "examples": [
-            3
+            2
           ]
         },
         "failure_domain": {
@@ -991,7 +1228,7 @@
       "properties": {
         "max_depth": {
           "type": "integer",
-          "description": "Maximum depth for the ls tool",
+          "description": "Maximum depth for directory listings",
           "default": 0,
           "examples": [
             10
@@ -999,7 +1236,7 @@
         },
         "max_items": {
           "type": "integer",
-          "description": "Maximum number of items to return for the ls tool",
+          "description": "Maximum number of items to return for directory listings",
           "default": 1000,
           "examples": [
             100

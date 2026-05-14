@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -28,11 +29,17 @@ const (
 var safeNullRedirectPattern = regexp.MustCompile(`(?i)(^|\s)(?:\d?>)\s*(?:/dev/null|nul|\$null)`)
 
 var highRiskBashDirectCommands = map[string]struct{}{
+	"aws":         {},
+	"az":          {},
 	"curl":        {},
-	"wget":        {},
-	"sudo":        {},
+	"gcloud":      {},
+	"gh":          {},
 	"kubectl":     {},
 	"remove-item": {},
+	"scp":         {},
+	"ssh":         {},
+	"sudo":        {},
+	"wget":        {},
 	"del":         {},
 }
 
@@ -91,6 +98,11 @@ type service struct {
 	workingDir                  string
 	failClosedOnClassifierError bool
 	allowedTools                []string
+	autoModeConfig              *config.AutoMode
+	approvalPolicy              ApprovalPolicyConfig
+	execPolicyRules             []ExecPolicyRule
+	policyEngine                *PolicyEngine
+	approvalCache               *approvalCache
 	classifierMu                sync.Mutex
 	sessionStates               map[string]sessionClassifierState
 }
@@ -103,7 +115,13 @@ func New(
 	workingDir string,
 	failClosedOnClassifierError bool,
 	allowedTools []string,
+	autoModeConfig ...*config.AutoMode,
 ) permission.Service {
+	var cfg *config.AutoMode
+	if len(autoModeConfig) > 0 {
+		cfg = autoModeConfig[0]
+	}
+	approvalPolicy, execPolicyRules := policyFromConfig(cfg)
 	return &service{
 		base:                        base,
 		sessions:                    sessions,
@@ -112,6 +130,11 @@ func New(
 		workingDir:                  workingDir,
 		failClosedOnClassifierError: failClosedOnClassifierError,
 		allowedTools:                slices.Clone(allowedTools),
+		autoModeConfig:              cfg,
+		approvalPolicy:              approvalPolicy,
+		execPolicyRules:             execPolicyRules,
+		policyEngine:                NewDefaultPolicyEngine(execPolicyRules),
+		approvalCache:               newApprovalCache(defaultApprovalCacheEntries),
 		sessionStates:               map[string]sessionClassifierState{},
 	}
 }
@@ -138,6 +161,9 @@ func (s *service) HasPersistentPermission(p permission.PermissionRequest) bool {
 
 func (s *service) ClearPersistentPermissions(sessionID string) {
 	s.base.ClearPersistentPermissions(sessionID)
+	if s.approvalCache != nil {
+		s.approvalCache.clearSession(sessionID)
+	}
 }
 
 func (s *service) EvaluateRequest(ctx context.Context, opts permission.CreatePermissionRequest) (permission.EvaluationResult, error) {
@@ -168,6 +194,12 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 	}
 
 	if mode == session.PermissionModeYolo {
+		if s.isBypassImmuneRequest(eval.Permission) {
+			return s.promptWithEscalation(ctx, withAutoReview(eval.Permission, permission.AutoReview{
+				Trigger: permission.AutoReviewTriggerAlwaysManual,
+				Reason:  "This safety-sensitive action requires manual confirmation even in YOLO Mode.",
+			}))
+		}
 		return true, nil
 	}
 
@@ -230,82 +262,7 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 		}))
 	}
 
-	if isAlwaysManual(eval.Permission, s.workingDir) {
-		slog.Debug("Auto Mode permission requires manual confirmation",
-			"session_id", sessionAuthorityID,
-			"tool", eval.Permission.ToolName,
-			"action", eval.Permission.Action,
-		)
-		return s.promptWithEscalation(ctx, withAutoReview(eval.Permission, permission.AutoReview{
-			Trigger: permission.AutoReviewTriggerAlwaysManual,
-			Reason:  "This action always requires manual confirmation in Auto Mode.",
-		}))
-	}
-
-	if isAcceptEditsEquivalentRequest(eval.Permission, s.workingDir) {
-		slog.Debug("Auto Mode permission allowed via accept-edits equivalent request",
-			"session_id", sessionAuthorityID,
-			"tool", eval.Permission.ToolName,
-			"action", eval.Permission.Action,
-		)
-		s.resetClassifierBlocks(sessionAuthorityID)
-		return true, nil
-	}
-
-	if isAutoModeAllowlistedRequest(eval.Permission) {
-		slog.Debug("Auto Mode permission allowed via allowlist",
-			"session_id", sessionAuthorityID,
-			"tool", eval.Permission.ToolName,
-			"action", eval.Permission.Action,
-		)
-		s.resetClassifierBlocks(sessionAuthorityID)
-		return true, nil
-	}
-
-	if isSafeReadOnlyBashRequest(eval.Permission) {
-		slog.Debug("Auto Mode permission allowed via safe read-only bash",
-			"session_id", sessionAuthorityID,
-			"tool", eval.Permission.ToolName,
-			"action", eval.Permission.Action,
-		)
-		s.resetClassifierBlocks(sessionAuthorityID)
-		return true, nil
-	}
-
-	classifier := s.classifier()
-	if classifier == nil {
-		return s.handleClassifierUnavailable(ctx, eval.Permission, "Auto Mode permission classification is unavailable.")
-	}
-
-	classification, err := classifier.ClassifyPermission(ctx, eval.Permission)
-	if err != nil {
-		return s.handleClassifierFailure(ctx, eval.Permission, err)
-	}
-	if classification.AllowAuto {
-		slog.Debug("Auto Mode permission allowed by classifier",
-			"session_id", sessionAuthorityID,
-			"tool", eval.Permission.ToolName,
-			"action", eval.Permission.Action,
-			"reason", strings.TrimSpace(classification.Reason),
-			"confidence", classification.Confidence,
-		)
-		s.resetClassifierBlocks(sessionAuthorityID)
-		return true, nil
-	}
-
-	slog.Debug("Auto Mode permission blocked by classifier",
-		"session_id", sessionAuthorityID,
-		"tool", eval.Permission.ToolName,
-		"action", eval.Permission.Action,
-		"reason", strings.TrimSpace(classification.Reason),
-		"confidence", classification.Confidence,
-	)
-
-	s.recordClassifierBlock(sessionAuthorityID)
-	return false, permission.NewPermissionBlockedError(
-		"Auto Mode classifier blocked this action.",
-		firstNonEmpty(classification.Reason, "The classifier could not confirm this action is safe to auto-approve."),
-	)
+	return s.handleAutoModeRequest(ctx, sessionAuthorityID, eval.Permission)
 }
 
 func effectivePermissionSessionID(req permission.PermissionRequest) string {
@@ -356,6 +313,149 @@ func (s *service) classifier() permission.Classifier {
 		return nil
 	}
 	return s.classifierFn()
+}
+
+func (s *service) handleAutoModeRequest(ctx context.Context, sessionAuthorityID string, req permission.PermissionRequest) (bool, error) {
+	policyCtx := PolicyRequestContext{
+		SessionID:          sessionAuthorityID,
+		WorkingDir:         s.workingDir,
+		Mode:               string(session.PermissionModeAuto),
+		Approval:           s.approvalPolicy,
+		WorkspaceWriteMode: s.workspaceWriteMode(),
+		Capabilities: []PolicyCapability{
+			{Kind: PolicyCapabilityNone, Name: "direct", Available: true},
+		},
+	}
+	decision := s.policyEngine.Evaluate(ctx, req, policyCtx)
+	if decision.Cacheable && s.approvalCache.approved(decision.CacheKeys) {
+		slog.Debug("Auto Mode permission allowed via approval cache",
+			"session_id", sessionAuthorityID,
+			"tool", req.ToolName,
+			"action", req.Action,
+			"source", decision.Source,
+		)
+		s.resetClassifierBlocks(sessionAuthorityID)
+		return true, nil
+	}
+
+	slog.Debug("Auto Mode policy evaluated request",
+		"session_id", sessionAuthorityID,
+		"tool", req.ToolName,
+		"action", req.Action,
+		"requirement", decision.Requirement,
+		"source", decision.Source,
+		"reason", decision.Reason,
+	)
+	switch decision.Requirement {
+	case PolicyRequirementAllow:
+		s.resetClassifierBlocks(sessionAuthorityID)
+		return true, nil
+	case PolicyRequirementForbidden:
+		return false, policyBlockedError("Auto Mode policy blocked this action.", decision.Reason)
+	case PolicyRequirementNeedsApproval:
+		if decision.Source == "always_manual" {
+			return s.promptWithEscalation(ctx, withAutoReview(req, permission.AutoReview{
+				Trigger: permission.AutoReviewTriggerAlwaysManual,
+				Reason:  decision.Reason,
+			}))
+		}
+		return s.handlePolicyApproval(ctx, sessionAuthorityID, req, decision)
+	default:
+		return s.handleGuardianReview(ctx, sessionAuthorityID, req, "Auto Mode policy requires guardian review for this action.")
+	}
+}
+
+func (s *service) handlePolicyApproval(ctx context.Context, sessionAuthorityID string, req permission.PermissionRequest, decision PolicyDecision) (bool, error) {
+	if s.useGuardianReview() {
+		return s.handleGuardianPolicyReview(ctx, sessionAuthorityID, req, decision)
+	}
+
+	granted, err := s.promptWithEscalation(ctx, withAutoReview(req, permission.AutoReview{
+		Trigger: permission.AutoReviewTriggerClassifierBlock,
+		Reason:  policyReasonWithSource(decision),
+	}))
+	if err != nil || !granted {
+		return granted, err
+	}
+	if decision.Cacheable {
+		s.approvalCache.approve(decision.CacheKeys)
+	}
+	s.resetClassifierBlocks(sessionAuthorityID)
+	return true, nil
+}
+
+func (s *service) handleGuardianPolicyReview(ctx context.Context, sessionAuthorityID string, req permission.PermissionRequest, decision PolicyDecision) (bool, error) {
+	granted, err := s.handleGuardianReview(ctx, sessionAuthorityID, req, firstNonEmpty(policyReasonWithSource(decision), "Auto Mode policy requires approval."))
+	if err != nil || !granted {
+		return granted, err
+	}
+	if decision.Cacheable {
+		s.approvalCache.approve(decision.CacheKeys)
+	}
+	return true, nil
+}
+
+func (s *service) handleGuardianReview(ctx context.Context, sessionAuthorityID string, req permission.PermissionRequest, reason string) (bool, error) {
+	if !s.useGuardianReview() {
+		return s.promptWithEscalation(ctx, withAutoReview(req, permission.AutoReview{
+			Trigger: permission.AutoReviewTriggerClassifierBlock,
+			Reason:  reason,
+		}))
+	}
+
+	classifier := s.classifier()
+	if classifier == nil {
+		return s.handleClassifierUnavailable(ctx, req, "Auto Mode guardian review is unavailable.")
+	}
+
+	classification, err := classifier.ClassifyPermission(ctx, withAutoReview(req, permission.AutoReview{
+		Trigger: permission.AutoReviewTriggerClassifierBlock,
+		Reason:  reason,
+	}))
+	if err != nil {
+		return s.handleClassifierFailure(ctx, req, err)
+	}
+	if classification.AllowAuto {
+		slog.Debug("Auto Mode guardian allowed request",
+			"session_id", sessionAuthorityID,
+			"tool", req.ToolName,
+			"action", req.Action,
+			"reason", strings.TrimSpace(classification.Reason),
+			"confidence", classification.Confidence,
+		)
+		s.resetClassifierBlocks(sessionAuthorityID)
+		return true, nil
+	}
+
+	slog.Debug("Auto Mode guardian blocked request, falling back to manual approval",
+		"session_id", sessionAuthorityID,
+		"tool", req.ToolName,
+		"action", req.Action,
+		"reason", strings.TrimSpace(classification.Reason),
+		"confidence", classification.Confidence,
+	)
+	s.recordClassifierBlock(sessionAuthorityID)
+	// Fall back to manual approval instead of outright denying.
+	// This allows users to override Guardian decisions when appropriate.
+	return s.promptWithEscalation(ctx, withAutoReview(req, permission.AutoReview{
+		Trigger: permission.AutoReviewTriggerClassifierBlock,
+		Reason:  classification.Reason,
+	}))
+}
+
+func (s *service) useGuardianReview() bool {
+	return s.autoModeConfig == nil || s.autoModeConfig.UseGuardianReview == nil || *s.autoModeConfig.UseGuardianReview
+}
+
+func (s *service) workspaceWriteMode() string {
+	if s.autoModeConfig == nil {
+		return ""
+	}
+	return s.autoModeConfig.WorkspaceWriteMode
+}
+
+func (s *service) isBypassImmuneRequest(req permission.PermissionRequest) bool {
+	return isAlwaysManual(req, s.workingDir)
 }
 
 func (s *service) handleClassifierUnavailable(ctx context.Context, req permission.PermissionRequest, message string) (bool, error) {
@@ -528,6 +628,36 @@ func (s *service) isExplicitlyAllowed(opts permission.CreatePermissionRequest, r
 	return slices.Contains(s.allowedTools, commandKey) || slices.Contains(s.allowedTools, req.ToolName)
 }
 
+func policyFromConfig(cfg *config.AutoMode) (ApprovalPolicyConfig, []ExecPolicyRule) {
+	policy := DefaultApprovalPolicyConfig()
+	if cfg == nil {
+		return policy, nil
+	}
+	if parsed, ok := ParseApprovalPolicy(string(cfg.ApprovalPolicy)); ok {
+		policy.Policy = parsed
+	}
+	if cfg.Granular != nil {
+		policy.Granular = GranularApprovalConfig{
+			SandboxApproval:    cfg.Granular.SandboxApproval,
+			Rules:              cfg.Granular.Rules,
+			SkillApproval:      cfg.Granular.SkillApproval,
+			RequestPermissions: cfg.Granular.RequestPermissions,
+			MCPElicitations:    cfg.Granular.MCPElicitations,
+		}
+	}
+
+	rules := make([]ExecPolicyRule, 0, len(cfg.ExecPolicyRules))
+	for _, rule := range cfg.ExecPolicyRules {
+		rules = append(rules, ExecPolicyRule{
+			Decision: ExecPolicyRuleDecision(strings.ToLower(strings.TrimSpace(rule.Decision))),
+			Exact:    slices.Clone(rule.Exact),
+			Prefix:   slices.Clone(rule.Prefix),
+			Reason:   rule.Reason,
+		})
+	}
+	return policy, rules
+}
+
 func isAutoModeAllowlistedRequest(req permission.PermissionRequest) bool {
 	switch req.ToolName {
 	case tools.ViewToolName:
@@ -554,80 +684,27 @@ func isAcceptEditsEquivalentRequest(req permission.PermissionRequest, workingDir
 }
 
 func isSafeReadOnlyBashRequest(req permission.PermissionRequest) bool {
-	if req.ToolName != tools.BashToolName || req.Action != "execute" {
-		return false
-	}
-
-	params, ok := req.Params.(tools.BashPermissionsParams)
-	if !ok || params.RunInBackground {
-		return false
-	}
-
-	command := strings.TrimSpace(params.Command)
-	if command == "" {
-		return false
-	}
-
-	sanitizedCommand := strings.TrimSpace(safeNullRedirectPattern.ReplaceAllString(command, " "))
-	if strings.ContainsAny(sanitizedCommand, "\r\n;<>") ||
-		strings.Contains(sanitizedCommand, "&&") ||
-		strings.Contains(sanitizedCommand, "||") ||
-		strings.Contains(sanitizedCommand, "|&") ||
-		strings.Contains(sanitizedCommand, "$(") ||
-		strings.Contains(sanitizedCommand, "`") {
-		return false
-	}
-
-	segments := strings.Split(sanitizedCommand, "|")
-	for _, segment := range segments {
-		fields := strings.Fields(strings.ToLower(strings.TrimSpace(segment)))
-		if len(fields) == 0 || !isSafeReadOnlyBashSegment(fields) {
-			return false
-		}
-	}
-	return true
+	return EvaluateBashExecPolicy(req, ApprovalPolicyUnlessTrusted).Requirement == ApprovalRequirementAllow
 }
 
 func isSafeReadOnlyBashSegment(fields []string) bool {
-	switch fields[0] {
-	case "pwd", "ls", "dir", "tree", "cat", "type", "head", "tail", "wc", "rg", "grep", "which", "where", "stat":
-		return true
-	case "cut", "sort", "uniq":
-		return true
-	case "find":
-		return isSafeFindCommand(fields)
-	case "get-location", "get-childitem", "get-content", "select-string", "get-item", "get-command":
-		return true
-	case "select-object", "sort-object", "measure-object", "format-table", "out-string":
-		return true
-	case "git":
-		return isSafeReadOnlyGitCommand(fields[1:])
-	default:
-		return false
+	args := make([]shellCallArg, 0, len(fields))
+	for _, field := range fields {
+		args = append(args, shellCallArg{value: field, literal: true})
 	}
-}
-
-func isSafeReadOnlyGitCommand(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
+	return safeReadOnlyExecPolicyHeuristic(normalizeExecPolicyCommandName(args[0].value), args)
+}
 
-	switch args[0] {
-	case "status", "diff", "log", "show", "rev-parse", "ls-files", "grep", "symbolic-ref":
-		return true
-	case "stash":
-		return len(args) > 1 && args[1] == "list"
-	case "tag":
-		return len(args) == 1 || slices.Contains(args[1:], "--list")
-	case "config":
-		return len(args) > 1 && args[1] == "--get"
-	case "branch":
-		return len(args) == 1 || slices.Contains(args[1:], "--show-current")
-	case "remote":
-		return len(args) > 1 && (args[1] == "-v" || (args[1] == "get-url" && len(args) <= 3))
-	default:
-		return false
+func isSafeReadOnlyGitCommand(args []string) bool {
+	fields := make([]shellCallArg, 0, len(args)+1)
+	fields = append(fields, shellCallArg{value: "git", literal: true})
+	for _, arg := range args {
+		fields = append(fields, shellCallArg{value: arg, literal: true})
 	}
+	return isSafeGitExecPolicyCommand(fields)
 }
 
 func isSafeFindCommand(args []string) bool {
@@ -1016,15 +1093,21 @@ func containsLiteralShellArg(args []shellCallArg, target string) bool {
 
 func isHighRiskBashTextFallback(command string) bool {
 	highRiskSnippets := []string{
+		"aws ",
+		"az ",
 		"curl ",
-		"wget ",
+		"gcloud ",
+		"gh ",
 		"git push",
 		"git reset --hard",
-		"rm -",
-		"remove-item",
-		"del ",
-		"sudo ",
 		"kubectl ",
+		"remove-item",
+		"rm -",
+		"scp ",
+		"ssh ",
+		"sudo ",
+		"wget ",
+		"del ",
 		"terraform apply",
 		"terraform destroy",
 		"npm publish",
