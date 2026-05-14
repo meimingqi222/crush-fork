@@ -173,7 +173,12 @@ func TestRuntimeEnvHookInjectsAndOverridesVars(t *testing.T) {
 	require.Equal(t, "hook-value,hook-override\n", stdout)
 
 	storedEnv := shell.GetEnv()
-	require.Equal(t, []string{"SHARED_VALUE=base"}, storedEnv)
+	// Verify hook-injected vars are cleaned up after execution.
+	// The env may contain additional shell vars (e.g., CRUSH=1) so we use
+	// targeted assertions instead of an exact set comparison.
+	require.Contains(t, storedEnv, "SHARED_VALUE=base")
+	require.NotContains(t, storedEnv, "HOOK_VAR=hook-value")
+	require.NotContains(t, storedEnv, "SHARED_VALUE=hook-override")
 }
 
 func toGitBashStylePath(t *testing.T, path string) string {

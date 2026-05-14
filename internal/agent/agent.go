@@ -234,6 +234,13 @@ type sessionAgent struct {
 	sessionMemoryTokens      map[string]int64
 	sessionMemoryInitialized map[string]bool
 	sessionMemoryEnabled     bool
+
+	// memoryBackend controls which pipeline is active for this agent.
+	memoryBackend     MemoryBackendType
+	// retainEveryNTurns is the transcript-retain interval; 0 means use the default.
+	retainEveryNTurns int
+	// transcriptTurnCount tracks turns since the last transcript window retain.
+	transcriptTurnCount map[string]int
 }
 
 type SessionAgentOptions struct {
@@ -263,6 +270,10 @@ type SessionAgentOptions struct {
 	RetryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
 	EnableSessionMemory  bool
 	RetryWaitFunc        func(context.Context, time.Duration) error
+	// MemoryBackend selects the memory pipeline: local (default) or transcript.
+	MemoryBackend     MemoryBackendType
+	// RetainEveryNTurns is used by the transcript backend; 0 means default (3).
+	RetainEveryNTurns int
 }
 
 type sessionAgentRuntimeConfig struct {
@@ -333,6 +344,9 @@ func NewSessionAgent(
 		sessionMemoryTokens:      make(map[string]int64),
 		sessionMemoryInitialized: make(map[string]bool),
 		sessionMemoryEnabled:     opts.EnableSessionMemory,
+		memoryBackend:            opts.MemoryBackend,
+		retainEveryNTurns:        opts.RetainEveryNTurns,
+		transcriptTurnCount:      make(map[string]int),
 	}
 }
 
@@ -2117,40 +2131,84 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.activeRequests.Del(call.SessionID)
 	cancel()
 	wg.Wait()
-	if !a.isSubAgent && a.memory != nil && a.backgroundModel != nil && !a.disableAutoMemory && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
+	// Transcript backend: force-retain the current window before compaction resets
+	// the context so no conversation state is silently lost.  This runs even when
+	// shouldSummarize is true, but only for the transcript backend — the local
+	// backend's extractor is intentionally skipped during compaction.
+	if !a.isSubAgent && a.memory != nil && !a.disableAutoMemory &&
+		shouldSummarize && a.memoryBackend == MemoryBackendTranscript &&
+		a.QueuedPrompts(call.SessionID) == 0 {
+		historyForCompaction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
+		a.extractionMu.Lock()
+		a.transcriptTurnCount[call.SessionID] = 0 // reset so next normal turn starts fresh
+		retainCtx, retainCancel := context.WithCancel(context.Background())
+		retainID := a.trackPendingExtractionLocked(call.SessionID, retainCancel)
+		go func(history []string, pendingID uint64) {
+			defer a.finishPendingExtraction(call.SessionID, pendingID)
+			retainTranscriptWindow(retainCtx, a.memory, call.SessionID, call.Prompt, history)
+		}(historyForCompaction, retainID)
+		a.extractionMu.Unlock()
+	}
+
+	if !a.isSubAgent && a.memory != nil && !a.disableAutoMemory && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
 		historyForExtraction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
 		a.extractionMu.Lock()
-		a.extractionTurnCount[call.SessionID]++
-		extractionTurns := a.extractionTurnCount[call.SessionID]
-		a.sessionMemoryTurns[call.SessionID]++
-		sessionMemoryTurns := a.sessionMemoryTurns[call.SessionID]
-		if shouldExtractMemories(extractionTurns) {
-			a.extractionTurnCount[call.SessionID] = 0
-			extractionCtx, extractionCancel := context.WithCancel(context.Background())
-			extractionID := a.trackPendingExtractionLocked(call.SessionID, extractionCancel)
-			go func(history []string, pendingID uint64) {
-				defer a.finishPendingExtraction(call.SessionID, pendingID)
-				extractMemories(extractionCtx, a.memory, a.backgroundModel, call.SessionID, call.Prompt, history)
-			}(historyForExtraction, extractionID)
-		}
-		if a.enableSessionMemory() {
-			shouldUpdate, initialized, newTokensAtLastExtraction := shouldUpdateSessionMemory(
-				a.sessionMemoryInitialized[call.SessionID],
-				currentSession.LastInputTokens(),
-				a.sessionMemoryTokens[call.SessionID],
-				sessionMemoryTurns,
-				runToolUses,
-			)
-			a.sessionMemoryInitialized[call.SessionID] = initialized
-			a.sessionMemoryTokens[call.SessionID] = newTokensAtLastExtraction
-			if shouldUpdate {
-				a.sessionMemoryTurns[call.SessionID] = 0
-				sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
-				sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
+		switch a.memoryBackend {
+		case MemoryBackendTranscript:
+			// Transcript backend: retain the raw conversation window every N turns.
+			// No per-turn extraction model is invoked and Dream consolidation is
+			// skipped by the coordinator.  The two backends must not mix writes.
+			a.transcriptTurnCount[call.SessionID]++
+			threshold := a.retainEveryNTurns
+			if threshold <= 0 {
+				threshold = defaultRetainEveryNTurns
+			}
+			if a.transcriptTurnCount[call.SessionID] >= threshold {
+				a.transcriptTurnCount[call.SessionID] = 0
+				retainCtx, retainCancel := context.WithCancel(context.Background())
+				retainID := a.trackPendingExtractionLocked(call.SessionID, retainCancel)
 				go func(history []string, pendingID uint64) {
 					defer a.finishPendingExtraction(call.SessionID, pendingID)
-					updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
-				}(historyForExtraction, sessionMemoryID)
+					retainTranscriptWindow(retainCtx, a.memory, call.SessionID, call.Prompt, history)
+				}(historyForExtraction, retainID)
+			}
+		default:
+			// Local backend (default): structured extraction + session memory updates.
+			// Requires a background model for the extraction LLM calls.
+			if a.backgroundModel != nil {
+				a.extractionTurnCount[call.SessionID]++
+				extractionTurns := a.extractionTurnCount[call.SessionID]
+				a.sessionMemoryTurns[call.SessionID]++
+				sessionMemoryTurns := a.sessionMemoryTurns[call.SessionID]
+				if shouldExtractMemories(extractionTurns) {
+					a.extractionTurnCount[call.SessionID] = 0
+					extractionCtx, extractionCancel := context.WithCancel(context.Background())
+					extractionID := a.trackPendingExtractionLocked(call.SessionID, extractionCancel)
+					go func(history []string, pendingID uint64) {
+						defer a.finishPendingExtraction(call.SessionID, pendingID)
+						extractMemories(extractionCtx, a.memory, a.backgroundModel, call.SessionID, call.Prompt, history)
+					}(historyForExtraction, extractionID)
+				}
+				if a.enableSessionMemory() {
+					shouldUpdate, initialized, newTokensAtLastExtraction := shouldUpdateSessionMemory(
+						a.sessionMemoryInitialized[call.SessionID],
+						currentSession.LastInputTokens(),
+						a.sessionMemoryTokens[call.SessionID],
+						sessionMemoryTurns,
+						runToolUses,
+					)
+					a.sessionMemoryInitialized[call.SessionID] = initialized
+					a.sessionMemoryTokens[call.SessionID] = newTokensAtLastExtraction
+					if shouldUpdate {
+						a.sessionMemoryTurns[call.SessionID] = 0
+						sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
+						sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
+						go func(history []string, pendingID uint64) {
+							defer a.finishPendingExtraction(call.SessionID, pendingID)
+							updateSessionMemory(sessionMemoryCtx, a.memory, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
+						}(historyForExtraction, sessionMemoryID)
+					}
+				}
 			}
 		}
 		a.extractionMu.Unlock()

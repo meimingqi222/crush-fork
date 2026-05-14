@@ -349,6 +349,8 @@ type Options struct {
 	DebugLSP                   bool         `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
 	DisableAutoSummarize       bool         `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
 	DisableAutoMemory          bool         `json:"disable_auto_memory,omitempty" jsonschema:"description=Disable automatic long-term memory extraction and background consolidation,default=false"`
+	MemoryBackend              string       `json:"memory_backend,omitempty" jsonschema:"description=Memory pipeline backend: local (default) uses structured extraction and Dream consolidation; transcript retains raw conversation windows every N turns without a background model call,enum=local,enum=transcript,default=local"`
+	RetainEveryNTurns          int          `json:"retain_every_n_turns,omitempty" jsonschema:"description=For the transcript memory backend: retain a conversation window every N turns (default 3); ignored when memory_backend is local,minimum=1"`
 	DataDirectory              string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing project-scoped application data (defaults to .crush in the working directory; falls back to a safe global workspace path when startup cwd is unsafe),default=.crush,example=.crush"`
 	DisabledTools              []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate  bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`

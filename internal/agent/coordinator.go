@@ -472,7 +472,16 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		// Skip prefetch if cumulative surfaced bytes exceed the session cap.
 		// Mirrors claude-code's MAX_SESSION_BYTES throttle.
 		if surfacedBytes < maxSessionRecallBytes {
-			recall = buildAutoRecallBlock(prefetchCtx, c.longTermMemory, bgModel, sessionID, prompt, recentTools, alreadySurfaced, recentConversation)
+			if MemoryBackendType(c.cfg.Config().Options.MemoryBackend) == MemoryBackendTranscript {
+				// Transcript backend: surface the most-recently retained window
+				// directly, without a background LLM relevance-selection call.
+				// Local file materializers are not consulted so the two backends
+				// remain strictly separated.
+				recall = buildTranscriptRecallBlock(prefetchCtx, c.longTermMemory, sessionID)
+			} else {
+				// Local backend (default): LLM-driven structured memory recall.
+				recall = buildAutoRecallBlock(prefetchCtx, c.longTermMemory, bgModel, sessionID, prompt, recentTools, alreadySurfaced, recentConversation)
+			}
 		}
 		memoryPrefetch.Settle(recall)
 		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)
@@ -545,7 +554,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 
 	if originalErr == nil && result != nil && !c.cfg.Config().Options.DisableAutoMemory {
-		c.maybeStartMemoryDream(context.Background(), sessionID)
+		// Dream consolidation applies only to the local backend.  The transcript
+		// backend retains raw conversation windows and does not use the
+		// extraction-model-driven consolidation loop.
+		if MemoryBackendType(c.cfg.Config().Options.MemoryBackend) != MemoryBackendTranscript {
+			c.maybeStartMemoryDream(context.Background(), sessionID)
+		}
 	}
 
 	return result, originalErr
@@ -955,6 +969,8 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Checkpoint:          c.checkpoint,
 		PluginRuntime:       c.pluginRuntime,
 		EnableSessionMemory: !c.cfg.Config().Options.DisableAutoMemory,
+		MemoryBackend:       MemoryBackendType(c.cfg.Config().Options.MemoryBackend),
+		RetainEveryNTurns:   c.cfg.Config().Options.RetainEveryNTurns,
 	})
 
 	// Only use async initialization for the primary agent (not subagents).
