@@ -33,17 +33,17 @@ func TestIsReadOnlyAgent(t *testing.T) {
 		},
 		{
 			name:         "read-only tools returns true",
-			allowedTools: []string{"bash", "glob", "grep", "tool_search", "read"},
+			allowedTools: []string{"glob", "grep", "tool_search", "view"},
 			expected:     true,
 		},
 		{
 			name:         "read-only tools with sourcegraph returns true",
-			allowedTools: []string{"sourcegraph", "read", "grep", "lsp_definition", "lsp_workspace_symbols"},
+			allowedTools: []string{"sourcegraph", "view", "grep", "lsp_definition", "lsp_workspace_symbols"},
 			expected:     true,
 		},
 		{
 			name:         "mixed tools returns false",
-			allowedTools: []string{"glob", "edit", "read"},
+			allowedTools: []string{"glob", "edit", "view"},
 			expected:     false,
 		},
 		{

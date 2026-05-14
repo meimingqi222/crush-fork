@@ -1085,8 +1085,13 @@ func shouldUseGlobalWorkspaceDataDirForOS(goos, workingDir, windowsDir string) b
 	}
 
 	if goos == "windows" {
-		system32 := filepath.Join(cmp.Or(strings.TrimSpace(windowsDir), `C:\Windows`), "System32")
-		return isPathWithin(clean, system32)
+		// Normalize backslashes to forward slashes so that path comparisons
+		// work correctly when this function is called on a non-Windows host
+		// (e.g. in cross-platform unit tests).
+		cleanNorm := strings.ReplaceAll(clean, `\`, `/`)
+		winDir := strings.ReplaceAll(cmp.Or(strings.TrimSpace(windowsDir), `C:\Windows`), `\`, `/`)
+		system32 := winDir + "/System32"
+		return isPathWithin(cleanNorm, system32)
 	}
 
 	return clean == string(filepath.Separator)

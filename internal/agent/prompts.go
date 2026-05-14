@@ -184,7 +184,6 @@ func isReadOnlyAgent(agentCfg config.Agent) bool {
 		return false
 	}
 	readOnlyTools := map[string]struct{}{
-		agenttools.BashToolName:                {},
 		agenttools.GlobToolName:                {},
 		agenttools.GrepToolName:                {},
 		agenttools.ViewToolName:                {},

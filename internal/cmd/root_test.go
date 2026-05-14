@@ -21,6 +21,8 @@ func TestResolveCwdFlagReturnsResolvedPath(t *testing.T) {
 
 	resolved, err := ResolveCwd(cmd)
 	require.NoError(t, err)
+	subDir, err = filepath.EvalSymlinks(subDir)
+	require.NoError(t, err)
 	require.Equal(t, subDir, resolved)
 }
 

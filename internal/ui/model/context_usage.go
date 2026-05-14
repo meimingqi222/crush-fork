@@ -87,21 +87,17 @@ func latestAssistantUsageSnapshot(messages []message.Message, cfg *config.Config
 }
 
 func contextWindowForUsageMessage(msg message.Message, cfg *config.Config, selected *agent.Model) int64 {
+	if cfg != nil {
+		if providerCfg, ok := cfg.Providers.Get(msg.Provider); ok {
+			for _, candidate := range providerCfg.Models {
+				if candidate.ID == msg.Model {
+					return agent.EffectiveContextWindow(candidate)
+				}
+			}
+		}
+	}
 	if selected != nil {
 		return agent.EffectiveContextWindow(selected.CatwalkCfg)
-	}
-	if cfg == nil {
-		return 0
-	}
-	providerCfg, ok := cfg.Providers.Get(msg.Provider)
-	if !ok {
-		return 0
-	}
-	for _, candidate := range providerCfg.Models {
-		if candidate.ID != msg.Model {
-			continue
-		}
-		return agent.EffectiveContextWindow(candidate)
 	}
 	return 0
 }

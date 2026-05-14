@@ -55,8 +55,8 @@ func (app *App) setupTimelineFromSessions(ctx context.Context) {
 }
 
 func (app *App) setupTimelineFromToolRuntime(ctx context.Context) {
+	sub := app.ToolRuntime.Subscribe(ctx)
 	app.serviceEventsWG.Go(func() {
-		sub := app.ToolRuntime.Subscribe(ctx)
 		states := make(map[string]map[string]toolruntime.State)
 		for {
 			select {

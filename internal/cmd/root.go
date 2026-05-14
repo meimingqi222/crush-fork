@@ -305,6 +305,10 @@ func ResolveCwd(cmd *cobra.Command) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("failed to get current working directory: %v", err)
 		}
+		resolved, err = filepath.EvalSymlinks(resolved)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve symlinks in working directory: %v", err)
+		}
 		return resolved, nil
 	}
 	cwd, err := os.Getwd()

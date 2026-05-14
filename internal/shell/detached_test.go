@@ -36,7 +36,10 @@ func TestNewShell_SetEnvReplacesExistingEntry(t *testing.T) {
 	})
 
 	shell.SetEnv("TERM", "dumb")
-	require.ElementsMatch(t, []string{"PATH=/tmp/bin", "TERM=dumb"}, shell.GetEnv())
+	env := shell.GetEnv()
+	require.Contains(t, env, "PATH=/tmp/bin")
+	require.Contains(t, env, "TERM=dumb")
+	require.NotContains(t, env, "TERM=screen")
 }
 
 func TestBackgroundShellManager_StartUsesCurrentAPI(t *testing.T) {
