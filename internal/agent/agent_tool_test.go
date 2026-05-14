@@ -238,6 +238,87 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	assert.Contains(t, defaultNames, "write")
 }
 
+func TestValidateExploreDelegationsBlocksCodeReview(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID:           "review",
+		Prompt:       "Review the current diff and decide whether it is safe to merge.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	require.NotEmpty(t, message)
+	assert.Contains(t, message, "task \"review\" cannot use `explore`")
+	assert.Contains(t, message, "final review")
+	assert.Contains(t, message, "primary agent")
+}
+
+func TestValidateExploreDelegationsBlocksFileContentRelay(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID: "relay",
+		Prompt: "Read internal/agent/agent.go and internal/agent/coordinator.go " +
+			"completely and return their full contents.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	require.NotEmpty(t, message)
+	assert.Contains(t, message, "full-file content relay")
+	assert.Contains(t, message, "direct file reads")
+}
+
+func TestValidateExploreDelegationsBlocksBuildTestLint(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID:           "test",
+		Prompt:       "Run go test ./internal/agent and investigate failures.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	require.NotEmpty(t, message)
+	assert.Contains(t, message, "build, test, lint")
+	assert.Contains(t, message, "`general`")
+}
+
+func TestValidateExploreDelegationsBlocksImplementation(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID:           "fix",
+		Prompt:       "Fix the bug in coordinator.go.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	require.NotEmpty(t, message)
+	assert.Contains(t, message, "implementation")
+	assert.Contains(t, message, "`general`")
+}
+
+func TestValidateExploreDelegationsAllowsCodeLocationSearch(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID: "locate",
+		Prompt: "Locate the files and symbols involved in MCP authentication state " +
+			"rendering. Return concise file:line references and observed facts only.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	assert.Empty(t, message)
+}
+
+func TestValidateExploreDelegationsAllowsChineseImplementationLookup(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID:           "locate",
+		Prompt:       "定位 MCP 认证状态渲染的实现入口，只返回简洁的 file:line 证据。",
+		SubagentType: config.AgentExplore,
+	}})
+
+	assert.Empty(t, message)
+}
+
+func TestValidateExploreDelegationsOnlyAppliesToExplore(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID:           "general-review",
+		Prompt:       "Review the current diff and decide whether it is safe to merge.",
+		SubagentType: config.AgentGeneral,
+	}})
+
+	assert.Empty(t, message)
+}
+
 func runAgentToolForTest(t *testing.T, tool fantasy.AgentTool, params AgentParams) (fantasy.ToolResponse, error) {
 	t.Helper()
 	input, err := json.Marshal(params)

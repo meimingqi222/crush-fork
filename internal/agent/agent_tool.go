@@ -173,6 +173,10 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 				}}
 			}
 
+			if message := validateExploreDelegations(tasks); message != "" {
+				return fantasy.NewTextErrorResponse(message), nil
+			}
+
 			return c.runTaskGraph(ctx, taskGraphParams{
 				SessionID:       sessionID,
 				AgentMessageID:  agentMessageID,
@@ -207,6 +211,134 @@ func (c *coordinator) buildAgentToolDescription() string {
 	}
 
 	return strings.ReplaceAll(string(agentToolDescription), "{agents}", strings.Join(entries, "\n"))
+}
+
+func validateExploreDelegations(tasks []taskGraphTask) string {
+	for _, task := range tasks {
+		if config.CanonicalSubagentID(strings.TrimSpace(task.SubagentType)) != config.AgentExplore {
+			continue
+		}
+		if reason := exploreDelegationViolation(task.Prompt); reason != "" {
+			return fmt.Sprintf(
+				"task %q cannot use `explore`: %s\n\n"+
+					"`explore` is only for quick codebase discovery: locating relevant files, symbols, call chains, "+
+					"and concise file:line evidence. The primary agent must do final review decisions and direct full-file reads. "+
+					"Use `general` for implementation, reproduction, build, test, lint, or other execution tasks.",
+				task.ID,
+				reason,
+			)
+		}
+	}
+	return ""
+}
+
+func exploreDelegationViolation(prompt string) string {
+	text := strings.ToLower(prompt)
+
+	if containsAnyLower(text, []string{
+		"code review",
+		"review the current",
+		"review current",
+		"review this diff",
+		"review the diff",
+		"safe to merge",
+		"correctness approval",
+		"final review",
+		"security review",
+		"bug triage",
+		"审阅",
+		"代码审查",
+		"代码 review",
+		"最终审查",
+		"安全审查",
+		"是否正确",
+		"是否安全",
+	}) {
+		return "final review, correctness, security, or bug-triage decisions belong in the primary agent"
+	}
+
+	if containsAnyLower(text, []string{
+		"return their full contents",
+		"return the full contents",
+		"return full contents",
+		"full file contents",
+		"read full contents",
+		"read the full",
+		"read these files completely",
+		"read this file completely",
+		"完整读取",
+		"读取完整",
+		"返回完整内容",
+		"完整内容",
+		"全文返回",
+	}) {
+		return "full-file content relay belongs in the primary agent with direct file reads"
+	}
+
+	if containsAnyLower(text, []string{
+		"go test",
+		"go build",
+		"npm test",
+		"npm run",
+		"pnpm test",
+		"pnpm build",
+		"pnpm run",
+		"yarn test",
+		"pytest",
+		"cargo test",
+		"cargo build",
+		"run tests",
+		"run the tests",
+		"run build",
+		"run the build",
+		"reproduce the",
+		"reproduction",
+		"lint",
+		"跑测试",
+		"运行测试",
+		"执行测试",
+		"构建",
+		"复现",
+	}) {
+		return "build, test, lint, and reproduction tasks require the primary agent or `general`"
+	}
+
+	if containsAnyLower(text, []string{
+		"fix the",
+		"fix this",
+		"implement the",
+		"implement this",
+		"refactor",
+		"edit the",
+		"modify the",
+		"patch the",
+		"write code",
+		"修复",
+		"帮我实现",
+		"请实现",
+		"实现这个功能",
+		"实现这个修复",
+		"实现该功能",
+		"实现该修复",
+		"实现修复",
+		"实现功能",
+		"重构",
+		"编辑",
+		"修改代码",
+	}) {
+		return "implementation and code-modification work requires the primary agent or `general`"
+	}
+
+	return ""
+}
+
+func containsAnyLower(text string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType string) (SessionAgent, config.Agent, error) {
