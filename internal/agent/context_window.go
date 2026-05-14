@@ -19,9 +19,10 @@ const (
 	// context-window-exceeded error.  Results larger than this are truncated
 	// in-place so that the subsequent summarization call does not also hit
 	// the limit.
-	contextWindowToolResultMaxChars       = 20_000
-	contextWindowStepToolResultCharsLimit = 40_000
-	contextWindowTruncationDir            = ".crush/truncation"
+	contextWindowToolResultMaxChars              = 20_000
+	contextWindowStepToolResultCharsLimit        = 40_000
+	contextWindowExhaustedToolResultPreviewChars = 2_000
+	contextWindowTruncationDir                   = ".crush/truncation"
 
 	// contextWindowMessageToolResultCharsLimit is the aggregate character budget
 	// for all tool results within a single API-level message. When multiple tool
@@ -124,23 +125,42 @@ func (a *sessionAgent) truncateToolResult(sessionID string, tr message.ToolResul
 
 func truncatedToolResultNotice(omitted int, fullOutputPath string) string {
 	if fullOutputPath != "" {
-		return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not assume it contains the full result. The full output was saved to `%s`. Use the view tool to inspect that file with offset/limit.]", omitted, filepath.ToSlash(fullOutputPath))
+		return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the view tool with offset/limit or grep to inspect the saved file.]", omitted, filepath.ToSlash(fullOutputPath))
 	}
-	return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not assume it contains the full result. If you need more detail, rerun the tool with a narrower scope or use a precise read with offsets/limits when available.]", omitted)
+	return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not guess from it or assume it contains the full result. If you need more detail, rerun the tool with a narrower scope or use a precise read with offset/limit when available.]", omitted)
 }
 
-func stepBudgetExhaustedToolResultNotice(omitted int, fullOutputPath string) string {
-	if fullOutputPath != "" {
-		return fmt.Sprintf("[Step tool-result budget exhausted. This result was omitted to keep the conversation within the context window. %d characters omitted. The full output was saved to `%s`. Use the view tool to inspect that file with offset/limit.]", omitted, filepath.ToSlash(fullOutputPath))
+func exhaustedToolResultPreview(content string) (string, int, int) {
+	contentRunes := []rune(content)
+	originalChars := len(contentRunes)
+	previewChars := min(originalChars, contextWindowExhaustedToolResultPreviewChars)
+	if previewChars == 0 {
+		return "", 0, originalChars
 	}
-	return fmt.Sprintf("[Step tool-result budget exhausted. This result was omitted to keep the conversation within the context window. Re-run the tool with a narrower scope if you still need it. %d characters omitted.]", omitted)
+	return string(contentRunes[originalChars-previewChars:]), previewChars, originalChars
 }
 
-func messageBudgetExhaustedToolResultNotice(totalUsed, omitted int, fullOutputPath string) string {
+func stepBudgetExhaustedToolResultNotice(originalChars, previewChars int, fullOutputPath string) string {
+	omitted := originalChars - previewChars
 	if fullOutputPath != "" {
-		return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). This result was omitted to keep the conversation within the context window. %d characters omitted. The full output was saved to `%s`. Use the view tool to inspect that file with offset/limit.]", totalUsed, contextWindowMessageToolResultCharsLimit, omitted, filepath.ToSlash(fullOutputPath))
+		return fmt.Sprintf("[Step tool-result budget exhausted. Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the view tool with offset/limit or grep to inspect the saved file.]", previewChars, originalChars, omitted, filepath.ToSlash(fullOutputPath))
 	}
-	return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). This result was omitted to keep the conversation within the context window. Re-run the tool with a narrower scope if you still need it. %d characters omitted.]", totalUsed, contextWindowMessageToolResultCharsLimit, omitted)
+	return fmt.Sprintf("[Step tool-result budget exhausted. Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. Re-run the tool with a narrower scope if you still need it, or use a precise read with offset/limit when available.]", previewChars, originalChars, omitted)
+}
+
+func messageBudgetExhaustedToolResultNotice(totalUsed, originalChars, previewChars int, fullOutputPath string) string {
+	omitted := originalChars - previewChars
+	if fullOutputPath != "" {
+		return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the view tool with offset/limit or grep to inspect the saved file.]", totalUsed, contextWindowMessageToolResultCharsLimit, previewChars, originalChars, omitted, filepath.ToSlash(fullOutputPath))
+	}
+	return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. Re-run the tool with a narrower scope if you still need it, or use a precise read with offset/limit when available.]", totalUsed, contextWindowMessageToolResultCharsLimit, previewChars, originalChars, omitted)
+}
+
+func exhaustedToolResultContent(preview, notice string) string {
+	if preview == "" {
+		return notice
+	}
+	return preview + "\n\n" + notice
 }
 
 func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.ToolResult) (string, error) {
@@ -203,12 +223,14 @@ func (a *sessionAgent) enforceStepToolResultBudget(sessionID string, tr message.
 				fullOutputPath = persistedPath
 			}
 		}
-		omitted := len([]rune(tr.Content))
-		tr.Content = stepBudgetExhaustedToolResultNotice(omitted, fullOutputPath)
-		slog.Info("Omitted tool result because step tool-result budget was exhausted",
+		preview, previewChars, originalChars := exhaustedToolResultPreview(tr.Content)
+		tr.Content = exhaustedToolResultContent(preview, stepBudgetExhaustedToolResultNotice(originalChars, previewChars, fullOutputPath))
+		slog.Info("Truncated tool result because step tool-result budget was exhausted",
 			"session_id", sessionID,
 			"tool_name", tr.Name,
-			"omitted_chars", omitted,
+			"original_chars", originalChars,
+			"kept_chars", previewChars,
+			"omitted_chars", originalChars-previewChars,
 			"full_output_path", fullOutputPath,
 		)
 		return tr
@@ -285,7 +307,8 @@ func (a *sessionAgent) enforceMessageToolResultBudget(sessionID string, results 
 					fullOutputPath = persistedPath
 				}
 			}
-			out[i].Content = messageBudgetExhaustedToolResultNotice(totalUsed, len(contentRunes), fullOutputPath)
+			preview, previewChars, originalChars := exhaustedToolResultPreview(tr.Content)
+			out[i].Content = exhaustedToolResultContent(preview, messageBudgetExhaustedToolResultNotice(totalUsed, originalChars, previewChars, fullOutputPath))
 			continue
 		}
 

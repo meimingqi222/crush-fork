@@ -145,6 +145,7 @@ type coordinator struct {
 
 	deferredMu                 sync.Mutex
 	activatedDeferredBySession map[string]map[string]struct{}
+	knownDeferredToolNames     map[string]bool
 
 	subAgentScheduler  subAgentScheduler
 	subAgentFactory    subAgentFactory
@@ -159,6 +160,10 @@ type coordinator struct {
 
 	// memoryEngine is the event-sourced memory pipeline orchestrator.
 	memoryEngine *engine.Engine
+
+	// transcriptTurnCounts tracks turn counts per session for transcript backend.
+	transcriptTurnCounts   map[string]int
+	transcriptTurnCountsMu sync.Mutex
 }
 
 func NewCoordinator(
@@ -204,8 +209,10 @@ func NewCoordinator(
 		mailbox:                    mailbox.NewService(),
 		agents:                     make(map[string]SessionAgent),
 		activatedDeferredBySession: make(map[string]map[string]struct{}),
+		knownDeferredToolNames:     make(map[string]bool),
 		backgroundAgents:           newBackgroundAgentRegistry(),
 		escalationBridge:           permission.NewEscalationBridge(),
+		transcriptTurnCounts:       make(map[string]int),
 	}
 	if c.pluginRuntime == nil {
 		c.pluginRuntime = plugin.DefaultRuntime()
@@ -242,12 +249,15 @@ func (c *coordinator) plugins() *plugin.Runtime {
 
 // SetMemoryEngine attaches the memory engine to the coordinator.
 // If the engine is enabled, the episodic memory extractor is also wired
-// automatically.
+// automatically, unless the backend is "transcript" which skips LLM extraction.
 func (c *coordinator) SetMemoryEngine(eng *engine.Engine) {
 	c.memoryEngine = eng
 	if eng != nil && eng.Enabled() {
-		c.wireMemoryExtractor(eng)
-		c.wireMemoryConsolidator(eng)
+		// Transcript backend skips LLM extraction and consolidation.
+		if eng.Backend() != "transcript" {
+			c.wireMemoryExtractor(eng)
+			c.wireMemoryConsolidator(eng)
+		}
 	}
 }
 
@@ -274,6 +284,61 @@ func (c *coordinator) memoryEngineRetriever() engine.Retriever {
 	return c.memoryEngine.Retriever()
 }
 
+// transcriptAfterTurn handles transcript window retention for the transcript backend.
+// It increments the turn counter and retains the transcript window every N turns.
+func (c *coordinator) transcriptAfterTurn(ctx context.Context, sessionID string) {
+	if c.memoryEngine == nil || c.memoryEngine.TranscriptRetainer() == nil {
+		return
+	}
+	retainInterval := 3
+	if cfg := c.cfg.Config(); cfg != nil && cfg.Options != nil && cfg.Options.Memory != nil {
+		retainInterval = cfg.Options.Memory.GetRetainEveryNTurns()
+	}
+
+	c.transcriptTurnCountsMu.Lock()
+	c.transcriptTurnCounts[sessionID]++
+	turnCount := c.transcriptTurnCounts[sessionID]
+	c.transcriptTurnCountsMu.Unlock()
+
+	if turnCount%retainInterval != 0 {
+		return
+	}
+
+	msgs, err := c.messages.List(ctx, sessionID)
+	if err != nil {
+		slog.Warn("Failed to list messages for transcript retain", "error", err, "session_id", sessionID)
+		return
+	}
+	content := buildTranscriptWindow(msgs)
+	if content == "" {
+		return
+	}
+	retainer := c.memoryEngine.TranscriptRetainer()
+	if retainer == nil {
+		slog.Warn("Transcript memory backend has no retainer", "session_id", sessionID)
+		return
+	}
+	if err := retainer.RetainTranscript(ctx, sessionID, turnCount, content); err != nil {
+		slog.Warn("Failed to retain transcript window", "error", err, "session_id", sessionID)
+	}
+}
+
+func (c *coordinator) clearTranscriptTurnCountForSession(sessionID string) {
+	c.transcriptTurnCountsMu.Lock()
+	defer c.transcriptTurnCountsMu.Unlock()
+	delete(c.transcriptTurnCounts, sessionID)
+}
+
+// onSessionClosed cleans up coordinator and memory-engine state for a session.
+func (c *coordinator) onSessionClosed(ctx context.Context, sessionID string) {
+	c.clearTranscriptTurnCountForSession(sessionID)
+	if c.memoryEngine != nil {
+		if err := c.memoryEngine.OnSessionClosed(ctx, sessionID); err != nil {
+			slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
+		}
+	}
+}
+
 // memoryEngineHooks returns lifecycle callbacks for the session agent
 // when the memory engine is enabled. Returns nil when the engine is
 // disabled or not configured.
@@ -283,9 +348,16 @@ func (c *coordinator) memoryEngineHooks() *MemoryEngineHooks {
 	}
 	return &MemoryEngineHooks{
 		OnBeforeCompaction: func(ctx context.Context, sessionID string) {
+			if c.memoryEngine.Backend() == "transcript" || c.memoryEngine.Backend() == "hindsight" {
+				c.transcriptAfterTurn(ctx, sessionID)
+				return
+			}
 			if err := c.memoryEngine.OnBeforeCompaction(ctx, sessionID); err != nil {
 				slog.Warn("Memory engine OnBeforeCompaction failed", "error", err, "session_id", sessionID)
 			}
+		},
+		OnSessionClosed: func(ctx context.Context, sessionID string) {
+			c.onSessionClosed(ctx, sessionID)
 		},
 	}
 }
@@ -520,11 +592,17 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	go func() {
 		var recall string
 		if surfacedBytes < maxSessionRecallBytes {
-			var retriever engine.Retriever
+			// Check backend type for recall routing.
 			if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-				retriever = c.memoryEngine.Retriever()
+				if c.memoryEngine.Backend() == "transcript" {
+					// Transcript backend: read from local EventStore.
+					recall = buildTranscriptRecallBlock(prefetchCtx, c.memoryEngine.EventStore(), sessionID)
+				} else {
+					// Local/Hindsight backend: use retriever.
+					retriever := c.memoryEngine.Retriever()
+					recall = buildAutoRecallBlock(prefetchCtx, retriever, sessionID)
+				}
 			}
-			recall = buildAutoRecallBlock(prefetchCtx, retriever, sessionID)
 		}
 		memoryPrefetch.Settle(recall)
 		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)
@@ -603,9 +681,13 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 	if originalErr == nil && result != nil {
 		if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-			slog.Debug("Memory engine enabled, calling AfterTurnIdle")
-			if err := c.memoryEngine.AfterTurnIdle(context.Background(), sessionID, nil); err != nil {
-				slog.Warn("Memory engine AfterTurnIdle failed", "error", err, "session_id", sessionID)
+			if c.memoryEngine.Backend() == "transcript" || c.memoryEngine.Backend() == "hindsight" {
+				c.transcriptAfterTurn(ctx, sessionID)
+			} else {
+				slog.Debug("Memory engine enabled, calling AfterTurnIdle")
+				if err := c.memoryEngine.AfterTurnIdle(context.Background(), sessionID, nil); err != nil {
+					slog.Warn("Memory engine AfterTurnIdle failed", "error", err, "session_id", sessionID)
+				}
 			}
 		}
 	}
@@ -1205,6 +1287,13 @@ func (c *coordinator) buildToolsWithContext(ctx context.Context, agent config.Ag
 		registry.entries[entry.Name] = entry
 	}
 	deferredHints := collectDeferredToolHints(registry.entries, disabledSet)
+
+	c.deferredMu.Lock()
+	c.knownDeferredToolNames = make(map[string]bool, len(deferredHints))
+	for _, hint := range deferredHints {
+		c.knownDeferredToolNames[hint.Name] = true
+	}
+	c.deferredMu.Unlock()
 
 	if mode == session.CollaborationModePlan {
 		filteredTools = removeNonPlanSafeCustomTools(filteredTools, registry)
@@ -1927,6 +2016,15 @@ func (c *coordinator) activatedDeferredToolsForSession(sessionID string) map[str
 		clone[name] = struct{}{}
 	}
 	return clone
+}
+
+func (c *coordinator) isDeferredTool(name string) bool {
+	if name == "" {
+		return false
+	}
+	c.deferredMu.Lock()
+	defer c.deferredMu.Unlock()
+	return c.knownDeferredToolNames[strings.TrimSpace(name)]
 }
 
 func (c *coordinator) clearDeferredToolActivationsForSession(sessionID string) {

@@ -298,10 +298,11 @@ type MemoryConfig struct {
 	// Enabled enables the event-sourced memory engine.
 	Enabled *bool `json:"enabled,omitempty" jsonschema:"description=Enable the event-sourced memory engine,default=true"`
 	// Backend selects the memory backend. "local" uses the local event log and
-	// materialized files. "hindsight" uses Hindsight as the recall/reflect
-	// backend and uses the local event log only as a replication queue. "off"
-	// disables memory. When empty, Remote implies "hindsight"; otherwise "local".
-	Backend string `json:"backend,omitempty" jsonschema:"description=Memory backend to use,enum=local,enum=hindsight,enum=off,default=local"`
+	// materialized files. "hindsight" retains raw transcript windows to Hindsight
+	// every N turns and uses Hindsight as the recall/reflect backend. "transcript"
+	// retains raw transcript windows locally without LLM extraction.
+	// "off" disables memory. When empty, Remote implies "hindsight"; otherwise "local".
+	Backend string `json:"backend,omitempty" jsonschema:"description=Memory backend to use,enum=local,enum=hindsight,enum=transcript,enum=off,default=local"`
 	// Remote is the base URL of a remote Hindsight memory service (e.g. http://localhost:8888).
 	// Required when backend is "hindsight".
 	Remote string `json:"remote,omitempty" jsonschema:"description=Remote Hindsight memory service base URL (e.g. http://localhost:8888),format=uri"`
@@ -315,6 +316,9 @@ type MemoryConfig struct {
 	// "global" uses one shared bank, "per-project" appends the project slug to
 	// the bank ID, and "per-project-tagged" uses one bank with project tags.
 	RemoteScoping string `json:"remote_scoping,omitempty" jsonschema:"description=Remote Hindsight scoping mode,enum=global,enum=per-project,enum=per-project-tagged,default=per-project-tagged"`
+	// RetainEveryNTurns controls how often transcript windows are retained
+	// when using transcript-style backends. Defaults to 3.
+	RetainEveryNTurns int `json:"retain_every_n_turns,omitempty" jsonschema:"description=Retain transcript window every N turns (hindsight/transcript backends),default=3"`
 }
 
 // BackendName returns the effective memory backend.
@@ -328,6 +332,8 @@ func (m *MemoryConfig) BackendName() string {
 		return "off"
 	case "hindsight", "remote":
 		return "hindsight"
+	case "transcript":
+		return "transcript"
 	case "local":
 		return "local"
 	}
@@ -363,6 +369,15 @@ func (m *MemoryConfig) IsEnabled() bool {
 		return false
 	}
 	return m.BackendName() != "off"
+}
+
+// GetRetainEveryNTurns returns the configured retain interval for transcript backend.
+// Defaults to 3 if not set or invalid.
+func (m *MemoryConfig) GetRetainEveryNTurns() int {
+	if m == nil || m.RetainEveryNTurns <= 0 {
+		return 3
+	}
+	return m.RetainEveryNTurns
 }
 
 // Completions defines options for the completions UI.

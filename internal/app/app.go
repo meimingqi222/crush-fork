@@ -98,8 +98,17 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	timelineService := timeline.NewService()
 
 	var memoryEngine *engine.Engine
+	var app *App
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
 		runtimeService.DeleteSession(sessionID)
+		if app != nil && app.AgentCoordinator != nil {
+			if coord, ok := app.AgentCoordinator.(interface {
+				onSessionClosed(context.Context, string)
+			}); ok {
+				coord.onSessionClosed(context.Background(), sessionID)
+				return
+			}
+		}
 		if memoryEngine != nil {
 			if err := memoryEngine.OnSessionClosed(context.Background(), sessionID); err != nil {
 				slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
@@ -122,7 +131,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	basePermissions := permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, nil)
 	pluginRuntime := plugin.NewRuntime()
 
-	var app *App
 	app = &App{
 		Sessions:  sessions,
 		Messages:  messages,
@@ -216,10 +224,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			projectLabel := config.ProjectSlug(store.WorkingDir())
 			scope := hindsight.ResolveScope(memCfg.RemoteBankID, memCfg.RemoteScopingName(), projectLabel)
 			hsClient := hindsight.NewClient(memCfg.Remote, scope.BankID, token)
-			eng.SetMaterializer(hindsight.NewMaterializer(
+			eng.SetTranscriptRetainer(hindsight.NewTranscriptRetainer(
 				hsClient,
-				conn,
-				eng.EventStore(),
 				hindsight.WithRetainTags(scope.RetainTags),
 			))
 			eng.SetRetriever(hindsight.NewRetriever(
@@ -230,10 +236,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			go func() {
 				if err := hsClient.EnsureBank(context.Background(), ""); err != nil {
 					slog.Warn("Hindsight EnsureBank failed", "error", err)
-					return
-				}
-				if err := eng.TriggerMaterialization(context.Background()); err != nil {
-					slog.Warn("Startup memory materialization failed", "error", err)
 				}
 			}()
 			slog.Info(
@@ -243,6 +245,14 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 				"scoping", memCfg.RemoteScopingName(),
 				"project", projectLabel,
 			)
+		case "transcript":
+			// Transcript backend: no LLM extraction, no materializers.
+			// Memory is retained as raw transcript windows every N turns.
+			// Recall reads directly from EventStore.
+			eng.SetTranscriptRetainer(agent.NewTranscriptRetainer(eng.EventStore()))
+			startupMaterialization = false
+			slog.Info("Transcript memory backend enabled",
+				"retain_every_n_turns", memCfg.GetRetainEveryNTurns())
 		default:
 			writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
 			eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))

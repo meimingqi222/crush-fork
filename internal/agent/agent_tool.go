@@ -234,29 +234,6 @@ func validateExploreDelegations(tasks []taskGraphTask) string {
 
 func exploreDelegationViolation(prompt string) string {
 	text := strings.ToLower(prompt)
-
-	if containsAnyLower(text, []string{
-		"code review",
-		"review the current",
-		"review current",
-		"review this diff",
-		"review the diff",
-		"safe to merge",
-		"correctness approval",
-		"final review",
-		"security review",
-		"bug triage",
-		"审阅",
-		"代码审查",
-		"代码 review",
-		"最终审查",
-		"安全审查",
-		"是否正确",
-		"是否安全",
-	}) {
-		return "final review, correctness, security, or bug-triage decisions belong in the primary agent"
-	}
-
 	if containsAnyLower(text, []string{
 		"return their full contents",
 		"return the full contents",
@@ -274,61 +251,6 @@ func exploreDelegationViolation(prompt string) string {
 	}) {
 		return "full-file content relay belongs in the primary agent with direct file reads"
 	}
-
-	if containsAnyLower(text, []string{
-		"go test",
-		"go build",
-		"npm test",
-		"npm run",
-		"pnpm test",
-		"pnpm build",
-		"pnpm run",
-		"yarn test",
-		"pytest",
-		"cargo test",
-		"cargo build",
-		"run tests",
-		"run the tests",
-		"run build",
-		"run the build",
-		"reproduce the",
-		"reproduction",
-		"lint",
-		"跑测试",
-		"运行测试",
-		"执行测试",
-		"构建",
-		"复现",
-	}) {
-		return "build, test, lint, and reproduction tasks require the primary agent or `general`"
-	}
-
-	if containsAnyLower(text, []string{
-		"fix the",
-		"fix this",
-		"implement the",
-		"implement this",
-		"refactor",
-		"edit the",
-		"modify the",
-		"patch the",
-		"write code",
-		"修复",
-		"帮我实现",
-		"请实现",
-		"实现这个功能",
-		"实现这个修复",
-		"实现该功能",
-		"实现该修复",
-		"实现修复",
-		"实现功能",
-		"重构",
-		"编辑",
-		"修改代码",
-	}) {
-		return "implementation and code-modification work requires the primary agent or `general`"
-	}
-
 	return ""
 }
 

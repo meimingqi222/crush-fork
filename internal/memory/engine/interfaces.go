@@ -12,6 +12,8 @@ type EventFilter struct {
 	MinWatermark int64
 	Tags         []string
 	Limit        int
+	// OrderDesc returns the newest/highest-watermark events first when true.
+	OrderDesc bool
 	// IncludeExpired when true includes events whose expires_at is in the past.
 	// By default, expired events are excluded from query results.
 	IncludeExpired bool
@@ -47,6 +49,11 @@ type Extractor interface {
 type Consolidator interface {
 	// Consolidate processes episodic events and returns consolidated events.
 	Consolidate(ctx context.Context, events []MemoryEvent) ([]MemoryEvent, error)
+}
+
+// TranscriptRetainer retains bounded raw transcript windows without LLM extraction.
+type TranscriptRetainer interface {
+	RetainTranscript(ctx context.Context, sessionID string, turnCount int, content string) error
 }
 
 // Materializer renders consolidated memory events into consumer-facing

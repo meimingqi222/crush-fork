@@ -169,7 +169,9 @@ func TestTruncateOversizedToolResults(t *testing.T) {
 	assert.Contains(t, truncated, "This excerpt is incomplete")
 	assert.Contains(t, truncated, ".crush/truncation/")
 	assert.Contains(t, truncated, "Use the view tool")
-	assert.NotContains(t, truncated, "use grep")
+	assert.Contains(t, truncated, "offset/limit")
+	assert.Contains(t, truncated, "grep")
+	assert.Contains(t, truncated, "do not guess")
 
 	artifactMatches, globErr := filepath.Glob(filepath.Join(env.workingDir, ".crush", "truncation", "*.txt"))
 	require.NoError(t, globErr)
@@ -215,6 +217,7 @@ func TestTruncateOversizedToolResults_UnicodeSafe(t *testing.T) {
 	assert.True(t, utf8.ValidString(truncated), "truncated content must remain valid UTF-8")
 	assert.Contains(t, truncated, ".crush/truncation/")
 	assert.Contains(t, truncated, "This excerpt is incomplete")
+	assert.Contains(t, truncated, "do not guess")
 	assert.LessOrEqual(t, len([]rune(truncated)), contextWindowToolResultMaxChars)
 	assert.True(t, strings.HasPrefix(truncated, strings.Repeat("你", 1000)))
 }
@@ -244,17 +247,23 @@ func TestEnforceStepToolResultBudget_TruncatesOversizedStepAggregate(t *testing.
 	assert.Equal(t, original, string(artifactContent))
 }
 
-func TestEnforceStepToolResultBudget_OmitsWhenBudgetExhausted(t *testing.T) {
+func TestEnforceStepToolResultBudget_PreviewsWhenBudgetExhausted(t *testing.T) {
 	t.Parallel()
 
 	agent := &sessionAgent{}
 	used := contextWindowStepToolResultCharsLimit
-	result := message.ToolResult{Name: "glob", Content: strings.Repeat("x", 200)}
+	original := strings.Repeat("head", 200) + strings.Repeat("tail", 600)
+	result := message.ToolResult{Name: "glob", Content: original}
 
 	truncated := agent.enforceStepToolResultBudget("sess", result, &used)
 
 	assert.Contains(t, truncated.Content, "Step tool-result budget exhausted")
-	assert.Contains(t, truncated.Content, "200 characters omitted")
+	assert.Contains(t, truncated.Content, "Showing the last 2000 of 3200 characters")
+	assert.Contains(t, truncated.Content, "1200 characters omitted")
+	assert.Contains(t, truncated.Content, "do not guess")
+	assert.Contains(t, truncated.Content, "offset/limit")
+	assert.True(t, strings.HasPrefix(truncated.Content, strings.Repeat("tail", 500)))
+	assert.NotContains(t, truncated.Content, strings.Repeat("head", 20))
 	assert.Equal(t, contextWindowStepToolResultCharsLimit, used)
 }
 
@@ -328,19 +337,23 @@ func TestTruncateOversizedToolResults_ErrorResultUntouched(t *testing.T) {
 	assert.Empty(t, artifactMatches)
 }
 
-func TestEnforceStepToolResultBudget_OmitsWhenBudgetExhausted_PersistsFullOutput(t *testing.T) {
+func TestEnforceStepToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFullOutput(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
 	agent := &sessionAgent{workingDir: env.workingDir}
 	used := contextWindowStepToolResultCharsLimit
-	original := strings.Repeat("x", 200)
+	original := strings.Repeat("head", 200) + strings.Repeat("tail", 600)
 	result := message.ToolResult{Name: "glob", Content: original}
 
 	truncated := agent.enforceStepToolResultBudget("sess", result, &used)
 
 	assert.Contains(t, truncated.Content, "Step tool-result budget exhausted")
 	assert.Contains(t, truncated.Content, ".crush/truncation/")
+	assert.Contains(t, truncated.Content, "The full output was saved")
+	assert.Contains(t, truncated.Content, "Use the view tool with offset/limit or grep")
+	assert.True(t, strings.HasPrefix(truncated.Content, strings.Repeat("tail", 500)))
+	assert.NotContains(t, truncated.Content, strings.Repeat("head", 20))
 	assert.Equal(t, contextWindowStepToolResultCharsLimit, used)
 
 	artifactMatches, globErr := filepath.Glob(filepath.Join(env.workingDir, ".crush", "truncation", "*.txt"))
@@ -351,14 +364,15 @@ func TestEnforceStepToolResultBudget_OmitsWhenBudgetExhausted_PersistsFullOutput
 	assert.Equal(t, original, string(artifactContent))
 }
 
-func TestEnforceMessageToolResultBudget_OmitsWhenBudgetExhausted_PersistsFullOutput(t *testing.T) {
+func TestEnforceMessageToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFullOutput(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
 	agent := &sessionAgent{workingDir: env.workingDir}
+	messageOriginal := strings.Repeat("head", 200) + strings.Repeat("tail", 600)
 	results := []message.ToolResult{
 		{Name: "glob", Content: strings.Repeat("a", contextWindowMessageToolResultCharsLimit)},
-		{Name: "grep", Content: strings.Repeat("b", 120)},
+		{Name: "grep", Content: messageOriginal},
 	}
 
 	budgeted := agent.enforceMessageToolResultBudget("sess", results)
@@ -367,11 +381,15 @@ func TestEnforceMessageToolResultBudget_OmitsWhenBudgetExhausted_PersistsFullOut
 	assert.Equal(t, results[0].Content, budgeted[0].Content)
 	assert.Contains(t, budgeted[1].Content, "Message tool-result budget exhausted")
 	assert.Contains(t, budgeted[1].Content, ".crush/truncation/")
+	assert.Contains(t, budgeted[1].Content, "The full output was saved")
+	assert.Contains(t, budgeted[1].Content, "Use the view tool with offset/limit or grep")
+	assert.True(t, strings.HasPrefix(budgeted[1].Content, strings.Repeat("tail", 500)))
+	assert.NotContains(t, budgeted[1].Content, strings.Repeat("head", 20))
 
 	artifactMatches, globErr := filepath.Glob(filepath.Join(env.workingDir, ".crush", "truncation", "*.txt"))
 	require.NoError(t, globErr)
 	require.Len(t, artifactMatches, 1)
 	artifactContent, readErr := os.ReadFile(artifactMatches[0])
 	require.NoError(t, readErr)
-	assert.Equal(t, results[1].Content, string(artifactContent))
+	assert.Equal(t, messageOriginal, string(artifactContent))
 }

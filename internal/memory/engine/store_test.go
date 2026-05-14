@@ -320,6 +320,33 @@ func TestEngine_StatusReportsBackend(t *testing.T) {
 	require.Equal(t, "hindsight", status.Backend)
 }
 
+func TestEventStore_QueryOrderDesc(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewSQLiteEventStore(db)
+	ctx := context.Background()
+
+	now := time.Now()
+	evt1 := testEvent(MemoryScopeSession, MemoryKindReference, "older")
+	evt1.Source.SessionID = "sess-order"
+	evt1.CreatedAt = now.Add(-time.Minute)
+	evt1.UpdatedAt = evt1.CreatedAt
+	evt2 := testEvent(MemoryScopeSession, MemoryKindReference, "newer")
+	evt2.Source.SessionID = "sess-order"
+	evt2.CreatedAt = now
+	evt2.UpdatedAt = now
+	require.NoError(t, store.Append(ctx, evt1))
+	require.NoError(t, store.Append(ctx, evt2))
+
+	events, err := store.Query(ctx, EventFilter{
+		SessionID: &evt1.Source.SessionID,
+		Limit:     1,
+		OrderDesc: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, evt2.Content, events[0].Content)
+}
+
 func TestEngine_Disabled(t *testing.T) {
 	db := setupTestDB(t)
 	engine := New(db, Config{Enabled: false})

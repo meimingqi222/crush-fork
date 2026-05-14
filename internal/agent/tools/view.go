@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -166,20 +167,38 @@ func NewReadTool(
 			}
 
 			// Check if file exists
+			requestedFilePath := filePath
+			var recovery viewPathRecovery
 			fileInfo, err := os.Stat(filePath)
 			if err != nil {
 				if os.IsNotExist(err) {
-					suggestions := findViewSuggestions(filePath)
-					message := fmt.Sprintf("File not found: %s", filePath)
-					if len(suggestions) > 0 {
-						message += fmt.Sprintf("\n\nDid you mean one of these?\n%s", strings.Join(suggestions, "\n"))
+					if !isOutsideWorkDir {
+						if recovered, ok := recoverMissingViewPath(absWorkingDir, relPath); ok {
+							if recoveredInfo, statErr := os.Stat(recovered.FilePath); statErr == nil {
+								filePath = recovered.FilePath
+								fileInfo = recoveredInfo
+								recovery = recovered
+								err = nil
+							} else {
+								err = statErr
+							}
+						}
 					}
-					return fantasy.WithResponseMetadata(
-						fantasy.NewTextErrorResponse(message),
-						newMissingViewMetadata(filePath, suggestions),
-					), nil
+					if err != nil && os.IsNotExist(err) {
+						suggestions := findViewSuggestions(requestedFilePath)
+						message := fmt.Sprintf("File not found: %s", requestedFilePath)
+						if len(suggestions) > 0 {
+							message += fmt.Sprintf("\n\nDid you mean one of these?\n%s", strings.Join(suggestions, "\n"))
+						}
+						return fantasy.WithResponseMetadata(
+							fantasy.NewTextErrorResponse(message),
+							newMissingViewMetadata(requestedFilePath, suggestions),
+						), nil
+					}
 				}
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("error accessing file: %v", err)), nil
+				if err != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("error accessing file: %v", err)), nil
+				}
 			}
 
 			// Check if it's a directory — automatically list its contents.
@@ -189,9 +208,11 @@ func NewReadTool(
 				if lsErr != nil {
 					return fantasy.NewTextErrorResponse(lsErr.Error()), nil
 				}
+				meta := ViewResponseMetadata{FilePath: filePath, Content: out, IsDirectory: true}
+				meta.applyRecovery(recovery)
 				return fantasy.WithResponseMetadata(
 					fantasy.NewTextResponse(out),
-					ViewResponseMetadata{FilePath: filePath, Content: out, IsDirectory: true},
+					meta,
 				), nil
 			}
 
@@ -230,7 +251,9 @@ func NewReadTool(
 					}
 				}
 
-				return fantasy.NewImageResponse(result.Data, result.MimeType), nil
+				meta := ViewResponseMetadata{FilePath: filePath}
+				meta.applyRecovery(recovery)
+				return fantasy.WithResponseMetadata(fantasy.NewImageResponse(result.Data, result.MimeType), meta), nil
 			}
 
 			// Read the file content.
@@ -283,6 +306,7 @@ func NewReadTool(
 				Content:  content,
 				Hashline: params.Hashline,
 			}
+			meta.applyRecovery(recovery)
 			if isSkillFile {
 				if skill, err := skills.Parse(filePath); err == nil {
 					meta.ResourceType = ViewResourceSkill
@@ -306,6 +330,84 @@ func newMissingViewMetadata(filePath string, suggestions []string) ViewResponseM
 	metadata.RecoveredBy = "file_not_found_suggestions"
 	metadata.RecoveryAction = fmt.Sprintf("File %q was not found. Try one of the suggested paths from the error message.", filePath)
 	return metadata
+}
+
+type viewPathRecovery struct {
+	FilePath       string
+	RecoveredBy    string
+	RecoveryAction string
+}
+
+func (metadata *ViewResponseMetadata) applyRecovery(recovery viewPathRecovery) {
+	if recovery.RecoveredBy == "" {
+		return
+	}
+	metadata.RecoveredBy = recovery.RecoveredBy
+	metadata.RecoveryAction = recovery.RecoveryAction
+}
+
+func recoverMissingViewPath(absWorkingDir, requestedRelPath string) (viewPathRecovery, bool) {
+	if requestedRelPath == "." || requestedRelPath == "" || strings.HasPrefix(requestedRelPath, ".."+string(filepath.Separator)) {
+		return viewPathRecovery{}, false
+	}
+
+	requestedSuffix := slashClean(requestedRelPath)
+	if requestedSuffix == "." || strings.HasPrefix(requestedSuffix, "../") {
+		return viewPathRecovery{}, false
+	}
+
+	var suffixMatches []string
+	var extensionMatches []string
+	walkErr := filepath.WalkDir(absWorkingDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == absWorkingDir {
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(absWorkingDir, path)
+		if relErr != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+			return nil
+		}
+
+		normalizedRelPath := slashClean(relPath)
+		if normalizedRelPath == requestedSuffix || strings.HasSuffix(normalizedRelPath, "/"+requestedSuffix) {
+			suffixMatches = append(suffixMatches, path)
+		}
+		if entry.IsDir() && pathpkg.Ext(requestedSuffix) != "" {
+			correctedSuffix := slashClean(strings.TrimSuffix(requestedSuffix, pathpkg.Ext(requestedSuffix)))
+			if correctedSuffix != "." && (normalizedRelPath == correctedSuffix || strings.HasSuffix(normalizedRelPath, "/"+correctedSuffix)) {
+				extensionMatches = append(extensionMatches, path)
+			}
+		}
+
+		return nil
+	})
+	if walkErr != nil {
+		return viewPathRecovery{}, false
+	}
+
+	if len(suffixMatches) == 1 {
+		return viewPathRecovery{
+			FilePath:       suffixMatches[0],
+			RecoveredBy:    "unique_suffix_recovery",
+			RecoveryAction: fmt.Sprintf("Recovered missing view path %q to unique workspace match %q.", requestedRelPath, suffixMatches[0]),
+		}, true
+	}
+	if len(suffixMatches) == 0 && len(extensionMatches) == 1 {
+		return viewPathRecovery{
+			FilePath:       extensionMatches[0],
+			RecoveredBy:    "directory_extension_recovery",
+			RecoveryAction: fmt.Sprintf("Recovered missing view path %q to unique directory match %q after removing the file extension.", requestedRelPath, extensionMatches[0]),
+		}, true
+	}
+
+	return viewPathRecovery{}, false
+}
+
+func slashClean(path string) string {
+	return pathpkg.Clean(filepath.ToSlash(path))
 }
 
 func findViewSuggestions(filePath string) []string {

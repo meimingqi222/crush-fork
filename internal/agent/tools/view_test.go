@@ -327,6 +327,54 @@ func TestViewTool_MissingFileIncludesSimilarPathSuggestions(t *testing.T) {
 	require.Contains(t, resp.Metadata, "file_not_found_suggestions")
 }
 
+func TestViewTool_RecoversMissingExtensionToUniqueDirectory(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	toolsDir := filepath.Join(tmpDir, "internal", "agent", "tools")
+	require.NoError(t, os.MkdirAll(toolsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(toolsDir, "view.go"), []byte("package tools"), 0o644))
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "internal/agent/tools.go"})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, resp.Content)
+	require.Contains(t, resp.Content, "view.go")
+
+	var meta ViewResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Equal(t, toolsDir, meta.FilePath)
+	require.Equal(t, "directory_extension_recovery", meta.RecoveredBy)
+	require.Contains(t, meta.RecoveryAction, "internal/agent/tools.go")
+	require.True(t, meta.IsDirectory)
+}
+
+func TestViewTool_MissingAmbiguousSuffixDoesNotRecover(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "internal", "agent"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "one", "internal", "agent"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "two", "internal", "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "internal", "agent", "tools.go.txt"), []byte("package tools"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "one", "internal", "agent", "tools.go"), []byte("package tools"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "two", "internal", "agent", "tools.go"), []byte("package tools"), 0o644))
+	permissions := &mockPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, &mockFileTracker{}, tmpDir, config.ToolLs{})
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runViewTool(t, tool, ctx, ViewParams{FilePath: "internal/agent/tools.go"})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "File not found")
+	require.Contains(t, resp.Content, "Did you mean one of these?")
+	require.Contains(t, resp.Content, "tools.go.txt")
+	require.Contains(t, resp.Metadata, "file_not_found_suggestions")
+	require.NotContains(t, resp.Metadata, "unique_suffix_recovery")
+}
+
 func TestViewTool_InvalidPathSyntaxReturnsToolErrorResponse(t *testing.T) {
 	t.Parallel()
 

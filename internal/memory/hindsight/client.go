@@ -5,8 +5,8 @@
 // package implements:
 //
 //   - Client: thin HTTP client for retain, recall, reflect, and bank setup.
-//   - Materializer: engine.Materializer that replicates local MemoryEvents to
-//     Hindsight via the retain endpoint.
+//   - TranscriptRetainer: engine.TranscriptRetainer that sends bounded transcript
+//     windows to Hindsight via the retain endpoint.
 //   - Retriever: engine.Retriever that uses Hindsight as the only recall and
 //     reflect source for the selected backend.
 package hindsight

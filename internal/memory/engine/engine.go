@@ -24,10 +24,11 @@ type Engine struct {
 	enabled bool
 	backend string
 
-	extractor     Extractor
-	consolidator  Consolidator
-	materializers []Materializer
-	retriever     Retriever
+	extractor          Extractor
+	consolidator       Consolidator
+	materializers      []Materializer
+	retriever          Retriever
+	transcriptRetainer TranscriptRetainer
 
 	lastExtractionRun         *time.Time
 	lastConsolidationRun      *time.Time
@@ -79,6 +80,22 @@ func New(db *sql.DB, cfg Config) *Engine {
 // EventStore returns the engine's event store.
 func (e *Engine) EventStore() EventStore {
 	return e.store
+}
+
+// Backend returns the configured memory backend type.
+func (e *Engine) Backend() string {
+	return e.backend
+}
+
+// SetTranscriptRetainer sets the transcript retainer for backends that retain
+// bounded raw transcript windows directly.
+func (e *Engine) SetTranscriptRetainer(retainer TranscriptRetainer) {
+	e.transcriptRetainer = retainer
+}
+
+// TranscriptRetainer returns the attached transcript retainer, or nil if not set.
+func (e *Engine) TranscriptRetainer() TranscriptRetainer {
+	return e.transcriptRetainer
 }
 
 // SetExtractor sets the Extractor component for the engine. When set,

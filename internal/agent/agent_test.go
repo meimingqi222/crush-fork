@@ -1785,8 +1785,9 @@ type textualToolProtocolTestAgent struct {
 }
 
 type deferredToolRuntimeStub struct {
-	mu        sync.Mutex
-	activated map[string]map[string]struct{}
+	mu             sync.Mutex
+	activated      map[string]map[string]struct{}
+	knownDeferred  map[string]bool
 }
 
 func (s *deferredToolRuntimeStub) activateDeferredToolsForSession(sessionID string, toolNames []string) []string {
@@ -1822,6 +1823,12 @@ func (s *deferredToolRuntimeStub) activatedDeferredToolsForSession(sessionID str
 		clone[name] = struct{}{}
 	}
 	return clone
+}
+
+func (s *deferredToolRuntimeStub) isDeferredTool(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.knownDeferred[name]
 }
 
 func (a *textualToolProtocolTestAgent) Generate(context.Context, fantasy.AgentCall) (*fantasy.AgentResult, error) {

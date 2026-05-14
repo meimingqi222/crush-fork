@@ -16,6 +16,8 @@ const hindsightViewName = "hindsight_replicate"
 // Materializer implements engine.Materializer by replicating new
 // MemoryEvents to the remote Hindsight service via the retain endpoint.
 // It uses watermark tracking to avoid re-sending already-replicated events.
+// This is kept for migrations and tests; the runtime Hindsight backend uses
+// TranscriptRetainer instead of event materialization.
 //
 // Only project-, user-, and global-scoped events with confidence >= 0.5 are
 // sent; session-scoped and working-memory events are skipped.

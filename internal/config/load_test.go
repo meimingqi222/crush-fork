@@ -88,8 +88,20 @@ func TestMemoryConfigBackendName(t *testing.T) {
 	require.Equal(t, "local", (&MemoryConfig{Backend: "LOCAL"}).BackendName())
 	require.Equal(t, "hindsight", (&MemoryConfig{Backend: "remote"}).BackendName())
 	require.Equal(t, "hindsight", (&MemoryConfig{Remote: "http://localhost:8888"}).BackendName())
+	require.Equal(t, "transcript", (&MemoryConfig{Backend: "transcript"}).BackendName())
 	require.Equal(t, "off", (&MemoryConfig{Backend: "disabled"}).BackendName())
 	require.Equal(t, "off", (&MemoryConfig{Backend: "off"}).BackendName())
+}
+
+func TestMemoryConfigGetRetainEveryNTurns(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 3, (*MemoryConfig)(nil).GetRetainEveryNTurns())
+	require.Equal(t, 3, (&MemoryConfig{}).GetRetainEveryNTurns())
+	require.Equal(t, 3, (&MemoryConfig{RetainEveryNTurns: 0}).GetRetainEveryNTurns())
+	require.Equal(t, 3, (&MemoryConfig{RetainEveryNTurns: -1}).GetRetainEveryNTurns())
+	require.Equal(t, 5, (&MemoryConfig{RetainEveryNTurns: 5}).GetRetainEveryNTurns())
+	require.Equal(t, 10, (&MemoryConfig{RetainEveryNTurns: 10}).GetRetainEveryNTurns())
 }
 
 func TestMemoryConfigRemoteScopingName(t *testing.T) {

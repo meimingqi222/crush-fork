@@ -238,19 +238,6 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	assert.Contains(t, defaultNames, "write")
 }
 
-func TestValidateExploreDelegationsBlocksCodeReview(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID:           "review",
-		Prompt:       "Review the current diff and decide whether it is safe to merge.",
-		SubagentType: config.AgentExplore,
-	}})
-
-	require.NotEmpty(t, message)
-	assert.Contains(t, message, "task \"review\" cannot use `explore`")
-	assert.Contains(t, message, "final review")
-	assert.Contains(t, message, "primary agent")
-}
-
 func TestValidateExploreDelegationsBlocksFileContentRelay(t *testing.T) {
 	message := validateExploreDelegations([]taskGraphTask{{
 		ID: "relay",
@@ -264,28 +251,26 @@ func TestValidateExploreDelegationsBlocksFileContentRelay(t *testing.T) {
 	assert.Contains(t, message, "direct file reads")
 }
 
-func TestValidateExploreDelegationsBlocksBuildTestLint(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID:           "test",
-		Prompt:       "Run go test ./internal/agent and investigate failures.",
-		SubagentType: config.AgentExplore,
-	}})
+func TestValidateExploreDelegationsAllowsQuestionableExplorePrompts(t *testing.T) {
+	tasks := []taskGraphTask{
+		{
+			ID:           "review-evidence",
+			Prompt:       "Review the current diff and report file:line evidence for the primary agent to verify.",
+			SubagentType: config.AgentExplore,
+		},
+		{
+			ID:           "test-command-reference",
+			Prompt:       "Find where go test ./internal/agent is documented. Do not run it.",
+			SubagentType: config.AgentExplore,
+		},
+		{
+			ID:           "fix-location",
+			Prompt:       "Locate the code likely responsible for the fix in coordinator.go and return concise evidence.",
+			SubagentType: config.AgentExplore,
+		},
+	}
 
-	require.NotEmpty(t, message)
-	assert.Contains(t, message, "build, test, lint")
-	assert.Contains(t, message, "`general`")
-}
-
-func TestValidateExploreDelegationsBlocksImplementation(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID:           "fix",
-		Prompt:       "Fix the bug in coordinator.go.",
-		SubagentType: config.AgentExplore,
-	}})
-
-	require.NotEmpty(t, message)
-	assert.Contains(t, message, "implementation")
-	assert.Contains(t, message, "`general`")
+	assert.Empty(t, validateExploreDelegations(tasks))
 }
 
 func TestValidateExploreDelegationsAllowsCodeLocationSearch(t *testing.T) {
@@ -293,6 +278,27 @@ func TestValidateExploreDelegationsAllowsCodeLocationSearch(t *testing.T) {
 		ID: "locate",
 		Prompt: "Locate the files and symbols involved in MCP authentication state " +
 			"rendering. Return concise file:line references and observed facts only.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	assert.Empty(t, message)
+}
+
+func TestValidateExploreDelegationsAllowsNegatedBuildTestLintInstruction(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID: "locate",
+		Prompt: "Locate red frame layer implementation. Return key files and line references. " +
+			"Do not run any build, test, lint, or non-git shell commands.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	assert.Empty(t, message)
+}
+
+func TestValidateExploreDelegationsAllowsChineseNegatedBuildTestLintInstruction(t *testing.T) {
+	message := validateExploreDelegations([]taskGraphTask{{
+		ID:           "locate",
+		Prompt:       "定位红色图框图层实现。不要运行任何构建、测试、lint 或非 git shell 命令。",
 		SubagentType: config.AgentExplore,
 	}})
 

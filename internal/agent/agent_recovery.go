@@ -235,7 +235,24 @@ func (a *sessionAgent) recoverTextualToolCallProtocol(ctx context.Context, genCt
 		var response fantasy.ToolResponse
 		var runErr error
 		if tool == nil {
-			runErr = fmt.Errorf("tool not found: %s", toolCall.Name)
+			if a.deferredToolRuntime != nil && a.deferredToolRuntime.isDeferredTool(toolCall.Name) {
+				payload, err := json.Marshal(map[string]any{
+					"recovered_by":         "deferred_tool_not_activated",
+					"recovery_action":      "Run tool_search with query \"select:" + toolCall.Name + "\" before using this tool.",
+					"fallback_tool":        "tool_search",
+					"fallback_tool_query":  "select:" + toolCall.Name,
+					"recovered_parameters": []string{"query"},
+					"tool":                 toolCall.Name,
+				})
+				if err != nil {
+					runErr = fmt.Errorf("tool not found: %s", toolCall.Name)
+				} else {
+					response = fantasy.NewTextErrorResponse(string(payload))
+					response.Metadata = string(payload)
+				}
+			} else {
+				runErr = fmt.Errorf("tool not found: %s", toolCall.Name)
+			}
 		} else {
 			response, runErr = tool.Run(toolCtx, fantasy.ToolCall{
 				ID:    toolCall.ID,

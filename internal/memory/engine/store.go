@@ -130,13 +130,17 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 		limit = 1000
 	}
 
+	orderDirection := "ASC"
+	if filter.OrderDesc {
+		orderDirection = "DESC"
+	}
 	query := fmt.Sprintf(`
 		SELECT id, session_id, scope, kind, content, summary, source_json, source_hash,
 		       confidence, importance, supersedes, tags_json, watermark, created_at, updated_at, expires_at
 		FROM memory_events
 		%s
-		ORDER BY watermark ASC
-		LIMIT ?`, whereClause)
+		ORDER BY watermark %s
+		LIMIT ?`, whereClause, orderDirection)
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

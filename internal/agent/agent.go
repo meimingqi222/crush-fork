@@ -203,6 +203,7 @@ type MemoryEngineHooks struct {
 type deferredToolRuntime interface {
 	activateDeferredToolsForSession(sessionID string, toolNames []string) []string
 	activatedDeferredToolsForSession(sessionID string) map[string]struct{}
+	isDeferredTool(name string) bool
 }
 
 type sessionAgent struct {
