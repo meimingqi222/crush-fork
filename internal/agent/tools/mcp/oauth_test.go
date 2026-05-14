@@ -17,6 +17,12 @@ func TestStateForError_MapsAuthErrors(t *testing.T) {
 	state := stateForError(&AuthRequiredError{Name: "notion"})
 	require.Equal(t, StateNeedsAuth, state)
 
+	state = stateForError(errors.New(`calling "initialize": sending "initialize": rejected by transport: Post "https://example.com/mcp": Unauthorized`))
+	require.Equal(t, StateNeedsAuth, state)
+
+	state = stateForError(errors.New("dial tcp 10.0.4.3:401: connect: connection refused"))
+	require.Equal(t, StateError, state)
+
 	state = stateForError(errors.New("boom"))
 	require.Equal(t, StateError, state)
 }

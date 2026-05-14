@@ -467,7 +467,40 @@ func stateForError(err error) State {
 	if _, ok := NeedsAuth(err); ok {
 		return StateNeedsAuth
 	}
+	if isAuthLikeError(err) {
+		return StateNeedsAuth
+	}
 	return StateError
+}
+
+func isAuthLikeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"unauthorized",
+		"forbidden",
+		"www-authenticate",
+		"authentication required",
+		"status 401",
+		"status: 401",
+		"status code 401",
+		"http 401",
+		"http/1.1 401",
+		"401 unauthorized",
+		"status 403",
+		"status: 403",
+		"status code 403",
+		"http 403",
+		"http/1.1 403",
+		"403 forbidden",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func Reconnect(ctx context.Context, cfg *config.ConfigStore, name string) error {
