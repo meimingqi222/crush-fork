@@ -671,15 +671,19 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
+		// Use a temp dir outside the git repo so worktree creation fails and
+		// the coordinator falls back to session isolation.
+		nonGitDir := t.TempDir()
+
 		parentSession, err := env.sessions.Create(t.Context(), "Parent")
 		require.NoError(t, err)
-		parentSession.WorkspaceCWD = env.workingDir
+		parentSession.WorkspaceCWD = nonGitDir
 		parentSession, err = env.sessions.Save(t.Context(), parentSession)
 		require.NoError(t, err)
 
 		agent := newMockAgent(providerID, 4096, func(ctx context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
 			require.Equal(t, "session", agenttools.GetAgentIsolationFromContext(ctx))
-			require.Equal(t, env.workingDir, agenttools.GetWorkingDirFromContext(ctx))
+			require.Equal(t, nonGitDir, agenttools.GetWorkingDirFromContext(ctx))
 			return agentResultWithText("ok"), nil
 		})
 
@@ -701,7 +705,7 @@ func TestRunSubAgent(t *testing.T) {
 
 		childSession, err := env.sessions.Get(t.Context(), subtask.ChildSessionID)
 		require.NoError(t, err)
-		require.Equal(t, env.workingDir, childSession.WorkspaceCWD)
+		require.Equal(t, nonGitDir, childSession.WorkspaceCWD)
 	})
 
 	t.Run("clears inherited parent runtime config before subagent run", func(t *testing.T) {

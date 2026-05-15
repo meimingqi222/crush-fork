@@ -3,6 +3,7 @@ Fast file pattern matching tool that finds files by name/pattern, returning path
 <usage>
 - Provide glob pattern to match against file paths
 - Optional starting directory (defaults to current working directory)
+- Use Glob for uncertain file-name lookups before read. Do not call read on a path that has only been inferred.
 - Results sorted with most recently modified files first
 </usage>
 
@@ -35,6 +36,7 @@ Fast file pattern matching tool that finds files by name/pattern, returning path
 
 <tips>
 - Combine with Grep: find files with Glob, search contents with Grep
+- Use patterns like `**/name.ext` to verify guessed basenames before reading them
 - For iterative exploration requiring multiple searches, consider Agent tool
 - Check if results truncated and refine pattern if needed
 </tips>

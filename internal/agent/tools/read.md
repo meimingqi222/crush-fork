@@ -54,6 +54,8 @@ When path is a directory:
 <tips>
 - Use with Glob to find files first
 - For code exploration: Grep to find relevant files, then read to examine
+- Do not use read to probe guessed paths. First ground uncertain paths with Glob, Grep, a directory read, or a path returned by another tool.
+- When a file is not found, follow the returned glob, parent-directory, or grep suggestion before retrying read.
 - For large files: use offset parameter for specific sections
 - When output says `Use offset=<n> to continue`, pass that exact offset in the next read call
 - Set `hashline=true` when preparing line-addressable edits

@@ -1242,7 +1242,7 @@ func (a *textualToolProtocolTestAgent) Stream(ctx context.Context, call fantasy.
 		if call.OnTextDelta != nil {
 			require.NoError(a.t, call.OnTextDelta(
 				"assistant",
-				"<|tool_calls_section_begin|><|tool_call_begin|>functions.view:15<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>",
+				"<|tool_calls_section_begin|><|tool_call_begin|>functions.read:15<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>",
 			))
 		}
 		if call.OnStepFinish != nil {
@@ -1290,7 +1290,7 @@ func TestShouldRetryForTextualToolCallProtocolAllowsToolUseWithoutStructuredTool
 		ID:   "assistant-1",
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
-			message.TextContent{Text: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.TextContent{Text: "<|tool_calls_section_begin|><|tool_call_begin|>functions.read<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
 			message.Finish{Reason: message.FinishReasonToolUse},
 		},
 	}
@@ -1305,7 +1305,7 @@ func TestShouldRetryForTextualToolCallProtocolDetectsReasoning(t *testing.T) {
 		ID:   "assistant-1",
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
-			message.ReasoningContent{Thinking: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.ReasoningContent{Thinking: "<|tool_calls_section_begin|><|tool_call_begin|>functions.read:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
 			message.Finish{Reason: message.FinishReasonEndTurn},
 		},
 	}
@@ -1320,14 +1320,14 @@ func TestParseTextualToolCallsFromAssistantUsesAnthropicSafeIDs(t *testing.T) {
 		ID:   "assistant-1",
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
-			message.TextContent{Text: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.TextContent{Text: "<|tool_calls_section_begin|><|tool_call_begin|>functions.read:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
 		},
 	}
 
 	toolCalls := parseTextualToolCallsFromAssistant(msg)
 
 	require.Len(t, toolCalls, 1)
-	require.Equal(t, "functions_view_25", toolCalls[0].ID)
+	require.Equal(t, "functions_read_25", toolCalls[0].ID)
 	require.Equal(t, agenttools.ReadToolName, toolCalls[0].Name)
 	require.Equal(t, `{"file_path":"main.go"}`, toolCalls[0].Input)
 }
@@ -1339,7 +1339,7 @@ func TestStripTextualToolCallProtocolFromAssistant(t *testing.T) {
 		ID:   "assistant-1",
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
-			message.TextContent{Text: "I will inspect it.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.view:6<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
+			message.TextContent{Text: "I will inspect it.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.read:6<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>"},
 			message.ReasoningContent{Thinking: "Thinking first.\n<|tool_calls_section_begin|><|tool_call_begin|>functions.grep:7<|tool_call_argument_begin|>{\"pattern\":\"x\"}<|tool_call_end|><|tool_calls_section_end|>"},
 			message.ToolCall{ID: "call-1", Name: agenttools.ReadToolName, Input: `{"file_path":"main.go"}`, Finished: true},
 		},

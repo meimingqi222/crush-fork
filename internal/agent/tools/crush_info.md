@@ -10,6 +10,9 @@ state.
 </usage>
 
 <tips>
+- Check [paths] first when diagnosing config/database location issues
+- Check [context_files] to verify which AGENTS.md or CRUSH.md files are active
+- Check [memory] for memory engine backend, event count, and materialized view state
 - Check [lsp] and [mcp] sections for service health
 - Check [providers] and [model] to confirm model/provider wiring
 - Check [permissions] and [tools] when tool calls are blocked

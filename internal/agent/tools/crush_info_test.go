@@ -98,7 +98,7 @@ func TestCrushInfo_HighValueSections(t *testing.T) {
 	readyClient.SetServerState(lsp.StateReady)
 	lspManager.Clients().Set("gopls", readyClient)
 
-	output := buildCrushInfo(store, lspManager)
+	output := buildCrushInfo(context.Background(), store, lspManager, nil)
 
 	require.Contains(t, output, "[model]")
 	require.Contains(t, output, "[providers]")
@@ -161,7 +161,7 @@ func TestCrushInfo_NoSecretsLeak(t *testing.T) {
 		Models: []catwalk.Model{{ID: "gpt-4o"}},
 	})
 
-	output := buildCrushInfo(store, nil)
+	output := buildCrushInfo(context.Background(), store, nil, nil)
 	require.NotContains(t, output, "sk-super-secret-key-12345")
 	require.NotContains(t, output, "secret-key")
 	require.Contains(t, output, "openai = enabled (1 models)")
@@ -169,9 +169,47 @@ func TestCrushInfo_NoSecretsLeak(t *testing.T) {
 
 func TestCrushInfoToolRun(t *testing.T) {
 	store := loadCrushInfoTestStore(t)
-	tool := NewCrushInfoTool(store, nil)
+	tool := NewCrushInfoTool(store, nil, nil)
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{ID: "call-1", Name: CrushInfoToolName, Input: "{}"})
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "[options]")
+}
+
+func TestCrushInfo_PathsSection(t *testing.T) {
+	store := loadCrushInfoTestStore(t)
+	output := buildCrushInfo(context.Background(), store, nil, nil)
+	require.Contains(t, output, "[paths]")
+	require.Contains(t, output, "working_dir =")
+	require.Contains(t, output, "global_config =")
+	require.Contains(t, output, "global_data =")
+}
+
+func TestCrushInfo_ContextFilesSection(t *testing.T) {
+	workingDir := t.TempDir()
+	globalConfigRoot := filepath.Join(t.TempDir(), "crush-info-global")
+	globalDataRoot := filepath.Join(t.TempDir(), "crush-info-data")
+	require.NoError(t, os.MkdirAll(globalConfigRoot, 0o755))
+	require.NoError(t, os.MkdirAll(globalDataRoot, 0o755))
+
+	t.Setenv("CRUSH_GLOBAL_CONFIG", globalConfigRoot)
+	t.Setenv("CRUSH_GLOBAL_DATA", globalDataRoot)
+	t.Setenv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+	t.Cleanup(func() {
+		require.NoError(t, crushlog.ResetForTesting())
+	})
+
+	payload, err := json.Marshal(map[string]any{})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "crush.json"), payload, 0o600))
+
+	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "AGENTS.md"), []byte("# test"), 0o600))
+
+	store, err := config.Load(workingDir, "", false)
+	require.NoError(t, err)
+	store.SetWorkingDir(workingDir)
+
+	output := buildCrushInfo(context.Background(), store, nil, nil)
+	require.Contains(t, output, "[context_files]")
+	require.Contains(t, output, "AGENTS.md = loaded")
 }

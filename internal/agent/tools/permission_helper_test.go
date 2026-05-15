@@ -51,6 +51,12 @@ func (m *mockToolPermissionService) ClearSkillContext()               {}
 func (m *mockToolPermissionService) GetSkillContext() (string, []string) {
 	return "", nil
 }
+func (m *mockToolPermissionService) GetDenialQueue(string) permission.DenialQueueReader {
+	return nil
+}
+func (m *mockToolPermissionService) GetDenialQueueEditor(string) permission.DenialQueueEditor {
+	return nil
+}
 
 func TestRequestPermission_ReturnsToolErrorForPolicyDenied(t *testing.T) {
 	t.Parallel()

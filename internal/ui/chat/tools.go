@@ -434,6 +434,19 @@ func (t *baseToolMessageItem) computeStatus() ToolStatus {
 		if t.result.IsError {
 			return ToolStatusError
 		}
+		// If runtime indicates failure or cancellation, trust it over the
+		// result. Some tools (like bash) may return a non-error result even
+		// when the runtime reports failure (e.g., non-zero exit code).
+		if t.runtimeState != nil {
+			switch t.runtimeState.Status {
+			case toolruntime.StatusFailed:
+				return ToolStatusError
+			case toolruntime.StatusCanceled:
+				return ToolStatusCanceled
+			case toolruntime.StatusCompleted:
+				return ToolStatusSuccess
+			}
+		}
 		return ToolStatusSuccess
 	}
 	if t.runtimeState != nil {

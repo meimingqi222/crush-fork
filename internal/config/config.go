@@ -49,6 +49,12 @@ var defaultContextPaths = []string{
 	"Agents.md",
 }
 
+// DefaultContextPaths returns the default set of context file paths
+// probed for project-specific AI instructions.
+func DefaultContextPaths() []string {
+	return append([]string(nil), defaultContextPaths...)
+}
+
 type SelectedModelType string
 
 // String returns the string representation of the [SelectedModelType].

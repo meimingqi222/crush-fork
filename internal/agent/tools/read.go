@@ -71,6 +71,10 @@ type ReadResponseMetadata struct {
 	ResourceType        ReadResourceType `json:"resource_type,omitempty"`
 	ResourceName        string           `json:"resource_name,omitempty"`
 	ResourceDescription string           `json:"resource_description,omitempty"`
+	MissingPath         string           `json:"missing_path,omitempty"`
+	SuggestedGlobs      []string         `json:"suggested_globs,omitempty"`
+	SuggestedParentDirs []string         `json:"suggested_parent_dirs,omitempty"`
+	RecoveryAvailable   *bool            `json:"recovery_available,omitempty"`
 	RecoveredBy         string           `json:"recovered_by,omitempty"`
 	RecoveryAction      string           `json:"recovery_action,omitempty"`
 	FallbackTool        string           `json:"fallback_tool,omitempty"`
@@ -351,13 +355,22 @@ func handleFileRead(
 			}
 			if err != nil && os.IsNotExist(err) {
 				suggestions := findReadSuggestions(requestedFilePath)
-				message := fmt.Sprintf("File not found: %s", requestedFilePath)
+				advice := buildMissingReadAdvice(absWorkingDir, requestedFilePath, relPath)
+				message := fmt.Sprintf("File not found: %s", advice.MissingPath)
 				if len(suggestions) > 0 {
 					message += fmt.Sprintf("\n\nDid you mean one of these?\n%s", strings.Join(suggestions, "\n"))
 				}
+				message += "\n\nNext steps:"
+				for _, glob := range advice.SuggestedGlobs {
+					message += fmt.Sprintf("\n- Use glob pattern: %s", glob)
+				}
+				for _, parentDir := range advice.SuggestedParentDirs {
+					message += fmt.Sprintf("\n- Read parent directory: %s", parentDir)
+				}
+				message += "\n- Search symbol/content with grep before retrying read"
 				return fantasy.WithResponseMetadata(
 					fantasy.NewTextErrorResponse(message),
-					newMissingReadMetadata(requestedFilePath, suggestions),
+					newMissingReadMetadata(advice, suggestions),
 				), nil
 			}
 		}
@@ -486,14 +499,80 @@ func handleFileRead(
 	), nil
 }
 
-func newMissingReadMetadata(filePath string, suggestions []string) ReadResponseMetadata {
-	metadata := ReadResponseMetadata{Path: filePath}
-	if len(suggestions) == 0 {
-		return metadata
+type missingReadAdvice struct {
+	MissingPath         string
+	SuggestedGlobs      []string
+	SuggestedParentDirs []string
+}
+
+func newMissingReadMetadata(advice missingReadAdvice, suggestions []string) ReadResponseMetadata {
+	recoveryAvailable := false
+	metadata := ReadResponseMetadata{
+		Path:                advice.MissingPath,
+		MissingPath:         advice.MissingPath,
+		SuggestedGlobs:      advice.SuggestedGlobs,
+		SuggestedParentDirs: advice.SuggestedParentDirs,
+		RecoveryAvailable:   &recoveryAvailable,
 	}
 	metadata.RecoveredBy = "file_not_found_suggestions"
-	metadata.RecoveryAction = fmt.Sprintf("File %q was not found. Try one of the suggested paths from the error message.", filePath)
+	if len(suggestions) > 0 {
+		metadata.RecoveryAction = fmt.Sprintf("File %q was not found. Try one of the suggested paths from the error message, or ground the path with glob/grep before retrying read.", advice.MissingPath)
+	} else {
+		metadata.RecoveryAction = fmt.Sprintf("File %q was not found. Ground the path with glob/grep or read an existing parent directory before retrying read.", advice.MissingPath)
+	}
 	return metadata
+}
+
+func buildMissingReadAdvice(absWorkingDir, requestedFilePath, requestedRelPath string) missingReadAdvice {
+	missingPath := displayMissingReadPath(absWorkingDir, requestedFilePath, requestedRelPath)
+	base := pathpkg.Base(slashClean(missingPath))
+	if base == "." || base == "/" {
+		base = filepath.Base(requestedFilePath)
+	}
+
+	advice := missingReadAdvice{
+		MissingPath: missingPath,
+	}
+	if base != "" && base != "." && base != string(filepath.Separator) {
+		advice.SuggestedGlobs = []string{"**/" + base}
+	}
+	if parentDir := nearestExistingParentDir(absWorkingDir, requestedFilePath); parentDir != "" {
+		advice.SuggestedParentDirs = []string{parentDir}
+	}
+	return advice
+}
+
+func displayMissingReadPath(absWorkingDir, requestedFilePath, requestedRelPath string) string {
+	if requestedRelPath != "" && requestedRelPath != ".." && !strings.HasPrefix(requestedRelPath, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(requestedRelPath)
+	}
+	if rel, err := filepath.Rel(absWorkingDir, requestedFilePath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(requestedFilePath)
+}
+
+func nearestExistingParentDir(absWorkingDir, requestedFilePath string) string {
+	dir := filepath.Dir(requestedFilePath)
+	for dir != "." && dir != "" {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			if rel, relErr := filepath.Rel(absWorkingDir, dir); relErr == nil {
+				if rel == "." {
+					return ""
+				}
+				if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return filepath.ToSlash(rel)
+				}
+			}
+			return filepath.ToSlash(dir)
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+		dir = next
+	}
+	return ""
 }
 
 type readPathRecovery struct {

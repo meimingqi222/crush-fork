@@ -648,6 +648,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Anthropic `redacted_thinking` content block, so subsequent
 	// prepareStep invocations strip those blocks from the history.
 	var stripRedactedThinking bool
+	// inStepCompactionBase holds the compacted messages produced by the
+	// ChatMessagesTransform plugin during a PrepareStep call. On each
+	// subsequent step we prepend this base instead of the full fantasy-
+	// agent history, so the plugin's compaction is effectively persistent
+	// within the run. inStepCompactionOffset records how many messages
+	// options.Messages contained at the time of compaction; messages at
+	// or after that index are the "new" messages appended since.
+	var inStepCompactionBase []fantasy.Message
+	var inStepCompactionOffset int
 	runStream := func(providerOptions fantasy.ProviderOptions, billFirstStepAsUser bool) (*fantasy.AgentResult, error) {
 		prefetchedRecallInjected := prefetchedRecallReady
 		currentAssistant = nil
@@ -656,6 +665,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		allRunMessageIDs = nil
 		estimatedPromptTokens = 0
 		shouldSummarize = false
+		inStepCompactionBase = nil
+		inStepCompactionOffset = 0
 		completedStepsThisRun = 0
 		runToolUses = 0
 		runLastTool = ""
@@ -756,7 +767,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					prepared.Tools[len(prepared.Tools)-1].SetProviderOptions(a.getCacheControlOptions())
 				}
 
-				prepared.Messages = options.Messages
+				// If the plugin performed a significant in-step compaction on a
+				// previous step, reconstruct prepared.Messages from the compacted
+				// base plus only the messages added since that compaction. This
+				// makes the plugin's compaction persistent across steps within a
+				// single run — without it the fantasy agent rebuilds the full
+				// initialPrompt+responseMessages slice on every iteration,
+				// causing the plugin to re-compact every step indefinitely.
+				if inStepCompactionBase != nil && inStepCompactionOffset <= len(options.Messages) {
+					newMsgs := options.Messages[inStepCompactionOffset:]
+					prepared.Messages = append(append([]fantasy.Message{}, inStepCompactionBase...), newMsgs...)
+				} else {
+					prepared.Messages = options.Messages
+				}
 				for i := range prepared.Messages {
 					prepared.Messages[i].ProviderOptions = nil
 				}
@@ -896,6 +919,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 								currentSession.LastPromptTokens = newTokens
 							}
 							sessionLock.Unlock()
+							// When the plugin reduces tokens by more than 40%, treat it as a
+							// real compaction. Persist the result as the new base so future
+							// steps continue from the compacted state instead of the full
+							// fantasy-agent history (which rebuilds every step).
+							if newTokens*10 < originalTokens*6 {
+								inStepCompactionBase = prepared.Messages
+								inStepCompactionOffset = len(options.Messages)
+								slog.Debug("Per-step compaction base updated",
+									"base_tokens", newTokens,
+									"offset", inStepCompactionOffset,
+									"session_id", call.SessionID,
+								)
+							}
 						}
 					}
 				}
@@ -2386,6 +2422,20 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// summarization. Without this, the full unpruned payload sent
 	// to transforms can exceed plugin buffer limits on large sessions.
 	msgs = builtinPruneToolResults(msgs)
+
+	// Filter out non-text content if the summary model doesn't support images
+	if !summaryModel.CatwalkCfg.SupportsImages {
+		originalCount := message.CountNonTextContent(msgs)
+		msgs = message.FilterNonTextContent(msgs)
+		filteredCount := message.CountNonTextContent(msgs)
+		itemsRemoved := originalCount - filteredCount
+		if itemsRemoved > 0 {
+			slog.Info("Filtered non-text content for summarization",
+				"session_id", sessionID,
+				"model", summaryModel.ModelCfg.Model,
+				"items_removed", itemsRemoved)
+		}
+	}
 
 	if shouldReactiveCompactMessages(compactingPurpose) {
 		reactiveCompacted, reactiveErr := a.reactiveCompactSessionMessages(ctx, sessionID, summaryModel, providerCtx, msgs)

@@ -6,7 +6,8 @@ Required JSON shape:
 {
   "allow_auto": true,
   "reason": "short explanation",
-  "confidence": "low"
+  "confidence": "low",
+  "soft_deny": true
 }
 
 Policy sections:
@@ -21,3 +22,7 @@ Decision rules:
 - If you are unsure, set "allow_auto" to false.
 - Keep "reason" short and concrete.
 - "confidence" must be one of: "low", "medium", "high".
+- "soft_deny" controls whether the user can override the denial:
+  - true (default): User can review and approve the blocked action later.
+  - false: Hard deny - action is too dangerous to retry, user cannot override.
+  - Use soft_deny=false only for clearly destructive actions (e.g., rm -rf, git push --force, publishing packages).

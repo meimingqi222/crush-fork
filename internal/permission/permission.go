@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -130,6 +131,12 @@ type AutoClassification struct {
 	AllowAuto  bool                   `json:"allow_auto"`
 	Reason     string                 `json:"reason"`
 	Confidence AutoApprovalConfidence `json:"confidence"`
+	// SoftDeny indicates that while the classifier blocked this request,
+	// it's a "soft" denial that can be overridden by user approval.
+	// Hard denials (SoftDeny=false) are for truly dangerous operations
+	// that should not be retryable even with user consent.
+	// Default is true (soft deny) for backward compatibility.
+	SoftDeny bool `json:"soft_deny,omitempty"`
 }
 
 type AutoReviewTrigger string
@@ -172,6 +179,38 @@ type Service interface {
 	SetSkillContext(skillName string, allowedTools []string)
 	ClearSkillContext()
 	GetSkillContext() (skillName string, allowedTools []string)
+	// GetDenialQueue returns the denial queue for the given session.
+	// Returns nil if the session has no denial queue (e.g., not in auto mode).
+	// This is used by the UI to display recent Guardian denials and allow retry.
+	GetDenialQueue(sessionID string) DenialQueueReader
+	// GetDenialQueueEditor returns an editor for the denial queue.
+	// Returns nil if the session has no denial queue.
+	// This is used for modifying the queue (e.g., removing approved entries).
+	GetDenialQueueEditor(sessionID string) DenialQueueEditor
+}
+
+// DenialQueueReader provides read-only access to a denial queue.
+type DenialQueueReader interface {
+	Entries() []*DenialQueueEntry
+	Size() int
+	IsEmpty() bool
+}
+
+// DenialQueueEditor provides write access to a denial queue.
+type DenialQueueEditor interface {
+	DenialQueueReader
+	// Take removes and returns the entry with the given ID.
+	// Returns nil if not found.
+	Take(id string) *DenialQueueEntry
+}
+
+// DenialQueueEntry represents a permission request that was blocked by the Guardian classifier.
+type DenialQueueEntry struct {
+	ID        string
+	Request   PermissionRequest
+	Reason    string
+	Timestamp time.Time
+	Retryable bool
 }
 
 type permissionService struct {
@@ -429,6 +468,18 @@ func (s *permissionService) GetSkillContext() (string, []string) {
 	s.skillContextMu.RLock()
 	defer s.skillContextMu.RUnlock()
 	return s.skillName, s.skillAllowed
+}
+
+// GetDenialQueue returns nil for the base permission service.
+// The autopermission wrapper provides the actual implementation.
+func (s *permissionService) GetDenialQueue(sessionID string) DenialQueueReader {
+	return nil
+}
+
+// GetDenialQueueEditor returns nil for the base permission service.
+// The autopermission wrapper provides the actual implementation.
+func (s *permissionService) GetDenialQueueEditor(sessionID string) DenialQueueEditor {
+	return nil
 }
 
 // isToolAllowedBySkill checks if a tool is allowed by the current skill context.

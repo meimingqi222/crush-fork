@@ -33,6 +33,7 @@ type autoClassifierResponse struct {
 	AllowAuto  bool                              `json:"allow_auto"`
 	Reason     string                            `json:"reason"`
 	Confidence permission.AutoApprovalConfidence `json:"confidence"`
+	SoftDeny   bool                              `json:"soft_deny"`
 }
 
 func (c *coordinator) ClassifyPermission(ctx context.Context, req permission.PermissionRequest) (permission.AutoClassification, error) {
@@ -305,6 +306,7 @@ func parseAutoClassification(raw string) (permission.AutoClassification, error) 
 		AllowAuto:  payload.AllowAuto,
 		Reason:     strings.TrimSpace(payload.Reason),
 		Confidence: payload.Confidence,
+		SoftDeny:   payload.SoftDeny,
 	}, nil
 }
 
@@ -370,6 +372,7 @@ func parseAutoClassificationTextFallback(raw string) (permission.AutoClassificat
 				AllowAuto:  false,
 				Reason:     truncateFallbackReason(text),
 				Confidence: permission.AutoApprovalConfidenceLow,
+				SoftDeny:   true, // Default to soft deny for text fallback
 			}, true
 		}
 	}

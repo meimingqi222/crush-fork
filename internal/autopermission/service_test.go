@@ -74,6 +74,12 @@ func (m *mockPermissionService) ClearSkillContext()               {}
 func (m *mockPermissionService) GetSkillContext() (string, []string) {
 	return "", nil
 }
+func (m *mockPermissionService) GetDenialQueue(string) permission.DenialQueueReader {
+	return nil
+}
+func (m *mockPermissionService) GetDenialQueueEditor(string) permission.DenialQueueEditor {
+	return nil
+}
 
 type mockSessionService struct {
 	mode  session.PermissionMode

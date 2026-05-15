@@ -830,3 +830,41 @@ func FromFantasyMessages(msgs []fantasy.Message) []Message {
 	}
 	return result
 }
+
+// FilterNonTextContent filters out non-text content from messages for non-multimodal models.
+// This removes ImageURLContent and BinaryContent parts from all messages.
+func FilterNonTextContent(msgs []Message) []Message {
+	filtered := make([]Message, 0, len(msgs))
+	for _, msg := range msgs {
+		filteredMsg := msg
+		filteredMsg.Parts = make([]ContentPart, 0, len(msg.Parts))
+		for _, part := range msg.Parts {
+			// Skip non-text content types (images, binary files, etc.)
+			if _, ok := part.(ImageURLContent); ok {
+				continue
+			}
+			if _, ok := part.(BinaryContent); ok {
+				continue
+			}
+			filteredMsg.Parts = append(filteredMsg.Parts, part)
+		}
+		filtered = append(filtered, filteredMsg)
+	}
+	return filtered
+}
+
+// CountNonTextContent counts the number of non-text content parts in messages.
+func CountNonTextContent(msgs []Message) int {
+	count := 0
+	for _, msg := range msgs {
+		for _, part := range msg.Parts {
+			if _, ok := part.(ImageURLContent); ok {
+				count++
+			}
+			if _, ok := part.(BinaryContent); ok {
+				count++
+			}
+		}
+	}
+	return count
+}

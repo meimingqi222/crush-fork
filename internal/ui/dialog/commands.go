@@ -63,6 +63,7 @@ type Commands struct {
 	permissionMode session.PermissionMode
 	proposedPlan   string
 	selected       CommandType
+	denialCount    int // Number of items in denial queue
 
 	spinner spinner.Model
 	loading bool
@@ -83,7 +84,7 @@ type Commands struct {
 var _ Dialog = (*Commands)(nil)
 
 // NewCommands creates a new commands dialog.
-func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue, queuePaused bool, mode session.CollaborationMode, permissionMode session.PermissionMode, proposedPlan string, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
+func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue, queuePaused bool, mode session.CollaborationMode, permissionMode session.PermissionMode, proposedPlan string, denialCount int, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
 	c := &Commands{
 		com:            com,
 		selected:       SystemCommands,
@@ -95,6 +96,7 @@ func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, has
 		mode:           mode,
 		permissionMode: permissionMode,
 		proposedPlan:   proposedPlan,
+		denialCount:    denialCount,
 		customCommands: customCommands,
 		mcpPrompts:     mcpPrompts,
 	}
@@ -459,6 +461,10 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		}
 		if c.permissionMode != session.PermissionModeYolo {
 			commands = append(commands, NewCommandItem(c.com.Styles, "set_mode_yolo", "Enable YOLO Mode", "", ActionToggleAutoMode{SessionID: c.sessionID, NextMode: session.PermissionModeYolo}))
+		}
+		// Show denial queue command if there are denied actions in auto mode
+		if c.denialCount > 0 {
+			commands = append(commands, NewCommandItem(c.com.Styles, "review_denials", "Review Guardian Denials", "", ActionOpenDialog{DenialsID}))
 		}
 	}
 

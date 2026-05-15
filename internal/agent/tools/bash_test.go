@@ -70,6 +70,12 @@ func (m *mockBashPermissionService) ClearSkillContext()               {}
 func (m *mockBashPermissionService) GetSkillContext() (string, []string) {
 	return "", nil
 }
+func (m *mockBashPermissionService) GetDenialQueue(string) permission.DenialQueueReader {
+	return nil
+}
+func (m *mockBashPermissionService) GetDenialQueueEditor(string) permission.DenialQueueEditor {
+	return nil
+}
 
 func TestBashTool_DefaultAutoBackgroundThreshold(t *testing.T) {
 	workingDir := t.TempDir()

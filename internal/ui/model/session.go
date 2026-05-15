@@ -554,6 +554,18 @@ func (m *UI) captureViewState() {
 	}
 }
 
+func (m *UI) selectedHasChildSession() bool {
+	selected := m.chat.SelectedMessageItem()
+	if selected == nil {
+		return false
+	}
+	if _, ok := selected.(*chat.TaskNodeItem); ok {
+		return true
+	}
+	toolItem, ok := selected.(chat.ToolMessageItem)
+	return ok && isChildSessionToolCall(toolItem.ToolCall().Name)
+}
+
 func (m *UI) openSelectedChildSession() tea.Cmd {
 	if m.session == nil {
 		return nil

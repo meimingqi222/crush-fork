@@ -99,6 +99,15 @@ func TestCoderPromptTemplateRequiresOrchestrationFirstDelegation(t *testing.T) {
 	assert.Contains(t, promptText, "If you describe a plan that depends on subagents but then continue doing the delegated work yourself without calling `agent`, you are behaving incorrectly")
 }
 
+func TestCoderPromptTemplateRequiresPathGroundingBeforeRead(t *testing.T) {
+	promptText := string(coderPromptTmpl)
+
+	assert.Contains(t, promptText, "Ground file paths before reading")
+	assert.Contains(t, promptText, "only read paths explicitly provided by the user")
+	assert.Contains(t, promptText, "do not probe guessed paths with read")
+	assert.Contains(t, promptText, "do not retry guessed paths until a tool confirms the exact path")
+}
+
 func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	env := testEnv(t)
 	cfg, err := config.Init(env.workingDir, "", false)
@@ -190,7 +199,7 @@ func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
 	for _, tool := range toolSet {
 		names = append(names, tool.Info().Name)
 	}
-	assert.Equal(t, []string{tools.SubagentFinishToolName, tools.ToolSearchToolName, tools.ReadToolName}, names)
+	assert.Equal(t, []string{tools.ReadToolName, tools.SubagentFinishToolName, tools.ToolSearchToolName}, names)
 }
 
 func TestDeriveSubagentPermissionsDenyWins(t *testing.T) {
@@ -264,10 +273,10 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"lsp_workspace_symbols",
 		"memory_status",
 		"plan_exit",
+		"read",
 		"recall",
 		"reflect",
 		"request_user_input",
-		"read",
 	}, planNames)
 	assert.NotContains(t, planNames, AgentToolName)
 	assert.NotContains(t, planNames, "agentic_fetch")

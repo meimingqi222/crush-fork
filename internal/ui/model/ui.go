@@ -2411,6 +2411,24 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			m.com.App.Permissions.Deny(msg.Permission)
 		}
 
+	case dialog.ActionApproveDenial:
+		// User approved a previously denied action from the denial queue.
+		// Grant the permission for session so it can be retried without blocking.
+		m.dialog.CloseDialog(dialog.DenialsID)
+		if m.session != nil {
+			if editor := m.com.App.Permissions.GetDenialQueueEditor(m.session.ID); editor != nil {
+				if entry := editor.Take(msg.EntryID); entry != nil {
+					// Grant persistent permission for this action so it won't block again
+					m.com.App.Permissions.GrantPersistent(entry.Request)
+					cmds = append(cmds, util.ReportInfo(fmt.Sprintf("Approved: %s %s. You can retry the action.", entry.Request.ToolName, entry.Request.Action)))
+				} else {
+					cmds = append(cmds, util.ReportInfo("Denial entry not found. It may have been already processed."))
+				}
+			} else {
+				cmds = append(cmds, util.ReportInfo("Could not access denial queue."))
+			}
+		}
+
 	case dialog.ActionFilePickerSelected:
 		cmds = append(cmds, tea.Sequence(
 			msg.Cmd(),
@@ -3487,6 +3505,9 @@ func (m *UI) ShortHelp() []key.Binding {
 			)
 		case uiFocusMain:
 			binds = append(binds, k.Chat.UpDown)
+			if m.selectedHasChildSession() {
+				binds = append(binds, k.Chat.SessionChild)
+			}
 		}
 	default:
 		binds = append(binds,
@@ -4597,6 +4618,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openFilesDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.DenialsID:
+		if cmd := m.openDenialsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.QuitID:
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -4618,6 +4643,26 @@ func (m *UI) openQuitDialog() tea.Cmd {
 
 	quitDialog := dialog.NewQuit(m.com)
 	m.dialog.OpenDialog(quitDialog)
+	return nil
+}
+
+// openDenialsDialog opens the denials review dialog.
+func (m *UI) openDenialsDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.DenialsID) {
+		// Bring to front
+		m.dialog.BringToFront(dialog.DenialsID)
+		return nil
+	}
+
+	var entries []*permission.DenialQueueEntry
+	if m.session != nil {
+		if dq := m.com.App.Permissions.GetDenialQueue(m.session.ID); dq != nil {
+			entries = dq.Entries()
+		}
+	}
+
+	denialsDialog := dialog.NewDenialsDialog(m.com, entries)
+	m.dialog.OpenDialog(denialsDialog)
 	return nil
 }
 
@@ -4663,7 +4708,14 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 	if m.session != nil {
 		permissionMode = m.session.PermissionMode
 	}
-	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, queuePaused, mode, permissionMode, m.latestProposedPlan, m.customCommands, m.mcpPrompts)
+	// Get denial queue count for auto mode
+	denialCount := 0
+	if m.session != nil {
+		if dq := m.com.App.Permissions.GetDenialQueue(m.session.ID); dq != nil {
+			denialCount = dq.Size()
+		}
+	}
+	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, queuePaused, mode, permissionMode, m.latestProposedPlan, denialCount, m.customCommands, m.mcpPrompts)
 	if err != nil {
 		return util.ReportError(err)
 	}

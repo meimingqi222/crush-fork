@@ -85,6 +85,7 @@ type sessionClassifierState struct {
 	consecutiveBlocks   int
 	totalBlocks         int
 	suspendAutoApproval bool
+	denialQueue         *DenialQueue
 }
 
 type service struct {
@@ -441,8 +442,16 @@ func (s *service) handleGuardianReview(ctx context.Context, sessionAuthorityID s
 		"action", req.Action,
 		"reason", strings.TrimSpace(classification.Reason),
 		"confidence", classification.Confidence,
+		"soft_deny", classification.SoftDeny,
 	)
 	s.recordClassifierBlock(sessionAuthorityID)
+	// Soft deny (default true) means user can override; hard deny means not retryable
+	retryable := classification.SoftDeny // defaults to false if not set, but we want true
+	// For backward compatibility: if SoftDeny is not explicitly set, treat as soft deny (retryable)
+	if !classification.AllowAuto && classification.SoftDeny == false && classification.Confidence == "" {
+		retryable = true // Default to retryable for old classifiers that don't set SoftDeny
+	}
+	s.pushDenialEntry(sessionAuthorityID, req, classification.Reason, retryable)
 	// Fall back to manual approval instead of outright denying.
 	// This allows users to override Guardian decisions when appropriate.
 	return s.promptWithEscalation(ctx, withAutoReview(req, permission.AutoReview{
@@ -569,7 +578,10 @@ func (s *service) shouldSuspendAutoApproval(sessionID string, mode session.Permi
 		return false
 	}
 	if state.lastMode != session.PermissionModeAuto {
-		state = sessionClassifierState{lastMode: mode}
+		state = sessionClassifierState{
+			lastMode:    mode,
+			denialQueue: NewDenialQueue(defaultMaxDenialQueueSize),
+		}
 		s.sessionStates[sessionID] = state
 		slog.Debug("Auto Mode classifier state initialized",
 			"session_id", sessionID,
@@ -628,6 +640,98 @@ func (s *service) recordClassifierBlock(sessionID string) {
 			"consecutive_blocks", state.consecutiveBlocks,
 			"total_blocks", state.totalBlocks,
 		)
+	}
+}
+
+func (s *service) pushDenialEntry(sessionID string, req permission.PermissionRequest, reason string, retryable bool) {
+	s.classifierMu.Lock()
+	state := s.sessionStates[sessionID]
+	if state.denialQueue == nil {
+		state.denialQueue = NewDenialQueue(defaultMaxDenialQueueSize)
+		s.sessionStates[sessionID] = state
+	}
+	q := state.denialQueue
+	s.classifierMu.Unlock()
+
+	entry := q.Push(req, reason, retryable)
+	slog.Debug("Auto Mode denial entry pushed",
+		"session_id", sessionID,
+		"entry_id", entry.ID,
+		"tool", req.ToolName,
+		"action", req.Action,
+		"retryable", retryable,
+	)
+}
+
+// GetDenialQueue returns the denial queue for the given session.
+// Returns nil if the session has no denial queue (e.g., not in auto mode).
+func (s *service) GetDenialQueue(sessionID string) permission.DenialQueueReader {
+	s.classifierMu.Lock()
+	state := s.sessionStates[sessionID]
+	s.classifierMu.Unlock()
+	if state.denialQueue == nil {
+		return nil
+	}
+	return &denialQueueReaderAdapter{q: state.denialQueue}
+}
+
+// denialQueueReaderAdapter adapts DenialQueue to permission.DenialQueueReader.
+type denialQueueReaderAdapter struct {
+	q *DenialQueue
+}
+
+func (a *denialQueueReaderAdapter) Entries() []*permission.DenialQueueEntry {
+	return a.q.AsPermissionEntries()
+}
+
+func (a *denialQueueReaderAdapter) Size() int {
+	return a.q.Size()
+}
+
+func (a *denialQueueReaderAdapter) IsEmpty() bool {
+	return a.q.IsEmpty()
+}
+
+// GetDenialQueueEditor returns an editor for the denial queue.
+// Returns nil if the session has no denial queue.
+func (s *service) GetDenialQueueEditor(sessionID string) permission.DenialQueueEditor {
+	s.classifierMu.Lock()
+	state := s.sessionStates[sessionID]
+	s.classifierMu.Unlock()
+	if state.denialQueue == nil {
+		return nil
+	}
+	return &denialQueueEditorAdapter{q: state.denialQueue}
+}
+
+// denialQueueEditorAdapter adapts DenialQueue to permission.DenialQueueEditor.
+type denialQueueEditorAdapter struct {
+	q *DenialQueue
+}
+
+func (a *denialQueueEditorAdapter) Entries() []*permission.DenialQueueEntry {
+	return a.q.AsPermissionEntries()
+}
+
+func (a *denialQueueEditorAdapter) Size() int {
+	return a.q.Size()
+}
+
+func (a *denialQueueEditorAdapter) IsEmpty() bool {
+	return a.q.IsEmpty()
+}
+
+func (a *denialQueueEditorAdapter) Take(id string) *permission.DenialQueueEntry {
+	entry := a.q.Take(id)
+	if entry == nil {
+		return nil
+	}
+	return &permission.DenialQueueEntry{
+		ID:        entry.ID,
+		Request:   entry.Request,
+		Reason:    entry.Reason,
+		Timestamp: entry.Timestamp,
+		Retryable: entry.Retryable,
 	}
 }
 

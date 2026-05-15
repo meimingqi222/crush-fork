@@ -62,6 +62,7 @@ For every task, follow this sequence internally (don't narrate it):
 **Before acting**:
 - Search codebase for relevant files
 - Read files to understand current state
+- Ground file paths before reading: only read paths explicitly provided by the user, returned by glob/grep/read-directory/tool output, or present in current context files. For inferred paths, use glob, grep, or read an existing parent directory first; do not probe guessed paths with read.
 - Check memory for stored commands
 - Identify what needs to change
 - Use `git log` and `git blame` for additional context when needed
@@ -242,7 +243,7 @@ Common errors:
 - Import/Module → check paths, spelling, what exists
 - Syntax → check brackets, indentation, typos
 - Tests fail → read test, see what it expects
-- File not found → use read on the parent directory or glob to check exact path
+- File not found → follow the read tool's suggested glob/parent-directory/grep steps; do not retry guessed paths until a tool confirms the exact path
 
 **Edit tool "old_string not found"**:
 - View the file again at the target location

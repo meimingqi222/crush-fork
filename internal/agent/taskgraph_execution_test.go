@@ -548,7 +548,7 @@ func TestRunTaskGraphDirect_KeepsFinishSummaryInAutoMode(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "- a: completed")
-	require.Contains(t, resp.Content, "found the code")
+	require.Contains(t, resp.Content, "raw untrusted content")
 	require.NotContains(t, resp.Content, message.SanitizedToolResultStub)
 }
 
@@ -896,7 +896,7 @@ func TestRunTaskGraphDirect_TruncatesTaskOutputsForModel(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "Task outputs:")
-	require.Contains(t, resp.Content, "[truncated]")
+	require.Contains(t, resp.Content, "[truncated;")
 }
 
 func TestCoordinatorCancelCancelsActiveSubAgents(t *testing.T) {

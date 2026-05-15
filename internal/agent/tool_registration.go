@@ -104,7 +104,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),
-		agenttools.NewCrushInfoTool(c.cfg, c.lspManager),
+		agenttools.NewCrushInfoTool(c.cfg, c.lspManager, c.memoryEngine),
 		agenttools.NewCrushLogsTool(filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
 		agenttools.NewRetainTool(c.memoryEngineEventStore(), c.permissions, c.cfg.WorkingDir(), c.memoryEngine),
 		agenttools.NewRecallTool(c.memoryEngineRetriever(), c.memoryEngineEventStore()),

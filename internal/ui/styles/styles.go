@@ -246,8 +246,9 @@ type Styles struct {
 			ThinkingFooterDuration lipgloss.Style // Duration value
 
 			// Summary section styles
-			SummaryBox            lipgloss.Style // Background for summary content
-			SummaryHeader         lipgloss.Style // "Context Summary" header label
+			SummaryBox            lipgloss.Style // Body box for summary content
+			SummaryHeader         lipgloss.Style // Pill tag for the header row
+			SummaryHeaderLine     lipgloss.Style // Fill line after the header tag
 			SummaryTruncationHint lipgloss.Style // "… (N lines hidden)" hint
 
 			AssistantInfoIcon     lipgloss.Style
@@ -1293,9 +1294,17 @@ func DefaultStyles() Styles {
 	s.Chat.Message.ThinkingFooterDuration = s.Subtle
 
 	// Summary section styles
-	s.Chat.Message.SummaryBox = s.Subtle.Background(bgOverlay)
-	s.Chat.Message.SummaryHeader = s.Base.Foreground(info).Bold(true)
-	s.Chat.Message.SummaryTruncationHint = s.Muted
+	s.Chat.Message.SummaryBox = lipgloss.NewStyle().
+		Foreground(fgBase).
+		Background(bgBaseLighter).
+		BorderStyle(lipgloss.ThickBorder()).
+		BorderLeft(true).
+		BorderForeground(blue).
+		PaddingLeft(2).
+		PaddingRight(1)
+	s.Chat.Message.SummaryHeader = base.Bold(true).Padding(0, 1).Background(blueLight).Foreground(white)
+	s.Chat.Message.SummaryHeaderLine = s.Muted
+	s.Chat.Message.SummaryTruncationHint = s.Subtle.Italic(true)
 
 	// Text selection.
 	s.TextSelection = lipgloss.NewStyle().Foreground(charmtone.Salt).Background(charmtone.Charple)

@@ -235,9 +235,13 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 }
 
 // renderSummary renders context compaction summary content in a collapsible
-// box with a header, using a distinct background color.
+// box with a distinct header tag row and a left-bordered body.
 func (a *AssistantMessageItem) renderSummary(content string, width int) string {
-	renderer := common.MarkdownRenderer(a.sty, width)
+	// Account for left border (1) + left padding (2) + right padding (1).
+	const boxOverhead = 4
+	innerWidth := max(width-boxOverhead, 10)
+
+	renderer := common.MarkdownRenderer(a.sty, innerWidth)
 	rendered, err := renderer.Render(content)
 	if err != nil {
 		rendered = content
@@ -248,18 +252,38 @@ func (a *AssistantMessageItem) renderSummary(content string, width int) string {
 	totalLines := len(lines)
 
 	isTruncated := totalLines > maxCollapsedSummaryHeight
+	var hint string
 	if !a.summaryExpanded && isTruncated {
 		lines = lines[:maxCollapsedSummaryHeight]
-		hint := a.sty.Chat.Message.SummaryTruncationHint.Render(
+		hint = a.sty.Chat.Message.SummaryTruncationHint.Render(
 			fmt.Sprintf(assistantMessageTruncateFormat, totalLines-maxCollapsedSummaryHeight),
 		)
-		lines = append(lines, "", hint)
 	}
 
-	header := a.sty.Chat.Message.SummaryHeader.Render("Context Summary")
+	// Header row: pill tag followed by a fill line.
+	tag := a.sty.Chat.Message.SummaryHeader.Render("◈ CONTEXT SUMMARY")
+	tagWidth := lipgloss.Width(tag)
+	fillWidth := width - tagWidth - 1
+	var headerRow string
+	if fillWidth > 0 {
+		fill := a.sty.Chat.Message.SummaryHeaderLine.Render(
+			strings.Repeat(styles.SectionSeparator, fillWidth),
+		)
+		headerRow = tag + " " + fill
+	} else {
+		headerRow = tag
+	}
+
+	// Body box with left border accent and padding.
 	bodyContent := strings.Join(lines, "\n")
 	summaryStyle := a.sty.Chat.Message.SummaryBox.Width(width)
-	result := summaryStyle.Render(header + "\n\n" + bodyContent)
+	body := summaryStyle.Render(bodyContent)
+
+	parts := []string{headerRow, body}
+	if hint != "" {
+		parts = append(parts, "  "+hint)
+	}
+	result := strings.Join(parts, "\n")
 	a.summaryBoxHeight = lipgloss.Height(result)
 	return result
 }

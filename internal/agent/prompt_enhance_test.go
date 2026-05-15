@@ -50,6 +50,28 @@ func TestEnhancePromptModelPrefersSmallConfiguredModel(t *testing.T) {
 	cfg, err := config.Init(env.workingDir, "", false)
 	require.NoError(t, err)
 
+	// Explicitly wire up a deterministic test small model so the test is
+	// self-contained and does not rely on the user's real global config
+	// (which may point to a provider whose base_url is missing/deleted).
+	const testProviderID = "test-small-provider"
+	const testModelID = "test-small-model"
+	wantProviderCfg := config.ProviderConfig{
+		ID:      testProviderID,
+		Type:    openaicompat.Name,
+		BaseURL: "http://localhost:1", // not actually dialed during model selection
+		APIKey:  "test-key",
+		Models: []catwalk.Model{{
+			ID:               testModelID,
+			ContextWindow:    64_000,
+			DefaultMaxTokens: 2_048,
+		}},
+	}
+	cfg.Config().Providers.Set(testProviderID, wantProviderCfg)
+	cfg.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
+		Provider: testProviderID,
+		Model:    testModelID,
+	}
+
 	want := cfg.Config().Models[config.SelectedModelTypeSmall]
 	providerCfg, ok := cfg.Config().Providers.Get(want.Provider)
 	require.True(t, ok)

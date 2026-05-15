@@ -126,3 +126,149 @@ func BenchmarkPromptWithTextAttachments(b *testing.B) {
 		})
 	}
 }
+
+func TestFilterNonTextContent(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{
+			Role: User,
+			Parts: []ContentPart{
+				TextContent{Text: "Hello"},
+				ImageURLContent{URL: "http://example.com/image.png"},
+			},
+		},
+		{
+			Role: Assistant,
+			Parts: []ContentPart{
+				TextContent{Text: "Hi there"},
+				BinaryContent{
+					Path:     "/path/to/image.jpg",
+					MIMEType: "image/jpeg",
+					Data:     []byte("fake-image-data"),
+				},
+			},
+		},
+		{
+			Role: User,
+			Parts: []ContentPart{
+				TextContent{Text: "How are you?"},
+			},
+		},
+	}
+
+	filtered := FilterNonTextContent(msgs)
+
+	require.Equal(t, len(msgs), len(filtered), "Should preserve message count")
+
+	// First message should have text but not image
+	require.Equal(t, 1, len(filtered[0].Parts), "First message should have 1 part after filtering")
+	_, hasImage := filtered[0].Parts[0].(ImageURLContent)
+	require.False(t, hasImage, "First message should not have ImageURLContent")
+	_, hasText := filtered[0].Parts[0].(TextContent)
+	require.True(t, hasText, "First message should have TextContent")
+
+	// Second message should have text but not binary content
+	require.Equal(t, 1, len(filtered[1].Parts), "Second message should have 1 part after filtering")
+	_, hasBinary := filtered[1].Parts[0].(BinaryContent)
+	require.False(t, hasBinary, "Second message should not have BinaryContent")
+	_, hasText2 := filtered[1].Parts[0].(TextContent)
+	require.True(t, hasText2, "Second message should have TextContent")
+
+	// Third message should be unchanged (no non-text content)
+	require.Equal(t, 1, len(filtered[2].Parts), "Third message should have 1 part")
+	_, hasText3 := filtered[2].Parts[0].(TextContent)
+	require.True(t, hasText3, "Third message should have TextContent")
+}
+
+func TestFilterNonTextContentWithPDF(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{
+			Role: User,
+			Parts: []ContentPart{
+				TextContent{Text: "Here is a PDF"},
+				BinaryContent{
+					Path:     "/path/to/document.pdf",
+					MIMEType: "application/pdf",
+					Data:     []byte("fake-pdf-data"),
+				},
+			},
+		},
+	}
+
+	filtered := FilterNonTextContent(msgs)
+
+	require.Equal(t, len(msgs), len(filtered), "Should preserve message count")
+	// All binary content should be filtered for non-multimodal models
+	require.Equal(t, 1, len(filtered[0].Parts), "Binary content should be filtered")
+	_, hasPDF := filtered[0].Parts[0].(BinaryContent)
+	require.False(t, hasPDF, "PDF binary content should be filtered")
+	_, hasText := filtered[0].Parts[0].(TextContent)
+	require.True(t, hasText, "Text content should be preserved")
+}
+
+func TestFilterNonTextContentOnlyNonText(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{
+			Role: User,
+			Parts: []ContentPart{
+				ImageURLContent{URL: "http://example.com/image.png"},
+			},
+		},
+		{
+			Role: User,
+			Parts: []ContentPart{
+				BinaryContent{
+					Path:     "/path/to/image.jpg",
+					MIMEType: "image/jpeg",
+					Data:     []byte("fake-image-data"),
+				},
+			},
+		},
+	}
+
+	filtered := FilterNonTextContent(msgs)
+
+	require.Equal(t, len(msgs), len(filtered), "Should preserve message count")
+	// Messages with only non-text content should become empty
+	require.Equal(t, 0, len(filtered[0].Parts), "Message with only image URL should be empty")
+	require.Equal(t, 0, len(filtered[1].Parts), "Message with only binary content should be empty")
+}
+
+func TestCountNonTextContent(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{
+			Role: User,
+			Parts: []ContentPart{
+				TextContent{Text: "Hello"},
+				ImageURLContent{URL: "http://example.com/image1.png"},
+				ImageURLContent{URL: "http://example.com/image2.png"},
+			},
+		},
+		{
+			Role: Assistant,
+			Parts: []ContentPart{
+				TextContent{Text: "Hi"},
+				BinaryContent{
+					Path:     "/path/to/image.jpg",
+					MIMEType: "image/jpeg",
+					Data:     []byte("fake-image-data"),
+				},
+				BinaryContent{
+					Path:     "/path/to/document.pdf",
+					MIMEType: "application/pdf",
+					Data:     []byte("fake-pdf-data"),
+				},
+			},
+		},
+	}
+
+	count := CountNonTextContent(msgs)
+	require.Equal(t, 4, count, "Should count 4 non-text contents (2 URLs + 2 binary)")
+}

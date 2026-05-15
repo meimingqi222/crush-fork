@@ -4,6 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/skills"
 )
 
@@ -21,33 +24,163 @@ var crushInfoDescription []byte
 
 type CrushInfoParams struct{}
 
-func NewCrushInfoTool(cfg *config.ConfigStore, lspManager *lsp.Manager) fantasy.AgentTool {
+func NewCrushInfoTool(cfg *config.ConfigStore, lspManager *lsp.Manager, memEng *engine.Engine) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		CrushInfoToolName,
 		string(crushInfoDescription),
 		func(ctx context.Context, _ CrushInfoParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			_ = ctx
-			return fantasy.NewTextResponse(buildCrushInfo(cfg, lspManager)), nil
+			return fantasy.NewTextResponse(buildCrushInfo(ctx, cfg, lspManager, memEng)), nil
 		},
 	)
 }
 
-func buildCrushInfo(cfg *config.ConfigStore, lspManager *lsp.Manager) string {
+func buildCrushInfo(ctx context.Context, cfg *config.ConfigStore, lspManager *lsp.Manager, memEng *engine.Engine) string {
 	if cfg == nil {
 		return ""
 	}
 
 	var b strings.Builder
+	writePaths(&b, cfg)
+	writeContextFiles(&b, cfg)
 	writeModels(&b, cfg)
 	writeProviders(&b, cfg)
 	writeLSP(&b, lspManager, cfg)
 	writeMCP(&b, mcp.GetStates(), cfg)
+	writeMemory(&b, ctx, memEng, cfg)
 	writeSkills(&b, cfg)
 	writePermissions(&b, cfg)
 	writeDisabledTools(&b, cfg)
 	writeOptions(&b, cfg)
 	writeAttribution(&b, cfg)
 	return b.String()
+}
+
+func writePaths(b *strings.Builder, cfg *config.ConfigStore) {
+	b.WriteString("[paths]\n")
+	fmt.Fprintf(b, "working_dir = %s\n", cfg.WorkingDir())
+	if pdd := cfg.ProjectDataDir(); pdd != "" {
+		fmt.Fprintf(b, "project_data_dir = %s\n", pdd)
+		fmt.Fprintf(b, "database = %s\n", filepath.Join(pdd, "crush.db"))
+	}
+	fmt.Fprintf(b, "global_config = %s\n", config.GlobalConfig())
+	fmt.Fprintf(b, "global_data = %s\n", config.GlobalConfigData())
+	b.WriteString("\n")
+}
+
+func writeContextFiles(b *strings.Builder, cfg *config.ConfigStore) {
+	workingDir := cfg.WorkingDir()
+	type contextEntry struct {
+		path   string
+		global bool
+	}
+	var active []contextEntry
+
+	for _, name := range config.DefaultContextPaths() {
+		p := filepath.Join(workingDir, name)
+		if _, err := os.Stat(p); err == nil {
+			active = append(active, contextEntry{path: name})
+		}
+	}
+
+	if cfg.Config().Options != nil {
+		for _, cp := range cfg.Config().Options.ContextPaths {
+			if cp == "" {
+				continue
+			}
+			if !filepath.IsAbs(cp) {
+				cp = filepath.Join(workingDir, cp)
+			}
+			if _, err := os.Stat(cp); err == nil {
+				active = append(active, contextEntry{path: cp})
+			}
+		}
+	}
+
+	globalAgents := config.GlobalAgentsMD()
+	if _, err := os.Stat(globalAgents); err == nil {
+		active = append(active, contextEntry{path: globalAgents, global: true})
+	}
+
+	if len(active) == 0 {
+		return
+	}
+
+	b.WriteString("[context_files]\n")
+	for _, entry := range active {
+		if entry.global {
+			fmt.Fprintf(b, "%s = loaded (global)\n", entry.path)
+		} else {
+			fmt.Fprintf(b, "%s = loaded\n", entry.path)
+		}
+	}
+	b.WriteString("\n")
+}
+
+func writeMemory(b *strings.Builder, ctx context.Context, eng *engine.Engine, cfg *config.ConfigStore) {
+	if eng == nil {
+		return
+	}
+
+	b.WriteString("[memory]\n")
+	fmt.Fprintf(b, "backend = %s\n", eng.Backend())
+	if !eng.Enabled() {
+		b.WriteString("enabled = false\n")
+		b.WriteString("\n")
+		return
+	}
+	b.WriteString("enabled = true\n")
+
+	if eng.IsDegraded() {
+		fmt.Fprintf(b, "degraded = %s\n", eng.DegradedReason())
+	}
+
+	if store := eng.EventStore(); store != nil {
+		if wm, err := store.GetMaxWatermark(ctx); err == nil {
+			fmt.Fprintf(b, "max_watermark = %d\n", wm)
+		}
+	}
+
+	status, err := eng.Status(ctx)
+	if err == nil && status != nil {
+		if status.ExtractionStatus.LastRunAt != nil {
+			fmt.Fprintf(b, "extraction = %s (last: %s)\n",
+				status.ExtractionStatus.State,
+				status.ExtractionStatus.LastRunAt.Format("15:04:05"),
+			)
+		} else {
+			fmt.Fprintf(b, "extraction = %s\n", status.ExtractionStatus.State)
+		}
+		if status.ConsolidationStatus.LastRunAt != nil {
+			fmt.Fprintf(b, "consolidation = %s (last: %s, watermark: %d)\n",
+				status.ConsolidationStatus.State,
+				status.ConsolidationStatus.LastRunAt.Format("15:04:05"),
+				status.ConsolidationStatus.LastWatermark,
+			)
+		} else {
+			fmt.Fprintf(b, "consolidation = %s\n", status.ConsolidationStatus.State)
+		}
+		for _, view := range status.MaterializationViews {
+			if view.LastUpdatedAt != nil {
+				fmt.Fprintf(b, "view %s = watermark=%d, updated=%s\n",
+					view.ViewName, view.Watermark, view.LastUpdatedAt.Format("2006-01-02 15:04:05"),
+				)
+			} else {
+				fmt.Fprintf(b, "view %s = watermark=%d\n", view.ViewName, view.Watermark)
+			}
+		}
+	}
+
+	if cfg != nil && cfg.Config().Options != nil {
+		memoryDir := filepath.Join(cfg.Config().Options.DataDirectory, "memory")
+		summaryPath := filepath.Join(memoryDir, "memory_summary.md")
+		if _, err := os.Stat(summaryPath); err == nil {
+			fmt.Fprintf(b, "summary_file = %s (exists)\n", summaryPath)
+		} else {
+			fmt.Fprintf(b, "summary_file = %s (missing)\n", summaryPath)
+		}
+	}
+
+	b.WriteString("\n")
 }
 
 func writeModels(b *strings.Builder, cfg *config.ConfigStore) {

@@ -307,6 +307,40 @@ func TestBashToolMessageItemFinalRuntimeSnapshotRendersBeforeToolResultArrives(t
 	}
 }
 
+func TestBashToolMessageItemRuntimeFailedOverridesNonErrorResult(t *testing.T) {
+	t.Parallel()
+
+	input, err := json.Marshal(agenttools.BashParams{Command: "git diff", Description: "diff"})
+	require.NoError(t, err)
+
+	theme := styles.DefaultStyles()
+	item := NewBashToolMessageItem(&theme, message.ToolCall{
+		ID:       "tool-runtime-failed",
+		Name:     agenttools.BashToolName,
+		Input:    string(input),
+		Finished: true,
+	}, &message.ToolResult{
+		ToolCallID: "tool-runtime-failed",
+		Name:       agenttools.BashToolName,
+		Content:    "no changes",
+		IsError:    false,
+	}, false)
+	item.SetRuntimeState(&toolruntime.State{
+		ToolCallID:   "tool-runtime-failed",
+		ToolName:     agenttools.BashToolName,
+		Status:       toolruntime.StatusFailed,
+		SnapshotText: "exit code 1",
+	})
+
+	if bashItem, ok := item.(*BashToolMessageItem); ok {
+		require.Equal(t, ToolStatusError, bashItem.computeStatus())
+	}
+
+	rendered := ansi.Strip(item.Render(100))
+	require.Contains(t, rendered, styles.ToolError)
+	require.NotContains(t, rendered, styles.ToolSuccess)
+}
+
 func TestAssistantMessageOnlyRendersProposedPlanWithPlanExitToolCall(t *testing.T) {
 	t.Parallel()
 
