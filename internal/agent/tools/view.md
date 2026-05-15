@@ -1,9 +1,11 @@
-Reads and displays file contents with line numbers for examining code, logs, or text data.
+Views and displays file contents with line numbers for examining code, logs, or text data.
+
+IMPORTANT: This tool is named "view". Do NOT call it "read" — there is no "read" tool. Always use the tool name "view".
 
 <usage>
-- Provide file path to read
-- Optional offset: start reading from specific line (0-based)
-- Optional limit: control lines read (default 2000)
+- Provide file path to view
+- Optional offset: start viewing from specific line (0-based)
+- Optional limit: control lines viewed (default 2000)
 - Optional hashline: include hashline anchors for line-addressable editing
 - Optional wait_for_diagnostics: wait for LSP diagnostics before returning (default true; set false to prefer lower latency)
 - When file_path is a directory, returns a directory tree listing instead of file content
@@ -12,9 +14,9 @@ Reads and displays file contents with line numbers for examining code, logs, or 
 
 <features>
 - Displays contents with line numbers
-- Can read from any file position using offset
-- Handles large files by limiting lines read
-- Reports the exact next offset when more lines are available
+- Can view from any file position using offset
+- Handles large files by limiting lines viewed
+- Reports the exact next offset when more lines are available (pass as offset to continue viewing)
 - Reports the total line count when the end of the file is reached
 - Auto-truncates very long lines for display
 - Suggests similar filenames when file not found
@@ -47,7 +49,7 @@ When file_path is a directory:
 - Use with Glob to find files first
 - For code exploration: Grep to find relevant files, then view to examine
 - For large files: use offset parameter for specific sections
-- When output says `Use offset=<n> to continue`, pass that exact offset in the next call
+- When output says `Use offset=<n> to continue`, pass that exact offset in the next view call
 - Set `hashline=true` when preparing line-addressable edits or when exact text matching looks brittle
 - Tool automatically detects and renders image files
 - Pass a directory path to get a directory tree listing

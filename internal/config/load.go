@@ -637,11 +637,13 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 		}
 		model := c.GetModel(large.Provider, large.Model)
 		if model == nil {
-			large = defaultLarge
-			// override the model type to large
-			err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large)
-			if err != nil {
-				return fmt.Errorf("failed to update preferred large model: %w", err)
+			if largeModelSelected.Model == "" {
+				large = defaultLarge
+				// override the model type to large
+				err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large)
+				if err != nil {
+					return fmt.Errorf("failed to update preferred large model: %w", err)
+				}
 			}
 		} else {
 			if largeModelSelected.MaxTokens > 0 {
@@ -680,11 +682,13 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 
 		model := c.GetModel(small.Provider, small.Model)
 		if model == nil {
-			small = defaultSmall
-			// override the model type to small
-			err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small)
-			if err != nil {
-				return fmt.Errorf("failed to update preferred small model: %w", err)
+			if smallModelSelected.Model == "" {
+				small = defaultSmall
+				// override the model type to small
+				err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small)
+				if err != nil {
+					return fmt.Errorf("failed to update preferred small model: %w", err)
+				}
 			}
 		} else {
 			if smallModelSelected.MaxTokens > 0 {
@@ -732,10 +736,12 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 
 		model := c.GetModel(background.Provider, background.Model)
 		if model == nil {
-			background = large
-			err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeBackground, background)
-			if err != nil {
-				return fmt.Errorf("failed to update preferred background model: %w", err)
+			if backgroundModelSelected.Model == "" {
+				background = large
+				err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeBackground, background)
+				if err != nil {
+					return fmt.Errorf("failed to update preferred background model: %w", err)
+				}
 			}
 		} else {
 			if backgroundModelSelected.MaxTokens > 0 {
@@ -810,10 +816,13 @@ func resolveConfiguredModel(store *ConfigStore, c *Config, modelType SelectedMod
 
 	model := c.GetModel(resolved.Provider, resolved.Model)
 	if model == nil {
-		if err := store.UpdatePreferredModel(ScopeGlobal, modelType, fallback); err != nil {
-			slog.Warn("Failed to update preferred model fallback", "model_type", modelType, "error", err)
+		if selected.Model == "" {
+			if err := store.UpdatePreferredModel(ScopeGlobal, modelType, fallback); err != nil {
+				slog.Warn("Failed to update preferred model fallback", "model_type", modelType, "error", err)
+			}
+			return fallback
 		}
-		return fallback
+		return resolved
 	}
 
 	if selected.MaxTokens > 0 {

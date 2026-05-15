@@ -91,19 +91,7 @@ type textViewResult struct {
 
 var errViewOffsetBeyondEOF = errors.New("offset is beyond end of file")
 
-// NewViewTool is an alias for NewReadTool for backward compatibility.
 func NewViewTool(
-	lspManager *lsp.Manager,
-	permissions permission.Service,
-	filetracker filetracker.Service,
-	workingDir string,
-	lsConfig config.ToolLs,
-	skillsPaths ...string,
-) fantasy.AgentTool {
-	return NewReadTool(lspManager, permissions, filetracker, workingDir, lsConfig, skillsPaths...)
-}
-
-func NewReadTool(
 	lspManager *lsp.Manager,
 	permissions permission.Service,
 	filetracker filetracker.Service,
