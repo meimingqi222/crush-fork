@@ -1669,19 +1669,10 @@ func hyperProviderBaseURL(t *testing.T, provider fantasy.Provider) string {
 func TestEnableSessionMemory_BackendAware(t *testing.T) {
 	t.Parallel()
 
-	env := testEnv(t)
-	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
+	providerCfg := config.ProviderConfig{
 		ID:     "test-provider",
 		Type:   catwalk.TypeOpenAICompat,
 		Models: []catwalk.Model{{ID: "test-model"}},
-	})
-	coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
-		Provider: "test-provider",
-		Model:    "test-model",
-	}
-	coord.cfg.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
-		Provider: "test-provider",
-		Model:    "test-model",
 	}
 
 	tests := []struct {
@@ -1694,6 +1685,20 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.backend, func(t *testing.T) {
+			t.Parallel()
+
+			// 每个 sub-test 独立创建 coordinator，避免 SetMemoryEngine 的并发写入竞争。
+			env := testEnv(t)
+			coord := newTestCoordinator(t, env, "test-provider", providerCfg)
+			coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
+				Provider: "test-provider",
+				Model:    "test-model",
+			}
+			coord.cfg.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
+				Provider: "test-provider",
+				Model:    "test-model",
+			}
+
 			conn, err := db.Connect(t.Context(), t.TempDir())
 			require.NoError(t, err)
 			t.Cleanup(func() { conn.Close() })

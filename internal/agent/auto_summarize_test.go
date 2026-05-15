@@ -12,6 +12,9 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/stretchr/testify/require"
@@ -1286,4 +1289,228 @@ func TestSummarizeRetriesWithoutAnthropicThinkingOnUnsignedReasoningError(t *tes
 	require.NoError(t, err)
 	require.Equal(t, 2, fakeAgent.summaryCalls)
 	require.Equal(t, []bool{true, false}, thinkingStates)
+}
+
+func TestSummarizeUsesBackgroundModelWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	sess, err := env.sessions.Create(t.Context(), "test-session")
+	require.NoError(t, err)
+
+	// 添加一条消息，确保 Summarize 有内容可处理
+	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "hello"},
+		},
+	})
+	require.NoError(t, err)
+
+	var capturedModel fantasy.LanguageModel
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+
+	// 创建独立的 background model 语言模型实例
+	bgLangModel := stubLanguageModel{
+		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
+			return nil, nil
+		},
+	}
+	largeLangModel := stubLanguageModel{
+		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
+			return nil, nil
+		},
+	}
+
+	bgModel := &backgroundModel{
+		model: Model{
+			Model: &bgLangModel,
+			CatwalkCfg: catwalk.Model{
+				ContextWindow:    200000,
+				DefaultMaxTokens: 1000,
+			},
+			ModelCfg: config.SelectedModel{Provider: "bg-provider", Model: "bg-model"},
+		},
+		provider: config.ProviderConfig{ID: "bg-provider"},
+	}
+
+	agent := NewSessionAgent(SessionAgentOptions{
+		LargeModel: Model{
+			Model: &largeLangModel,
+			CatwalkCfg: catwalk.Model{
+				ContextWindow:    10000,
+				DefaultMaxTokens: 1000,
+			},
+			ModelCfg: config.SelectedModel{Provider: "large-provider", Model: "large-model"},
+		},
+		SmallModel: Model{
+			CatwalkCfg: catwalk.Model{
+				ContextWindow:    10000,
+				DefaultMaxTokens: 1000,
+			},
+		},
+		BackgroundModel: bgModel,
+		SystemPrompt:    "",
+		WorkingDir:      env.workingDir,
+		IsYolo:          true,
+		Sessions:        env.sessions,
+		Messages:        env.messages,
+		AgentFactory: func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent {
+			// Summarize 内部用 retryableStreamModel 包装了模型，需要解包
+			if rsm, ok := model.(retryableStreamModel); ok {
+				capturedModel = rsm.LanguageModel
+			} else {
+				capturedModel = model
+			}
+			return fakeAgent
+		},
+		RetryWaitFunc: func(context.Context, time.Duration) error {
+			return nil
+		},
+	})
+
+	err = agent.Summarize(t.Context(), sess.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, &bgLangModel, capturedModel, "Summarize should use background model when configured")
+}
+
+// fakeGenLM 是一个支持 Generate 和 Stream 的 LanguageModel stub，
+// 用于测试中需要同时触发 Summarize 和 working memory 生成的场景。
+type fakeGenLM struct {
+	generateResp *fantasy.Response
+	generateErr  error
+	streamErr    error
+}
+
+func (m fakeGenLM) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
+	return m.generateResp, m.generateErr
+}
+
+func (m fakeGenLM) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	if m.streamErr != nil {
+		return nil, m.streamErr
+	}
+	return nil, nil
+}
+
+func (m fakeGenLM) GenerateObject(ctx context.Context, call fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
+	return nil, nil
+}
+
+func (m fakeGenLM) StreamObject(ctx context.Context, call fantasy.ObjectCall) (fantasy.ObjectStreamResponse, error) {
+	return nil, nil
+}
+
+func (m fakeGenLM) Provider() string { return "fake" }
+func (m fakeGenLM) Model() string    { return "fake-model" }
+
+func TestSummarizeTriggersWorkingMemoryGeneration(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	sess, err := env.sessions.Create(t.Context(), "test-session")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "hello world"}},
+	})
+	require.NoError(t, err)
+
+	// 创建独立的 EventStore 供 working memory 写入
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+	store := engine.NewSQLiteEventStore(conn)
+
+	// Background model 的 LanguageModel：Generate 返回有效的 session memory JSON
+	bgLM := fakeGenLM{
+		generateResp: &fantasy.Response{
+			Content: fantasy.ResponseContent{
+				fantasy.TextContent{Text: `[{"content": "test working memory"}]`},
+			},
+		},
+	}
+
+	bgModel := &backgroundModel{
+		model: Model{
+			Model: &bgLM,
+			CatwalkCfg: catwalk.Model{
+				ContextWindow:    200000,
+				DefaultMaxTokens: 1000,
+			},
+			ModelCfg: config.SelectedModel{Provider: "bg-provider", Model: "bg-model"},
+		},
+		provider: config.ProviderConfig{ID: "bg-provider"},
+	}
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+
+	largeLM := fakeGenLM{}
+	agent := NewSessionAgent(SessionAgentOptions{
+		LargeModel: Model{
+			Model: &largeLM,
+			CatwalkCfg: catwalk.Model{
+				ContextWindow:    10000,
+				DefaultMaxTokens: 1000,
+			},
+			ModelCfg: config.SelectedModel{Provider: "large-provider", Model: "large-model"},
+		},
+		SmallModel: Model{
+			CatwalkCfg: catwalk.Model{
+				ContextWindow:    10000,
+				DefaultMaxTokens: 1000,
+			},
+		},
+		BackgroundModel:        bgModel,
+		SystemPrompt:           "",
+		WorkingDir:             env.workingDir,
+		IsYolo:                 true,
+		Sessions:               env.sessions,
+		Messages:               env.messages,
+		EnableSessionMemory:    true,
+		MemoryEngineEnabled:    true,
+		MemoryEngineEventStore: store,
+		AgentFactory: func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent {
+			return fakeAgent
+		},
+		RetryWaitFunc: func(context.Context, time.Duration) error {
+			return nil
+		},
+	})
+
+	err = agent.Summarize(t.Context(), sess.ID, nil)
+	require.NoError(t, err)
+
+	// 等待异步 working memory 生成完成。
+	// condition 在独立 goroutine 中执行，不能调用 t.FailNow()（即 require），
+	// 查询失败时直接返回 false 让 Eventually 超时。
+	scope := engine.MemoryScopeSession
+	kind := engine.MemoryKindWorkingMemory
+	require.Eventually(t, func() bool {
+		events, qerr := store.Query(t.Context(), engine.EventFilter{
+			Scope:     &scope,
+			Kind:      &kind,
+			SessionID: &sess.ID,
+		})
+		if qerr != nil {
+			return false
+		}
+		return len(events) > 0
+	}, 2*time.Second, 50*time.Millisecond, "working memory should be generated after successful summarize")
+
+	events, err := store.Query(t.Context(), engine.EventFilter{
+		Scope:     &scope,
+		Kind:      &kind,
+		SessionID: &sess.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, "test working memory", events[0].Content)
 }
