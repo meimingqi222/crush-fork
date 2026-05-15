@@ -134,21 +134,19 @@ Injects coordinator prompt prefix only when:
 
 Subagent sessions do not receive the coordinator prompt injection.
 
-### Unused in internal/autopermission/service.go
+### Removed from internal/autopermission/service.go
 
-The following helpers exist but are not yet wired into subagent permission
-derivation. They are candidates for wiring during P2 or for removal if
-determined redundant:
+The following helpers were previously candidates for wiring into subagent
+permission derivation but have been removed as dead code:
 
-- `safeNullRedirectPattern` — regex for safe null redirects in bash commands
-- `isSafeReadOnlyBashSegment` — classifies individual bash segments as
-  read-only safe
-- `isSafeReadOnlyGitCommand` — classifies git invocations as read-only
-- `classifyPluginDecision` — wraps `classifyPluginDecisionWithRuntime` with a
-  nil runtime
+- `safeNullRedirectPattern` — removed, zero production references
+- `isSafeReadOnlyBashSegment` — removed, zero production references
+- `isSafeReadOnlyGitCommand` — removed, zero production references
+- `classifyPluginDecision` — removed, zero production references
+  (`classifyPluginDecisionWithRuntime` remains and is actively used)
 
-These will be evaluated and either wired into `DeriveSubagentPermissions` or
-cleaned up during P2.
+Read-only safety for `explore` subagents is enforced via
+`DerivedSubagentPermissions` and `BashToolOptions{DisableBackground: true}`.
 
 ## Architecture
 
@@ -1160,7 +1158,7 @@ on top.
 - `internal/agent/subagent_tools_test.go`
 
 **Modified files:**
-- `internal/autopermission/service.go` — wire or remove unused helpers
+- `internal/autopermission/service.go` — removed dead helpers
   (`isSafeReadOnlyBashSegment`, `isSafeReadOnlyGitCommand`,
   `safeNullRedirectPattern`, `classifyPluginDecision`)
 - `internal/agent/tool_registration.go`
@@ -1176,9 +1174,7 @@ on top.
 4. Implement `ShapeToolsForSubagent` in `subagent_tools.go`.
 5. Call `ShapeToolsForSubagent` inside tool registry construction when
    `isSubAgent == true`.
-6. Audit `autopermission/service.go` unused helpers; wire
-   `isSafeReadOnlyBashSegment` into bash policy or remove if redundant.
-7. Add tests: parent-deny propagation, read-only profile enforcement, explore
+6. Add tests: parent-deny propagation, read-only profile enforcement, explore
    cannot receive edit/write, general does not receive `agent` by default.
 
 **Verification:**
@@ -1355,10 +1351,10 @@ The following questions have recommended answers:
    configurable via `SubagentRuntimeConfig.StructuredCompletionRequired`.
 
 3. **Should `explore` be allowed to run safe read-only bash?**
-   Answer: Allow read-only bash only through a deterministic command policy
-   (using `isSafeReadOnlyBashSegment` if wired, or `BashToolOptions`
-   restriction). Otherwise, keep `DisableBackground: true` and rely on existing
+   Answer: Allow read-only bash through `BashToolOptions` restriction and
    `AllowedTools` filtering. Full bash hiding is acceptable for `explore`.
+   `DerivedSubagentPermissions` enforces the read-only profile at the
+   permission layer.
 
 4. **Should worktree isolation be enabled by default for write-capable parallel
    subagents after P4?**

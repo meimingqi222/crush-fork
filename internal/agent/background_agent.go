@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -438,6 +439,9 @@ func backgroundAgentSubtaskResult(entry *backgroundAgentEntry) message.ToolResul
 	case backgroundAgentStatusCanceled:
 		status = message.ToolResultSubtaskStatusCanceled
 	}
+	if strings.TrimSpace(entry.Content) != "" && strings.Contains(strings.ToLower(entry.Content), "warning") && status == message.ToolResultSubtaskStatusCompleted {
+		status = message.ToolResultSubtaskStatusCompletedWithWarnings
+	}
 	return message.ToolResultSubtaskResult{
 		ChildSessionID:   entry.ChildSessionID,
 		ParentToolCallID: entry.AgentID,
@@ -456,7 +460,12 @@ func (c *coordinator) runBackgroundTask(ctx context.Context, params taskGraphPar
 
 	// Launch the task in a background goroutine.
 	go func() {
-		bgCtx := context.Background()
+		// Detach from parent cancellation so the background task survives
+		// parent context termination, but preserve tracing/metadata values.
+		bgCtx := context.WithoutCancel(ctx)
+		if runtime, ok := subagentRuntimeFromContext(ctx); ok {
+			bgCtx = withSubagentRuntimeContext(bgCtx, runtime)
+		}
 		result, err := c.runTaskGraphDirect(bgCtx, params)
 		if err != nil {
 			slog.Error("Background agent failed", "agent_id", agentID, "error", err)
@@ -475,9 +484,11 @@ func (c *coordinator) runBackgroundTask(ctx context.Context, params taskGraphPar
 				childSessionID = sub.ChildSessionID
 				c.backgroundAgents.SetChildSession(agentID, childSessionID)
 			}
+			if finish, ok := message.ParseToolResultSubagentFinish(result.Metadata); ok {
+				c.backgroundAgents.UpdateArtifacts(agentID, finish.Summary, finish.FilesTouched, finish.Artifacts)
+			}
 		}
 
-		_ = childSessionID
 		c.backgroundAgents.Complete(agentID, content)
 	}()
 

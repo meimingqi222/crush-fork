@@ -18,6 +18,9 @@ type EscalationRequest struct {
 	Description     string                 `json:"description"`
 	SessionID       string                 `json:"session_id"`
 	ParentSessionID string                 `json:"parent_session_id,omitempty"`
+	ChildSessionID  string                 `json:"child_session_id,omitempty"`
+	TaskID          string                 `json:"task_id,omitempty"`
+	ProfileName     string                 `json:"profile_name,omitempty"`
 	CreatedAt       int64                  `json:"created_at"`
 }
 
@@ -138,10 +141,14 @@ func EscalationBridgeFromContext(ctx context.Context) *EscalationBridge {
 
 // WorkerIdentity identifies a worker agent for permission requests.
 type WorkerIdentity struct {
-	AgentID   string `json:"agent_id"`
-	AgentName string `json:"agent_name"`
-	AgentType string `json:"agent_type"`
-	Color     string `json:"color,omitempty"`
+	AgentID         string `json:"agent_id"`
+	AgentName       string `json:"agent_name"`
+	AgentType       string `json:"agent_type"`
+	Color           string `json:"color,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	ChildSessionID  string `json:"child_session_id,omitempty"`
+	TaskID          string `json:"task_id,omitempty"`
+	ProfileName     string `json:"profile_name,omitempty"`
 }
 
 type workerIdentityKey struct{}

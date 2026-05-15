@@ -20,7 +20,12 @@ import (
 const assistantMessageTruncateFormat = "… (%d lines hidden) [click or space to expand]"
 
 // maxCollapsedThinkingHeight defines the maximum height of the thinking
+// content before it is collapsed.
 const maxCollapsedThinkingHeight = 10
+
+// maxCollapsedSummaryHeight defines the maximum number of lines shown in a
+// collapsed context summary.
+const maxCollapsedSummaryHeight = 8
 
 // AssistantMessageItem represents an assistant message in the chat UI.
 //
@@ -36,6 +41,9 @@ type AssistantMessageItem struct {
 	showLoadingState  bool
 	thinkingExpanded  bool
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
+	summaryExpanded   bool
+	summaryBoxHeight  int // Tracks the rendered summary box height for click detection.
+	summaryBoxStart   int // Y offset where the summary box begins.
 }
 
 // NewAssistantMessageItem creates a new AssistantMessageItem.
@@ -154,11 +162,17 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 
 	// then add the main content
 	if content != "" {
-		// add a spacer between thinking and content
+		// Compute the Y offset at which the content block starts.
+		summaryStart := 0
 		if thinking != "" {
+			// Spacer line between thinking and content adds 1.
+			summaryStart = a.thinkingBoxHeight + 1
 			messageParts = append(messageParts, "")
 		}
-		if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasToolCall(tools.PlanExitToolName) {
+		if a.message.IsSummaryMessage {
+			a.summaryBoxStart = summaryStart
+			messageParts = append(messageParts, a.renderSummary(content, width))
+		} else if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasToolCall(tools.PlanExitToolName) {
 			messageParts = append(messageParts, a.renderPlan(plan, width))
 		} else {
 			messageParts = append(messageParts, a.renderMarkdown(content, width))
@@ -217,6 +231,36 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 		result += "\n\n" + footer
 	}
 
+	return result
+}
+
+// renderSummary renders context compaction summary content in a collapsible
+// box with a header, using a distinct background color.
+func (a *AssistantMessageItem) renderSummary(content string, width int) string {
+	renderer := common.MarkdownRenderer(a.sty, width)
+	rendered, err := renderer.Render(content)
+	if err != nil {
+		rendered = content
+	}
+	rendered = strings.TrimSpace(rendered)
+
+	lines := strings.Split(rendered, "\n")
+	totalLines := len(lines)
+
+	isTruncated := totalLines > maxCollapsedSummaryHeight
+	if !a.summaryExpanded && isTruncated {
+		lines = lines[:maxCollapsedSummaryHeight]
+		hint := a.sty.Chat.Message.SummaryTruncationHint.Render(
+			fmt.Sprintf(assistantMessageTruncateFormat, totalLines-maxCollapsedSummaryHeight),
+		)
+		lines = append(lines, "", hint)
+	}
+
+	header := a.sty.Chat.Message.SummaryHeader.Render("Context Summary")
+	bodyContent := strings.Join(lines, "\n")
+	summaryStyle := a.sty.Chat.Message.SummaryBox.Width(width)
+	result := summaryStyle.Render(header + "\n\n" + bodyContent)
+	a.summaryBoxHeight = lipgloss.Height(result)
 	return result
 }
 
@@ -298,9 +342,17 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 	if btn != ansi.MouseLeft {
 		return false
 	}
-	// check if the click is within the thinking box
+	// Check if the click is within the thinking box.
 	if a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight {
-		a.ToggleExpanded()
+		a.thinkingExpanded = !a.thinkingExpanded
+		a.clearCache()
+		return true
+	}
+	// Check if the click is within the summary box.
+	summaryEnd := a.summaryBoxStart + a.summaryBoxHeight
+	if a.summaryBoxHeight > 0 && y >= a.summaryBoxStart && y < summaryEnd {
+		a.summaryExpanded = !a.summaryExpanded
+		a.clearCache()
 		return true
 	}
 	return false

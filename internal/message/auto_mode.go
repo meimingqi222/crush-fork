@@ -29,12 +29,14 @@ type ToolResultAutoReview struct {
 type ToolResultSubtaskStatus string
 
 const (
-	ToolResultSubtaskStatusPending    ToolResultSubtaskStatus = "pending"
-	ToolResultSubtaskStatusInProgress ToolResultSubtaskStatus = "in_progress"
-	ToolResultSubtaskStatusRunning    ToolResultSubtaskStatus = "running" // Background agent still executing
-	ToolResultSubtaskStatusCompleted  ToolResultSubtaskStatus = "completed"
-	ToolResultSubtaskStatusFailed     ToolResultSubtaskStatus = "failed"
-	ToolResultSubtaskStatusCanceled   ToolResultSubtaskStatus = "canceled"
+	ToolResultSubtaskStatusPending               ToolResultSubtaskStatus = "pending"
+	ToolResultSubtaskStatusInProgress            ToolResultSubtaskStatus = "in_progress"
+	ToolResultSubtaskStatusRunning               ToolResultSubtaskStatus = "running" // Background agent still executing
+	ToolResultSubtaskStatusCompleted             ToolResultSubtaskStatus = "completed"
+	ToolResultSubtaskStatusCompletedWithWarnings ToolResultSubtaskStatus = "completed_with_warnings"
+	ToolResultSubtaskStatusFailed                ToolResultSubtaskStatus = "failed"
+	ToolResultSubtaskStatusCanceled              ToolResultSubtaskStatus = "canceled"
+	ToolResultSubtaskStatusBlocked               ToolResultSubtaskStatus = "blocked"
 )
 
 type ToolResultSubtaskResult struct {
@@ -43,6 +45,22 @@ type ToolResultSubtaskResult struct {
 	ParentMessageID  string                  `json:"parent_message_id,omitempty"`
 	Status           ToolResultSubtaskStatus `json:"status,omitempty"`
 }
+
+type ToolResultSubagentFinish struct {
+	Status       ToolResultSubtaskStatus `json:"status,omitempty"`
+	Summary      string                  `json:"summary,omitempty"`
+	Artifacts    []string                `json:"artifacts,omitempty"`
+	FilesTouched []string                `json:"files_touched,omitempty"`
+	PatchPlan    []string                `json:"patch_plan,omitempty"`
+	TestResults  []string                `json:"test_results,omitempty"`
+	Followups    []string                `json:"followups,omitempty"`
+	Risks        []string                `json:"risks,omitempty"`
+	NextActions  []string                `json:"next_actions,omitempty"`
+	Confidence   string                  `json:"confidence,omitempty"`
+	Error        string                  `json:"error,omitempty"`
+	Data         json.RawMessage         `json:"data,omitempty"`
+}
+
 type ToolResultReducer struct {
 	Summary           string                          `json:"summary,omitempty"`
 	Artifacts         []string                        `json:"artifacts,omitempty"`
@@ -80,10 +98,26 @@ func (r ToolResultReducer) isEmpty() bool {
 		len(r.ChildSessions) == 0
 }
 
+func (f ToolResultSubagentFinish) IsEmpty() bool {
+	return f.Status == "" &&
+		strings.TrimSpace(f.Summary) == "" &&
+		len(f.Artifacts) == 0 &&
+		len(f.FilesTouched) == 0 &&
+		len(f.PatchPlan) == 0 &&
+		len(f.TestResults) == 0 &&
+		len(f.Followups) == 0 &&
+		len(f.Risks) == 0 &&
+		len(f.NextActions) == 0 &&
+		strings.TrimSpace(f.Confidence) == "" &&
+		strings.TrimSpace(f.Error) == "" &&
+		len(f.Data) == 0
+}
+
 const (
-	toolResultSubtaskResultMetadataKey = "subtask_result"
-	toolResultReducerMetadataKey       = "reducer"
-	toolResultDeferredToolStateKey     = "deferred_tool_state"
+	toolResultSubtaskResultMetadataKey  = "subtask_result"
+	toolResultSubagentFinishMetadataKey = "subagent_finish"
+	toolResultReducerMetadataKey        = "reducer"
+	toolResultDeferredToolStateKey      = "deferred_tool_state"
 )
 
 type ToolResultDeferredToolState struct {
@@ -231,6 +265,63 @@ func (t ToolResult) WithSubtaskResult(subtask ToolResultSubtaskResult) ToolResul
 		payload = map[string]json.RawMessage{}
 	}
 	payload[toolResultSubtaskResultMetadataKey] = subtaskData
+
+	merged, err := json.Marshal(payload)
+	if err != nil {
+		return t
+	}
+	t.Metadata = string(merged)
+	return t
+}
+
+func ParseToolResultSubagentFinish(metadata string) (ToolResultSubagentFinish, bool) {
+	var finish ToolResultSubagentFinish
+	if strings.TrimSpace(metadata) == "" {
+		return finish, false
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(metadata), &payload); err != nil {
+		return ToolResultSubagentFinish{}, false
+	}
+
+	raw, ok := payload[toolResultSubagentFinishMetadataKey]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return ToolResultSubagentFinish{}, false
+	}
+	if err := json.Unmarshal(raw, &finish); err != nil {
+		return ToolResultSubagentFinish{}, false
+	}
+	if finish.IsEmpty() {
+		return ToolResultSubagentFinish{}, false
+	}
+	return finish, true
+}
+
+func (t ToolResult) SubagentFinish() (ToolResultSubagentFinish, bool) {
+	if !t.SubagentFinishMeta.IsEmpty() {
+		return t.SubagentFinishMeta, true
+	}
+	return ParseToolResultSubagentFinish(t.Metadata)
+}
+
+func (t ToolResult) WithSubagentFinish(finish ToolResultSubagentFinish) ToolResult {
+	t.SubagentFinishMeta = finish
+	finishData, err := json.Marshal(finish)
+	if err != nil {
+		return t
+	}
+
+	var payload map[string]json.RawMessage
+	if strings.TrimSpace(t.Metadata) != "" {
+		if err := json.Unmarshal([]byte(t.Metadata), &payload); err != nil {
+			payload = nil
+		}
+	}
+	if payload == nil {
+		payload = map[string]json.RawMessage{}
+	}
+	payload[toolResultSubagentFinishMetadataKey] = finishData
 
 	merged, err := json.Marshal(payload)
 	if err != nil {

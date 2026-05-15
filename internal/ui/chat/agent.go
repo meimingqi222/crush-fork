@@ -30,6 +30,11 @@ const (
 	maxAgentTaskDisplayItems     = 8
 )
 
+const (
+	taskStatusCompletedWithWarnings = message.ToolResultSubtaskStatus("completed_with_warnings")
+	taskStatusBlocked               = message.ToolResultSubtaskStatus("blocked")
+)
+
 // -----------------------------------------------------------------------------
 // Agent Tool
 // -----------------------------------------------------------------------------
@@ -511,13 +516,16 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 	}
 
 	statusesByID := parseTaskStatusesFromAgentResult(opts)
-	completed, failed, canceled, inProgress, pending := summarizeTaskStatusCounts(tasks, statusesByID)
+	completed, failed, canceled, blocked, inProgress, pending := summarizeTaskStatusCounts(tasks, statusesByID)
 	summaryText := fmt.Sprintf("done %d · running %d · pending %d", completed, inProgress, pending)
 	if failed > 0 {
 		summaryText += fmt.Sprintf(" · failed %d", failed)
 	}
 	if canceled > 0 {
 		summaryText += fmt.Sprintf(" · canceled %d", canceled)
+	}
+	if blocked > 0 {
+		summaryText += fmt.Sprintf(" · blocked %d", blocked)
 	}
 	summaryLine := lipgloss.JoinHorizontal(
 		lipgloss.Left,
@@ -567,7 +575,7 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 	return lipgloss.JoinVertical(lipgloss.Left, header, summaryLine, taskText)
 }
 
-var taskStatusLinePattern = regexp.MustCompile(`(?m)^-\s+([^:]+):\s*(completed|failed|canceled)\s*$`)
+var taskStatusLinePattern = regexp.MustCompile(`(?m)^-\s+([^:]+):\s*(completed|completed_with_warnings|failed|canceled|blocked)\s*$`)
 
 func parseTaskStatusesFromAgentResult(opts *ToolRenderOpts) map[string]message.ToolResultSubtaskStatus {
 	statuses := make(map[string]message.ToolResultSubtaskStatus)
@@ -600,54 +608,69 @@ func ParseTaskStatusesFromAgentResult(result *message.ToolResult) map[string]mes
 		switch strings.TrimSpace(match[2]) {
 		case string(message.ToolResultSubtaskStatusCompleted):
 			statuses[taskID] = message.ToolResultSubtaskStatusCompleted
+		case string(taskStatusCompletedWithWarnings):
+			statuses[taskID] = taskStatusCompletedWithWarnings
 		case string(message.ToolResultSubtaskStatusFailed):
 			statuses[taskID] = message.ToolResultSubtaskStatusFailed
 		case string(message.ToolResultSubtaskStatusCanceled):
 			statuses[taskID] = message.ToolResultSubtaskStatusCanceled
+		case string(taskStatusBlocked):
+			statuses[taskID] = taskStatusBlocked
 		}
 	}
 	return statuses
 }
 
-func summarizeTaskStatusCounts(tasks []agentTaskRenderEntry, statuses map[string]message.ToolResultSubtaskStatus) (completed, failed, canceled, inProgress, pending int) {
+func summarizeTaskStatusCounts(tasks []agentTaskRenderEntry, statuses map[string]message.ToolResultSubtaskStatus) (completed, failed, canceled, blocked, inProgress, pending int) {
 	completedSet := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
-		if statuses[task.id] == message.ToolResultSubtaskStatusCompleted {
+		if taskStatusReleasesDependents(statuses[task.id]) {
 			completedSet[task.id] = struct{}{}
 		}
 	}
 	for _, task := range tasks {
 		status := statuses[task.id]
 		switch status {
-		case message.ToolResultSubtaskStatusCompleted:
+		case message.ToolResultSubtaskStatusCompleted, taskStatusCompletedWithWarnings:
 			completed++
 		case message.ToolResultSubtaskStatusFailed:
 			failed++
 		case message.ToolResultSubtaskStatusCanceled:
 			canceled++
+		case taskStatusBlocked:
+			blocked++
 		default:
-			blocked := false
+			depsBlocked := false
 			for _, dep := range task.dependsOn {
 				if _, ok := completedSet[strings.TrimSpace(dep)]; !ok {
-					blocked = true
+					depsBlocked = true
 					break
 				}
 			}
-			if blocked {
+			if depsBlocked {
 				pending++
 			} else {
 				inProgress++
 			}
 		}
 	}
-	return completed, failed, canceled, inProgress, pending
+	return completed, failed, canceled, blocked, inProgress, pending
+}
+
+func taskStatusReleasesDependents(status message.ToolResultSubtaskStatus) bool {
+	switch status {
+	case message.ToolResultSubtaskStatusCompleted, taskStatusCompletedWithWarnings:
+		return true
+	default:
+		return false
+	}
 }
 
 func taskStatusIcon(sty *styles.Styles, status message.ToolResultSubtaskStatus, opts *ToolRenderOpts, taskID string) string {
 	switch status {
-	case message.ToolResultSubtaskStatusCompleted:
+	case message.ToolResultSubtaskStatusCompleted, taskStatusCompletedWithWarnings:
 		return sty.Tool.IconSuccess.String()
-	case message.ToolResultSubtaskStatusFailed:
+	case message.ToolResultSubtaskStatusFailed, taskStatusBlocked:
 		return sty.Tool.IconError.String()
 	case message.ToolResultSubtaskStatusCanceled:
 		return sty.Tool.IconCancelled.String()
@@ -917,9 +940,9 @@ func (t *TaskNodeItem) renderContent(width int) string {
 	switch {
 	case t.childStatusIsError:
 		statusIcon = t.sty.Tool.IconError.String()
-	case t.completionStatus == message.ToolResultSubtaskStatusCompleted:
+	case t.completionStatus == message.ToolResultSubtaskStatusCompleted, t.completionStatus == taskStatusCompletedWithWarnings:
 		statusIcon = t.sty.Tool.IconSuccess.String()
-	case t.completionStatus == message.ToolResultSubtaskStatusFailed:
+	case t.completionStatus == message.ToolResultSubtaskStatusFailed, t.completionStatus == taskStatusBlocked:
 		statusIcon = t.sty.Tool.IconError.String()
 	case t.completionStatus == message.ToolResultSubtaskStatusCanceled:
 		statusIcon = t.sty.Tool.IconCancelled.String()

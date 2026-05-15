@@ -39,6 +39,19 @@ func TestTimelineEventSummary(t *testing.T) {
 		require.Equal(t, "Bash", title)
 		require.Equal(t, "Completed • line one line two", description)
 	})
+
+	t.Run("child session blocked shows blocked label", func(t *testing.T) {
+		t.Parallel()
+
+		title, description := timelineEventSummary(timeline.Event{
+			Type:   timeline.EventChildSessionBlocked,
+			Title:  "explore task",
+			Status: "blocked",
+		})
+
+		require.Equal(t, "Subagent", title)
+		require.Equal(t, "Blocked • explore task", description)
+	})
 }
 
 func TestTimelineListRendersNewestFirst(t *testing.T) {

@@ -52,6 +52,24 @@ type MemoryEvent struct {
 	ExpiresAt  *time.Time      `json:"expires_at,omitempty"`
 }
 
+// FilterLatestNonSuperseded returns the most recent event that has not been
+// superseded by another event in the slice. The slice must be ordered by
+// watermark (ascending). Returns nil if no valid event remains.
+func FilterLatestNonSuperseded(events []MemoryEvent) *MemoryEvent {
+	superseded := make(map[string]bool, len(events))
+	for _, evt := range events {
+		if evt.Supersedes != nil {
+			superseded[*evt.Supersedes] = true
+		}
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if !superseded[events[i].ID] {
+			return &events[i]
+		}
+	}
+	return nil
+}
+
 // DegradedModeInfo describes degraded mode state when the background model
 // is unavailable. Extraction and consolidation are paused but existing
 // materialized summaries continue to be injected.

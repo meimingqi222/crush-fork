@@ -91,14 +91,14 @@ func ucMarshal(c *ucCassette) ([]byte, error) {
 
 // ucShouldKeep returns true for cassette interactions that should be kept:
 // - response code must be 200
-// - request body must NOT be a title-gen call (max_tokens == 40)
+// - request body must NOT be a title-gen call (max_tokens == titleMaxOutputTokens)
 func ucShouldKeep(i *ucInteraction) bool {
 	if i.Response.Code != 200 {
 		return false
 	}
 	var req map[string]interface{}
 	if err := json.Unmarshal([]byte(i.Request.Body), &req); err == nil {
-		if mt, ok := req["max_tokens"].(float64); ok && mt == 40 {
+		if mt, ok := req["max_tokens"].(float64); ok && int64(mt) == titleMaxOutputTokens {
 			return false
 		}
 	}

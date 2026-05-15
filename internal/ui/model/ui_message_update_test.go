@@ -600,6 +600,138 @@ func TestSetSessionMessagesRestoresTaskNodeCompletionFromChildSession(t *testing
 	require.Equal(t, message.ToolResultSubtaskStatusCompleted, taskNode.CompletionStatus())
 }
 
+func TestSetSessionMessagesRestoresTaskNodeCompletedWithWarningsFromToolMetadata(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(context.Background(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	messages := message.NewService(q)
+	fileTracker := filetracker.NewService(q)
+	historyService := history.NewService(q, conn)
+
+	parent, err := sessions.Create(context.Background(), "Parent")
+	require.NoError(t, err)
+
+	assistantMsg, err := messages.Create(context.Background(), parent.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ToolCall{
+				ID:   "call-general",
+				Name: agent.AgentToolName,
+				Input: `{"tasks":[{"id":"task-a","description":"Search references","prompt":"Find usages","subagent_type":"explore"},` +
+					`{"id":"task-b","description":"Apply patch","prompt":"Implement fix","subagent_type":"general"}]}`,
+				Finished: true,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	taskSessionID := sessions.CreateAgentToolSessionID(assistantMsg.ID, "call-general::task-a")
+	taskSession, err := sessions.CreateTaskSession(context.Background(), taskSessionID, parent.ID, "Task A")
+	require.NoError(t, err)
+
+	toolResult := message.ToolResult{
+		ToolCallID: "subtask-finish",
+		Name:       "subtask_finish",
+		Content:    "Completed with warnings",
+	}.WithSubtaskResult(message.ToolResultSubtaskResult{
+		ParentToolCallID: "call-general::task-a",
+		ParentMessageID:  assistantMsg.ID,
+		ChildSessionID:   taskSession.ID,
+		Status:           message.ToolResultSubtaskStatus("completed_with_warnings"),
+	})
+	_, err = messages.Create(context.Background(), taskSession.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{toolResult},
+	})
+	require.NoError(t, err)
+
+	theme := styles.DefaultStyles()
+	com := &common.Common{
+		App:    &app.App{Sessions: sessions, Messages: messages, History: historyService, FileTracker: fileTracker},
+		Styles: &theme,
+	}
+	ui := &UI{
+		com:     com,
+		chat:    NewChat(com),
+		session: &parent,
+	}
+
+	_ = ui.setSessionMessages([]message.Message{assistantMsg})
+
+	taskNodeID := chat.TaskNodeItemID("call-general", "task-a")
+	taskNode, ok := ui.chat.MessageItem(taskNodeID).(*chat.TaskNodeItem)
+	require.True(t, ok)
+	require.Equal(t, message.ToolResultSubtaskStatus("completed_with_warnings"), taskNode.CompletionStatus())
+}
+
+func TestHandleChildSessionMessageShowsBlockedAndWarningStatuses(t *testing.T) {
+	t.Parallel()
+
+	ui, parent, generalChild, _, _, _ := testSessionUI(t)
+	ui.session = parent
+
+	msgs, err := ui.com.App.Messages.List(t.Context(), parent.ID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+
+	toolCalls := msgs[0].ToolCalls()
+	require.NotEmpty(t, toolCalls)
+	ui.chat.SetMessages(chat.NewToolMessageItem(ui.com.Styles, msgs[0].ID, toolCalls[0], nil, false))
+
+	blockedResult := message.ToolResult{
+		ToolCallID: "subtask-finish",
+		Name:       "subtask_finish",
+		Content:    "Blocked by policy",
+	}.WithSubtaskResult(message.ToolResultSubtaskResult{
+		ParentToolCallID: toolCalls[0].ID,
+		ParentMessageID:  msgs[0].ID,
+		ChildSessionID:   generalChild.ID,
+		Status:           message.ToolResultSubtaskStatus("blocked"),
+	})
+	_ = ui.handleChildSessionMessage(pubsub.Event[message.Message]{
+		Type: pubsub.CreatedEvent,
+		Payload: message.Message{
+			ID:        "child-tool-1",
+			SessionID: generalChild.ID,
+			Role:      message.Tool,
+			Parts:     []message.ContentPart{blockedResult},
+		},
+	})
+
+	rendered := ansi.Strip(ui.chat.MessageItem(toolCalls[0].ID).Render(100))
+	require.Contains(t, rendered, "Blocked by policy")
+
+	warningResult := message.ToolResult{
+		ToolCallID: "subtask-finish",
+		Name:       "subtask_finish",
+		Content:    "Completed with warnings",
+	}.WithSubtaskResult(message.ToolResultSubtaskResult{
+		ParentToolCallID: toolCalls[0].ID,
+		ParentMessageID:  msgs[0].ID,
+		ChildSessionID:   generalChild.ID,
+		Status:           message.ToolResultSubtaskStatus("completed_with_warnings"),
+	})
+	_ = ui.handleChildSessionMessage(pubsub.Event[message.Message]{
+		Type: pubsub.UpdatedEvent,
+		Payload: message.Message{
+			ID:        "child-tool-1",
+			SessionID: generalChild.ID,
+			Role:      message.Tool,
+			Parts:     []message.ContentPart{warningResult},
+		},
+	})
+
+	rendered = ansi.Strip(ui.chat.MessageItem(toolCalls[0].ID).Render(100))
+	require.Contains(t, rendered, "Completed with warnings")
+}
+
 func TestUpdateLatestProposedPlanRequiresPlanModeAndPlanExit(t *testing.T) {
 	t.Parallel()
 

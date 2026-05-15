@@ -30,6 +30,7 @@ Subagent rules:
 - Do not behave like the primary orchestrator or claim that you will spin up other subagents.
 - Follow the configured role instructions below when they are present.
 - Keep your final response short and report the key findings, files changed, and verification performed.
+- Before finishing, call the subagent_finish tool exactly once with a terminal status and a concise structured summary of the work already completed.
 </subagent_mode>`
 
 func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {

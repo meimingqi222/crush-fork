@@ -38,12 +38,16 @@ func EscalateToLeader(
 	}
 
 	req := EscalationRequest{
-		WorkerID:    identity.AgentID,
-		WorkerName:  identity.AgentName,
-		WorkerColor: identity.Color,
-		ToolName:    toolName,
-		ToolInput:   inputMap,
-		Description: description,
+		WorkerID:        identity.AgentID,
+		WorkerName:      identity.AgentName,
+		WorkerColor:     identity.Color,
+		ToolName:        toolName,
+		ToolInput:       inputMap,
+		Description:     description,
+		ParentSessionID: identity.ParentSessionID,
+		ChildSessionID:  identity.ChildSessionID,
+		TaskID:          identity.TaskID,
+		ProfileName:     identity.ProfileName,
 	}
 
 	return bridge.RequestEscalation(ctx, req)

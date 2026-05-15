@@ -15,6 +15,12 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 )
 
+// titleMaxOutputTokens is the max output token budget for session title
+// generation. All models use this single value to avoid issues with thinking
+// tokens, non-English titles, model-specific prefixes, and models that lack
+// metadata to signal their capabilities.
+const titleMaxOutputTokens int64 = 1200
+
 func shouldGenerateSessionTitle(title string) bool {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -96,25 +102,10 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	largeModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
-	// Thinking-capable models require a larger token budget because thinking
-	// tokens count against max_tokens. 40 tokens is too small for a model that
-	// reasons: the thinking content fills the budget, leaving nothing for the
-	// visible title text. Use 1200 when the model can reason (1000 for thinking
-	// + ~200 for the title), unless thinking is explicitly disabled by config.
-	titleMaxOutputTokens := func(m Model) int64 {
-		if m.CatwalkCfg.CanReason {
-			thinkingDisabled := m.ModelCfg.Think != nil && !*m.ModelCfg.Think
-			if !thinkingDisabled {
-				return 1200
-			}
-		}
-		return 40
-	}
-
-	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
+	newAgent := func(m fantasy.LanguageModel, p []byte) fantasy.Agent {
 		return fantasy.NewAgent(m,
 			fantasy.WithSystemPrompt(string(p)+"\n/no_think"),
-			fantasy.WithMaxOutputTokens(tok),
+			fantasy.WithMaxOutputTokens(titleMaxOutputTokens),
 			fantasy.WithUserAgent(userAgent),
 		)
 	}
@@ -141,7 +132,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 
 	// Use the small model to generate the title.
 	model := smallModel
-	agent := newAgent(model.Model, titlePrompt, titleMaxOutputTokens(model))
+	agent := newAgent(model.Model, titlePrompt)
 	titleCtx := copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent)
 	resp, err := agent.Stream(titleCtx, streamCall)
 	if err == nil {
@@ -151,7 +142,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		// It didn't work. Let's try with the big model.
 		slog.Error("Error generating title with small model; trying big model", "err", err)
 		model = largeModel
-		agent = newAgent(model.Model, titlePrompt, titleMaxOutputTokens(model))
+		agent = newAgent(model.Model, titlePrompt)
 		streamedTitle.Reset()
 		resp, err = agent.Stream(titleCtx, streamCall)
 		if err == nil {

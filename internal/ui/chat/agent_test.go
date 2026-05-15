@@ -128,6 +128,35 @@ func TestAgentToolMessageItemRendersTaskDependenciesAndStatuses(t *testing.T) {
 	require.Contains(t, rendered, "[General] Apply fix (after: t1)")
 }
 
+func TestAgentToolMessageItemRendersCompletedWarningsAndBlockedStatuses(t *testing.T) {
+	t.Parallel()
+
+	params, err := json.Marshal(agent.AgentParams{
+		Tasks: []agent.AgentTaskParams{
+			{ID: "t1", Description: "Collect data", Prompt: "Inspect logs", SubagentType: "explore"},
+			{ID: "t2", Description: "Patch config", Prompt: "Update settings", SubagentType: "general", DependsOn: []string{"t1"}},
+		},
+	})
+	require.NoError(t, err)
+
+	resultContent := "Summary\n- t1: completed_with_warnings\n- t2: blocked"
+	theme := styles.DefaultStyles()
+	item := NewAgentToolMessageItem(&theme, message.ToolCall{
+		ID:       "tool-warn-blocked",
+		Name:     agent.AgentToolName,
+		Input:    string(params),
+		Finished: true,
+	}, &message.ToolResult{
+		ToolCallID: "tool-warn-blocked",
+		Content:    resultContent,
+	}, false)
+
+	rendered := ansi.Strip(item.Render(140))
+	require.Contains(t, rendered, "done 1 · running 0 · pending 0 · blocked 1")
+	require.Contains(t, rendered, "[Explore] Collect data")
+	require.Contains(t, rendered, "[General] Patch config (after: t1)")
+}
+
 func TestAgentToolMessageItemCollapsesNestedToolsByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -191,6 +220,21 @@ func TestAgenticFetchToolMessageItemCollapsesNestedToolsByDefault(t *testing.T) 
 	expanded := ansi.Strip(item.Render(140))
 	require.Contains(t, expanded, "Collapse")
 	require.Contains(t, expanded, "fetch-nested-11")
+}
+
+func TestTaskNodeItemRendersCompletedWarningsAndBlockedIcons(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.DefaultStyles()
+	warningNode := NewTaskNodeItem(&theme, "parent", "warn", "Collect data", "Inspect logs", "explore", "child-1")
+	warningNode.SetCompletionStatus(message.ToolResultSubtaskStatus("completed_with_warnings"))
+	warningRendered := warningNode.RawRender(100)
+	require.Contains(t, warningRendered, theme.Tool.IconSuccess.String())
+
+	blockedNode := NewTaskNodeItem(&theme, "parent", "blocked", "Patch config", "Update settings", "general", "child-2")
+	blockedNode.SetCompletionStatus(message.ToolResultSubtaskStatus("blocked"))
+	blockedRendered := blockedNode.RawRender(100)
+	require.Contains(t, blockedRendered, theme.Tool.IconError.String())
 }
 
 func newNestedBashTool(t *testing.T, sty *styles.Styles, cmd string) ToolMessageItem {

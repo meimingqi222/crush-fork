@@ -51,7 +51,7 @@ func (c *coordinator) ClassifyPermission(ctx context.Context, req permission.Per
 	}
 
 	prompt := buildAutoClassifierPrompt(c.cfg.Config(), c.cfg.WorkingDir(), sess, req, msgs)
-	quickResult, err := c.runAutoGuardModel(ctx, model, providerCfg, string(autoClassifierFastPrompt), prompt, 8, 0.0)
+	quickResult, err := c.runAutoGuardModel(ctx, model, providerCfg, string(autoClassifierFastPrompt), prompt, titleMaxOutputTokens, 0.0)
 	if err != nil {
 		return permission.AutoClassification{}, err
 	}

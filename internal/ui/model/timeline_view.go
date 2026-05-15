@@ -111,7 +111,13 @@ func timelineEventSummary(event timeline.Event) (string, string) {
 		}
 	case timeline.EventChildSessionStarted:
 		return "Subagent", timelineChildDescription("started", event.Title)
-	case timeline.EventChildSessionFinished:
+	case timeline.EventChildSessionProgress:
+		status := timelineLabel(event.Status)
+		if status == "" {
+			status = "progress"
+		}
+		return "Subagent", timelineChildDescription(status, event.Title)
+	case timeline.EventChildSessionFinished, timeline.EventChildSessionFailed, timeline.EventChildSessionCanceled, timeline.EventChildSessionBlocked:
 		status := timelineLabel(event.Status)
 		if status == "" {
 			status = "finished"

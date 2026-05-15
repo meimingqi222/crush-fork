@@ -152,6 +152,80 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	assert.Equal(t, []string{"bash", "glob", "grep", "tool_search", "view"}, exploreNames)
 }
 
+func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	coord := &coordinator{
+		cfg:         cfg,
+		sessions:    env.sessions,
+		messages:    env.messages,
+		permissions: env.permissions,
+		userInput:   nil,
+		history:     env.history,
+		filetracker: *env.filetracker,
+		lspManager:  lsp.NewManager(cfg),
+	}
+
+	agentCfg := cfg.Config().Agents[config.AgentExplore]
+	runtime := buildSubagentRuntimeContext(
+		"parent-session",
+		"child-session",
+		"msg-1",
+		"call-1",
+		taskGraphTask{ID: "task", SubagentType: config.AgentExplore},
+		agentCfg,
+		ParentPermissionContext{SessionID: "parent-session", AllowedTools: []string{tools.ViewToolName, tools.ToolSearchToolName}},
+		agentCfg.AllowedTools,
+		"session",
+		env.workingDir,
+		nil,
+	)
+
+	toolSet, err := coord.buildTools(withSubagentRuntimeContext(t.Context(), runtime), agentCfg, session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	var names []string
+	for _, tool := range toolSet {
+		names = append(names, tool.Info().Name)
+	}
+	assert.Equal(t, []string{tools.SubagentFinishToolName, tools.ToolSearchToolName, tools.ViewToolName}, names)
+}
+
+func TestDeriveSubagentPermissionsDenyWins(t *testing.T) {
+	profile := SubagentProfile{
+		Name:      config.AgentGeneral,
+		Kind:      SubagentProfileGeneral,
+		ToolNames: []string{"bash", "edit", "view", tools.SubagentFinishToolName},
+	}
+
+	derived := DeriveSubagentPermissions(ParentPermissionContext{
+		AllowedTools: []string{"bash", "edit", "view", tools.SubagentFinishToolName},
+		DeniedTools:  []string{"edit"},
+	}, profile, []string{"bash", "edit", "view", tools.SubagentFinishToolName})
+
+	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "bash")
+	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "view")
+	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), tools.SubagentFinishToolName)
+	assert.NotContains(t, toolNamesFromSet(derived.AllowedTools), "edit")
+	assert.Contains(t, toolNamesFromSet(derived.DeniedTools), "edit")
+}
+
+func TestShapeToolsForSubagentFiltersToolList(t *testing.T) {
+	shaped := ShapeToolsForSubagent([]fantasy.AgentTool{
+		tools.NewGlobTool("/tmp"),
+		tools.NewViewTool(nil, nil, nil, "/tmp", config.ToolLs{}),
+		tools.NewEditTool(nil, nil, nil, nil, "/tmp"),
+	}, SubagentToolProfile{Allowed: map[string]struct{}{"glob": {}, "view": {}}, Denied: map[string]struct{}{"edit": {}}})
+
+	var names []string
+	for _, tool := range shaped {
+		names = append(names, tool.Info().Name)
+	}
+	assert.Equal(t, []string{"glob", "view"}, names)
+}
+
 func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	env := testEnv(t)
 	cfg, err := config.Init(env.workingDir, "", false)

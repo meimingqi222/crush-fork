@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -25,8 +24,6 @@ const (
 	defaultMaxConsecutiveClassifierBlocks = 3
 	defaultMaxTotalClassifierBlocks       = 20
 )
-
-var safeNullRedirectPattern = regexp.MustCompile(`(?i)(^|\s)(?:\d?>)\s*(?:/dev/null|nul|\$null)`)
 
 var highRiskBashDirectCommands = map[string]struct{}{
 	"aws":         {},
@@ -683,30 +680,6 @@ func isAcceptEditsEquivalentRequest(req permission.PermissionRequest, workingDir
 	return isSafeWorkspaceWrite(req, workingDir)
 }
 
-func isSafeReadOnlyBashRequest(req permission.PermissionRequest) bool {
-	return EvaluateBashExecPolicy(req, ApprovalPolicyUnlessTrusted).Requirement == ApprovalRequirementAllow
-}
-
-func isSafeReadOnlyBashSegment(fields []string) bool {
-	args := make([]shellCallArg, 0, len(fields))
-	for _, field := range fields {
-		args = append(args, shellCallArg{value: field, literal: true})
-	}
-	if len(args) == 0 {
-		return false
-	}
-	return safeReadOnlyExecPolicyHeuristic(normalizeExecPolicyCommandName(args[0].value), args)
-}
-
-func isSafeReadOnlyGitCommand(args []string) bool {
-	fields := make([]shellCallArg, 0, len(args)+1)
-	fields = append(fields, shellCallArg{value: "git", literal: true})
-	for _, arg := range args {
-		fields = append(fields, shellCallArg{value: arg, literal: true})
-	}
-	return isSafeGitExecPolicyCommand(fields)
-}
-
 func isSafeFindCommand(args []string) bool {
 	for _, arg := range args[1:] {
 		if arg == "-delete" || arg == "-exec" || arg == "-execdir" || arg == "-ok" || arg == "-okdir" {
@@ -840,10 +813,6 @@ func isShellStartupFile(name string) bool {
 	default:
 		return false
 	}
-}
-
-func classifyPluginDecision(req permission.PermissionRequest) permission.EvaluationDecision {
-	return classifyPluginDecisionWithRuntime(nil, req)
 }
 
 func classifyPluginDecisionWithRuntime(runtime *plugin.Runtime, req permission.PermissionRequest) permission.EvaluationDecision {

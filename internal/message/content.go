@@ -122,9 +122,10 @@ type ToolResult struct {
 	Metadata   string `json:"metadata"`
 	IsError    bool   `json:"is_error"`
 
-	AutoReviewMeta    ToolResultAutoReview    `json:"-"`
-	SubtaskResultMeta ToolResultSubtaskResult `json:"-"`
-	ReducerMeta       ToolResultReducer       `json:"-"`
+	AutoReviewMeta     ToolResultAutoReview     `json:"-"`
+	SubtaskResultMeta  ToolResultSubtaskResult  `json:"-"`
+	SubagentFinishMeta ToolResultSubagentFinish `json:"-"`
+	ReducerMeta        ToolResultReducer        `json:"-"`
 }
 
 func (ToolResult) isPart() {}

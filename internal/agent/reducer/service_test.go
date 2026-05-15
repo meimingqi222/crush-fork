@@ -12,7 +12,7 @@ func TestReduce(t *testing.T) {
 		result := Reduce([]TaskResult{
 			{ID: "a", Description: "Fetch", Status: message.ToolResultSubtaskStatusCompleted, ChildSessionID: "s1", FilesTouched: []string{"/tmp/a.go"}, PatchPlan: []string{"collect baseline"}, TestResults: []string{"fetch smoke passed"}, Followups: []string{"Need API throttling review?"}},
 			{ID: "b", Description: "Analyze", Status: message.ToolResultSubtaskStatusCompleted, ChildSessionID: "s2", Artifacts: []string{"shell:bg-1"}, FilesTouched: []string{"/tmp/b.go"}, PatchPlan: []string{"apply optimization"}, TestResults: []string{"analysis tests passed"}, Followups: []string{"Should we add benchmark CI?"}},
-		})
+		}, nil)
 
 		require.Equal(t, "Completed 2/2 subtasks.", result.Summary)
 		require.Equal(t, "high", result.Confidence)
@@ -33,7 +33,7 @@ func TestReduce(t *testing.T) {
 		result := Reduce([]TaskResult{
 			{ID: "a", Description: "Root", Status: message.ToolResultSubtaskStatusFailed, Content: "boom"},
 			{ID: "b", Description: "Child", Status: message.ToolResultSubtaskStatusCanceled, Content: "blocked"},
-		})
+		}, nil)
 
 		require.Equal(t, "Completed 0/2 subtasks (1 failed, 1 canceled).", result.Summary)
 		require.Equal(t, "low", result.Confidence)

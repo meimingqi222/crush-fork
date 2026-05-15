@@ -133,11 +133,6 @@ Seven reliability and safety gaps remain after the current foundation:
   and retry safety.
 - Maintain backward compatibility for existing `agent` tool calls while making
   structured completion the preferred path for built-in agents.
-- Wire or clean up the unused read-only bash classification helpers
-  (`isSafeReadOnlyBashSegment`, `isSafeReadOnlyGitCommand`,
-  `safeNullRedirectPattern`, `classifyPluginDecision`) in
-  `internal/autopermission/service.go` during P2 or P3 when permission
-  derivation is added.
 
 ## Non-Goals
 
@@ -216,11 +211,10 @@ The following are already correctly implemented and must not be re-implemented:
   `buildAgentModels`, `buildProvider`, HTTP client construction, and persistence
   decisions throughout `coordinator.go`.
 
-The following exist in `internal/autopermission/service.go` but are not yet
-wired into subagent permission derivation:
+The following were previously in `internal/autopermission/service.go` as
+candidates for subagent permission derivation but have been removed as dead code:
 `safeNullRedirectPattern`, `isSafeReadOnlyBashSegment`,
-`isSafeReadOnlyGitCommand`, `classifyPluginDecision`. These are candidates for
-wiring during P2 or for cleanup if not needed.
+`isSafeReadOnlyGitCommand`, `classifyPluginDecision`.
 
 ## Reference Design Inputs
 
@@ -631,11 +625,7 @@ algorithm and a runtime `ShapeToolsForSubagent` function on top.
    - Built-in profile defaults for `coordinator`, `explore`, `general`,
      `review`
 3. Wire `ShapeToolsForSubagent` into tool registry construction.
-4. Audit and wire or clean up unused autopermission helpers:
-   `isSafeReadOnlyBashSegment`, `isSafeReadOnlyGitCommand`,
-   `safeNullRedirectPattern`, `classifyPluginDecision` in
-   `internal/autopermission/service.go`.
-5. Make `explore` and `review` hard read-only through derived permissions.
+4. Make `explore` and `review` hard read-only through derived permissions.
 6. Add parent-deny propagation tests and read-only subagent tests.
 
 **Files:**

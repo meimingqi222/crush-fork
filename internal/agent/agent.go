@@ -237,14 +237,11 @@ type sessionAgent struct {
 	activeRequests *csync.Map[string, context.CancelFunc]
 	pausedQueues   *csync.Map[string, bool]
 
-	extractionMu             sync.Mutex
-	pendingExtractions       map[string][]pendingExtraction
-	nextExtractionID         uint64
-	sessionMemoryTurns       map[string]int
-	sessionMemoryTokens      map[string]int64
-	sessionMemoryInitialized map[string]bool
-	sessionMemoryEnabled     bool
-	memoryEngineEnabled      bool
+	extractionMu         sync.Mutex
+	pendingExtractions   map[string][]pendingExtraction
+	nextExtractionID     uint64
+	sessionMemoryEnabled bool
+	memoryEngineEnabled  bool
 
 	// memoryEngineEventStore provides direct EventStore access when the memory
 	// engine is enabled. Used for Working Memory read/write operations.
@@ -319,40 +316,37 @@ func NewSessionAgent(
 		retryWaitFunc = waitForRetryDelay
 	}
 	return &sessionAgent{
-		largeModel:               csync.NewValue(opts.LargeModel),
-		smallModel:               csync.NewValue(opts.SmallModel),
-		systemPromptPrefix:       csync.NewValue(opts.SystemPromptPrefix),
-		systemPrompt:             csync.NewValue(opts.SystemPrompt),
-		workingDir:               opts.WorkingDir,
-		agentFactory:             agentFactory,
-		refreshCallConfig:        opts.RefreshCallConfig,
-		deferredToolRuntime:      opts.DeferredToolRuntime,
-		isSubAgent:               opts.IsSubAgent,
-		sessions:                 opts.Sessions,
-		messages:                 opts.Messages,
-		backgroundModel:          opts.BackgroundModel,
-		reviewToolResult:         opts.ReviewToolResult,
-		disableAutoSummarize:     opts.DisableAutoSummarize,
-		tools:                    csync.NewSliceFrom(opts.Tools),
-		isYolo:                   opts.IsYolo,
-		notify:                   opts.Notify,
-		hookManager:              opts.HookManager,
-		pluginRuntime:            opts.PluginRuntime,
-		filetracker:              opts.Filetracker,
-		checkpoint:               opts.Checkpoint,
-		retryDelayFunc:           retryDelayFunc,
-		retryWaitFunc:            retryWaitFunc,
-		messageQueue:             csync.NewMap[string, []SessionAgentCall](),
-		activeRequests:           csync.NewMap[string, context.CancelFunc](),
-		pausedQueues:             csync.NewMap[string, bool](),
-		pendingExtractions:       make(map[string][]pendingExtraction),
-		sessionMemoryTurns:       make(map[string]int),
-		sessionMemoryTokens:      make(map[string]int64),
-		sessionMemoryInitialized: make(map[string]bool),
-		sessionMemoryEnabled:     opts.EnableSessionMemory,
-		memoryEngineEnabled:      opts.MemoryEngineEnabled,
-		memoryEngineEventStore:   opts.MemoryEngineEventStore,
-		memoryEngineHooks:        opts.MemoryEngineHooks,
+		largeModel:             csync.NewValue(opts.LargeModel),
+		smallModel:             csync.NewValue(opts.SmallModel),
+		systemPromptPrefix:     csync.NewValue(opts.SystemPromptPrefix),
+		systemPrompt:           csync.NewValue(opts.SystemPrompt),
+		workingDir:             opts.WorkingDir,
+		agentFactory:           agentFactory,
+		refreshCallConfig:      opts.RefreshCallConfig,
+		deferredToolRuntime:    opts.DeferredToolRuntime,
+		isSubAgent:             opts.IsSubAgent,
+		sessions:               opts.Sessions,
+		messages:               opts.Messages,
+		backgroundModel:        opts.BackgroundModel,
+		reviewToolResult:       opts.ReviewToolResult,
+		disableAutoSummarize:   opts.DisableAutoSummarize,
+		tools:                  csync.NewSliceFrom(opts.Tools),
+		isYolo:                 opts.IsYolo,
+		notify:                 opts.Notify,
+		hookManager:            opts.HookManager,
+		pluginRuntime:          opts.PluginRuntime,
+		filetracker:            opts.Filetracker,
+		checkpoint:             opts.Checkpoint,
+		retryDelayFunc:         retryDelayFunc,
+		retryWaitFunc:          retryWaitFunc,
+		messageQueue:           csync.NewMap[string, []SessionAgentCall](),
+		activeRequests:         csync.NewMap[string, context.CancelFunc](),
+		pausedQueues:           csync.NewMap[string, bool](),
+		pendingExtractions:     make(map[string][]pendingExtraction),
+		sessionMemoryEnabled:   opts.EnableSessionMemory,
+		memoryEngineEnabled:    opts.MemoryEngineEnabled,
+		memoryEngineEventStore: opts.MemoryEngineEventStore,
+		memoryEngineHooks:      opts.MemoryEngineHooks,
 	}
 }
 
@@ -2141,33 +2135,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.activeRequests.Del(call.SessionID)
 	cancel()
 	wg.Wait()
-	if !a.isSubAgent && a.enableSessionMemory() && !shouldSummarize && a.QueuedPrompts(call.SessionID) == 0 {
-		historyForExtraction := a.getHistoryForMemoryExtraction(ctx, call.SessionID)
-		a.extractionMu.Lock()
-		a.sessionMemoryTurns[call.SessionID]++
-		sessionMemoryTurns := a.sessionMemoryTurns[call.SessionID]
-		if a.enableSessionMemory() {
-			shouldUpdate, initialized, newTokensAtLastExtraction := shouldUpdateSessionMemory(
-				a.sessionMemoryInitialized[call.SessionID],
-				currentSession.LastInputTokens(),
-				a.sessionMemoryTokens[call.SessionID],
-				sessionMemoryTurns,
-				runToolUses,
-			)
-			a.sessionMemoryInitialized[call.SessionID] = initialized
-			a.sessionMemoryTokens[call.SessionID] = newTokensAtLastExtraction
-			if shouldUpdate {
-				a.sessionMemoryTurns[call.SessionID] = 0
-				sessionMemoryCtx, sessionMemoryCancel := context.WithCancel(context.Background())
-				sessionMemoryID := a.trackPendingExtractionLocked(call.SessionID, sessionMemoryCancel)
-				go func(history []string, pendingID uint64) {
-					defer a.finishPendingExtraction(call.SessionID, pendingID)
-					updateSessionMemoryEventStore(sessionMemoryCtx, a.memoryEngineEventStore, a.backgroundModel, a.filetracker, call.SessionID, call.Prompt, history)
-				}(historyForExtraction, sessionMemoryID)
-			}
-		}
-		a.extractionMu.Unlock()
-	}
 
 	if a.QueuedPrompts(call.SessionID) == 0 {
 		return result, err
@@ -2380,8 +2347,16 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	// Copy mutable fields under lock to avoid races with SetModels.
-	largeModel := a.largeModel.Get()
+	summaryModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
+	// 选择摘要模型：优先使用 background model，否则回退到 large model
+	if a.backgroundModel != nil {
+		summaryModel = a.backgroundModel.model
+		// 为 background model 重新计算 provider options
+		opts = getProviderOptions(summaryModel, a.backgroundModel.provider)
+		// 切换为 background model provider 的 system prompt prefix
+		systemPromptPrefix = a.backgroundModel.provider.SystemPromptPrefix
+	}
 	providerCtx := defaultProviderContext()
 	compactingPurpose := sessionCompactingPurposeFromContext(ctx)
 
@@ -2411,7 +2386,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	msgs = builtinPruneToolResults(msgs)
 
 	if shouldReactiveCompactMessages(compactingPurpose) {
-		reactiveCompacted, reactiveErr := a.reactiveCompactSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
+		reactiveCompacted, reactiveErr := a.reactiveCompactSessionMessages(ctx, sessionID, summaryModel, providerCtx, msgs)
 		if reactiveErr != nil {
 			return reactiveErr
 		}
@@ -2420,14 +2395,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 	if shouldAutoCompactMessages(compactingPurpose, msgs) {
-		autoCompacted, autoCompactErr := a.autoCompactSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
+		autoCompacted, autoCompactErr := a.autoCompactSessionMessages(ctx, sessionID, summaryModel, providerCtx, msgs)
 		if autoCompactErr != nil {
 			return autoCompactErr
 		}
 		if len(autoCompacted) > 0 {
 			msgs = autoCompacted
 		}
-		postCompacted, postCompactErr := a.postCompactSessionMessages(ctx, sessionID, largeModel, providerCtx, msgs)
+		postCompacted, postCompactErr := a.postCompactSessionMessages(ctx, sessionID, summaryModel, providerCtx, msgs)
 		if postCompactErr != nil {
 			return postCompactErr
 		}
@@ -2439,7 +2414,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	transformedMsgs, err := a.transformSessionMessages(ctx, chatRequestStateInput{
 		SessionID:             sessionID,
 		Agent:                 "session",
-		Model:                 largeModel,
+		Model:                 summaryModel,
 		Provider:              providerCtx,
 		Purpose:               compactingPurpose,
 		RequestPurpose:        compactingPurpose,
@@ -2461,7 +2436,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	compacting, err := a.plugins().TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
 		SessionID: sessionID,
 		Agent:     "session",
-		Model:     agentModelInfo(largeModel),
+		Model:     agentModelInfo(summaryModel),
 		Purpose:   compactingPurpose,
 		Usage:     compactUsage,
 	}, plugin.SessionCompactingOutput{})
@@ -2470,7 +2445,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	if a.filetracker != nil {
-		fileContext := a.buildRecentFileContext(ctx, sessionID, int64(largeModel.CatwalkCfg.ContextWindow))
+		fileContext := a.buildRecentFileContext(ctx, sessionID, int64(summaryModel.CatwalkCfg.ContextWindow))
 		compacting.Context = append(compacting.Context, fileContext...)
 	}
 
@@ -2480,14 +2455,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	defer a.activeRequests.Del(sessionID)
 	defer cancel()
 
-	agent := a.agentFactory(retryableStreamModel{largeModel.Model},
+	agent := a.agentFactory(retryableStreamModel{summaryModel.Model},
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
 		fantasy.WithUserAgent(userAgent),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:             message.Assistant,
-		Model:            largeModel.ModelCfg.Model,
-		Provider:         largeModel.ModelCfg.Provider,
+		Model:            summaryModel.ModelCfg.Model,
+		Provider:         summaryModel.ModelCfg.Provider,
 		IsSummaryMessage: true,
 	})
 	if err != nil {
@@ -2499,9 +2474,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// Check whether history alone would leave enough room for the summary
 	// prompt, system prompt, and output reserve. This uses the same effective
 	// prompt budget as normal auto-summarization, including max_prompt_tokens.
-	contextWindow := EffectiveContextWindow(largeModel.CatwalkCfg)
+	contextWindow := EffectiveContextWindow(summaryModel.CatwalkCfg)
 	maxAllowedTokens := summaryHistoryTokenBudget(
-		largeModel,
+		summaryModel,
 		0,
 		summaryPromptText,
 		string(summaryPrompt),
@@ -2592,8 +2567,8 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			slog.Warn(
 				"Retrying summarization without Anthropic thinking after provider rejected unsigned reasoning content",
 				"session_id", sessionID,
-				"model", largeModel.ModelCfg.Model,
-				"provider", largeModel.ModelCfg.Provider,
+				"model", summaryModel.ModelCfg.Model,
+				"provider", summaryModel.ModelCfg.Provider,
 				"error", err,
 			)
 			var changed bool
@@ -2611,8 +2586,8 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			slog.Warn(
 				"Retrying summarization after proxy rejected Anthropic redacted_thinking blocks",
 				"session_id", sessionID,
-				"model", largeModel.ModelCfg.Model,
-				"provider", largeModel.ModelCfg.Provider,
+				"model", summaryModel.ModelCfg.Model,
+				"provider", summaryModel.ModelCfg.Provider,
 				"error", err,
 			)
 			var changed bool
@@ -2698,7 +2673,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
-	summaryMessage.SetUsage(normalizedMessageUsage(resp.TotalUsage, usageProvider(largeModel), summarizeEstimatedPromptTokens))
+	summaryMessage.SetUsage(normalizedMessageUsage(resp.TotalUsage, usageProvider(summaryModel), summarizeEstimatedPromptTokens))
 	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
 	err = a.messages.Update(genCtx, summaryMessage)
 	if err != nil {
@@ -2717,12 +2692,16 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
-	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens)
+	a.updateSessionUsage(summaryModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens)
 
 	currentSession.SummaryMessageID = summaryMessage.ID
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err == nil && a.hookManager != nil {
 		a.hookManager.RunPostCompact(ctx, sessionID)
+	}
+	// Compact 后生成 session working memory，供后续 turn 快速恢复上下文。
+	if err == nil && a.enableSessionMemory() {
+		a.asyncUpdateSessionMemory(ctx, sessionID)
 	}
 	return err
 }

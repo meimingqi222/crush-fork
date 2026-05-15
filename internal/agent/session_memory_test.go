@@ -116,3 +116,36 @@ func TestBuildSessionMemoryHistoryCapsRecentMessages(t *testing.T) {
 	block := buildSessionMemoryHistory(history)
 	require.Len(t, strings.Split(block, "\n\n"), sessionMemoryMaxHistory)
 }
+
+func TestUpdateSessionMemorySupersedesOldEntry(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	model := &sessionMemoryLanguageModel{
+		response: `[{"content":"first memory"}]`,
+	}
+	bgModel := &backgroundModel{model: Model{Model: model}, provider: config.ProviderConfig{ID: "test"}}
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	eng := engine.New(conn, engine.Config{Enabled: true})
+
+	sess, err := env.sessions.Create(t.Context(), "session-supersede")
+	require.NoError(t, err)
+
+	// 第一条 memory
+	updateSessionMemoryEventStore(t.Context(), eng.EventStore(), bgModel, *env.filetracker, sess.ID, "prompt-1", []string{
+		"USER: prompt-1",
+	})
+	first := readWorkingMemoryContent(t.Context(), eng.EventStore(), sess.ID)
+	require.Equal(t, "first memory", first)
+
+	// 第二条 memory 应该 supersede 第一条
+	model.response = `[{"content":"second memory"}]`
+	updateSessionMemoryEventStore(t.Context(), eng.EventStore(), bgModel, *env.filetracker, sess.ID, "prompt-2", []string{
+		"USER: prompt-2",
+	})
+	second := readWorkingMemoryContent(t.Context(), eng.EventStore(), sess.ID)
+	require.Equal(t, "second memory", second)
+}

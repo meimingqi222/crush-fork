@@ -247,3 +247,51 @@ func TestToolResultReducerPreservesSubtaskMetadata(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "Done", reducer.Summary)
 }
+
+func TestToolResultSubagentFinishRoundTripUsesStructuredMetadata(t *testing.T) {
+	t.Parallel()
+
+	finish := ToolResultSubagentFinish{
+		Status:       ToolResultSubtaskStatusCompletedWithWarnings,
+		Summary:      "done with warnings",
+		Artifacts:    []string{"artifact.txt"},
+		FilesTouched: []string{"a.go"},
+		PatchPlan:    []string{"update a.go"},
+		TestResults:  []string{"go test ./..."},
+		Followups:    []string{"check prod"},
+		Risks:        []string{"warning"},
+		NextActions:  []string{"merge"},
+		Confidence:   "medium",
+		Error:        "minor warning",
+	}
+
+	result := ToolResult{Metadata: `{"existing":"value"}`}.WithSubagentFinish(finish)
+	require.Contains(t, result.Metadata, `"existing":"value"`)
+	require.Contains(t, result.Metadata, `"subagent_finish":`)
+
+	parsed, ok := result.SubagentFinish()
+	require.True(t, ok)
+	require.Equal(t, finish, parsed)
+}
+
+func TestToolResultSubagentFinishPreservesOtherMetadata(t *testing.T) {
+	t.Parallel()
+
+	result := ToolResult{Metadata: `{"existing":"value"}`}.WithSubtaskResult(ToolResultSubtaskResult{
+		ChildSessionID:   "child-1",
+		ParentToolCallID: "call-1",
+		Status:           ToolResultSubtaskStatusCompleted,
+	}).WithSubagentFinish(ToolResultSubagentFinish{Summary: "Done", Status: ToolResultSubtaskStatusCompleted})
+
+	require.Contains(t, result.Metadata, `"existing":"value"`)
+	require.Contains(t, result.Metadata, `"subtask_result":`)
+	require.Contains(t, result.Metadata, `"subagent_finish":`)
+
+	subtask, ok := result.SubtaskResult()
+	require.True(t, ok)
+	require.Equal(t, "child-1", subtask.ChildSessionID)
+
+	finish, ok := result.SubagentFinish()
+	require.True(t, ok)
+	require.Equal(t, "Done", finish.Summary)
+}

@@ -1,0 +1,23 @@
+Marks a subagent session as finished with structured completion metadata.
+
+Use this tool only from subagent sessions. Call it exactly once at the end of delegated work.
+
+Parameters:
+- status: Terminal subagent status (`completed`, `completed_with_warnings`, `failed`, `canceled`, or `blocked`)
+- summary: Human-readable completion summary
+- artifacts: Output artifacts or references
+- files_touched: Workspace-relative or absolute file paths changed by the task
+- patch_plan: Applied or proposed change steps
+- test_results: Verification results
+- followups: Questions or next tasks for the coordinator
+- risks: Risks or caveats discovered during execution
+- next_actions: Suggested next coordinator actions
+- confidence: Qualitative confidence label
+- error: Required for `failed` and `blocked`
+- data: Optional structured JSON payload
+
+Rules:
+- Do not pass non-terminal statuses.
+- `summary` is required for successful completion unless structured data is sufficient.
+- `error` is required for `failed` and `blocked`.
+- Only the first successful `subagent_finish` call is accepted for a session.

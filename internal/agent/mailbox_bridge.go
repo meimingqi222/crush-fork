@@ -207,9 +207,9 @@ func taskGraphTodoStatus(status message.ToolResultSubtaskStatus) session.TodoSta
 	switch status {
 	case message.ToolResultSubtaskStatusInProgress:
 		return session.TodoStatusInProgress
-	case message.ToolResultSubtaskStatusCompleted:
+	case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings:
 		return session.TodoStatusCompleted
-	case message.ToolResultSubtaskStatusFailed:
+	case message.ToolResultSubtaskStatusFailed, message.ToolResultSubtaskStatusBlocked:
 		return session.TodoStatusFailed
 	case message.ToolResultSubtaskStatusCanceled:
 		return session.TodoStatusCanceled
@@ -220,7 +220,7 @@ func taskGraphTodoStatus(status message.ToolResultSubtaskStatus) session.TodoSta
 
 func taskGraphTodoProgress(status message.ToolResultSubtaskStatus, toolUses int) int {
 	switch status {
-	case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusFailed, message.ToolResultSubtaskStatusCanceled:
+	case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings, message.ToolResultSubtaskStatusFailed, message.ToolResultSubtaskStatusCanceled, message.ToolResultSubtaskStatusBlocked:
 		return 100
 	case message.ToolResultSubtaskStatusInProgress:
 		return min(95, 10+toolUses*5)
@@ -241,10 +241,14 @@ func taskGraphTodoActiveForm(node *taskGraphNodeState) string {
 		return "Running"
 	case message.ToolResultSubtaskStatusFailed:
 		return "Failed"
+	case message.ToolResultSubtaskStatusBlocked:
+		return "Blocked"
 	case message.ToolResultSubtaskStatusCanceled:
 		return "Canceled"
 	case message.ToolResultSubtaskStatusCompleted:
 		return "Completed"
+	case message.ToolResultSubtaskStatusCompletedWithWarnings:
+		return "Completed with warnings"
 	default:
 		return "Pending"
 	}

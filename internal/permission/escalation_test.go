@@ -99,10 +99,14 @@ func TestEscalationBridgeFromContext(t *testing.T) {
 
 func TestWorkerIdentity(t *testing.T) {
 	identity := WorkerIdentity{
-		AgentID:   "agent-123",
-		AgentName: "researcher",
-		AgentType: "general",
-		Color:     "blue",
+		AgentID:         "agent-123",
+		AgentName:       "researcher",
+		AgentType:       "general",
+		Color:           "blue",
+		ParentSessionID: "parent-1",
+		ChildSessionID:  "child-1",
+		TaskID:          "task-1",
+		ProfileName:     "general",
 	}
 
 	ctx := WithWorkerIdentity(context.Background(), identity)
@@ -111,6 +115,10 @@ func TestWorkerIdentity(t *testing.T) {
 	require.Equal(t, identity.AgentID, retrieved.AgentID)
 	require.Equal(t, identity.AgentName, retrieved.AgentName)
 	require.Equal(t, identity.Color, retrieved.Color)
+	require.Equal(t, identity.ParentSessionID, retrieved.ParentSessionID)
+	require.Equal(t, identity.ChildSessionID, retrieved.ChildSessionID)
+	require.Equal(t, identity.TaskID, retrieved.TaskID)
+	require.Equal(t, identity.ProfileName, retrieved.ProfileName)
 
 	// Test without identity
 	retrieved = WorkerIdentityFromContext(context.Background())
@@ -173,7 +181,7 @@ func TestEscalateToLeader_NoWorkerIdentity(t *testing.T) {
 
 func TestEscalateToLeader_Success(t *testing.T) {
 	bridge := NewEscalationBridge()
-	identity := WorkerIdentity{AgentID: "worker-1", AgentName: "researcher"}
+	identity := WorkerIdentity{AgentID: "worker-1", AgentName: "researcher", ParentSessionID: "parent-1", ChildSessionID: "child-1", TaskID: "task-a", ProfileName: "general"}
 	ctx := WithEscalationBridge(context.Background(), bridge)
 	ctx = WithWorkerIdentity(ctx, identity)
 
@@ -209,4 +217,38 @@ func TestEscalateToLeader_Success(t *testing.T) {
 	require.True(t, resp.Approved)
 	require.Equal(t, "Looks safe", resp.Reason)
 	require.NoError(t, <-errCh)
+}
+
+func TestEscalateToLeader_PropagatesTaskMetadata(t *testing.T) {
+	bridge := NewEscalationBridge()
+	identity := WorkerIdentity{
+		AgentID:         "worker-1",
+		AgentName:       "researcher",
+		ParentSessionID: "parent-1",
+		ChildSessionID:  "child-1",
+		TaskID:          "task-a",
+		ProfileName:     "general",
+	}
+	ctx := WithEscalationBridge(context.Background(), bridge)
+	ctx = WithWorkerIdentity(ctx, identity)
+
+	resultCh := make(chan EscalationRequest, 1)
+	go func() {
+		pending := bridge.GetPendingEscalations()
+		for len(pending) == 0 {
+			time.Sleep(5 * time.Millisecond)
+			pending = bridge.GetPendingEscalations()
+		}
+		resultCh <- pending[0]
+		_ = bridge.RespondToEscalation(EscalationResponse{RequestID: pending[0].RequestID, Approved: true})
+	}()
+
+	resp, err := EscalateToLeader(ctx, "bash", map[string]string{"cmd": "ls"}, "list files")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	pending := <-resultCh
+	require.Equal(t, "parent-1", pending.ParentSessionID)
+	require.Equal(t, "child-1", pending.ChildSessionID)
+	require.Equal(t, "task-a", pending.TaskID)
+	require.Equal(t, "general", pending.ProfileName)
 }

@@ -16,11 +16,8 @@ import (
 )
 
 const (
-	sessionMemoryMaxHistory                = 12
-	sessionMemoryInitializationTokens      = 10_000
-	sessionMemoryMinimumTokensBetweenTurns = 5_000
-	sessionMemoryToolCallsBetweenUpdates   = 3
-	workingMemoryTTL                       = 24 * time.Hour
+	sessionMemoryMaxHistory = 12
+	workingMemoryTTL        = 24 * time.Hour
 )
 
 const sessionMemoryPrompt = `You maintain a single session memory entry that helps future turns quickly recover the current working state.
@@ -75,32 +72,6 @@ type sessionMemoryContextKey struct{}
 
 type sessionMemoryUpdate struct {
 	Content string `json:"content"`
-}
-
-func shouldUpdateSessionMemory(initialized bool, currentPromptTokens, tokensAtLastExtraction int64, toolCallsSinceLastExtraction, currentRunToolUses int) (bool, bool, int64) {
-	if currentPromptTokens <= 0 {
-		return false, initialized, tokensAtLastExtraction
-	}
-	if !initialized {
-		if currentPromptTokens < sessionMemoryInitializationTokens {
-			return false, false, tokensAtLastExtraction
-		}
-		initialized = true
-		return true, initialized, currentPromptTokens
-	}
-	if currentPromptTokens < tokensAtLastExtraction {
-		return false, initialized, currentPromptTokens
-	}
-	if currentPromptTokens-tokensAtLastExtraction < sessionMemoryMinimumTokensBetweenTurns {
-		return false, initialized, tokensAtLastExtraction
-	}
-	if toolCallsSinceLastExtraction >= sessionMemoryToolCallsBetweenUpdates {
-		return true, initialized, currentPromptTokens
-	}
-	if currentRunToolUses == 0 {
-		return true, initialized, currentPromptTokens
-	}
-	return false, initialized, tokensAtLastExtraction
 }
 
 func buildSessionMemoryPrompt(sessionID, prompt, historyBlock, filesBlock string) string {
@@ -181,6 +152,20 @@ func updateSessionMemoryEventStore(ctx context.Context, store engine.EventStore,
 		return
 	}
 
+	// 查询同 session 的现有 WorkingMemory，用 supersede 语义覆盖旧条目。
+	scope := engine.MemoryScopeSession
+	kind := engine.MemoryKindWorkingMemory
+	existingEvents, qerr := store.Query(ctx, engine.EventFilter{
+		Scope:     &scope,
+		Kind:      &kind,
+		SessionID: &sessionID,
+		Limit:     1,
+		OrderDesc: true,
+	})
+	if qerr != nil {
+		slog.Warn("Failed to query existing working memory", "error", qerr, "session_id", sessionID)
+	}
+
 	now := time.Now()
 	expiresAt := now.Add(workingMemoryTTL)
 	for i, mem := range memories {
@@ -202,6 +187,10 @@ func updateSessionMemoryEventStore(ctx context.Context, store engine.EventStore,
 			UpdatedAt: now,
 			ExpiresAt: &expiresAt,
 			Tags:      []string{"working_memory"},
+		}
+		if len(existingEvents) > 0 {
+			sid := existingEvents[0].ID
+			event.Supersedes = &sid
 		}
 
 		if err := store.Append(ctx, event); err != nil {
@@ -256,8 +245,10 @@ func readWorkingMemoryContent(ctx context.Context, store engine.EventStore, sess
 		return ""
 	}
 
-	latest := events[len(events)-1]
-	return latest.Content
+	if latest := engine.FilterLatestNonSuperseded(events); latest != nil {
+		return latest.Content
+	}
+	return ""
 }
 
 func listFilesFromTracker(ctx context.Context, tracker filetracker.Service, sessionID string) []string {

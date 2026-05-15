@@ -117,6 +117,9 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
+	if config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent {
+		builtin = append(builtin, agenttools.NewSubagentFinishTool())
+	}
 	for _, tool := range builtin {
 		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))
 	}

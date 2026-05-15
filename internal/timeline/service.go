@@ -15,7 +15,11 @@ const (
 	EventToolProgress         EventType = "tool_progress"
 	EventToolFinished         EventType = "tool_finished"
 	EventChildSessionStarted  EventType = "child_session_started"
+	EventChildSessionProgress EventType = "child_session_progress"
 	EventChildSessionFinished EventType = "child_session_finished"
+	EventChildSessionFailed   EventType = "child_session_failed"
+	EventChildSessionCanceled EventType = "child_session_canceled"
+	EventChildSessionBlocked  EventType = "child_session_blocked"
 )
 
 type Event struct {

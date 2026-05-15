@@ -59,3 +59,28 @@ func (a *sessionAgent) finishPendingExtraction(sessionID string, pendingID uint6
 func (a *sessionAgent) enableSessionMemory() bool {
 	return a.sessionMemoryEnabled && a.memoryEngineEnabled && a.memoryEngineEventStore != nil && a.backgroundModel != nil
 }
+
+// asyncUpdateSessionMemory 在 compact 后异步生成 session working memory。
+// 提取最后一条 user message 作为 prompt，结合完整对话历史生成状态快照。
+func (a *sessionAgent) asyncUpdateSessionMemory(ctx context.Context, sessionID string) {
+	history := a.getHistoryForMemoryExtraction(ctx, sessionID)
+
+	msgs, err := a.messages.List(ctx, sessionID)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	var prompt string
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.User {
+			prompt = msgs[i].Content().Text
+			break
+		}
+	}
+
+	go func() {
+		// Detach from parent deadline/cancellation so the background task
+		// survives after Summarize returns.
+		bgCtx := context.WithoutCancel(ctx)
+		updateSessionMemoryEventStore(bgCtx, a.memoryEngineEventStore, a.backgroundModel, a.filetracker, sessionID, prompt, history)
+	}()
+}

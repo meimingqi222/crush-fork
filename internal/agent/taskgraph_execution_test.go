@@ -234,7 +234,7 @@ func TestRunTaskGraphDirect_PropagatesFailureToDependents(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "root: failed")
-	require.Contains(t, resp.Content, "child: canceled")
+	require.Contains(t, resp.Content, "child: blocked")
 	reducerMeta, ok := message.ParseToolResultReducer(resp.Metadata)
 	require.True(t, ok)
 	require.Equal(t, "low", reducerMeta.Confidence)
@@ -251,7 +251,15 @@ func TestRunTaskGraphDirect_PropagatesFailureToDependents(t *testing.T) {
 		statuses[todo.ID] = todo.Status
 	}
 	require.Equal(t, session.TodoStatusFailed, statuses["root"])
-	require.Equal(t, session.TodoStatusCanceled, statuses["child"])
+	require.Equal(t, session.TodoStatusFailed, statuses["child"])
+}
+
+func TestStatusReleasesDependents(t *testing.T) {
+	t.Parallel()
+	require.True(t, statusReleasesDependents(message.ToolResultSubtaskStatusCompleted))
+	require.True(t, statusReleasesDependents(message.ToolResultSubtaskStatusCompletedWithWarnings))
+	require.False(t, statusReleasesDependents(message.ToolResultSubtaskStatusRunning))
+	require.False(t, statusReleasesDependents(message.ToolResultSubtaskStatusBlocked))
 }
 
 func TestRunTaskGraphDirect_SingleTaskKeepsSubtaskMetadata(t *testing.T) {
@@ -267,13 +275,23 @@ func TestRunTaskGraphDirect_SingleTaskKeepsSubtaskMetadata(t *testing.T) {
 		return agent, config.Agent{ID: requestedType, Description: requestedType, Mode: config.AgentModeSubagent}, nil
 	}
 	coord.subAgentScheduler = func(_ context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
-		return withSubtaskToolResponseMetadata(
+		resp := withSubtaskToolResponseMetadata(
 			fantasy.NewTextResponse("ok"),
 			params.ToolCallID,
 			"child-session-1",
 			params.ParentMessageID,
-			message.ToolResultSubtaskStatusCompleted,
-		), nil
+			message.ToolResultSubtaskStatusCompletedWithWarnings,
+		)
+		resp = withSubagentFinishToolResponseMetadata(resp, message.ToolResultSubagentFinish{
+			Status:      message.ToolResultSubtaskStatusCompletedWithWarnings,
+			Summary:     "ok",
+			Artifacts:   []string{"artifact.txt"},
+			PatchPlan:   []string{"update"},
+			TestResults: []string{"go test ./..."},
+			Followups:   []string{"review"},
+			Error:       "minor warning",
+		})
+		return resp, nil
 	}
 
 	resp, err := coord.runTaskGraphDirect(t.Context(), taskGraphParams{
@@ -288,7 +306,10 @@ func TestRunTaskGraphDirect_SingleTaskKeepsSubtaskMetadata(t *testing.T) {
 	subtask, ok := message.ParseToolResultSubtaskResult(resp.Metadata)
 	require.True(t, ok)
 	require.Equal(t, "child-session-1", subtask.ChildSessionID)
-	require.Equal(t, message.ToolResultSubtaskStatusCompleted, subtask.Status)
+	require.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, subtask.Status)
+	finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+	require.True(t, ok)
+	require.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, finish.Status)
 	reducerMeta, hasReducer := message.ParseToolResultReducer(resp.Metadata)
 	require.True(t, hasReducer)
 	require.Equal(t, "high", reducerMeta.Confidence)
@@ -480,6 +501,57 @@ func TestRunTaskGraphDirect_SkipsPerChildHandoffReview(t *testing.T) {
 	require.NotContains(t, resp.Content, "ok")
 }
 
+func TestRunTaskGraphDirect_KeepsFinishSummaryInAutoMode(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Agents[config.AgentGeneral] = config.Agent{
+		ID:          config.AgentGeneral,
+		Description: "general",
+		Mode:        config.AgentModeSubagent,
+	}
+	parentSession, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+	_, err = env.sessions.UpdatePermissionMode(t.Context(), parentSession.ID, session.PermissionModeAuto)
+	require.NoError(t, err)
+	coord := &coordinator{cfg: cfg, mailbox: mailbox.NewService(), sessions: env.sessions}
+
+	coord.subAgentFactory = func(_ context.Context, requestedType string) (SessionAgent, config.Agent, error) {
+		require.Equal(t, config.AgentGeneral, requestedType)
+		return &taskGraphMockSessionAgent{model: Model{CatwalkCfg: catwalk.Model{DefaultMaxTokens: 1000}, ModelCfg: config.SelectedModel{Provider: "test-provider", Model: "test-model"}}}, cfg.Config().Agents[config.AgentGeneral], nil
+	}
+	coord.subAgentScheduler = func(_ context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
+		require.True(t, params.SkipHandoffReview)
+		response := withSubtaskToolResponseMetadata(
+			fantasy.NewTextResponse("raw untrusted content"),
+			params.ToolCallID,
+			"child-1",
+			params.ParentMessageID,
+			message.ToolResultSubtaskStatusCompleted,
+		)
+		finish := message.ToolResultSubagentFinish{
+			Status:  message.ToolResultSubtaskStatusCompleted,
+			Summary: "found the code",
+		}
+		response = withSubagentFinishToolResponseMetadata(response, finish)
+		return response, nil
+	}
+
+	resp, err := coord.runTaskGraphDirect(t.Context(), taskGraphParams{
+		SessionID:      parentSession.ID,
+		AgentMessageID: "msg-1",
+		ToolCallID:     "call-1",
+		Tasks: []taskGraphTask{
+			{ID: "a", Prompt: "task-a", SubagentType: config.AgentGeneral},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "- a: completed")
+	require.Contains(t, resp.Content, "found the code")
+	require.NotContains(t, resp.Content, message.SanitizedToolResultStub)
+}
+
 func TestRunTaskGraphDirect_RetriesFailuresWithinBudget(t *testing.T) {
 	env := testEnv(t)
 	cfg, err := config.Init(env.workingDir, "", false)
@@ -518,6 +590,47 @@ func TestRunTaskGraphDirect_RetriesFailuresWithinBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
 	require.Equal(t, int32(2), atomic.LoadInt32(&attempts))
+}
+
+func TestRunTaskGraphDirect_DoesNotRetryAfterSideEffects(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	retryBudget := 1
+	cfg.Config().Agents[config.AgentGeneral] = config.Agent{
+		ID:          config.AgentGeneral,
+		Description: "general",
+		Mode:        config.AgentModeSubagent,
+		TaskGovernance: &config.TaskGovernance{
+			RetryBudget: &retryBudget,
+		},
+	}
+	coord := &coordinator{cfg: cfg, mailbox: mailbox.NewService(), sessions: env.sessions}
+
+	var attempts int32
+	coord.subAgentFactory = func(_ context.Context, requestedType string) (SessionAgent, config.Agent, error) {
+		return &taskGraphMockSessionAgent{model: Model{CatwalkCfg: catwalk.Model{DefaultMaxTokens: 1000}, ModelCfg: config.SelectedModel{Provider: "test-provider", Model: "test-model"}}}, cfg.Config().Agents[config.AgentGeneral], nil
+	}
+	coord.subAgentScheduler = func(_ context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
+		atomic.AddInt32(&attempts, 1)
+		resp := withSubtaskToolResponseMetadata(fantasy.NewTextErrorResponse("try again"), params.ToolCallID, "child-session-1", params.ParentMessageID, message.ToolResultSubtaskStatusFailed)
+		resp = withSubagentFinishToolResponseMetadata(resp, message.ToolResultSubagentFinish{
+			Status:       message.ToolResultSubtaskStatusFailed,
+			Summary:      "try again",
+			FilesTouched: []string{"internal/agent/coordinator.go"},
+		})
+		return resp, nil
+	}
+
+	resp, err := coord.runTaskGraphDirect(t.Context(), taskGraphParams{
+		SessionID:      "session-1",
+		AgentMessageID: "msg-1",
+		ToolCallID:     "call-1",
+		Tasks:          []taskGraphTask{{ID: "a", Prompt: "task-a", SubagentType: "general"}},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+	require.Equal(t, int32(1), atomic.LoadInt32(&attempts))
 }
 
 func TestRunTaskGraphDirect_TimesOutTaskAttempts(t *testing.T) {

@@ -251,8 +251,10 @@ func (r *SummaryRetriever) readWorkingMemory(ctx context.Context, sessionID stri
 		return ""
 	}
 
-	latest := events[len(events)-1]
-	return fmt.Sprintf("- Current session state: %s", latest.Content)
+	if latest := FilterLatestNonSuperseded(events); latest != nil {
+		return fmt.Sprintf("- Current session state: %s", latest.Content)
+	}
+	return ""
 }
 
 func (r *SummaryRetriever) recallFromEvents(ctx context.Context) (string, error) {

@@ -29,10 +29,30 @@ func ChildSessionStartedEvent(parentSessionID, childSessionID, title string) Eve
 	}
 }
 
-func ChildSessionFinishedEvent(parentSessionID, childSessionID, title, status, content string) Event {
+func ChildSessionProgressEvent(parentSessionID, childSessionID, title, status, content string) Event {
 	return Event{
 		SessionID:      parentSessionID,
-		Type:           EventChildSessionFinished,
+		Type:           EventChildSessionProgress,
+		ChildSessionID: childSessionID,
+		Title:          title,
+		Status:         status,
+		Content:        strings.TrimSpace(content),
+	}
+}
+
+func ChildSessionFinishedEvent(parentSessionID, childSessionID, title, status, content string) Event {
+	eventType := EventChildSessionFinished
+	switch strings.TrimSpace(status) {
+	case "failed":
+		eventType = EventChildSessionFailed
+	case "canceled":
+		eventType = EventChildSessionCanceled
+	case "blocked":
+		eventType = EventChildSessionBlocked
+	}
+	return Event{
+		SessionID:      parentSessionID,
+		Type:           eventType,
 		ChildSessionID: childSessionID,
 		Title:          title,
 		Status:         status,

@@ -244,6 +244,12 @@ type Styles struct {
 			ThinkingTruncationHint lipgloss.Style // "… (N lines hidden)" hint
 			ThinkingFooterTitle    lipgloss.Style // "Thought for" text
 			ThinkingFooterDuration lipgloss.Style // Duration value
+
+			// Summary section styles
+			SummaryBox            lipgloss.Style // Background for summary content
+			SummaryHeader         lipgloss.Style // "Context Summary" header label
+			SummaryTruncationHint lipgloss.Style // "… (N lines hidden)" hint
+
 			AssistantInfoIcon      lipgloss.Style
 			AssistantInfoModel     lipgloss.Style
 			AssistantInfoProvider  lipgloss.Style
@@ -1285,6 +1291,11 @@ func DefaultStyles() Styles {
 	s.Chat.Message.ThinkingTruncationHint = s.Muted
 	s.Chat.Message.ThinkingFooterTitle = s.Muted
 	s.Chat.Message.ThinkingFooterDuration = s.Subtle
+
+	// Summary section styles
+	s.Chat.Message.SummaryBox = s.Subtle.Background(bgOverlay)
+	s.Chat.Message.SummaryHeader = s.Base.Foreground(info).Bold(true)
+	s.Chat.Message.SummaryTruncationHint = s.Muted
 
 	// Text selection.
 	s.TextSelection = lipgloss.NewStyle().Foreground(charmtone.Salt).Background(charmtone.Charple)

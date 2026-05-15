@@ -1510,6 +1510,13 @@ func (m *UI) loadTaskNodeNestedTools(items []chat.MessageItem) {
 
 func taskNodeCompletionStatusFromMessages(msgs []message.Message) (message.ToolResultSubtaskStatus, bool) {
 	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.Tool {
+			for _, result := range msgs[i].ToolResults() {
+				if subtask, ok := result.SubtaskResult(); ok && subtask.Status != "" {
+					return subtask.Status, true
+				}
+			}
+		}
 		if msgs[i].Role != message.Assistant {
 			continue
 		}
@@ -1520,7 +1527,7 @@ func taskNodeCompletionStatusFromMessages(msgs []message.Message) (message.ToolR
 		switch finish.Reason {
 		case message.FinishReasonEndTurn:
 			return message.ToolResultSubtaskStatusCompleted, true
-		case message.FinishReasonError:
+		case message.FinishReasonError, message.FinishReasonPermissionDenied:
 			return message.ToolResultSubtaskStatusFailed, true
 		case message.FinishReasonCanceled:
 			return message.ToolResultSubtaskStatusCanceled, true
@@ -1859,32 +1866,24 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 
 	// If this is a task-graph task session (toolCallID = "tc.ID::taskID"),
 	// update the corresponding TaskNodeItem status directly.
-	if event.Payload.Role == message.Assistant {
-		if tcPart, taskPart, found := strings.Cut(toolCallID, "::"); found && taskPart != "" {
-			baseTaskID, _, _ := strings.Cut(taskPart, "::")
-			nodeID := chat.TaskNodeItemID(tcPart, baseTaskID)
-			if nodeItem := m.chat.MessageItem(nodeID); nodeItem != nil {
-				if taskNode, ok := nodeItem.(*chat.TaskNodeItem); ok {
-					if statusText, isError, ok := childSessionStatus(event.Payload); ok {
-						if event.Type == pubsub.DeletedEvent {
-							taskNode.ClearChildSessionStatus()
-						} else {
-							taskNode.SetChildSessionStatus(statusText, isError)
-						}
-					} else {
+	if tcPart, taskPart, found := strings.Cut(toolCallID, "::"); found && taskPart != "" {
+		baseTaskID, _, _ := strings.Cut(taskPart, "::")
+		nodeID := chat.TaskNodeItemID(tcPart, baseTaskID)
+		if nodeItem := m.chat.MessageItem(nodeID); nodeItem != nil {
+			if taskNode, ok := nodeItem.(*chat.TaskNodeItem); ok {
+				if statusText, isError, ok := childSessionStatus(event.Payload); ok {
+					if event.Type == pubsub.DeletedEvent {
 						taskNode.ClearChildSessionStatus()
+					} else {
+						taskNode.SetChildSessionStatus(statusText, isError)
 					}
-					// Detect task completion from child session finish reason.
-					if finish := event.Payload.FinishPart(); finish != nil {
-						switch finish.Reason {
-						case message.FinishReasonEndTurn:
-							taskNode.SetCompletionStatus(message.ToolResultSubtaskStatusCompleted)
-							taskNode.ClearChildSessionStatus()
-						case message.FinishReasonError:
-							taskNode.SetCompletionStatus(message.ToolResultSubtaskStatusFailed)
-						case message.FinishReasonCanceled:
-							taskNode.SetCompletionStatus(message.ToolResultSubtaskStatusCanceled)
-						}
+				} else {
+					taskNode.ClearChildSessionStatus()
+				}
+				if status, ok := taskNodeCompletionStatusFromMessages([]message.Message{event.Payload}); ok {
+					taskNode.SetCompletionStatus(status)
+					if status == message.ToolResultSubtaskStatusCompleted || status == message.ToolResultSubtaskStatus("completed_with_warnings") {
+						taskNode.ClearChildSessionStatus()
 					}
 				}
 			}
@@ -1930,7 +1929,7 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 		return nil
 	}
 
-	if statusItem, ok := nestedTarget.(chat.ChildSessionStatusSetter); ok && event.Payload.Role == message.Assistant {
+	if statusItem, ok := nestedTarget.(chat.ChildSessionStatusSetter); ok {
 		if statusText, isError, ok := childSessionStatus(event.Payload); ok {
 			if event.Type == pubsub.DeletedEvent {
 				statusItem.ClearChildSessionStatus()
@@ -2473,12 +2472,32 @@ func childSessionStatus(msg message.Message) (text string, isError bool, ok bool
 		return content, false, true
 	}
 
-	if finish := msg.FinishPart(); finish != nil && finish.Reason == message.FinishReasonError {
-		switch {
-		case strings.TrimSpace(finish.Details) != "":
-			return strings.TrimSpace(finish.Details), true, true
-		case strings.TrimSpace(finish.Message) != "":
-			return strings.TrimSpace(finish.Message), true, true
+	for _, result := range msg.ToolResults() {
+		if subtask, ok := result.SubtaskResult(); ok {
+			switch subtask.Status {
+			case message.ToolResultSubtaskStatus("blocked"):
+				if content := strings.TrimSpace(result.Content); content != "" {
+					return content, true, true
+				}
+				return "Blocked", true, true
+			case message.ToolResultSubtaskStatus("completed_with_warnings"):
+				if content := strings.TrimSpace(result.Content); content != "" {
+					return content, false, true
+				}
+				return "Completed with warnings", false, true
+			}
+		}
+	}
+
+	if finish := msg.FinishPart(); finish != nil {
+		switch finish.Reason {
+		case message.FinishReasonError, message.FinishReasonPermissionDenied:
+			switch {
+			case strings.TrimSpace(finish.Details) != "":
+				return strings.TrimSpace(finish.Details), true, true
+			case strings.TrimSpace(finish.Message) != "":
+				return strings.TrimSpace(finish.Message), true, true
+			}
 		}
 	}
 

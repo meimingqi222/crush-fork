@@ -20,7 +20,7 @@ type TaskResult struct {
 	Followups      []string
 }
 
-func Reduce(results []TaskResult) message.ToolResultReducer {
+func Reduce(results []TaskResult, childSession func(TaskResult) message.ToolResultReducerChildSession) message.ToolResultReducer {
 	completed := 0
 	failed := 0
 	canceled := 0
@@ -103,6 +103,9 @@ func Reduce(results []TaskResult) message.ToolResultReducer {
 		case message.ToolResultSubtaskStatusFailed:
 			failed++
 			risks = append(risks, fmt.Sprintf("%s failed: %s", title, summarizeText(result.Content)))
+		case message.ToolResultSubtaskStatusBlocked:
+			failed++
+			risks = append(risks, fmt.Sprintf("%s blocked: %s", title, summarizeText(result.Content)))
 		case message.ToolResultSubtaskStatusCanceled:
 			canceled++
 			risks = append(risks, fmt.Sprintf("%s canceled: %s", title, summarizeText(result.Content)))
@@ -112,12 +115,16 @@ func Reduce(results []TaskResult) message.ToolResultReducer {
 
 		if childSessionID := strings.TrimSpace(result.ChildSessionID); childSessionID != "" {
 			addArtifact(fmt.Sprintf("%s session: %s", title, childSessionID))
-			childSessions = append(childSessions, message.ToolResultReducerChildSession{
-				TaskID:      strings.TrimSpace(result.ID),
-				Description: title,
-				SessionID:   childSessionID,
-				Status:      result.Status,
-			})
+			if childSession != nil {
+				childSessions = append(childSessions, childSession(result))
+			} else {
+				childSessions = append(childSessions, message.ToolResultReducerChildSession{
+					TaskID:      strings.TrimSpace(result.ID),
+					Description: title,
+					SessionID:   childSessionID,
+					Status:      result.Status,
+				})
+			}
 		}
 		for _, artifact := range result.Artifacts {
 			addArtifact(artifact)
