@@ -49,6 +49,7 @@ func TestBuildTranscriptWindow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			result := buildTranscriptWindow(tt.msgs)
 			if tt.wantEmpty {
 				require.Empty(t, result)

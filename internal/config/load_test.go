@@ -88,6 +88,8 @@ func TestMemoryConfigBackendName(t *testing.T) {
 	require.Equal(t, "local", (&MemoryConfig{Backend: "LOCAL"}).BackendName())
 	require.Equal(t, "hindsight", (&MemoryConfig{Backend: "remote"}).BackendName())
 	require.Equal(t, "hindsight", (&MemoryConfig{Remote: "http://localhost:8888"}).BackendName())
+	// 未知值（包括已删除的 "transcript"）回落到 "local"。
+	require.Equal(t, "local", (&MemoryConfig{Backend: "transcript"}).BackendName())
 	require.Equal(t, "off", (&MemoryConfig{Backend: "disabled"}).BackendName())
 	require.Equal(t, "off", (&MemoryConfig{Backend: "off"}).BackendName())
 }

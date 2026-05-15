@@ -249,12 +249,16 @@ func (c *coordinator) plugins() *plugin.Runtime {
 
 // SetMemoryEngine attaches the memory engine to the coordinator.
 // If the engine is enabled, the episodic memory extractor and consolidator
-// are also wired automatically for local and hindsight backends.
+// are wired automatically for the local backend only. The hindsight backend
+// delegates extraction and consolidation to the remote Hindsight service, so
+// running them locally would be redundant and wasteful.
 func (c *coordinator) SetMemoryEngine(eng *engine.Engine) {
 	c.memoryEngine = eng
 	if eng != nil && eng.Enabled() {
-		c.wireMemoryExtractor(eng)
-		c.wireMemoryConsolidator(eng)
+		if eng.Backend() != "hindsight" {
+			c.wireMemoryExtractor(eng)
+			c.wireMemoryConsolidator(eng)
+		}
 	}
 }
 
