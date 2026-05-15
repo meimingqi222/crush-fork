@@ -88,7 +88,6 @@ func TestMemoryConfigBackendName(t *testing.T) {
 	require.Equal(t, "local", (&MemoryConfig{Backend: "LOCAL"}).BackendName())
 	require.Equal(t, "hindsight", (&MemoryConfig{Backend: "remote"}).BackendName())
 	require.Equal(t, "hindsight", (&MemoryConfig{Remote: "http://localhost:8888"}).BackendName())
-	require.Equal(t, "transcript", (&MemoryConfig{Backend: "transcript"}).BackendName())
 	require.Equal(t, "off", (&MemoryConfig{Backend: "disabled"}).BackendName())
 	require.Equal(t, "off", (&MemoryConfig{Backend: "off"}).BackendName())
 }
@@ -120,6 +119,39 @@ func TestMemoryConfigBackendOffDisablesMemory(t *testing.T) {
 
 	require.False(t, (&MemoryConfig{Backend: "off"}).IsEnabled())
 	require.True(t, (&MemoryConfig{Backend: "hindsight"}).IsEnabled())
+}
+
+func TestEffectiveSubagentRuntimeDefaults(t *testing.T) {
+	t.Parallel()
+
+	runtime := (&Config{}).EffectiveSubagentRuntime()
+	require.True(t, runtime.StructuredCompletionRequired)
+	require.Equal(t, "", runtime.MissingFinishPolicy)
+	require.Equal(t, "", runtime.DefaultRetryPolicy)
+	require.Equal(t, 4, runtime.MaxConcurrency)
+	require.Equal(t, "none", runtime.DefaultIsolation)
+	require.True(t, runtime.SafeSummary)
+}
+
+func TestEffectiveSubagentRuntimeOverrides(t *testing.T) {
+	t.Parallel()
+
+	runtime := (&Config{Subagents: &SubagentRuntimeConfig{
+		StructuredCompletionRequired: false,
+		MissingFinishPolicy:          "fail",
+		DefaultRetryPolicy:           "isolated",
+		MaxConcurrency:               8,
+		AllowRecursiveAgents:         true,
+		DefaultIsolation:             "worktree",
+		SafeSummary:                  false,
+	}}).EffectiveSubagentRuntime()
+	require.False(t, runtime.StructuredCompletionRequired)
+	require.Equal(t, "fail", runtime.MissingFinishPolicy)
+	require.Equal(t, "isolated", runtime.DefaultRetryPolicy)
+	require.Equal(t, 8, runtime.MaxConcurrency)
+	require.True(t, runtime.AllowRecursiveAgents)
+	require.Equal(t, "worktree", runtime.DefaultIsolation)
+	require.False(t, runtime.SafeSummary)
 }
 
 func TestConfig_LoadFromBytesMemoryEnabledExplicitFalse(t *testing.T) {

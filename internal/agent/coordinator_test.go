@@ -22,7 +22,10 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,9 +89,11 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 	cfg.Config().Providers.Set(providerID, providerCfg)
 	env.sessions.SetDefaultPermissionMode(session.PermissionModeDefault)
 	return &coordinator{
-		cfg:      cfg,
-		sessions: env.sessions,
-		messages: env.messages,
+		cfg:              cfg,
+		sessions:         env.sessions,
+		messages:         env.messages,
+		permissions:      env.permissions,
+		escalationBridge: permission.NewEscalationBridge(),
 	}
 }
 
@@ -129,9 +134,19 @@ func TestRunSubAgent(t *testing.T) {
 		parentSession, err := env.sessions.Create(t.Context(), "Parent")
 		require.NoError(t, err)
 
-		agent := newMockAgent(providerID, 4096, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
 			assert.Equal(t, "do something", call.Prompt)
 			assert.Equal(t, int64(4096), call.MaxOutputTokens)
+			_, createErr := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
+						Status:  message.ToolResultSubtaskStatusCompleted,
+						Summary: "done",
+					}),
+				},
+			})
+			require.NoError(t, createErr)
 			return agentResultWithText("done"), nil
 		})
 
@@ -155,6 +170,9 @@ func TestRunSubAgent(t *testing.T) {
 			ParentMessageID:  "msg-1",
 			Status:           message.ToolResultSubtaskStatusCompleted,
 		}, parsed)
+		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		require.True(t, ok)
+		assert.Equal(t, message.ToolResultSubtaskStatusCompleted, finish.Status)
 	})
 
 	t.Run("auto mode blocks delegation when handoff review cannot run", func(t *testing.T) {
@@ -373,6 +391,81 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, "persisted final answer", resp.Content)
 	})
 
+	t.Run("uses persisted subagent_finish metadata when available", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
+						Status:      message.ToolResultSubtaskStatusCompletedWithWarnings,
+						Summary:     "structured summary",
+						Artifacts:   []string{"artifact.txt"},
+						PatchPlan:   []string{"apply patch"},
+						TestResults: []string{"go test ./..."},
+						Followups:   []string{"review"},
+						Error:       "minor warning",
+					}),
+				},
+			})
+			require.NoError(t, err)
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "test",
+			SessionTitle:    "Test",
+			SubagentType:    config.AgentGeneral,
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "structured summary", resp.Content)
+		subtask, ok := message.ParseToolResultSubtaskResult(resp.Metadata)
+		require.True(t, ok)
+		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, subtask.Status)
+		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		require.True(t, ok)
+		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, finish.Status)
+	})
+
+	t.Run("missing finish policy warns when finish is absent", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		coord.cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: true, MissingFinishPolicy: "warn"}
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			if strings.Contains(call.Prompt, "Call subagent_finish exactly once now") {
+				return agentResultWithText("reminder ignored"), nil
+			}
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role:  message.Assistant,
+				Parts: []message.ContentPart{message.TextContent{Text: "fallback text"}, message.Finish{Reason: message.FinishReasonEndTurn}},
+			})
+			require.NoError(t, err)
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{Agent: agent, SessionID: parentSession.ID, AgentMessageID: "msg-1", ParentMessageID: "msg-1", ToolCallID: "call-1", Prompt: "test", SessionTitle: "Test", SubagentType: config.AgentGeneral})
+		require.NoError(t, err)
+		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		require.True(t, ok)
+		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, finish.Status)
+		assert.Equal(t, "fallback text", finish.Summary)
+	})
+
 	t.Run("returns guidance text when neither result nor child session has content", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
@@ -494,6 +587,35 @@ func TestRunSubAgent(t *testing.T) {
 			AgentMemory:     "isolated",
 			AgentIsolation:  "session",
 			AgentBackground: &background,
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("propagates approval metadata in worker identity", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			identity := permission.WorkerIdentityFromContext(ctx)
+			require.Equal(t, parentSession.ID, identity.ParentSessionID)
+			require.Equal(t, "call-1", identity.TaskID)
+			require.Equal(t, config.AgentGeneral, identity.ProfileName)
+			require.NotEmpty(t, identity.ChildSessionID)
+			return agentResultWithText("ok"), nil
+		})
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "test",
+			SessionTitle:    "Test",
+			SubagentType:    config.AgentGeneral,
 		})
 		require.NoError(t, err)
 	})
@@ -1542,4 +1664,52 @@ func hyperProviderBaseURL(t *testing.T, provider fantasy.Provider) string {
 	require.True(t, baseURLField.IsValid())
 
 	return reflect.NewAt(baseURLField.Type(), unsafe.Pointer(baseURLField.UnsafeAddr())).Elem().String()
+}
+
+func TestEnableSessionMemory_BackendAware(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
+		ID:     "test-provider",
+		Type:   catwalk.TypeOpenAICompat,
+		Models: []catwalk.Model{{ID: "test-model"}},
+	})
+	coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
+		Provider: "test-provider",
+		Model:    "test-model",
+	}
+	coord.cfg.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
+		Provider: "test-provider",
+		Model:    "test-model",
+	}
+
+	tests := []struct {
+		backend     string
+		wantEnabled bool
+	}{
+		{"local", true},
+		{"hindsight", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.backend, func(t *testing.T) {
+			conn, err := db.Connect(t.Context(), t.TempDir())
+			require.NoError(t, err)
+			t.Cleanup(func() { conn.Close() })
+
+			eng := engine.New(conn, engine.Config{Enabled: true, Backend: tt.backend})
+			coord.SetMemoryEngine(eng)
+
+			agent, err := coord.buildAgent(t.Context(), nil, config.Agent{}, true)
+			require.NoError(t, err)
+
+			sa, ok := agent.(*sessionAgent)
+			require.True(t, ok)
+			// 检查 buildAgent 中根据 backend 类型正确设置 EnableSessionMemory。
+			// 使用 sessionMemoryEnabled 而非 enableSessionMemory()，
+			// 后者还受 backgroundModel 是否存在的影响，不应在此测试中耦合。
+			assert.Equal(t, tt.wantEnabled, sa.sessionMemoryEnabled)
+		})
+	}
 }

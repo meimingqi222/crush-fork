@@ -248,16 +248,13 @@ func (c *coordinator) plugins() *plugin.Runtime {
 }
 
 // SetMemoryEngine attaches the memory engine to the coordinator.
-// If the engine is enabled, the episodic memory extractor is also wired
-// automatically, unless the backend is "transcript" which skips LLM extraction.
+// If the engine is enabled, the episodic memory extractor and consolidator
+// are also wired automatically for local and hindsight backends.
 func (c *coordinator) SetMemoryEngine(eng *engine.Engine) {
 	c.memoryEngine = eng
 	if eng != nil && eng.Enabled() {
-		// Transcript backend skips LLM extraction and consolidation.
-		if eng.Backend() != "transcript" {
-			c.wireMemoryExtractor(eng)
-			c.wireMemoryConsolidator(eng)
-		}
+		c.wireMemoryExtractor(eng)
+		c.wireMemoryConsolidator(eng)
 	}
 }
 
@@ -348,7 +345,7 @@ func (c *coordinator) memoryEngineHooks() *MemoryEngineHooks {
 	}
 	return &MemoryEngineHooks{
 		OnBeforeCompaction: func(ctx context.Context, sessionID string) {
-			if c.memoryEngine.Backend() == "transcript" || c.memoryEngine.Backend() == "hindsight" {
+			if c.memoryEngine.Backend() == "hindsight" {
 				c.transcriptAfterTurn(ctx, sessionID)
 				return
 			}
@@ -592,16 +589,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	go func() {
 		var recall string
 		if surfacedBytes < maxSessionRecallBytes {
-			// Check backend type for recall routing.
 			if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-				if c.memoryEngine.Backend() == "transcript" {
-					// Transcript backend: read from local EventStore.
-					recall = buildTranscriptRecallBlock(prefetchCtx, c.memoryEngine.EventStore(), sessionID)
-				} else {
-					// Local/Hindsight backend: use retriever.
-					retriever := c.memoryEngine.Retriever()
-					recall = buildAutoRecallBlock(prefetchCtx, retriever, sessionID)
-				}
+				retriever := c.memoryEngine.Retriever()
+				recall = buildAutoRecallBlock(prefetchCtx, retriever, sessionID)
 			}
 		}
 		memoryPrefetch.Settle(recall)
@@ -681,7 +671,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 	if originalErr == nil && result != nil {
 		if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-			if c.memoryEngine.Backend() == "transcript" || c.memoryEngine.Backend() == "hindsight" {
+			if c.memoryEngine.Backend() == "hindsight" {
 				c.transcriptAfterTurn(ctx, sessionID)
 			} else {
 				slog.Debug("Memory engine enabled, calling AfterTurnIdle")
@@ -1090,13 +1080,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		ReviewToolResult: func(callCtx context.Context, sessionID string, toolResult message.ToolResult, permissionMode session.PermissionMode) (message.ToolResult, error) {
 			return c.reviewToolResultForPromptInjection(callCtx, sessionID, toolResult, permissionMode)
 		},
-		Tools:                  nil,
-		Notify:                 c.notify,
-		HookManager:            c.hookManager,
-		Filetracker:            c.filetracker,
-		Checkpoint:             c.checkpoint,
-		PluginRuntime:          c.pluginRuntime,
-		EnableSessionMemory:    true,
+		Tools:         nil,
+		Notify:        c.notify,
+		HookManager:   c.hookManager,
+		Filetracker:   c.filetracker,
+		Checkpoint:    c.checkpoint,
+		PluginRuntime: c.pluginRuntime,
+		// Session working memory is only useful for the local backend.
+		// The hindsight backend retrieves memories from the remote service, so
+		// generating local working memory there is pure cost with no benefit.
+		EnableSessionMemory:    c.memoryEngine != nil && c.memoryEngine.Enabled() && c.memoryEngine.Backend() != "hindsight",
 		MemoryEngineEnabled:    c.memoryEngine != nil && c.memoryEngine.Enabled(),
 		MemoryEngineEventStore: c.memoryEngineEventStore(),
 		MemoryEngineHooks:      c.memoryEngineHooks(),
@@ -1235,8 +1228,9 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, mode s
 }
 
 type buildToolsResult struct {
-	Tools         []fantasy.AgentTool
-	DeferredHints []tools.RegistryEntry
+	Tools               []fantasy.AgentTool
+	DeferredHints       []tools.RegistryEntry
+	RegisteredToolNames []string
 }
 
 func (c *coordinator) buildToolsWithContext(ctx context.Context, agent config.Agent, mode session.CollaborationMode) (buildToolsResult, error) {
@@ -1247,9 +1241,17 @@ func (c *coordinator) buildToolsWithContext(ctx context.Context, agent config.Ag
 	}
 
 	allowedToolNames := filterToolsForRiskPolicy(agent.AllowedTools, mode, c.cfg.Config().Options.DisabledTools)
+	if runtime, ok := subagentRuntimeFromContext(ctx); ok {
+		allowedToolNames = unionToolNames(allowedToolNames, toolNamesFromSet(runtime.ToolProfile.Allowed))
+	}
 	allowedSet := make(map[string]struct{}, len(allowedToolNames))
 	for _, name := range allowedToolNames {
 		allowedSet[name] = struct{}{}
+	}
+
+	registeredToolNames := make([]string, 0, len(registeredTools))
+	for _, registered := range registeredTools {
+		registeredToolNames = append(registeredToolNames, registered.tool.Info().Name)
 	}
 
 	activatedDeferred := c.activatedDeferredTools(ctx)
@@ -1295,12 +1297,17 @@ func (c *coordinator) buildToolsWithContext(ctx context.Context, agent config.Ag
 	}
 	c.deferredMu.Unlock()
 
+	if runtime, ok := subagentRuntimeFromContext(ctx); ok {
+		filteredTools = ShapeToolsForSubagent(filteredTools, runtime.ToolProfile)
+		deferredHints = shapeDeferredHintsForSubagent(deferredHints, runtime.ToolProfile)
+	}
+
 	if mode == session.CollaborationModePlan {
 		filteredTools = removeNonPlanSafeCustomTools(filteredTools, registry)
 		slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 			return strings.Compare(a.Info().Name, b.Info().Name)
 		})
-		return buildToolsResult{Tools: filteredTools}, nil
+		return buildToolsResult{Tools: filteredTools, RegisteredToolNames: registeredToolNames}, nil
 	}
 
 	for i, tool := range filteredTools {
@@ -1310,7 +1317,7 @@ func (c *coordinator) buildToolsWithContext(ctx context.Context, agent config.Ag
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
-	return buildToolsResult{Tools: filteredTools, DeferredHints: deferredHints}, nil
+	return buildToolsResult{Tools: filteredTools, DeferredHints: deferredHints, RegisteredToolNames: registeredToolNames}, nil
 }
 
 func removeNonPlanSafeCustomTools(toolsList []fantasy.AgentTool, registry *toolRegistry) []fantasy.AgentTool {
@@ -2160,19 +2167,21 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 
 // subAgentParams holds the parameters for running a sub-agent.
 type subAgentParams struct {
-	Agent             SessionAgent
-	SessionID         string
-	ExistingSessionID string
-	AgentMessageID    string
-	ParentMessageID   string
-	ToolCallID        string
-	Prompt            string
-	SessionTitle      string
-	DelegationMailbox string
-	AgentMemory       string
-	AgentIsolation    string
-	AgentBackground   *bool
-	SkipHandoffReview bool
+	Agent                     SessionAgent
+	SessionID                 string
+	ExistingSessionID         string
+	AgentMessageID            string
+	ParentMessageID           string
+	ToolCallID                string
+	Prompt                    string
+	SessionTitle              string
+	SubagentType              string
+	DelegationMailbox         string
+	AgentMemory               string
+	AgentIsolation            string
+	AgentBackground           *bool
+	SkipHandoffReview         bool
+	SkipStructuredFinishCheck bool
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
 	SessionSetup func(sessionID string)
@@ -2199,13 +2208,28 @@ type taskGraphParams struct {
 type taskGraphNodeResult struct {
 	Task           taskGraphTask
 	Status         message.ToolResultSubtaskStatus
+	AgentID        string
 	ChildSessionID string
 	Content        string
+	Finish         message.ToolResultSubagentFinish
+	Warnings       []string
+	Error          string
+	Attempts       int
 	Artifacts      []string
 	FilesTouched   []string
 	PatchPlan      []string
 	TestResults    []string
 	Followups      []string
+}
+
+type taskGraphReducerInput struct {
+	TaskResult   reducer.TaskResult
+	ChildSession message.ToolResultReducerChildSession
+	Result       taskGraphNodeResult
+	SideEffects  SideEffectSummary
+	Runtime      SubagentRuntimeContext
+	HasRuntime   bool
+	AttemptCount int
 }
 
 type (
@@ -2220,6 +2244,13 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		scheduler = c.runSubAgentDirect
 	}
 	return scheduler(ctx, params)
+}
+
+func (p subAgentParams) SubagentTypeOrDefault() string {
+	if strings.TrimSpace(p.SubagentType) != "" {
+		return strings.TrimSpace(p.SubagentType)
+	}
+	return config.AgentGeneral
 }
 
 func (c *coordinator) runTaskGraph(ctx context.Context, params taskGraphParams) (fantasy.ToolResponse, error) {
@@ -2318,7 +2349,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 			var blockedBy string
 			for _, dependencyID := range task.DependsOn {
 				dependencyResult := results[dependencyID]
-				if dependencyResult.Status != message.ToolResultSubtaskStatusCompleted {
+				if !statusReleasesDependents(dependencyResult.Status) {
 					blockedBy = dependencyID
 					break
 				}
@@ -2342,10 +2373,17 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 				return
 			}
 			if blockedBy != "" {
+				blockedStatus := message.ToolResultSubtaskStatusBlocked
+				blockedReason := fmt.Sprintf("dependency %q did not complete successfully", blockedBy)
+				if dependencyResult := results[blockedBy]; dependencyResult.Status == message.ToolResultSubtaskStatusCanceled {
+					blockedStatus = message.ToolResultSubtaskStatusCanceled
+					blockedReason = fmt.Sprintf("dependency %q was canceled", blockedBy)
+				}
 				finalize(taskGraphNodeResult{
 					Task:    task,
-					Status:  message.ToolResultSubtaskStatusCanceled,
+					Status:  blockedStatus,
 					Content: fmt.Sprintf("Skipped due to dependency %q failure.", blockedBy),
+					Error:   blockedReason,
 				})
 				return
 			}
@@ -2373,6 +2411,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 				finalize(taskGraphNodeResult{
 					Task:           task,
 					Status:         message.ToolResultSubtaskStatusRunning,
+					AgentID:        agentID,
 					Content:        fmt.Sprintf("Background agent launched with ID: %s. Use subtask_result tool to check status.", agentID),
 					ChildSessionID: agentID,
 				})
@@ -2402,7 +2441,40 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 				attempts += agentCfg.TaskGovernance.RetryBudgetLimit()
 			}
 
-			result := taskGraphNodeResult{Task: task}
+			mode, modeErr := c.collaborationModeForContext(ctx)
+			if modeErr != nil {
+				finalize(taskGraphNodeResult{
+					Task:    task,
+					Status:  message.ToolResultSubtaskStatusFailed,
+					Content: strings.TrimSpace(modeErr.Error()),
+				})
+				return
+			}
+			parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, mode, params.SessionID)
+			if parentPermissionsErr != nil {
+				finalize(taskGraphNodeResult{
+					Task:    task,
+					Status:  message.ToolResultSubtaskStatusFailed,
+					Content: strings.TrimSpace(parentPermissionsErr.Error()),
+				})
+				return
+			}
+			runtimeTask := taskGraphTask{ID: task.ID, Description: description, Prompt: task.Prompt, SubagentType: subagentType}
+			runtime := buildSubagentRuntimeContext(
+				params.SessionID,
+				"",
+				params.AgentMessageID,
+				taskToolCallID,
+				runtimeTask,
+				agentCfg,
+				parentPermissions,
+				agentCfg.AllowedTools,
+				agentCfg.Isolation,
+				c.cfg.WorkingDir(),
+				coordinatorSubagentEventSink{timeline: c.timeline},
+			)
+			runtime.Retry.MaxAttempts = attempts
+			result := taskGraphNodeResult{Task: task, Attempts: 0}
 			basePrompt := strings.TrimSpace(task.Prompt)
 			for attempt := range attempts {
 				attemptPrompt := basePrompt
@@ -2450,6 +2522,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 						ToolCallID:        taskGraphAttemptToolCallID(taskToolCallID, attempt),
 						Prompt:            attemptPrompt,
 						SessionTitle:      formatSubagentSessionTitle(description, subagentType),
+						SubagentType:      subagentType,
 						DelegationMailbox: params.ToolCallID,
 						AgentMemory:       agentCfg.Memory,
 						AgentIsolation:    agentCfg.Isolation,
@@ -2484,33 +2557,37 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 						status = message.ToolResultSubtaskStatusCanceled
 					}
 					result = taskGraphNodeResult{
-						Task:    task,
-						Status:  status,
-						Content: strings.TrimSpace(runErr.Error()),
+						Task:     task,
+						Status:   status,
+						Content:  strings.TrimSpace(runErr.Error()),
+						Attempts: attempt + 1,
 					}
 				} else {
 					result = taskGraphNodeResultFromResponse(task, response)
+					result.Attempts = attempt + 1
 					if parentSession, err := c.sessions.Get(ctx, params.SessionID); err == nil && parentSession.PermissionMode == session.PermissionModeAuto {
-						result.Content = message.SanitizedToolResultStub
+						if result.Finish.IsEmpty() && result.Status != message.ToolResultSubtaskStatusFailed {
+							result.Content = message.SanitizedToolResultStub
+						}
 					}
-					if result.ChildSessionID != "" {
+					if result.ChildSessionID != "" && result.Finish.IsEmpty() {
 						artifacts, filesTouched, patchPlan, testResults, followups := c.collectTaskGraphArtifacts(ctx, result.ChildSessionID)
-						result.Artifacts = artifacts
-						result.FilesTouched = filesTouched
-						result.PatchPlan = patchPlan
-						result.TestResults = testResults
-						result.Followups = followups
+						result.Artifacts = mergeUniqueStrings(result.Artifacts, artifacts)
+						result.FilesTouched = mergeUniqueStrings(result.FilesTouched, filesTouched)
+						result.PatchPlan = mergeUniqueStrings(result.PatchPlan, patchPlan)
+						result.TestResults = mergeUniqueStrings(result.TestResults, testResults)
+						result.Followups = mergeUniqueStrings(result.Followups, followups)
 					}
 					if result.Status == message.ToolResultSubtaskStatusFailed {
 						_ = toolruntime.ReportFailure(attemptCtx, "subagent_result", errors.New(result.Content))
 					}
 				}
 
-				if result.Status == message.ToolResultSubtaskStatusCompleted ||
-					result.Status == message.ToolResultSubtaskStatusCanceled ||
-					attempt == attempts-1 {
+				sideEffects := c.sideEffectSummary(attemptCtx, result)
+				if !ShouldRetrySubagent(result, runtime, sideEffects) || attempt == attempts-1 {
 					break
 				}
+
 			}
 
 			finalize(result)
@@ -2535,6 +2612,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 
 	orderedResults := make([]taskGraphNodeResult, 0, len(params.Tasks))
 	reducerInput := make([]reducer.TaskResult, 0, len(params.Tasks))
+	resultByTask := make(map[string]taskGraphNodeResult, len(params.Tasks))
 	lines := make([]string, 0, len(params.Tasks))
 	hasFailures := false
 	hasCancellations := false
@@ -2549,7 +2627,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 			}
 		}
 		orderedResults = append(orderedResults, result)
-		reducerInput = append(reducerInput, reducer.TaskResult{
+		reduced := reducer.TaskResult{
 			ID:             result.Task.ID,
 			Description:    result.Task.Description,
 			Status:         result.Status,
@@ -2560,7 +2638,9 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 			PatchPlan:      result.PatchPlan,
 			TestResults:    result.TestResults,
 			Followups:      result.Followups,
-		})
+		}
+		reducerInput = append(reducerInput, reduced)
+		resultByTask[result.Task.ID] = result
 		lines = append(lines, fmt.Sprintf("- %s: %s", result.Task.ID, result.Status))
 		if result.Status == message.ToolResultSubtaskStatusFailed {
 			hasFailures = true
@@ -2570,7 +2650,9 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 		}
 	}
 
-	reducerResult := reducer.Reduce(reducerInput)
+	reducerResult := reducer.Reduce(reducerInput, func(taskResult reducer.TaskResult) message.ToolResultReducerChildSession {
+		return reduceNodeToChildSession(resultByTask[taskResult.ID])
+	})
 	reducerResult.MailboxID = strings.TrimSpace(params.ToolCallID)
 	reducerResult.Messages = taskGraphReducerMessages(orderedResults)
 	content := reducerResult.Summary
@@ -2593,6 +2675,9 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 	if len(orderedResults) == 1 {
 		only := orderedResults[0]
 		response = withSubtaskToolResponseMetadata(response, params.ToolCallID, only.ChildSessionID, params.AgentMessageID, only.Status)
+		if !only.Finish.IsEmpty() {
+			response = withSubagentFinishToolResponseMetadata(response, only.Finish)
+		}
 	}
 
 	return response, nil
@@ -2705,6 +2790,88 @@ func taskGraphAttemptToolCallID(toolCallID string, attempt int) string {
 	return fmt.Sprintf("%s::retry-%d", toolCallID, attempt)
 }
 
+func mergeUniqueStrings(values ...[]string) []string {
+	merged := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, group := range values {
+		for _, value := range group {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			merged = append(merged, trimmed)
+		}
+	}
+	return merged
+}
+
+func (c *coordinator) sideEffectSummary(ctx context.Context, result taskGraphNodeResult) SideEffectSummary {
+	filesTouched := slices.Clone(result.FilesTouched)
+	filesTouched = append(filesTouched, result.Finish.FilesTouched...)
+	if len(filesTouched) > 1 {
+		slices.Sort(filesTouched)
+		filesTouched = slices.Compact(filesTouched)
+	}
+	summary := SideEffectSummary{
+		FilesTouched: filesTouched,
+	}
+	if len(filesTouched) > 0 {
+		summary.MutatingTools = append(summary.MutatingTools, tools.EditToolName)
+	}
+	if strings.TrimSpace(result.AgentID) != "" || result.Status == message.ToolResultSubtaskStatusRunning {
+		summary.SpawnedBackground = true
+	}
+	if c == nil || c.messages == nil || strings.TrimSpace(result.ChildSessionID) == "" {
+		return summary
+	}
+	msgs, err := c.messages.List(ctx, result.ChildSessionID)
+	if err != nil {
+		return summary
+	}
+	for _, msg := range msgs {
+		if msg.Role != message.Tool {
+			continue
+		}
+		for _, toolResult := range msg.ToolResults() {
+			switch toolResult.Name {
+			case tools.EditToolName, tools.WriteToolName, tools.DownloadToolName:
+				summary.MutatingTools = append(summary.MutatingTools, toolResult.Name)
+			case tools.BashToolName:
+				if !toolResult.IsError {
+					summary.MutatingTools = append(summary.MutatingTools, toolResult.Name)
+				}
+			}
+		}
+	}
+	if len(summary.MutatingTools) > 1 {
+		slices.Sort(summary.MutatingTools)
+		summary.MutatingTools = slices.Compact(summary.MutatingTools)
+	}
+	if len(summary.FilesTouched) == 0 && c.filetracker != nil && strings.TrimSpace(result.ChildSessionID) != "" {
+		if files, err := c.filetracker.ListReadFiles(ctx, result.ChildSessionID); err == nil {
+			summary.FilesTouched = append(summary.FilesTouched, files...)
+		}
+	}
+	return summary
+}
+
+func reduceNodeToChildSession(result taskGraphNodeResult) message.ToolResultReducerChildSession {
+	description := strings.TrimSpace(result.Task.Description)
+	if description == "" {
+		description = strings.TrimSpace(result.Task.ID)
+	}
+	return message.ToolResultReducerChildSession{
+		TaskID:      strings.TrimSpace(result.Task.ID),
+		Description: description,
+		SessionID:   strings.TrimSpace(result.ChildSessionID),
+		Status:      result.Status,
+	}
+}
+
 func taskGraphNodeResultFromResponse(task taskGraphTask, response fantasy.ToolResponse) taskGraphNodeResult {
 	result := taskGraphNodeResult{
 		Task:    task,
@@ -2714,6 +2881,30 @@ func taskGraphNodeResultFromResponse(task taskGraphTask, response fantasy.ToolRe
 	if subtask, ok := message.ParseToolResultSubtaskResult(response.Metadata); ok {
 		result.Status = subtask.Status
 		result.ChildSessionID = subtask.ChildSessionID
+	}
+	if finish, ok := message.ParseToolResultSubagentFinish(response.Metadata); ok {
+		result.Finish = finish
+		if finish.Status != "" {
+			result.Status = finish.Status
+		}
+		if strings.TrimSpace(finish.Summary) != "" {
+			result.Content = strings.TrimSpace(finish.Summary)
+		}
+		result.Artifacts = append([]string(nil), finish.Artifacts...)
+		result.FilesTouched = append([]string(nil), finish.FilesTouched...)
+		result.PatchPlan = append([]string(nil), finish.PatchPlan...)
+		result.TestResults = append([]string(nil), finish.TestResults...)
+		result.Followups = append([]string(nil), finish.Followups...)
+		if strings.TrimSpace(finish.Error) != "" {
+			result.Error = strings.TrimSpace(finish.Error)
+		}
+		if finish.Status == message.ToolResultSubtaskStatusCompletedWithWarnings {
+			warnings := append([]string(nil), finish.Risks...)
+			if strings.TrimSpace(finish.Error) != "" {
+				warnings = append(warnings, strings.TrimSpace(finish.Error))
+			}
+			result.Warnings = warnings
+		}
 	} else if response.IsError {
 		result.Status = message.ToolResultSubtaskStatusFailed
 	}
@@ -2805,6 +2996,23 @@ func (c *coordinator) collectTaskGraphArtifacts(ctx context.Context, childSessio
 			continue
 		}
 		for _, toolResult := range msg.ToolResults() {
+			if finishMeta, ok := toolResult.SubagentFinish(); ok {
+				for _, artifact := range finishMeta.Artifacts {
+					addArtifact(artifact)
+				}
+				for _, filePath := range finishMeta.FilesTouched {
+					addFile(filePath)
+				}
+				for _, step := range finishMeta.PatchPlan {
+					addPatchStep(step)
+				}
+				for _, testResult := range finishMeta.TestResults {
+					addTestResult(testResult)
+				}
+				for _, question := range finishMeta.Followups {
+					addFollowup(question)
+				}
+			}
 			if reducerMeta, ok := toolResult.Reducer(); ok {
 				for _, artifact := range reducerMeta.Artifacts {
 					addArtifact(artifact)
@@ -2881,6 +3089,84 @@ func taskGraphToolResultArtifacts(toolResult message.ToolResult) []string {
 	}
 }
 
+func (c *coordinator) latestSubagentFinish(ctx context.Context, childSessionID string) (message.ToolResultSubagentFinish, bool) {
+	if c.messages == nil || strings.TrimSpace(childSessionID) == "" {
+		return message.ToolResultSubagentFinish{}, false
+	}
+	msgs, err := c.messages.List(ctx, childSessionID)
+	if err != nil {
+		return message.ToolResultSubagentFinish{}, false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != message.Tool {
+			continue
+		}
+		toolResults := msgs[i].ToolResults()
+		for j := len(toolResults) - 1; j >= 0; j-- {
+			if finish, ok := toolResults[j].SubagentFinish(); ok {
+				return finish, true
+			}
+		}
+	}
+	return message.ToolResultSubagentFinish{}, false
+}
+
+func (c *coordinator) ensureSubagentFinish(ctx context.Context, params subAgentParams, childSessionID string, runtime SubagentRuntimeContext, result *fantasy.AgentResult, maxOutputTokens int64, providerOptions fantasy.ProviderOptions, temperature, topP *float64, topK *int64, frequencyPenalty, presencePenalty *float64) (message.ToolResultSubagentFinish, bool) {
+	if finish, ok := c.latestSubagentFinish(ctx, childSessionID); ok {
+		return finish, true
+	}
+	if !runtime.Result.Required {
+		return message.ToolResultSubagentFinish{}, false
+	}
+	policy := runtime.Result.MissingFinishPolicy
+	if policy == "" {
+		policy = MissingFinishWarn
+	}
+	shouldRetry := policy == MissingFinishRetryThenWarn || policy == MissingFinishRetryThenFail
+	if shouldRetry {
+		for range 2 {
+			_, runErr := params.Agent.Run(ctx, SessionAgentCall{
+				SessionID:        childSessionID,
+				Prompt:           "Call subagent_finish exactly once now. Summarize only the work already completed. Do not start new work unless needed to determine final status.",
+				MaxOutputTokens:  maxOutputTokens,
+				ProviderOptions:  providerOptions,
+				Temperature:      temperature,
+				TopP:             topP,
+				TopK:             topK,
+				FrequencyPenalty: frequencyPenalty,
+				PresencePenalty:  presencePenalty,
+				NonInteractive:   true,
+			})
+			if runErr != nil {
+				break
+			}
+			if finish, ok := c.latestSubagentFinish(ctx, childSessionID); ok {
+				return finish, true
+			}
+		}
+	}
+	content := c.subAgentResponseText(ctx, childSessionID, result)
+	if strings.TrimSpace(content) == "" {
+		content = subAgentNoContentText(childSessionID)
+	}
+	switch policy {
+	case MissingFinishFail, MissingFinishRetryThenFail:
+		return message.ToolResultSubagentFinish{
+			Status:  message.ToolResultSubtaskStatusFailed,
+			Summary: content,
+			Error:   "subagent_finish was not called",
+			Risks:   []string{"Missing required subagent_finish metadata."},
+		}, true
+	default:
+		return message.ToolResultSubagentFinish{
+			Status:  message.ToolResultSubtaskStatusCompletedWithWarnings,
+			Summary: content,
+			Error:   "subagent_finish was not called",
+			Risks:   []string{"Missing required subagent_finish metadata."},
+		}, true
+	}
+}
+
 func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
 	untrackSubAgent := c.trackActiveSubAgent(params.SessionID, params.Agent)
 	defer untrackSubAgent()
@@ -2939,6 +3225,8 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		params.SessionSetup(subSession.ID)
 	}
 
+	eventSink := coordinatorSubagentEventSink{timeline: c.timeline}
+
 	effectiveIsolation := strings.TrimSpace(params.AgentIsolation)
 	subSession, sessionWorkingDir, effectiveIsolation, err := c.prepareSubagentWorkspace(ctx, parentSession, subSession, effectiveIsolation)
 	if err != nil {
@@ -2964,6 +3252,15 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		return fantasy.ToolResponse{}, errModelProviderNotConfigured
 	}
 
+	resolvedAgentCfg, resolveErr := c.subagentConfig(params.SubagentTypeOrDefault())
+	if resolveErr != nil {
+		resolvedAgentCfg = config.Agent{ID: params.SubagentTypeOrDefault(), Description: params.SessionTitle, AllowedTools: nil}
+	}
+	parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, parentSession.CollaborationMode, params.SessionID)
+	if parentPermissionsErr != nil {
+		return fantasy.ToolResponse{}, parentPermissionsErr
+	}
+
 	// Clear any inherited runtime config from the parent agent before running
 	// the subagent. Each subagent must refresh its own models, tools, and
 	// system prompt; otherwise concurrent child runs can observe the parent's
@@ -2984,11 +3281,35 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	}
 
 	// Inject worker identity for permission escalation.
+	runtimeTask := taskGraphTask{ID: params.ToolCallID, Description: params.SessionTitle, Prompt: params.Prompt}
+	runtime := buildSubagentRuntimeContext(
+		params.SessionID,
+		subSession.ID,
+		params.ParentMessageID,
+		params.ToolCallID,
+		runtimeTask,
+		resolvedAgentCfg,
+		parentPermissions,
+		resolvedAgentCfg.AllowedTools,
+		effectiveIsolation,
+		sessionWorkingDir,
+		eventSink,
+	)
+	applySubagentRuntimeConfig(&runtime, c.cfg.Config().EffectiveSubagentRuntime())
+	if runtimeCfg := c.cfg.Config().EffectiveSubagentRuntime(); strings.TrimSpace(runtimeCfg.DefaultIsolation) != "" && strings.TrimSpace(params.AgentIsolation) == "" {
+		runtime.Isolation.Kind = subagentIsolationKind(runtimeCfg.DefaultIsolation)
+	}
+	ctx = withSubagentRuntimeContext(ctx, runtime)
+
 	if c.escalationBridge != nil {
 		workerIdentity := permission.WorkerIdentity{
-			AgentID:   subSession.ID,
-			AgentName: params.SessionTitle,
-			AgentType: "subagent",
+			AgentID:         subSession.ID,
+			AgentName:       params.SessionTitle,
+			AgentType:       "subagent",
+			ParentSessionID: runtime.ParentSessionID,
+			ChildSessionID:  runtime.ChildSessionID,
+			TaskID:          runtime.TaskID,
+			ProfileName:     runtime.AgentProfile.Name,
 		}
 		ctx = permission.WithWorkerIdentity(ctx, workerIdentity)
 		ctx = permission.WithEscalationBridge(ctx, c.escalationBridge)
@@ -3002,16 +3323,22 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		enrichedPrompt = c.buildSubagentContextPrefix(ctx, params.SessionID) + params.Prompt
 	}
 
+	providerOptions := getProviderOptions(model, providerCfg)
+	temperature := model.ModelCfg.Temperature
+	topP := model.ModelCfg.TopP
+	topK := model.ModelCfg.TopK
+	frequencyPenalty := model.ModelCfg.FrequencyPenalty
+	presencePenalty := model.ModelCfg.PresencePenalty
 	result, err := params.Agent.Run(ctx, SessionAgentCall{
 		SessionID:        subSession.ID,
 		Prompt:           enrichedPrompt,
 		MaxOutputTokens:  maxTokens,
-		ProviderOptions:  getProviderOptions(model, providerCfg),
-		Temperature:      model.ModelCfg.Temperature,
-		TopP:             model.ModelCfg.TopP,
-		TopK:             model.ModelCfg.TopK,
-		FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
-		PresencePenalty:  model.ModelCfg.PresencePenalty,
+		ProviderOptions:  providerOptions,
+		Temperature:      temperature,
+		TopP:             topP,
+		TopK:             topK,
+		FrequencyPenalty: frequencyPenalty,
+		PresencePenalty:  presencePenalty,
 		NonInteractive:   true,
 		OnProgress:       params.OnProgress,
 	})
@@ -3019,9 +3346,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		_ = toolruntime.ReportFailure(ctx, "subagent_run", err)
 		slog.Error("Sub-agent run failed", "error", err, "session", subSession.ID, "prompt", params.Prompt)
 		content := c.subAgentErrorText(ctx, subSession.ID, err)
-		if c.timeline != nil {
-			c.timeline.Publish(timeline.ChildSessionFinishedEvent(params.SessionID, subSession.ID, params.SessionTitle, "failed", content))
-		}
+		eventSink.PublishSubagentEvent(ctx, SubagentEvent{Type: SubagentEventFailed, ParentSessionID: params.SessionID, ChildSessionID: subSession.ID, TaskID: runtime.TaskID, Message: params.SessionTitle, Status: "failed", Timestamp: time.Now()})
 		if costErr := c.updateParentSessionCostDelta(ctx, subSession.ID, params.SessionID, previousChildCost); costErr != nil {
 			return fantasy.ToolResponse{}, costErr
 		}
@@ -3042,7 +3367,17 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		return fantasy.ToolResponse{}, err
 	}
 
+	var (
+		finishResult message.ToolResultSubagentFinish
+		hasFinish    bool
+	)
+	if !params.SkipStructuredFinishCheck {
+		finishResult, hasFinish = c.ensureSubagentFinish(ctx, params, subSession.ID, runtime, result, maxTokens, providerOptions, temperature, topP, topK, frequencyPenalty, presencePenalty)
+	}
 	content := c.subAgentResponseText(ctx, subSession.ID, result)
+	if hasFinish && strings.TrimSpace(finishResult.Summary) != "" {
+		content = strings.TrimSpace(finishResult.Summary)
+	}
 	if content == "" {
 		slog.Warn("Sub-agent returned empty response", "session", subSession.ID, "prompt", params.Prompt)
 		content = subAgentNoContentText(subSession.ID)
@@ -3072,17 +3407,37 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 			), nil
 		}
 	}
-	if c.timeline != nil {
-		c.timeline.Publish(timeline.ChildSessionFinishedEvent(params.SessionID, subSession.ID, params.SessionTitle, "completed", content))
+	status := message.ToolResultSubtaskStatusCompleted
+	if hasFinish && finishResult.Status != "" {
+		status = finishResult.Status
 	}
+	eventStatus := "completed"
+	if status == message.ToolResultSubtaskStatusCompletedWithWarnings {
+		eventStatus = "completed_with_warnings"
+	} else if status == message.ToolResultSubtaskStatusBlocked {
+		eventStatus = "blocked"
+	}
+	eventType := SubagentEventFinish
+	if status == message.ToolResultSubtaskStatusBlocked {
+		eventType = SubagentEventBlocked
+	} else if status == message.ToolResultSubtaskStatusCanceled {
+		eventType = SubagentEventCanceled
+	} else if status == message.ToolResultSubtaskStatusFailed {
+		eventType = SubagentEventFailed
+	}
+	eventSink.PublishSubagentEvent(ctx, SubagentEvent{Type: eventType, ParentSessionID: params.SessionID, ChildSessionID: subSession.ID, TaskID: runtime.TaskID, Message: params.SessionTitle, Status: eventStatus, Timestamp: time.Now()})
 
-	return withSubtaskToolResponseMetadata(
+	response := withSubtaskToolResponseMetadata(
 		fantasy.NewTextResponse(content),
 		params.ToolCallID,
 		subSession.ID,
 		params.ParentMessageID,
-		message.ToolResultSubtaskStatusCompleted,
-	), nil
+		status,
+	)
+	if hasFinish {
+		response = withSubagentFinishToolResponseMetadata(response, finishResult)
+	}
+	return response, nil
 }
 
 func withAgentPolicyContext(ctx context.Context, agentCfg config.Agent) context.Context {
@@ -3352,6 +3707,11 @@ func withSubtaskToolResponseMetadata(response fantasy.ToolResponse, parentToolCa
 	return response
 }
 
+func withSubagentFinishToolResponseMetadata(response fantasy.ToolResponse, finish message.ToolResultSubagentFinish) fantasy.ToolResponse {
+	response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithSubagentFinish(finish).Metadata
+	return response
+}
+
 func taskGraphReducerMessages(results []taskGraphNodeResult) []string {
 	messages := make([]string, 0, len(results))
 	for _, result := range results {
@@ -3385,7 +3745,11 @@ func taskGraphSessionDetailsForModel(results []taskGraphNodeResult) string {
 		if label == "" {
 			label = result.Task.ID
 		}
-		lines = append(lines, fmt.Sprintf("- %s (%s): %s", label, result.Status, sessionID))
+		identifier := sessionID
+		if strings.TrimSpace(result.AgentID) != "" {
+			identifier = fmt.Sprintf("%s (agent %s)", sessionID, strings.TrimSpace(result.AgentID))
+		}
+		lines = append(lines, fmt.Sprintf("- %s (%s): %s", label, result.Status, identifier))
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
@@ -3664,19 +4028,21 @@ func (c *coordinator) runBackgroundTaskNode(
 		}
 
 		runParams := subAgentParams{
-			Agent:             subAgent,
-			SessionID:         params.SessionID,
-			ExistingSessionID: childSessionID,
-			AgentMessageID:    cmp.Or(command.AgentMessageID, params.AgentMessageID),
-			ParentMessageID:   cmp.Or(command.AgentMessageID, params.AgentMessageID),
-			ToolCallID:        cmp.Or(command.ToolCallID, taskToolCallID),
-			Prompt:            strings.TrimSpace(command.Prompt),
-			SessionTitle:      formatSubagentSessionTitle(description, subagentType),
-			DelegationMailbox: params.ToolCallID,
-			AgentMemory:       agentCfg.Memory,
-			AgentIsolation:    agentCfg.Isolation,
-			AgentBackground:   agentCfg.Background,
-			SkipHandoffReview: true,
+			Agent:                     subAgent,
+			SessionID:                 params.SessionID,
+			ExistingSessionID:         childSessionID,
+			AgentMessageID:            cmp.Or(command.AgentMessageID, params.AgentMessageID),
+			ParentMessageID:           cmp.Or(command.AgentMessageID, params.AgentMessageID),
+			ToolCallID:                cmp.Or(command.ToolCallID, taskToolCallID),
+			Prompt:                    strings.TrimSpace(command.Prompt),
+			SessionTitle:              formatSubagentSessionTitle(description, subagentType),
+			SubagentType:              subagentType,
+			DelegationMailbox:         params.ToolCallID,
+			AgentMemory:               agentCfg.Memory,
+			AgentIsolation:            agentCfg.Isolation,
+			AgentBackground:           agentCfg.Background,
+			SkipHandoffReview:         true,
+			SkipStructuredFinishCheck: true,
 		}
 		response, runErr := c.runSubAgent(attemptCtx, runParams)
 		cancel()

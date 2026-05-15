@@ -3,6 +3,7 @@ package config
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -298,11 +299,11 @@ type MemoryConfig struct {
 	// Enabled enables the event-sourced memory engine.
 	Enabled *bool `json:"enabled,omitempty" jsonschema:"description=Enable the event-sourced memory engine,default=true"`
 	// Backend selects the memory backend. "local" uses the local event log and
-	// materialized files. "hindsight" retains raw transcript windows to Hindsight
-	// every N turns and uses Hindsight as the recall/reflect backend. "transcript"
-	// retains raw transcript windows locally without LLM extraction.
-	// "off" disables memory. When empty, Remote implies "hindsight"; otherwise "local".
-	Backend string `json:"backend,omitempty" jsonschema:"description=Memory backend to use,enum=local,enum=hindsight,enum=transcript,enum=off,default=local"`
+	// materialized files. "hindsight" retains raw transcript windows to a remote
+	// Hindsight service every N turns and uses Hindsight as the recall/reflect
+	// backend. "off" disables memory. When empty, Remote implies "hindsight";
+	// otherwise "local".
+	Backend string `json:"backend,omitempty" jsonschema:"description=Memory backend to use,enum=local,enum=hindsight,enum=off,default=local"`
 	// Remote is the base URL of a remote Hindsight memory service (e.g. http://localhost:8888).
 	// Required when backend is "hindsight".
 	Remote string `json:"remote,omitempty" jsonschema:"description=Remote Hindsight memory service base URL (e.g. http://localhost:8888),format=uri"`
@@ -317,8 +318,8 @@ type MemoryConfig struct {
 	// the bank ID, and "per-project-tagged" uses one bank with project tags.
 	RemoteScoping string `json:"remote_scoping,omitempty" jsonschema:"description=Remote Hindsight scoping mode,enum=global,enum=per-project,enum=per-project-tagged,default=per-project-tagged"`
 	// RetainEveryNTurns controls how often transcript windows are retained
-	// when using transcript-style backends. Defaults to 3.
-	RetainEveryNTurns int `json:"retain_every_n_turns,omitempty" jsonschema:"description=Retain transcript window every N turns (hindsight/transcript backends),default=3"`
+	// when using the hindsight backend. Defaults to 3.
+	RetainEveryNTurns int `json:"retain_every_n_turns,omitempty" jsonschema:"description=Retain transcript window every N turns (hindsight backend),default=3"`
 }
 
 // BackendName returns the effective memory backend.
@@ -332,8 +333,6 @@ func (m *MemoryConfig) BackendName() string {
 		return "off"
 	case "hindsight", "remote":
 		return "hindsight"
-	case "transcript":
-		return "transcript"
 	case "local":
 		return "local"
 	}
@@ -371,7 +370,7 @@ func (m *MemoryConfig) IsEnabled() bool {
 	return m.BackendName() != "off"
 }
 
-// GetRetainEveryNTurns returns the configured retain interval for transcript backend.
+// GetRetainEveryNTurns returns the configured retain interval for the hindsight backend.
 // Defaults to 3 if not set or invalid.
 func (m *MemoryConfig) GetRetainEveryNTurns() int {
 	if m == nil || m.RetainEveryNTurns <= 0 {
@@ -695,6 +694,52 @@ func (p PluginConfig) Timeout() time.Duration {
 }
 
 // Config holds the configuration for crush.
+type SubagentRuntimeConfig struct {
+	StructuredCompletionRequired bool   `json:"structured_completion_required,omitempty" jsonschema:"description=Require built-in subagents to call subagent_finish,default=true"`
+	MissingFinishPolicy          string `json:"missing_finish_policy,omitempty" jsonschema:"description=Policy when a subagent omits subagent_finish,enum=warn,enum=fail,enum=retry_then_warn,enum=retry_then_fail,default=retry_then_warn"`
+	DefaultRetryPolicy           string `json:"default_retry_policy,omitempty" jsonschema:"description=Default child retry policy,enum=never,enum=read_only_only,enum=idempotent,enum=isolated,default=read_only_only"`
+	MaxConcurrency               int    `json:"max_concurrency,omitempty" jsonschema:"description=Maximum subagent concurrency,default=4"`                    // TODO: wire into task graph semaphore
+	AllowRecursiveAgents         bool   `json:"allow_recursive_agents,omitempty" jsonschema:"description=Allow child agents to spawn children,default=false"` // TODO: not yet consumed at runtime; recursive agents blocked at tool_registration.go
+	DefaultIsolation             string `json:"default_isolation,omitempty" jsonschema:"description=Default child isolation mode,enum=none,enum=worktree,enum=external_sandbox,enum=managed_sandbox,default=none"`
+	SafeSummary                  bool   `json:"safe_summary,omitempty" jsonschema:"description=Prefer structured finish summaries over raw child output,default=true"` // TODO: not yet consumed at runtime; structured finish is already preferred when available
+}
+
+func (c *SubagentRuntimeConfig) UnmarshalJSON(data []byte) error {
+	type rawSubagentRuntimeConfig struct {
+		StructuredCompletionRequired *bool  `json:"structured_completion_required,omitempty"`
+		MissingFinishPolicy          string `json:"missing_finish_policy,omitempty"`
+		DefaultRetryPolicy           string `json:"default_retry_policy,omitempty"`
+		MaxConcurrency               int    `json:"max_concurrency,omitempty"`
+		AllowRecursiveAgents         *bool  `json:"allow_recursive_agents,omitempty"`
+		DefaultIsolation             string `json:"default_isolation,omitempty"`
+		SafeSummary                  *bool  `json:"safe_summary,omitempty"`
+	}
+
+	var raw rawSubagentRuntimeConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*c = SubagentRuntimeConfig{
+		StructuredCompletionRequired: true,
+		MissingFinishPolicy:          raw.MissingFinishPolicy,
+		DefaultRetryPolicy:           raw.DefaultRetryPolicy,
+		MaxConcurrency:               raw.MaxConcurrency,
+		DefaultIsolation:             raw.DefaultIsolation,
+		SafeSummary:                  true,
+	}
+	if raw.StructuredCompletionRequired != nil {
+		c.StructuredCompletionRequired = *raw.StructuredCompletionRequired
+	}
+	if raw.AllowRecursiveAgents != nil {
+		c.AllowRecursiveAgents = *raw.AllowRecursiveAgents
+	}
+	if raw.SafeSummary != nil {
+		c.SafeSummary = *raw.SafeSummary
+	}
+	return nil
+}
+
 type Config struct {
 	Schema string `json:"$schema,omitempty"`
 
@@ -721,7 +766,43 @@ type Config struct {
 
 	Plugins []PluginConfig `json:"plugins,omitempty" jsonschema:"description=External command plugins for chat or tool lifecycle customization"`
 
-	Agents map[string]Agent `json:"agents,omitempty" jsonschema:"description=Named agent configurations, including built-in overrides and custom subagents"`
+	Agents    map[string]Agent       `json:"agents,omitempty" jsonschema:"description=Named agent configurations, including built-in overrides and custom subagents"`
+	Subagents *SubagentRuntimeConfig `json:"subagents,omitempty" jsonschema:"description=Subagent runtime execution controls"`
+}
+
+func (c *Config) EffectiveSubagentRuntime() SubagentRuntimeConfig {
+	cfg := SubagentRuntimeConfig{
+		StructuredCompletionRequired: true,
+		MaxConcurrency:               4,
+		AllowRecursiveAgents:         false,
+		DefaultIsolation:             "none",
+		SafeSummary:                  true,
+	}
+	if c == nil || c.Subagents == nil {
+		return cfg
+	}
+	if c.Subagents.StructuredCompletionRequired == false {
+		cfg.StructuredCompletionRequired = false
+	}
+	if strings.TrimSpace(c.Subagents.MissingFinishPolicy) != "" {
+		cfg.MissingFinishPolicy = strings.TrimSpace(c.Subagents.MissingFinishPolicy)
+	}
+	if strings.TrimSpace(c.Subagents.DefaultRetryPolicy) != "" {
+		cfg.DefaultRetryPolicy = strings.TrimSpace(c.Subagents.DefaultRetryPolicy)
+	}
+	if c.Subagents.MaxConcurrency > 0 {
+		cfg.MaxConcurrency = c.Subagents.MaxConcurrency
+	}
+	if c.Subagents.AllowRecursiveAgents {
+		cfg.AllowRecursiveAgents = true
+	}
+	if strings.TrimSpace(c.Subagents.DefaultIsolation) != "" {
+		cfg.DefaultIsolation = strings.TrimSpace(c.Subagents.DefaultIsolation)
+	}
+	if c.Subagents.SafeSummary == false {
+		cfg.SafeSummary = false
+	}
+	return cfg
 }
 
 func (c *Config) EnabledProviders() []ProviderConfig {

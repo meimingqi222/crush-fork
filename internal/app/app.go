@@ -249,14 +249,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 				"scoping", memCfg.RemoteScopingName(),
 				"project", projectLabel,
 			)
-		case "transcript":
-			// Transcript backend: no LLM extraction, no materializers.
-			// Memory is retained as raw transcript windows every N turns.
-			// Recall reads directly from EventStore.
-			eng.SetTranscriptRetainer(agent.NewTranscriptRetainer(eng.EventStore()))
-			startupMaterialization = false
-			slog.Info("Transcript memory backend enabled",
-				"retain_every_n_turns", memCfg.GetRetainEveryNTurns())
 		default:
 			writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
 			eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))
