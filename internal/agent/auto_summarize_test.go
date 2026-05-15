@@ -96,6 +96,16 @@ func (p *requestPurposeSystemPrefixPlugin) Init(context.Context, plugin.PluginIn
 
 func (p *requestPurposeSystemPrefixPlugin) Close(context.Context) error { return nil }
 
+func textFromFantasyMessage(msg fantasy.Message) string {
+	var b strings.Builder
+	for _, part := range msg.Content {
+		if textPart, ok := part.(fantasy.TextPart); ok {
+			b.WriteString(textPart.Text)
+		}
+	}
+	return b.String()
+}
+
 type autoSummarizeTestAgent struct {
 	t                       *testing.T
 	runCalls                int
@@ -108,6 +118,7 @@ type autoSummarizeTestAgent struct {
 	runErrs                 []error
 	summaryErrs             []error
 	onSummary               func(fantasy.AgentStreamCall)
+	lastCall                fantasy.AgentStreamCall
 	errAfterStep            bool
 	startToolBeforeRunError bool
 	toolCallID              string
@@ -119,6 +130,7 @@ func (a *autoSummarizeTestAgent) Generate(context.Context, fantasy.AgentCall) (*
 }
 
 func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
+	a.lastCall = call
 	if call.PrepareStep != nil {
 		_, _, err := call.PrepareStep(ctx, fantasy.PrepareStepFunctionOptions{Messages: call.Messages})
 		require.NoError(a.t, err)
@@ -599,16 +611,14 @@ func TestRunPreflightEstimateTrustsPluginCompactionForRequestPurpose(t *testing.
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	// LastInputTokens (9_500) is the observed API count and must always
-	// serve as the floor for compaction decisions, regardless of whether
-	// a plugin transform reduced the character-based estimate. With a
-	// 10_000 window, usable budget is 9_000, so 9_500 triggers summarization.
-	require.Equal(t, 1, fakeAgent.summaryCalls)
+	require.Equal(t, 0, fakeAgent.summaryCalls)
 	require.Equal(t, 1, fakeAgent.runCalls)
+	require.Len(t, fakeAgent.lastCall.Messages, 1)
+	require.Equal(t, "tiny", textFromFantasyMessage(fakeAgent.lastCall.Messages[0]))
 
 	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
 	require.NoError(t, err)
-	require.NotEmpty(t, savedSession.SummaryMessageID)
+	require.Empty(t, savedSession.SummaryMessageID)
 }
 
 func TestRunPreflightEstimateKeepsLastInputFallbackWhenTransformDoesNotReduceEstimate(t *testing.T) {

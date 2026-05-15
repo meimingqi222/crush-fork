@@ -524,7 +524,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// output token reservation internally, so we don't need to add maxOutputTokens here.
 		// This prevents double-counting the output reservation for large context models.
 		estimatedInput := a.estimateSessionPromptTokens(preflightState.History, call.Prompt, call.Attachments, agentTools, preflightState.SystemPrompt, preflightState.PromptPrefix)
-		estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
+		if !preflightState.EstimateReduced {
+			estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
+		}
 		trigger := proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens)
 		budget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
 		slog.Info("Auto-summarize preflight decision",
@@ -1302,7 +1304,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						}
 						projectedPromptTokens = fallbackTokens
 					}
-					if !preflightSummarized {
+					if !preflightSummarized && !estimateReduced {
 						projectedPromptTokens = max(projectedPromptTokens, currentSession.LastInputTokens())
 					}
 					// Pass input-only estimate to shouldAutoSummarize. The function
