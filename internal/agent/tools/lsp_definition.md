@@ -18,5 +18,5 @@ Find the definition location for the symbol at a specific source position using 
 </limitations>
 
 <tips>
-- Use this after view/grep when you know the exact symbol position.
+- Use this after read/grep when you know the exact symbol position.
 - Prefer this over text search for real code navigation.

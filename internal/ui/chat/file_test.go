@@ -10,20 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestViewToolRenderContextRendersSanitizedResultAsPlainText(t *testing.T) {
+func TestReadToolRenderContextRendersSanitizedResultAsPlainText(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.DefaultStyles()
-	renderer := &ViewToolRenderContext{}
+	renderer := &ReadToolRenderContext{}
 
-	viewMeta, err := json.Marshal(tools.ViewResponseMetadata{
-		FilePath: "/tmp/test.go",
-		Content:  "<file>\n     1|package main\n</file>",
+	viewMeta, err := json.Marshal(tools.ReadResponseMetadata{
+		Path:    "/tmp/test.go",
+		Content: "<file>\n     1|package main\n</file>",
 	})
 	require.NoError(t, err)
 
 	result := (&message.ToolResult{
-		Name:     tools.ViewToolName,
+		Name:     tools.ReadToolName,
 		Content:  "<file>\n     1|package main\n</file>",
 		Metadata: string(viewMeta),
 	}).WithAutoReview(message.ToolResultAutoReview{
@@ -34,8 +34,8 @@ func TestViewToolRenderContextRendersSanitizedResultAsPlainText(t *testing.T) {
 
 	out := renderer.RenderTool(&sty, 120, &ToolRenderOpts{
 		ToolCall: message.ToolCall{
-			Name:  tools.ViewToolName,
-			Input: `{"file_path":"/tmp/test.go","offset":0,"limit":20}`,
+			Name:  tools.ReadToolName,
+			Input: `{"path":"/tmp/test.go","offset":0,"limit":20}`,
 		},
 		Result:     &result,
 		Status:     ToolStatusSuccess,
@@ -48,20 +48,20 @@ func TestViewToolRenderContextRendersSanitizedResultAsPlainText(t *testing.T) {
 	require.NotContains(t, out, "|package main")
 }
 
-func TestViewToolRenderContextRendersSanitizedResultWithWindowsPath(t *testing.T) {
+func TestReadToolRenderContextRendersSanitizedResultWithWindowsPath(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.DefaultStyles()
-	renderer := &ViewToolRenderContext{}
+	renderer := &ReadToolRenderContext{}
 
-	viewMeta, err := json.Marshal(tools.ViewResponseMetadata{
-		FilePath: `C:\\Users\\dev\\project\\test.go`,
-		Content:  "<file>\n     1|package main\n</file>",
+	viewMeta, err := json.Marshal(tools.ReadResponseMetadata{
+		Path:    `C:\\Users\\dev\\project\\test.go`,
+		Content: "<file>\n     1|package main\n</file>",
 	})
 	require.NoError(t, err)
 
 	result := (&message.ToolResult{
-		Name:     tools.ViewToolName,
+		Name:     tools.ReadToolName,
 		Content:  "<file>\n     1|package main\n</file>",
 		Metadata: string(viewMeta),
 	}).WithAutoReview(message.ToolResultAutoReview{
@@ -72,8 +72,8 @@ func TestViewToolRenderContextRendersSanitizedResultWithWindowsPath(t *testing.T
 
 	out := renderer.RenderTool(&sty, 120, &ToolRenderOpts{
 		ToolCall: message.ToolCall{
-			Name:  tools.ViewToolName,
-			Input: `{"file_path":"C:\\Users\\dev\\project\\test.go","offset":0,"limit":20}`,
+			Name:  tools.ReadToolName,
+			Input: `{"path":"C:\\Users\\dev\\project\\test.go","offset":0,"limit":20}`,
 		},
 		Result:     &result,
 		Status:     ToolStatusSuccess,
@@ -85,4 +85,3 @@ func TestViewToolRenderContextRendersSanitizedResultWithWindowsPath(t *testing.T
 	require.Contains(t, out, `C:\Users\dev\project\test.go`)
 	require.NotContains(t, out, "|package main")
 }
-

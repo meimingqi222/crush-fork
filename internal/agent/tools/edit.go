@@ -34,7 +34,7 @@ type EditParams struct {
 	NewString  string                  `json:"new_string,omitempty" description:"The text to replace it with"`
 	ReplaceAll bool                    `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)"`
 	Edits      []EditEntry             `json:"edits,omitempty" description:"Array of edit operations to perform sequentially on the file. When provided, old_string/new_string/replace_all are ignored."`
-	Operations []HashlineEditOperation `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from view(hashline=true). When provided, all other parameters except file_path are ignored."`
+	Operations []HashlineEditOperation `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from read(hashline=true). When provided, all other parameters except file_path are ignored."`
 }
 
 type EditPermissionsParams struct {

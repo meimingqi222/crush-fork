@@ -250,10 +250,10 @@ type Styles struct {
 			SummaryHeader         lipgloss.Style // "Context Summary" header label
 			SummaryTruncationHint lipgloss.Style // "… (N lines hidden)" hint
 
-			AssistantInfoIcon      lipgloss.Style
-			AssistantInfoModel     lipgloss.Style
-			AssistantInfoProvider  lipgloss.Style
-			AssistantInfoDuration  lipgloss.Style
+			AssistantInfoIcon     lipgloss.Style
+			AssistantInfoModel    lipgloss.Style
+			AssistantInfoProvider lipgloss.Style
+			AssistantInfoDuration lipgloss.Style
 		}
 	}
 

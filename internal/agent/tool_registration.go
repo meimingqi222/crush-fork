@@ -100,7 +100,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewJobKillTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		editTool,
-		agenttools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
+		agenttools.NewReadTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),
@@ -114,7 +114,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),
 		agenttools.NewSubtaskResultTool(c.messages),
-		agenttools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
 	if config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent {

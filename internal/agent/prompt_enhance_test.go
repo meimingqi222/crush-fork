@@ -181,14 +181,14 @@ func TestLoadEnhancePromptHistoryStripsToolCallsToAvoidOrphans(t *testing.T) {
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: "let me check"},
-			message.ToolCall{ID: "call_1", Name: "view", Input: "{}", Finished: true},
+			message.ToolCall{ID: "call_1", Name: "read", Input: "{}", Finished: true},
 		},
 	})
 	require.NoError(t, err)
 	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
 		Role: message.Tool,
 		Parts: []message.ContentPart{
-			message.ToolResult{ToolCallID: "call_1", Name: "view", Content: "ok"},
+			message.ToolResult{ToolCallID: "call_1", Name: "read", Content: "ok"},
 		},
 	})
 	require.NoError(t, err)

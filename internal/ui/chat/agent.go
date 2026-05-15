@@ -785,6 +785,7 @@ type TaskNodeItem struct {
 	id               string
 	parentToolCallID string
 	childSessionID   string
+	taskRef          string
 	taskID           string
 	description      string
 	prompt           string
@@ -827,6 +828,17 @@ func (t *TaskNodeItem) ID() string { return t.id }
 func (t *TaskNodeItem) ParentToolCallID() string { return t.parentToolCallID }
 
 func (t *TaskNodeItem) ChildSessionID() string { return t.childSessionID }
+
+func (t *TaskNodeItem) TaskRef() string { return t.taskRef }
+
+func (t *TaskNodeItem) SetTaskRef(taskRef string) {
+	taskRef = strings.TrimSpace(strings.TrimPrefix(taskRef, "subtask://"))
+	if t.taskRef == taskRef {
+		return
+	}
+	t.taskRef = taskRef
+	t.clearCache()
+}
 
 // SetChildSessionStatus stores transient child-session status text for live display.
 func (t *TaskNodeItem) SetChildSessionStatus(text string, isError bool) {

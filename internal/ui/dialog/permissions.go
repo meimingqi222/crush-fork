@@ -478,15 +478,15 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 			lines = append(lines, p.renderKeyValue("URL", params.URL, contentWidth))
 			lines = append(lines, p.renderKeyValue("File", fsext.PrettyPath(params.FilePath), contentWidth))
 		}
-	case tools.EditToolName, tools.WriteToolName, tools.ViewToolName:
+	case tools.EditToolName, tools.WriteToolName, tools.ReadToolName:
 		var filePath string
 		switch params := p.permission.Params.(type) {
 		case tools.EditPermissionsParams:
 			filePath = params.FilePath
 		case tools.WritePermissionsParams:
 			filePath = params.FilePath
-		case tools.ViewPermissionsParams:
-			filePath = params.FilePath
+		case tools.ReadPermissionsParams:
+			filePath = params.Path
 		}
 		if filePath != "" {
 			lines = append(lines, p.renderKeyValue("File", fsext.PrettyPath(filePath), contentWidth))
@@ -561,12 +561,10 @@ func (p *Permissions) renderContent(width int) string {
 		return p.renderWriteContent(width)
 	case tools.DownloadToolName:
 		return p.renderDownloadContent(width)
-	case tools.FetchToolName:
-		return p.renderFetchContent(width)
 	case tools.AgenticFetchToolName:
 		return p.renderAgenticFetchContent(width)
-	case tools.ViewToolName:
-		return p.renderViewContent(width)
+	case tools.ReadToolName:
+		return p.renderReadContent(width)
 	default:
 		return p.renderDefaultContent(width)
 	}
@@ -640,15 +638,6 @@ func (p *Permissions) renderDownloadContent(width int) string {
 	return p.renderContentPanel(content, width)
 }
 
-func (p *Permissions) renderFetchContent(width int) string {
-	params, ok := p.permission.Params.(tools.FetchPermissionsParams)
-	if !ok {
-		return ""
-	}
-
-	return p.renderContentPanel(params.URL, width)
-}
-
 func (p *Permissions) renderAgenticFetchContent(width int) string {
 	params, ok := p.permission.Params.(tools.AgenticFetchPermissionsParams)
 	if !ok {
@@ -665,13 +654,13 @@ func (p *Permissions) renderAgenticFetchContent(width int) string {
 	return p.renderContentPanel(content, width)
 }
 
-func (p *Permissions) renderViewContent(width int) string {
-	params, ok := p.permission.Params.(tools.ViewPermissionsParams)
+func (p *Permissions) renderReadContent(width int) string {
+	params, ok := p.permission.Params.(tools.ReadPermissionsParams)
 	if !ok {
 		return ""
 	}
 
-	content := fmt.Sprintf("File: %s", fsext.PrettyPath(params.FilePath))
+	content := fmt.Sprintf("File: %s", fsext.PrettyPath(params.Path))
 	if params.Offset > 0 {
 		content += fmt.Sprintf("\nStarting from line: %d", params.Offset+1)
 	}

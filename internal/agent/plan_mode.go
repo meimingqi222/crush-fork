@@ -82,7 +82,7 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.JobKillToolName:      toolRiskExecute,
 	tools.DownloadToolName:     toolRiskNetwork,
 	tools.EditToolName:         toolRiskWrite,
-	tools.FetchToolName:        toolRiskNetwork,
+	tools.ReadToolName:         toolRiskRead,
 	tools.GlobToolName:         toolRiskRead,
 	tools.GrepToolName:         toolRiskRead,
 
@@ -94,7 +94,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.TodosToolName:               toolRiskWrite,
 	tools.SendMessageToolName:         toolRiskWrite,
 	tools.TaskStopToolName:            toolRiskWrite,
-	tools.ViewToolName:                toolRiskRead,
 	tools.WriteToolName:               toolRiskWrite,
 	tools.DiagnosticsToolName:         toolRiskRead,
 	tools.ReferencesToolName:          toolRiskRead,
@@ -117,7 +116,7 @@ var toolRiskLevels = map[string]toolRiskLevel{
 var planModeFileInspectToolNames = map[string]struct{}{
 	tools.GlobToolName:                {},
 	tools.GrepToolName:                {},
-	tools.ViewToolName:                {},
+	tools.ReadToolName:                {},
 	tools.DiagnosticsToolName:         {},
 	tools.ReferencesToolName:          {},
 	tools.LSPDeclarationToolName:      {},

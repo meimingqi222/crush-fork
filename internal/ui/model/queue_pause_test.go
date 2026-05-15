@@ -44,6 +44,7 @@ func (m *mockQueueCoordinator) IsQueuePaused(string) bool           { return m.p
 func (m *mockQueueCoordinator) Summarize(context.Context, string, fantasy.ProviderOptions) error {
 	return nil
 }
+
 func (m *mockQueueCoordinator) EnhancePrompt(context.Context, string, string) (string, error) {
 	return "", nil
 }
@@ -55,8 +56,11 @@ func (m *mockQueueCoordinator) GenerateHandoff(context.Context, string, string) 
 func (m *mockQueueCoordinator) ClassifyPermission(context.Context, permission.PermissionRequest) (permission.AutoClassification, error) {
 	return permission.AutoClassification{}, nil
 }
-func (m *mockQueueCoordinator) Model() agent.Model                           { return agent.Model{} }
-func (m *mockQueueCoordinator) ModelForSession(_ string) (agent.Model, bool) { return agent.Model{}, false }
+func (m *mockQueueCoordinator) Model() agent.Model { return agent.Model{} }
+func (m *mockQueueCoordinator) ModelForSession(_ string) (agent.Model, bool) {
+	return agent.Model{}, false
+}
+
 func (m *mockQueueCoordinator) EscalationBridge() *permission.EscalationBridge {
 	return nil
 }

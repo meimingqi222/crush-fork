@@ -428,8 +428,8 @@ func TestHandleChildSessionMessageMapsTaskGraphRetrySessionsToTaskNode(t *testin
 		Parts: []message.ContentPart{
 			message.ToolCall{
 				ID:       "retry-nested-1",
-				Name:     "view",
-				Input:    `{"file_path":"README.md"}`,
+				Name:     "read",
+				Input:    `{"path":"README.md"}`,
 				Finished: false,
 			},
 		},
@@ -493,7 +493,7 @@ func TestSetSessionMessagesLoadsTaskNodeNestedToolsFromRetrySessions(t *testing.
 	_, err = messages.Create(context.Background(), baseTaskSession.ID, message.CreateMessageParams{
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
-			message.ToolCall{ID: "base-view", Name: "view", Input: `{"file_path":"a.txt"}`, Finished: true},
+			message.ToolCall{ID: "base-read", Name: "read", Input: `{"path":"a.txt"}`, Finished: true},
 		},
 	})
 	require.NoError(t, err)
@@ -501,7 +501,7 @@ func TestSetSessionMessagesLoadsTaskNodeNestedToolsFromRetrySessions(t *testing.
 	_, err = messages.Create(context.Background(), retryTaskSession.ID, message.CreateMessageParams{
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
-			message.ToolCall{ID: "retry-view", Name: "view", Input: `{"file_path":"b.txt"}`, Finished: true},
+			message.ToolCall{ID: "retry-read", Name: "read", Input: `{"path":"b.txt"}`, Finished: true},
 		},
 	})
 	require.NoError(t, err)
@@ -528,7 +528,7 @@ func TestSetSessionMessagesLoadsTaskNodeNestedToolsFromRetrySessions(t *testing.
 		taskNode.NestedTools()[0].ToolCall().ID,
 		taskNode.NestedTools()[1].ToolCall().ID,
 	}
-	require.ElementsMatch(t, []string{"base-view", "retry-view"}, nestedToolIDs)
+	require.ElementsMatch(t, []string{"base-read", "retry-read"}, nestedToolIDs)
 
 	_ = ui.setSessionMessages([]message.Message{assistantMsg})
 	taskNode, ok = ui.chat.MessageItem(taskNodeID).(*chat.TaskNodeItem)
@@ -647,7 +647,7 @@ func TestSetSessionMessagesRestoresTaskNodeCompletedWithWarningsFromToolMetadata
 		Status:           message.ToolResultSubtaskStatus("completed_with_warnings"),
 	})
 	_, err = messages.Create(context.Background(), taskSession.ID, message.CreateMessageParams{
-		Role: message.Tool,
+		Role:  message.Tool,
 		Parts: []message.ContentPart{toolResult},
 	})
 	require.NoError(t, err)

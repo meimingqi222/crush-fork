@@ -100,8 +100,9 @@ func applyLocalAutoToolOutputReview(toolResult message.ToolResult) (message.Tool
 
 func isTrustedLocalReadOnlyToolResult(toolResult message.ToolResult) bool {
 	switch toolResult.Name {
-	case tools.ViewToolName,
-		tools.GlobToolName,
+	case tools.ReadToolName:
+		return isTrustedLocalReadToolResult(toolResult)
+	case tools.GlobToolName,
 		tools.GrepToolName,
 		tools.DiagnosticsToolName,
 		tools.ReferencesToolName:
@@ -111,6 +112,17 @@ func isTrustedLocalReadOnlyToolResult(toolResult message.ToolResult) bool {
 	default:
 		return false
 	}
+}
+
+func isTrustedLocalReadToolResult(toolResult message.ToolResult) bool {
+	if strings.TrimSpace(toolResult.Metadata) == "" {
+		return true
+	}
+	var meta tools.ReadResponseMetadata
+	if err := json.Unmarshal([]byte(toolResult.Metadata), &meta); err != nil {
+		return true
+	}
+	return !meta.IsURL
 }
 
 func isTrustedLocalReadOnlyBashToolResult(toolResult message.ToolResult) bool {

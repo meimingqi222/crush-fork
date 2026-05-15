@@ -48,7 +48,7 @@ func TestUpdatePermissionRequestNotificationKeepsWaitingTitle(t *testing.T) {
 	_, cmd := ui.Update(pubsub.Event[permission.PermissionRequest]{
 		Type: pubsub.CreatedEvent,
 		Payload: permission.PermissionRequest{
-			ToolName: "view",
+			ToolName: "read",
 		},
 	})
 	require.NotNil(t, cmd)

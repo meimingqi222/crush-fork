@@ -58,7 +58,7 @@ func TestToolSearchIncludesDeferredByDefault(t *testing.T) {
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read file",
 			Parameters:  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}}, "required": []string{"file_path"}},
 			Required:    []string{"file_path"},
@@ -78,11 +78,11 @@ func TestToolSearchIncludesDeferredByDefault(t *testing.T) {
 	results := response.Results
 
 	require.Len(t, results, 2)
-	require.Equal(t, "view", results[0].Name)
+	require.Equal(t, "read", results[0].Name)
 	require.Equal(t, "sourcegraph", results[1].Name)
 	require.NotNil(t, results[0].Parameters)
 	require.Equal(t, []string{"file_path"}, results[0].Required)
-	require.Equal(t, []string{"view", "sourcegraph"}, response.Matches)
+	require.Equal(t, []string{"read", "sourcegraph"}, response.Matches)
 	require.Equal(t, 1, response.TotalDeferred)
 }
 
@@ -96,7 +96,7 @@ func TestToolSearchSelectActivatesDeferredTools(t *testing.T) {
 			Metadata:    ToolMetadata{Exposure: ToolExposureDeferred},
 		},
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read file",
 			Exposed:     true,
 			Metadata:    ToolMetadata{Exposure: ToolExposureDefault},
@@ -109,18 +109,18 @@ func TestToolSearchSelectActivatesDeferredTools(t *testing.T) {
 		return toolNames
 	})
 
-	results := runToolSearch(t, tool, ToolSearchParams{Query: "select:sourcegraph,missing,view"})
+	results := runToolSearch(t, tool, ToolSearchParams{Query: "select:sourcegraph,missing,read"})
 
 	require.Equal(t, []string{"sourcegraph"}, activated)
 	require.Len(t, results, 2)
 	require.Equal(t, "sourcegraph", results[0].Name)
 	require.True(t, results[0].Selected)
 	require.True(t, results[0].Activated)
-	require.Equal(t, "view", results[1].Name)
+	require.Equal(t, "read", results[1].Name)
 	require.True(t, results[1].Selected)
 	require.False(t, results[1].Activated)
 
-	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: "select:sourcegraph,missing,view"})
+	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: "select:sourcegraph,missing,read"})
 	require.Equal(t, []string{"sourcegraph"}, response.ActivatedDeferredTools)
 	require.Contains(t, response.ActivationHint, "sourcegraph")
 }
@@ -130,7 +130,7 @@ func TestToolSearchSelectSkipsUnexposedNonDeferredTools(t *testing.T) {
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read file",
 			Exposed:     true,
 			Metadata:    ToolMetadata{Exposure: ToolExposureDefault},
@@ -144,10 +144,10 @@ func TestToolSearchSelectSkipsUnexposedNonDeferredTools(t *testing.T) {
 	}}
 
 	tool := NewToolSearchTool(registry, nil)
-	results := runToolSearch(t, tool, ToolSearchParams{Query: "select:view,secret_write"})
+	results := runToolSearch(t, tool, ToolSearchParams{Query: "select:read,secret_write"})
 
 	require.Len(t, results, 1)
-	require.Equal(t, "view", results[0].Name)
+	require.Equal(t, "read", results[0].Name)
 	require.True(t, results[0].Selected)
 }
 
@@ -182,7 +182,7 @@ func TestToolSearchKeywordQueryActivatesDeferredMatches(t *testing.T) {
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read file",
 			Exposed:     true,
 			Metadata:    ToolMetadata{Exposure: ToolExposureDefault},
@@ -214,7 +214,7 @@ func TestToolSearchUsesMaxResultsAlias(t *testing.T) {
 	t.Parallel()
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
-		{Name: "view", Description: "read files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
+		{Name: "read", Description: "read files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
 		{Name: "grep", Description: "search files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
 		{Name: "glob", Description: "find files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
 	}}
@@ -239,7 +239,7 @@ func TestToolSearchKeywordRankingPrefersHintAndTags(t *testing.T) {
 			},
 		},
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read local files",
 			Exposed:     true,
 			Metadata: ToolMetadata{
@@ -271,7 +271,7 @@ func TestToolSearchKeywordRequiredTerms(t *testing.T) {
 			},
 		},
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read local files",
 			Exposed:     true,
 			Metadata: ToolMetadata{
@@ -293,7 +293,7 @@ func TestToolSearchNoMatchIncludesPendingMCPServers(t *testing.T) {
 	t.Parallel()
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
-		{Name: "view", Description: "read local files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
+		{Name: "read", Description: "read local files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
 		{Name: "sourcegraph", Description: "search public repositories", Metadata: ToolMetadata{Exposure: ToolExposureDeferred}},
 	}}
 

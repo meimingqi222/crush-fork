@@ -2,10 +2,8 @@ package autopermission
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
@@ -203,7 +201,7 @@ func TestAutoPermission_AutoModeReadOnlyRequestSkipsClassifier(t *testing.T) {
 
 	base := &mockPermissionService{
 		Broker:      pubsub.NewBroker[permission.PermissionRequest](),
-		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: tools.ViewToolName, Action: "read"}},
+		evalResult:  permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{SessionID: "s1", ToolName: tools.ReadToolName, Action: "read"}},
 		promptGrant: true,
 	}
 	classifier := &mockClassifier{}
@@ -281,13 +279,13 @@ func TestAutoPermission_UsesAuthoritySessionModeForSubagentRequests(t *testing.T
 	require.Equal(t, 1, classifier.calls)
 }
 
-func TestAutoPermission_EscalatesToLeaderWhenWorkerIdentityPresent(t *testing.T) {
+func TestAutoPermission_RoutesSubagentPromptToParentSession(t *testing.T) {
 	t.Parallel()
 
 	base := &mockPermissionService{
 		Broker: pubsub.NewBroker[permission.PermissionRequest](),
 		evalResult: permission.EvaluationResult{Decision: permission.EvaluationDecisionAsk, Permission: permission.PermissionRequest{
-			SessionID: "s1",
+			SessionID: "child-session",
 			ToolName:  tools.BashToolName,
 			Action:    "execute",
 			Params: tools.BashPermissionsParams{
@@ -295,43 +293,25 @@ func TestAutoPermission_EscalatesToLeaderWhenWorkerIdentityPresent(t *testing.T)
 			},
 			Description: "run bash command",
 		}},
-		promptGrant: false,
+		promptGrant: true,
 	}
 
 	classifier := &mockClassifier{result: permission.AutoClassification{AllowAuto: false}}
 	svc := New(base, &mockSessionService{mode: session.PermissionModeAuto}, nil, func() permission.Classifier { return classifier }, "", false, nil)
 
-	bridge := permission.NewEscalationBridge()
-	ctx := permission.WithEscalationBridge(t.Context(), bridge)
-	ctx = permission.WithWorkerIdentity(ctx, permission.WorkerIdentity{AgentID: "worker-1", AgentName: "researcher"})
-
-	errCh := make(chan error, 1)
-	go func() {
-		deadline := time.After(500 * time.Millisecond)
-		tick := time.NewTicker(5 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-deadline:
-				errCh <- fmt.Errorf("timeout waiting for pending escalation")
-				return
-			case <-tick.C:
-				pending := bridge.GetPendingEscalations()
-				if len(pending) == 0 {
-					continue
-				}
-				err := bridge.RespondToEscalation(permission.EscalationResponse{RequestID: pending[0].RequestID, Approved: true})
-				errCh <- err
-				return
-			}
-		}
-	}()
+	ctx := permission.WithWorkerIdentity(t.Context(), permission.WorkerIdentity{
+		AgentID:         "worker-1",
+		AgentName:       "researcher",
+		ParentSessionID: "parent-session",
+		ChildSessionID:  "child-session",
+	})
 
 	granted, err := svc.Request(ctx, permission.CreatePermissionRequest{})
 	require.NoError(t, err)
 	require.True(t, granted)
-	require.Zero(t, base.promptCalls)
-	require.NoError(t, <-errCh)
+	require.Equal(t, 1, base.promptCalls)
+	require.Equal(t, "parent-session", base.lastPrompt.AuthoritySessionID)
+	require.Equal(t, "child-session", base.lastPrompt.SessionID)
 }
 
 func TestAutoPermission_DefaultModeExplicitAllowListSkipsClassifierAndPrompt(t *testing.T) {
@@ -820,7 +800,7 @@ func TestAutoPermission_AutoModeConfigExecPolicyAllowRuleSkipsGuardian(t *testin
 	require.Zero(t, classifier.calls)
 }
 
-func TestAutoPermission_YoloModeDoesNotBypassSensitiveWrite(t *testing.T) {
+func TestAutoPermission_YoloModeBypassesSensitiveWritePrompt(t *testing.T) {
 	t.Parallel()
 
 	workingDir := filepath.Join(t.TempDir(), "workspace")
@@ -847,10 +827,36 @@ func TestAutoPermission_YoloModeDoesNotBypassSensitiveWrite(t *testing.T) {
 	granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{})
 	require.NoError(t, err)
 	require.True(t, granted)
-	require.Equal(t, 1, base.promptCalls)
+	require.Zero(t, base.promptCalls)
 	require.Zero(t, classifier.calls)
-	require.NotNil(t, base.lastPrompt.AutoReview)
-	require.Equal(t, permission.AutoReviewTriggerAlwaysManual, base.lastPrompt.AutoReview.Trigger)
+}
+
+func TestAutoPermission_YoloModeBypassesHighRiskBashPrompt(t *testing.T) {
+	t.Parallel()
+
+	base := &mockPermissionService{
+		Broker: pubsub.NewBroker[permission.PermissionRequest](),
+		evalResult: permission.EvaluationResult{
+			Decision: permission.EvaluationDecisionAsk,
+			Permission: permission.PermissionRequest{
+				SessionID: "s1",
+				ToolName:  tools.BashToolName,
+				Action:    "execute",
+				Params: tools.BashPermissionsParams{
+					Command: "rm -rf build",
+				},
+			},
+		},
+		promptGrant: true,
+	}
+	classifier := &mockClassifier{result: permission.AutoClassification{AllowAuto: false}}
+	svc := New(base, &mockSessionService{mode: session.PermissionModeYolo}, nil, func() permission.Classifier { return classifier }, "", false, nil)
+
+	granted, err := svc.Request(t.Context(), permission.CreatePermissionRequest{})
+	require.NoError(t, err)
+	require.True(t, granted)
+	require.Zero(t, base.promptCalls)
+	require.Zero(t, classifier.calls)
 }
 
 func TestAutoPermission_AutoModeWorkspaceWriteSkipsClassifier(t *testing.T) {
@@ -917,6 +923,41 @@ func TestAutoPermission_AutoModeSensitiveWorkspaceWriteFallsBackToPrompt(t *test
 	require.Zero(t, classifier.calls)
 	require.NotNil(t, base.lastPrompt.AutoReview)
 	require.Equal(t, permission.AutoReviewTriggerAlwaysManual, base.lastPrompt.AutoReview.Trigger)
+}
+
+func TestAutoPermission_AutoModeSubagentWithoutParentAuthorityBlocks(t *testing.T) {
+	t.Parallel()
+
+	base := &mockPermissionService{
+		Broker: pubsub.NewBroker[permission.PermissionRequest](),
+		evalResult: permission.EvaluationResult{
+			Decision: permission.EvaluationDecisionAsk,
+			Permission: permission.PermissionRequest{
+				SessionID: "child-1",
+				ToolName:  tools.BashToolName,
+				Action:    "execute",
+				Params: tools.BashPermissionsParams{
+					Command: "rm -rf build",
+				},
+			},
+		},
+		promptGrant: true,
+	}
+	svc := New(base, &mockSessionService{mode: session.PermissionModeAuto}, nil, func() permission.Classifier { return nil }, "", false, nil)
+	ctx := permission.WithWorkerIdentity(t.Context(), permission.WorkerIdentity{
+		AgentID:        "child-1",
+		AgentName:      "worker",
+		ChildSessionID: "child-1",
+		TaskID:         "task-a",
+	})
+
+	granted, err := svc.Request(ctx, permission.CreatePermissionRequest{})
+	require.False(t, granted)
+	require.Error(t, err)
+	permissionErr, ok := permission.AsPermissionError(err)
+	require.True(t, ok)
+	require.Equal(t, permission.PermissionErrorKindPolicyDenied, permissionErr.Kind)
+	require.Zero(t, base.promptCalls)
 }
 
 func TestAutoPermission_FailClosedOnClassifierErrorBlocksRequest(t *testing.T) {
@@ -1258,13 +1299,13 @@ func TestIsAlwaysManual(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "fetch always manual",
-			req:  permission.PermissionRequest{ToolName: tools.FetchToolName, Action: "fetch"},
+			name: "url read always manual",
+			req:  permission.PermissionRequest{ToolName: tools.ReadToolName, Action: "read_url"},
 			want: true,
 		},
 		{
 			name: "agentic fetch always manual",
-			req:  permission.PermissionRequest{ToolName: tools.AgenticFetchToolName, Action: "fetch"},
+			req:  permission.PermissionRequest{ToolName: tools.AgenticFetchToolName, Action: "agentic_fetch"},
 			want: true,
 		},
 		{

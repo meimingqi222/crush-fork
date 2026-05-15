@@ -160,7 +160,7 @@ func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentS
 			}
 			toolName := a.toolName
 			if toolName == "" {
-				toolName = "view"
+				toolName = "read"
 			}
 			require.NoError(a.t, call.OnToolInputStart(toolCallID, toolName))
 		}
@@ -235,14 +235,14 @@ func (a *emptyStreamRetryAfterToolTestAgent) Stream(ctx context.Context, call fa
 	if call.OnToolCall != nil {
 		require.NoError(a.t, call.OnToolCall(fantasy.ToolCallContent{
 			ToolCallID: "empty-retry-tool-call",
-			ToolName:   "view",
-			Input:      `{"file_path":"README.md"}`,
+			ToolName:   "read",
+			Input:      `{"path":"README.md"}`,
 		}))
 	}
 	if call.OnToolResult != nil {
 		require.NoError(a.t, call.OnToolResult(fantasy.ToolResultContent{
 			ToolCallID: "empty-retry-tool-call",
-			ToolName:   "view",
+			ToolName:   "read",
 			Result:     fantasy.ToolResultOutputContentText{Text: "README"},
 		}))
 	}
@@ -960,14 +960,14 @@ func TestRunNormalSummarizeUsesSummarizePurpose(t *testing.T) {
 			_, createErr := env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
 				Role: message.Assistant,
 				Parts: []message.ContentPart{
-					message.ToolCall{ID: "tc-1", Name: "view", Input: "{}"},
+					message.ToolCall{ID: "tc-1", Name: "read", Input: "{}"},
 				},
 			})
 			require.NoError(t, createErr)
 			_, createErr = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
 				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.ToolResult{ToolCallID: "tc-1", Name: "view", Content: strings.Repeat("x", 50000)},
+					message.ToolResult{ToolCallID: "tc-1", Name: "read", Content: strings.Repeat("x", 50000)},
 				},
 			})
 			require.NoError(t, createErr)
@@ -1190,7 +1190,7 @@ func TestSummarizeRetriesWithoutRedactedThinkingOnAnthropicProxyError(t *testing
 
 	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
 		Role:  message.User,
-		Parts: []message.ContentPart{message.TextContent{Text: "use the view tool"}},
+		Parts: []message.ContentPart{message.TextContent{Text: "use the read tool"}},
 	})
 	require.NoError(t, err)
 
@@ -1198,7 +1198,7 @@ func TestSummarizeRetriesWithoutRedactedThinkingOnAnthropicProxyError(t *testing
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.ReasoningContent{Thinking: "tool reasoning"},
-			message.ToolCall{ID: "call-1", Name: "view", Input: `{"file_path":"README.md","offset":0,"limit":120}`},
+			message.ToolCall{ID: "call-1", Name: "read", Input: `{"path":"README.md","offset":0,"limit":120}`},
 		},
 	})
 	require.NoError(t, err)
@@ -1258,7 +1258,7 @@ func TestSummarizeRetriesWithoutAnthropicThinkingOnUnsignedReasoningError(t *tes
 				Thinking:  "signed reasoning",
 				Signature: base64.StdEncoding.EncodeToString([]byte("sig")),
 			},
-			message.ToolCall{ID: "call-2", Name: "view", Input: `{"file_path":"README.md","offset":0,"limit":120}`},
+			message.ToolCall{ID: "call-2", Name: "read", Input: `{"path":"README.md","offset":0,"limit":120}`},
 		},
 	})
 	require.NoError(t, err)

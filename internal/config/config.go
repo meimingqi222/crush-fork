@@ -390,7 +390,7 @@ func (c Completions) Limits() (depth, items int) {
 }
 
 type Permissions struct {
-	AllowedTools                []string  `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"` // Tools that don't require permission prompts
+	AllowedTools                []string  `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=read"` // Tools that don't require permission prompts
 	SkipRequests                bool      `json:"-"`                                                                                                                              // Automatically accept all permissions (YOLO mode)
 	FailClosedOnClassifierError bool      `json:"fail_closed_on_classifier_error,omitempty" jsonschema:"description=Block permission-requiring actions when Auto Mode permission classification is unavailable instead of falling back to manual confirmation,default=false"`
 	AutoMode                    *AutoMode `json:"auto_mode,omitempty" jsonschema:"description=Auto Mode policy customization"`
@@ -913,10 +913,10 @@ func allToolNames() []string {
 		"lsp_rename",
 		"lsp_format",
 		"lsp_restart",
-		"fetch",
 		"agentic_fetch",
 		"glob",
 		"grep",
+		"read",
 		"request_user_input",
 
 		"crush_info",
@@ -930,7 +930,6 @@ func allToolNames() []string {
 		"send_message",
 		"task_stop",
 		"subtask_result",
-		"view",
 		"write",
 	}
 }
@@ -944,7 +943,7 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"bash", "glob", "grep", "tool_search", "view"}
+	readOnlyTools := []string{"bash", "glob", "grep", "read", "tool_search"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }

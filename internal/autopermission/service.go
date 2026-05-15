@@ -192,10 +192,11 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 
 	if mode == session.PermissionModeYolo {
 		if s.isBypassImmuneRequest(eval.Permission) {
-			return s.promptWithEscalation(ctx, withAutoReview(eval.Permission, permission.AutoReview{
-				Trigger: permission.AutoReviewTriggerAlwaysManual,
-				Reason:  "This safety-sensitive action requires manual confirmation even in YOLO Mode.",
-			}))
+			slog.Debug("YOLO Mode allowed bypass-immune permission request",
+				"session_id", sessionAuthorityID,
+				"tool", eval.Permission.ToolName,
+				"action", eval.Permission.Action,
+			)
 		}
 		return true, nil
 	}
@@ -237,6 +238,16 @@ func (s *service) Request(ctx context.Context, opts permission.CreatePermissionR
 		return true, nil
 	case permission.EvaluationDecisionDeny:
 		return false, permission.ErrorPermissionBlocked
+	}
+
+	if mode == session.PermissionModeAuto && isAutoModeAllowlistedRequest(eval.Permission) {
+		slog.Debug("Auto Mode permission allowed via read-only allowlist",
+			"session_id", sessionAuthorityID,
+			"tool", eval.Permission.ToolName,
+			"action", eval.Permission.Action,
+		)
+		s.resetClassifierBlocks(sessionAuthorityID)
+		return true, nil
 	}
 
 	if mode == session.PermissionModeDefault {
@@ -502,16 +513,16 @@ func (s *service) handleClassifierFailure(ctx context.Context, req permission.Pe
 }
 
 func (s *service) promptWithEscalation(ctx context.Context, req permission.PermissionRequest) (bool, error) {
-	if permission.ShouldEscalate(ctx, "ask") {
-		resp, err := permission.EscalateToLeader(ctx, req.ToolName, req.Params, req.Description)
-		if err != nil {
-			return false, err
+	identity := permission.WorkerIdentityFromContext(ctx)
+	if identity.AgentID != "" {
+		if strings.TrimSpace(req.AuthoritySessionID) == "" {
+			req.AuthoritySessionID = strings.TrimSpace(identity.ParentSessionID)
 		}
-		if resp != nil {
-			if !resp.Approved {
-				return false, nil
-			}
-			return true, nil
+		if strings.TrimSpace(req.AuthoritySessionID) == "" || strings.TrimSpace(req.AuthoritySessionID) == strings.TrimSpace(req.SessionID) {
+			return false, permission.NewPermissionBlockedError(
+				"Subagent permission approval is unavailable.",
+				"Auto Mode could not route this subagent permission request to the parent session.",
+			)
 		}
 	}
 	return s.base.Prompt(ctx, req)
@@ -657,7 +668,7 @@ func policyFromConfig(cfg *config.AutoMode) (ApprovalPolicyConfig, []ExecPolicyR
 
 func isAutoModeAllowlistedRequest(req permission.PermissionRequest) bool {
 	switch req.ToolName {
-	case tools.ViewToolName:
+	case tools.ReadToolName:
 		return req.Action == "read"
 	case tools.GrepToolName, tools.GlobToolName:
 		return req.Action == "search"
@@ -779,8 +790,10 @@ func isSensitiveWorkspacePath(path, workingDir string) bool {
 
 func isAlwaysManual(req permission.PermissionRequest, workingDir string) bool {
 	switch req.ToolName {
-	case tools.DownloadToolName, tools.FetchToolName, tools.AgenticFetchToolName:
+	case tools.DownloadToolName, tools.AgenticFetchToolName:
 		return true
+	case tools.ReadToolName:
+		return req.Action == "read_url"
 	case tools.BashToolName:
 		return isHighRiskBashRequest(req)
 	case tools.EditToolName, tools.WriteToolName:

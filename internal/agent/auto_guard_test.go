@@ -16,7 +16,7 @@ func TestApplyLocalAutoToolOutputReview(t *testing.T) {
 		t.Parallel()
 
 		reviewed, handled := applyLocalAutoToolOutputReview(message.ToolResult{
-			Name:    tools.ViewToolName,
+			Name:    tools.ReadToolName,
 			Content: "package main\n\nfunc main() {}\n",
 		})
 		require.True(t, handled)
@@ -42,9 +42,12 @@ func TestApplyLocalAutoToolOutputReview(t *testing.T) {
 	t.Run("untrusted tool output still requires downstream review", func(t *testing.T) {
 		t.Parallel()
 
+		metadata, err := json.Marshal(tools.ReadResponseMetadata{IsURL: true})
+		require.NoError(t, err)
 		_, handled := applyLocalAutoToolOutputReview(message.ToolResult{
-			Name:    "fetch",
-			Content: "plain remote content",
+			Name:     tools.ReadToolName,
+			Content:  "plain remote content",
+			Metadata: string(metadata),
 		})
 		require.False(t, handled)
 	})
@@ -133,12 +136,12 @@ func TestIsTrustedLocalReadOnlyToolResult(t *testing.T) {
 		result  message.ToolResult
 		trusted bool
 	}{
-		{name: "view trusted", result: message.ToolResult{Name: tools.ViewToolName, Content: "ok"}, trusted: true},
+		{name: "read trusted", result: message.ToolResult{Name: tools.ReadToolName, Content: "ok"}, trusted: true},
 		{name: "ls trusted", result: message.ToolResult{Name: "ls", Content: "ok"}, trusted: false},
 		{name: "grep trusted", result: message.ToolResult{Name: "grep", Content: "ok"}, trusted: true},
 		{name: "bash with safe metadata trusted", result: message.ToolResult{Name: "bash", Content: "ok", Metadata: `{"safe_read_only":true}`}, trusted: true},
 		{name: "bash without metadata untrusted", result: message.ToolResult{Name: "bash", Content: "ok"}, trusted: false},
-		{name: "fetch untrusted", result: message.ToolResult{Name: "fetch", Content: "ok"}, trusted: false},
+		{name: "read url untrusted", result: message.ToolResult{Name: tools.ReadToolName, Content: "ok", Metadata: `{"is_url":true}`}, trusted: false},
 		{name: "unknown untrusted", result: message.ToolResult{Name: "custom_tool", Content: "ok"}, trusted: false},
 	}
 

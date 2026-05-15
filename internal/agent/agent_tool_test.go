@@ -40,7 +40,7 @@ func TestSubagentConfigSupportsConfiguredSubagents(t *testing.T) {
 		"reviewer": {
 			Mode:         config.AgentModeSubagent,
 			Description:  "Reviews changes before handoff.",
-			AllowedTools: []string{"view"},
+			AllowedTools: []string{"read"},
 		},
 	}
 	cfg.SetupAgents()
@@ -50,7 +50,7 @@ func TestSubagentConfigSupportsConfiguredSubagents(t *testing.T) {
 	agentCfg, err := coord.subagentConfig("reviewer")
 	require.NoError(t, err)
 	assert.Equal(t, "reviewer", agentCfg.ID)
-	assert.Equal(t, []string{"view"}, agentCfg.AllowedTools)
+	assert.Equal(t, []string{"read"}, agentCfg.AllowedTools)
 }
 
 func TestBuildAgentToolDescriptionDeduplicatesExploreAlias(t *testing.T) {
@@ -149,7 +149,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	for _, tool := range exploreTools {
 		exploreNames = append(exploreNames, tool.Info().Name)
 	}
-	assert.Equal(t, []string{"bash", "glob", "grep", "tool_search", "view"}, exploreNames)
+	assert.Equal(t, []string{"bash", "glob", "grep", "read", "tool_search"}, exploreNames)
 }
 
 func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
@@ -176,7 +176,7 @@ func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
 		"call-1",
 		taskGraphTask{ID: "task", SubagentType: config.AgentExplore},
 		agentCfg,
-		ParentPermissionContext{SessionID: "parent-session", AllowedTools: []string{tools.ViewToolName, tools.ToolSearchToolName}},
+		ParentPermissionContext{SessionID: "parent-session", AllowedTools: []string{tools.ReadToolName, tools.ToolSearchToolName}},
 		agentCfg.AllowedTools,
 		"session",
 		env.workingDir,
@@ -190,23 +190,23 @@ func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
 	for _, tool := range toolSet {
 		names = append(names, tool.Info().Name)
 	}
-	assert.Equal(t, []string{tools.SubagentFinishToolName, tools.ToolSearchToolName, tools.ViewToolName}, names)
+	assert.Equal(t, []string{tools.SubagentFinishToolName, tools.ToolSearchToolName, tools.ReadToolName}, names)
 }
 
 func TestDeriveSubagentPermissionsDenyWins(t *testing.T) {
 	profile := SubagentProfile{
 		Name:      config.AgentGeneral,
 		Kind:      SubagentProfileGeneral,
-		ToolNames: []string{"bash", "edit", "view", tools.SubagentFinishToolName},
+		ToolNames: []string{"bash", "edit", "read", tools.SubagentFinishToolName},
 	}
 
 	derived := DeriveSubagentPermissions(ParentPermissionContext{
-		AllowedTools: []string{"bash", "edit", "view", tools.SubagentFinishToolName},
+		AllowedTools: []string{"bash", "edit", "read", tools.SubagentFinishToolName},
 		DeniedTools:  []string{"edit"},
-	}, profile, []string{"bash", "edit", "view", tools.SubagentFinishToolName})
+	}, profile, []string{"bash", "edit", "read", tools.SubagentFinishToolName})
 
 	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "bash")
-	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "view")
+	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "read")
 	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), tools.SubagentFinishToolName)
 	assert.NotContains(t, toolNamesFromSet(derived.AllowedTools), "edit")
 	assert.Contains(t, toolNamesFromSet(derived.DeniedTools), "edit")
@@ -215,15 +215,15 @@ func TestDeriveSubagentPermissionsDenyWins(t *testing.T) {
 func TestShapeToolsForSubagentFiltersToolList(t *testing.T) {
 	shaped := ShapeToolsForSubagent([]fantasy.AgentTool{
 		tools.NewGlobTool("/tmp"),
-		tools.NewViewTool(nil, nil, nil, "/tmp", config.ToolLs{}),
+		tools.NewReadTool(nil, nil, nil, "/tmp", config.ToolLs{}, nil),
 		tools.NewEditTool(nil, nil, nil, nil, "/tmp"),
-	}, SubagentToolProfile{Allowed: map[string]struct{}{"glob": {}, "view": {}}, Denied: map[string]struct{}{"edit": {}}})
+	}, SubagentToolProfile{Allowed: map[string]struct{}{"glob": {}, "read": {}}, Denied: map[string]struct{}{"edit": {}}})
 
 	var names []string
 	for _, tool := range shaped {
 		names = append(names, tool.Info().Name)
 	}
-	assert.Equal(t, []string{"glob", "view"}, names)
+	assert.Equal(t, []string{"glob", "read"}, names)
 }
 
 func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
@@ -267,7 +267,7 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"recall",
 		"reflect",
 		"request_user_input",
-		"view",
+		"read",
 	}, planNames)
 	assert.NotContains(t, planNames, AgentToolName)
 	assert.NotContains(t, planNames, "agentic_fetch")
@@ -285,7 +285,7 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	env := testEnv(t)
 	cfg, err := config.Init(env.workingDir, "", false)
 	require.NoError(t, err)
-	cfg.Config().Options.DisabledTools = []string{"bash", "fetch"}
+	cfg.Config().Options.DisabledTools = []string{"bash", "read"}
 
 	coord := &coordinator{
 		cfg:         cfg,
@@ -307,8 +307,7 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	}
 
 	assert.NotContains(t, defaultNames, "bash")
-	assert.NotContains(t, defaultNames, "fetch")
-	assert.Contains(t, defaultNames, "view")
+	assert.NotContains(t, defaultNames, "read")
 	assert.Contains(t, defaultNames, "write")
 }
 
@@ -422,8 +421,8 @@ func TestAgentToolUsesTaskGraphWhenTasksProvided(t *testing.T) {
 		require.Equal(t, "msg-1", params.AgentMessageID)
 		require.Equal(t, "call-1", params.ToolCallID)
 		require.Len(t, params.Tasks, 2)
-		require.Equal(t, "fetch", params.Tasks[0].ID)
-		require.Equal(t, []string{"fetch"}, params.Tasks[1].DependsOn)
+		require.Equal(t, "collect", params.Tasks[0].ID)
+		require.Equal(t, []string{"collect"}, params.Tasks[1].DependsOn)
 		return fantasy.NewTextResponse("graph"), nil
 	}
 
@@ -431,8 +430,8 @@ func TestAgentToolUsesTaskGraphWhenTasksProvided(t *testing.T) {
 	require.NoError(t, err)
 
 	resp, err := runAgentToolForTest(t, tool, AgentParams{Tasks: []AgentTaskParams{
-		{ID: "fetch", Prompt: "fetch info", SubagentType: "explore", Description: "Fetch"},
-		{ID: "summarize", Prompt: "summarize info", SubagentType: "general", DependsOn: []string{"fetch"}},
+		{ID: "collect", Prompt: "collect info", SubagentType: "explore", Description: "Collect"},
+		{ID: "summarize", Prompt: "summarize info", SubagentType: "general", DependsOn: []string{"collect"}},
 	}})
 	require.NoError(t, err)
 	require.True(t, called)

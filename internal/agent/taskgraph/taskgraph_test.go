@@ -10,8 +10,8 @@ func TestValidate(t *testing.T) {
 	t.Run("accepts acyclic graph", func(t *testing.T) {
 		err := Validate(TaskGraph{
 			Nodes: []TaskNode{
-				{ID: "fetch"},
-				{ID: "analyze", Dependencies: []string{"fetch"}},
+				{ID: "collect"},
+				{ID: "analyze", Dependencies: []string{"collect"}},
 				{ID: "report", Dependencies: []string{"analyze"}},
 			},
 		})

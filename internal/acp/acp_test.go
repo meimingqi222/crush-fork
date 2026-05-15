@@ -225,7 +225,7 @@ func (f *fakeCoordinator) Run(_ context.Context, sessionID, prompt string, _ ...
 		})
 	}
 	if strings.Contains(prompt, "publish-runtime-complete") {
-		f.runtimeSvc.Publish(toolruntime.State{SessionID: sessionID, ToolCallID: "tool-fetch-1", ToolName: "fetch", Status: toolruntime.StatusCompleted})
+		f.runtimeSvc.Publish(toolruntime.State{SessionID: sessionID, ToolCallID: "tool-read-1", ToolName: "read", Status: toolruntime.StatusCompleted})
 	}
 	if strings.Contains(prompt, "publish-reducer-update") {
 		f.messageSvc.Publish(pubsub.CreatedEvent, message.Message{
@@ -272,6 +272,7 @@ func (f *fakeCoordinator) IsQueuePaused(_ string) bool             { return fals
 func (f *fakeCoordinator) Summarize(_ context.Context, _ string, _ fantasy.ProviderOptions) error {
 	return nil
 }
+
 func (f *fakeCoordinator) EnhancePrompt(_ context.Context, _ string, _ string) (string, error) {
 	return "", nil
 }
@@ -1018,10 +1019,10 @@ func TestSessionPrompt_ForwardsNonBashRuntimeCompletion(t *testing.T) {
 			continue
 		}
 		update := envelope.Params.Update
-		if update.SessionUpdate == acp.SessionUpdateToolCallUpdate && update.ToolCallID == "tool-fetch-1" {
+		if update.SessionUpdate == acp.SessionUpdateToolCallUpdate && update.ToolCallID == "tool-read-1" {
 			seenRuntimeUpdate = true
 			require.Equal(t, acp.ToolCallStatusCompleted, update.Status)
-			require.Equal(t, "fetch", update.Title)
+			require.Equal(t, "read", update.Title)
 		}
 	}
 	require.True(t, seenRuntimeUpdate)

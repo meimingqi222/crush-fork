@@ -2211,10 +2211,14 @@ type taskGraphParams struct {
 
 type taskGraphNodeResult struct {
 	Task           taskGraphTask
+	TaskRef        string
 	Status         message.ToolResultSubtaskStatus
 	AgentID        string
 	ChildSessionID string
 	Content        string
+	Preview        string
+	HasFullOutput  bool
+	OutputChars    int
 	Finish         message.ToolResultSubagentFinish
 	Warnings       []string
 	Error          string
@@ -2280,8 +2284,10 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 	ctx = toolruntime.WithToolCallID(ctx, params.ToolCallID)
 	graph := taskgraph.TaskGraph{Nodes: make([]taskgraph.TaskNode, 0, len(params.Tasks))}
 	tasksByID := make(map[string]taskGraphTask, len(params.Tasks))
-	for _, task := range params.Tasks {
+	taskRefs := make(map[string]string, len(params.Tasks))
+	for i, task := range params.Tasks {
 		tasksByID[task.ID] = task
+		taskRefs[task.ID] = taskGraphTaskRef(i, task.ID)
 		graph.Nodes = append(graph.Nodes, taskgraph.TaskNode{ID: task.ID, Dependencies: task.DependsOn})
 	}
 
@@ -2316,6 +2322,8 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 				if finalized {
 					return
 				}
+				result.TaskRef = taskRefs[task.ID]
+				result = withTaskGraphOutputMetadata(result)
 				finalized = true
 				mailboxBridge.MarkResult(task.ID, result.Status, result.Content)
 				stateMu.Lock()
@@ -2630,6 +2638,8 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 				Content: "Task did not produce a result.",
 			}
 		}
+		result.TaskRef = taskRefs[task.ID]
+		result = withTaskGraphOutputMetadata(result)
 		orderedResults = append(orderedResults, result)
 		reduced := reducer.TaskResult{
 			ID:             result.Task.ID,
@@ -2678,7 +2688,7 @@ func (c *coordinator) runTaskGraphDirect(ctx context.Context, params taskGraphPa
 
 	if len(orderedResults) == 1 {
 		only := orderedResults[0]
-		response = withSubtaskToolResponseMetadata(response, params.ToolCallID, only.ChildSessionID, params.AgentMessageID, only.Status)
+		response = withSubtaskToolResponseTaskRefMetadata(response, params.ToolCallID, only.ChildSessionID, params.AgentMessageID, only.TaskRef, only.Status)
 		if !only.Finish.IsEmpty() {
 			response = withSubagentFinishToolResponseMetadata(response, only.Finish)
 		}
@@ -2869,11 +2879,62 @@ func reduceNodeToChildSession(result taskGraphNodeResult) message.ToolResultRedu
 		description = strings.TrimSpace(result.Task.ID)
 	}
 	return message.ToolResultReducerChildSession{
-		TaskID:      strings.TrimSpace(result.Task.ID),
-		Description: description,
-		SessionID:   strings.TrimSpace(result.ChildSessionID),
-		Status:      result.Status,
+		TaskID:        strings.TrimSpace(result.Task.ID),
+		TaskRef:       strings.TrimSpace(result.TaskRef),
+		Description:   description,
+		SessionID:     strings.TrimSpace(result.ChildSessionID),
+		Status:        result.Status,
+		Preview:       strings.TrimSpace(result.Preview),
+		HasFullOutput: result.HasFullOutput,
+		OutputChars:   result.OutputChars,
 	}
+}
+
+func withTaskGraphOutputMetadata(result taskGraphNodeResult) taskGraphNodeResult {
+	content := strings.TrimSpace(result.Content)
+	if content == "" {
+		content = strings.TrimSpace(result.Finish.Summary)
+	}
+	result.OutputChars = len([]rune(content))
+	if content == "" {
+		result.Preview = ""
+		result.HasFullOutput = false
+		return result
+	}
+	preview, truncated := taskGraphEllipsize(content, taskGraphOutputPreviewCharsLimit)
+	result.Preview = preview
+	result.HasFullOutput = truncated
+	return result
+}
+
+func taskGraphTaskRef(index int, taskID string) string {
+	slug := taskGraphTaskRefSlug(taskID)
+	if slug == "" {
+		slug = "task"
+	}
+	return fmt.Sprintf("%d-%s", index, slug)
+}
+
+func taskGraphTaskRefSlug(taskID string) string {
+	taskID = strings.ToLower(strings.TrimSpace(taskID))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range taskID {
+		if b.Len() >= 48 {
+			break
+		}
+		allowed := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if allowed {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash && b.Len() > 0 {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func taskGraphNodeResultFromResponse(task taskGraphTask, response fantasy.ToolResponse) taskGraphNodeResult {
@@ -2890,9 +2951,6 @@ func taskGraphNodeResultFromResponse(task taskGraphTask, response fantasy.ToolRe
 		result.Finish = finish
 		if finish.Status != "" {
 			result.Status = finish.Status
-		}
-		if strings.TrimSpace(finish.Summary) != "" {
-			result.Content = strings.TrimSpace(finish.Summary)
 		}
 		result.Artifacts = append([]string(nil), finish.Artifacts...)
 		result.FilesTouched = append([]string(nil), finish.FilesTouched...)
@@ -3379,7 +3437,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		finishResult, hasFinish = c.ensureSubagentFinish(ctx, params, subSession.ID, runtime, result, maxTokens, providerOptions, temperature, topP, topK, frequencyPenalty, presencePenalty)
 	}
 	content := c.subAgentResponseText(ctx, subSession.ID, result)
-	if hasFinish && strings.TrimSpace(finishResult.Summary) != "" {
+	if content == "" && hasFinish && strings.TrimSpace(finishResult.Summary) != "" {
 		content = strings.TrimSpace(finishResult.Summary)
 	}
 	if content == "" {
@@ -3702,10 +3760,15 @@ func (c *coordinator) cleanupStaleWorktreesInDir(worktreesDir string, cutoffDays
 }
 
 func withSubtaskToolResponseMetadata(response fantasy.ToolResponse, parentToolCallID, childSessionID, parentMessageID string, status message.ToolResultSubtaskStatus) fantasy.ToolResponse {
+	return withSubtaskToolResponseTaskRefMetadata(response, parentToolCallID, childSessionID, parentMessageID, "", status)
+}
+
+func withSubtaskToolResponseTaskRefMetadata(response fantasy.ToolResponse, parentToolCallID, childSessionID, parentMessageID, taskRef string, status message.ToolResultSubtaskStatus) fantasy.ToolResponse {
 	response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithSubtaskResult(message.ToolResultSubtaskResult{
 		ChildSessionID:   childSessionID,
 		ParentToolCallID: parentToolCallID,
 		ParentMessageID:  parentMessageID,
+		TaskRef:          taskRef,
 		Status:           status,
 	}).Metadata
 	return response
@@ -3753,6 +3816,11 @@ func taskGraphSessionDetailsForModel(results []taskGraphNodeResult) string {
 		if strings.TrimSpace(result.AgentID) != "" {
 			identifier = fmt.Sprintf("%s (agent %s)", sessionID, strings.TrimSpace(result.AgentID))
 		}
+		taskRef := strings.TrimSpace(result.TaskRef)
+		if taskRef != "" {
+			lines = append(lines, fmt.Sprintf("- %s (%s): %s; task_ref=%s", label, result.Status, identifier, taskRef))
+			continue
+		}
 		lines = append(lines, fmt.Sprintf("- %s (%s): %s", label, result.Status, identifier))
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
@@ -3763,7 +3831,7 @@ func taskGraphOutputDetailsForModel(results []taskGraphNodeResult) string {
 	remaining := taskGraphOutputAggregateCharsLimit
 	truncatedTail := false
 	for _, result := range results {
-		content := taskGraphCompactText(result.Content)
+		content := taskGraphCompactText(result.Preview)
 		if content == "" {
 			continue
 		}
@@ -3775,8 +3843,13 @@ func taskGraphOutputDetailsForModel(results []taskGraphNodeResult) string {
 
 		content, truncated := taskGraphEllipsize(content, taskGraphOutputPerTaskCharsLimit)
 		line := fmt.Sprintf("- %s (%s): %s", label, result.Status, content)
-		if truncated {
-			line += " [truncated]"
+		if truncated || result.HasFullOutput {
+			taskRef := strings.TrimSpace(result.TaskRef)
+			if taskRef != "" {
+				line += fmt.Sprintf(" [truncated; full output: subtask://%s]", taskRef)
+			} else {
+				line += " [truncated; inspect child session for full details]"
+			}
 		}
 
 		lineRunes := len([]rune(line))

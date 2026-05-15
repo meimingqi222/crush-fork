@@ -88,7 +88,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 					Path:               c.cfg.WorkingDir(),
 					ToolCallID:         call.ID,
 					ToolName:           tools.AgenticFetchToolName,
-					Action:             "fetch",
+					Action:             "agentic_fetch",
 					Description:        description,
 					Params:             tools.AgenticFetchPermissionsParams(params),
 				},
@@ -110,7 +110,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 
 			if params.URL != "" {
 				// URL mode: fetch the URL content first.
-				content, err := tools.FetchURLAndConvert(ctx, client, params.URL)
+				content, err := tools.ReadURLAndConvert(ctx, client, params.URL)
 				if err != nil {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to fetch URL: %s", err)), nil
 				}
@@ -130,7 +130,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 					}
 					tempFile.Close()
 
-					fullPrompt = fmt.Sprintf("%s\n\nThe web page from %s has been saved to: %s\n\nUse the view and grep tools to analyze this file and extract the requested information.", params.Prompt, params.URL, tempFilePath)
+					fullPrompt = fmt.Sprintf("%s\n\nThe web page from %s has been saved to: %s\n\nUse the read and grep tools to analyze this file and extract the requested information.", params.Prompt, params.URL, tempFilePath)
 				} else {
 					fullPrompt = fmt.Sprintf("%s\n\nWeb page URL: %s\n\n<webpage_content>\n%s\n</webpage_content>", params.Prompt, params.URL, content)
 				}
@@ -174,7 +174,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				tools.NewGlobTool(tmpDir),
 				tools.NewGrepTool(tmpDir, c.cfg.Config().Tools.Grep),
 				tools.NewSourcegraphTool(client),
-				tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, tmpDir, c.cfg.Config().Tools.Ls),
+				tools.NewReadTool(c.lspManager, c.permissions, c.filetracker, tmpDir, c.cfg.Config().Tools.Ls, nil),
 			}
 
 			agent := NewSessionAgent(SessionAgentOptions{

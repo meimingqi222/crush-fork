@@ -22,8 +22,8 @@ func TestCollectDeferredToolHintsFiltersExpectedEntries(t *testing.T) {
 			Source:   "mcp:github",
 			Metadata: agenttools.ToolMetadata{Exposure: agenttools.ToolExposureDeferred},
 		},
-		"view": {
-			Name:     "view",
+		"read": {
+			Name:     "read",
 			Source:   "builtin",
 			Metadata: agenttools.ToolMetadata{Exposure: agenttools.ToolExposureDefault},
 			Exposed:  true,

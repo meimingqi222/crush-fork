@@ -118,10 +118,9 @@ func isFantasyToolParallelSafe(tool fantasy.AgentTool) bool {
 	}
 	name := strings.TrimSpace(tool.Info().Name)
 	switch name {
-	case agenttools.FetchToolName,
+	case agenttools.ReadToolName,
 		agenttools.GlobToolName,
 		agenttools.GrepToolName,
-		agenttools.ViewToolName,
 		agenttools.DiagnosticsToolName,
 		agenttools.ReferencesToolName,
 		agenttools.LSPDeclarationToolName,

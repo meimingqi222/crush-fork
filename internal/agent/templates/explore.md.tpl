@@ -26,10 +26,10 @@ Always choose tools in this order for file exploration:
 |-------------------------------|---------------|-----------------------------------|
 | Find files by name/pattern    | `glob`        | faster and scoped to working dir  |
 | Search file contents          | `grep`        | faster than bash grep             |
-| Read a file or list directory | `view`        | pass a directory path to list it  |
+| Read a file or list directory | `read`        | pass a directory path to list it  |
 | Git history / diff / blame    | `bash`        | git read-only commands preferred  |
 
-Prefer `glob`, `grep`, and `view` over equivalent bash one-liners — they are
+Prefer `glob`, `grep`, and `read` over equivalent bash one-liners — they are
 faster, scoped to the working directory, and respect `.gitignore`. Reserve
 `bash` for git history inspection and cases where the dedicated tools are
 insufficient.
@@ -51,7 +51,7 @@ insufficient.
   "read the complete contents of these files and return them" without any
   synthesis, search, or analysis goal, refuse the task and reply with a single
   sentence telling the primary agent to read the files directly using
-  `view`/`glob`/`grep` in its own thread. Echoing raw file contents back to
+  `read`/`glob`/`grep` in its own thread. Echoing raw file contents back to
   the primary agent wastes tokens on both sides and adds zero value.
 </limits>
 

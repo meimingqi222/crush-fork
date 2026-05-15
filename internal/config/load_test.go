@@ -40,13 +40,13 @@ func TestConfig_LoadFromBytes(t *testing.T) {
 
 func TestConfig_LoadFromBytesIncludesConfiguredAgents(t *testing.T) {
 	loadedConfig, err := loadFromBytes([][]byte{
-		[]byte(`{"agents":{"reviewer":{"mode":"subagent","allowed_tools":["view"]}}}`),
+		[]byte(`{"agents":{"reviewer":{"mode":"subagent","allowed_tools":["read"]}}}`),
 	})
 
 	require.NoError(t, err)
 	require.Contains(t, loadedConfig.Agents, "reviewer")
 	require.Equal(t, AgentModeSubagent, loadedConfig.Agents["reviewer"].Mode)
-	require.Equal(t, []string{"view"}, loadedConfig.Agents["reviewer"].AllowedTools)
+	require.Equal(t, []string{"read"}, loadedConfig.Agents["reviewer"].AllowedTools)
 }
 
 func TestConfig_LoadFromBytesIncludesTaskGovernance(t *testing.T) {
@@ -790,7 +790,7 @@ func TestConfig_setupAgentsWithNoDisabledTools(t *testing.T) {
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Equal(t, []string{"bash", "glob", "grep", "tool_search", "view"}, exploreAgent.AllowedTools)
+	assert.Equal(t, []string{"bash", "glob", "grep", "read", "tool_search"}, exploreAgent.AllowedTools)
 	assert.Equal(t, AgentModeSubagent, exploreAgent.Mode)
 	assert.Equal(t, "researcher", exploreAgent.Role)
 	assert.Contains(t, exploreAgent.AdditionalPrompt, "Act as a read-only researcher")
@@ -826,7 +826,7 @@ func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
 				"glob",
 				"grep",
 				"sourcegraph",
-				"view",
+				"read",
 			},
 		},
 	}

@@ -8,6 +8,7 @@ import (
 const (
 	taskGraphMailboxMessagesLimit      = 6
 	taskGraphMailboxPromptCharsLimit   = 1_800
+	taskGraphOutputPreviewCharsLimit   = 5_000
 	taskGraphOutputPerTaskCharsLimit   = 20_000
 	taskGraphOutputAggregateCharsLimit = 80_000
 	taskGraphReducerMessageCharsLimit  = 280

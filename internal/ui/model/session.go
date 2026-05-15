@@ -454,6 +454,84 @@ func isChildSessionToolCall(toolName string) bool {
 	}
 }
 
+func taskGraphTaskRef(index int, taskID string) string {
+	slug := taskGraphTaskRefSlug(taskID)
+	if slug == "" {
+		slug = "task"
+	}
+	return fmt.Sprintf("%d-%s", index, slug)
+}
+
+func taskGraphTaskRefSlug(taskID string) string {
+	taskID = strings.ToLower(strings.TrimSpace(taskID))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range taskID {
+		if b.Len() >= 48 {
+			break
+		}
+		allowed := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if allowed {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash && b.Len() > 0 {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func childSessionIDForTaskRef(app *app.App, parentSessionID, taskRef string) string {
+	if app == nil || app.Messages == nil {
+		return ""
+	}
+	taskRef = strings.TrimSpace(strings.TrimPrefix(taskRef, "subtask://"))
+	if parentSessionID == "" || taskRef == "" {
+		return ""
+	}
+	msgs, err := app.Messages.List(context.Background(), parentSessionID)
+	if err != nil {
+		return ""
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		toolResults := msgs[i].ToolResults()
+		for j := len(toolResults) - 1; j >= 0; j-- {
+			if reducer, ok := toolResults[j].Reducer(); ok {
+				for k := len(reducer.ChildSessions) - 1; k >= 0; k-- {
+					child := reducer.ChildSessions[k]
+					if !taskRefMatches(taskRef, child.TaskRef, child.TaskID) {
+						continue
+					}
+					if sessionID := strings.TrimSpace(child.SessionID); sessionID != "" {
+						return sessionID
+					}
+				}
+			}
+			if subtask, ok := toolResults[j].SubtaskResult(); ok && taskRefMatches(taskRef, subtask.TaskRef) {
+				if sessionID := strings.TrimSpace(subtask.ChildSessionID); sessionID != "" {
+					return sessionID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func taskRefMatches(target string, candidates ...string) bool {
+	target = strings.TrimSpace(strings.TrimPrefix(target, "subtask://"))
+	if target == "" {
+		return false
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "subtask://"))
+		if candidate != "" && strings.EqualFold(target, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 type openChildSessionMsg struct {
 	sessionID string
 }
@@ -491,8 +569,12 @@ func (m *UI) openSelectedChildSession() tea.Cmd {
 
 	if taskNode, ok := selected.(*chat.TaskNodeItem); ok {
 		childID := taskNode.ChildSessionID()
+		taskRef := taskNode.TaskRef()
 		parentSessionID := m.session.ID
 		return func() tea.Msg {
+			if sessionID := childSessionIDForTaskRef(m.com.App, parentSessionID, taskRef); sessionID != "" {
+				return openChildSessionMsg{sessionID: sessionID}
+			}
 			s, err := m.com.App.Sessions.Get(context.Background(), childID)
 			if err == nil && s.ParentSessionID == parentSessionID {
 				return openChildSessionMsg{sessionID: s.ID}

@@ -186,7 +186,7 @@ func runGrepSearch(ctx context.Context, params GrepParams, rootPath string, limi
 	if err != nil {
 		metadata.RecoveredBy = "path_validation"
 		metadata.RecoveryAction = err.Error()
-		metadata.FallbackTool = ViewToolName
+		metadata.FallbackTool = ReadToolName
 		metadata.FallbackToolQuery = cmp.Or(params.Path, rootPath)
 		metadata.RecoveredParameters = []string{"path"}
 		return grepExecutionResult{metadata: metadata}, nil
@@ -222,12 +222,12 @@ func validateGrepPath(rootPath string) (string, error) {
 	info, err := os.Stat(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("Search path does not exist: %s. Verify the path first or use glob/view to inspect nearby files.", resolved)
+			return "", fmt.Errorf("Search path does not exist: %s. Verify the path first or use glob/read to inspect nearby files.", resolved)
 		}
 		return "", fmt.Errorf("error accessing search path: %w", err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("Search path is not a directory: %s. Use view for files or provide a directory path.", resolved)
+		return "", fmt.Errorf("Search path is not a directory: %s. Use read for files or provide a directory path.", resolved)
 	}
 	return resolved, nil
 }

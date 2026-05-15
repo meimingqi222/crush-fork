@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/rivo/uniseg"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -158,6 +159,9 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	if title == fmt.Sprintf(" (%d/%d)", r.current+1, len(r.request.Questions)) {
 		title = fmt.Sprintf("Question %d/%d", r.current+1, len(r.request.Questions))
 	}
+	dialogWidth := min(area.Dx(), requestUserInputMaxWidth)
+	r.dialogInnerWidth = max(0, dialogWidth-r.com.Styles.Dialog.View.GetHorizontalFrameSize())
+	r.customInput.SetWidth(max(0, r.dialogInnerWidth-r.com.Styles.Dialog.InputPrompt.GetHorizontalFrameSize()-1))
 
 	var parts []string
 	parts = append(parts, r.com.Styles.Dialog.Title.Render(title))
@@ -183,13 +187,10 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	}
 
 	content := strings.Join(parts, "\n")
-	dialogWidth := min(area.Dx(), requestUserInputMaxWidth)
-	r.dialogInnerWidth = max(0, dialogWidth-r.com.Styles.Dialog.View.GetHorizontalFrameSize())
-	r.customInput.SetWidth(max(0, r.dialogInnerWidth-r.com.Styles.Dialog.InputPrompt.GetHorizontalFrameSize()-1))
 	rendered := r.com.Styles.Dialog.View.Width(dialogWidth).Render(content)
 	var cur *tea.Cursor
 	if r.customMode {
-		cur = r.customInput.Cursor()
+		cur = realTextInputCursor(r.customInput)
 		if cur != nil {
 			dialogStyle := r.com.Styles.Dialog.View
 			inputStyle := r.com.Styles.Dialog.InputPrompt
@@ -216,6 +217,40 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	}
 	DrawCenter(scr, area, rendered)
 	return cur
+}
+
+func realTextInputCursor(input textinput.Model) *tea.Cursor {
+	cur := input.Cursor()
+	if cur == nil {
+		return nil
+	}
+	cur.X = textInputCursorX(input)
+	return cur
+}
+
+func textInputCursorX(input textinput.Model) int {
+	promptWidth := lipgloss.Width(input.Prompt)
+	value := []rune(input.Value())
+	pos := max(0, min(input.Position(), len(value)))
+	inputWidth := input.Width()
+	if inputWidth <= 0 || uniseg.StringWidth(string(value)) <= inputWidth {
+		return promptWidth + uniseg.StringWidth(string(value[:pos]))
+	}
+
+	prefixWidth := uniseg.StringWidth(string(value[:pos]))
+	if prefixWidth <= inputWidth {
+		return promptWidth + prefixWidth
+	}
+
+	visibleWidth := 0
+	for i := pos - 1; i >= 0; i-- {
+		charWidth := uniseg.StringWidth(string(value[i : i+1]))
+		if visibleWidth+charWidth > inputWidth {
+			break
+		}
+		visibleWidth += charWidth
+	}
+	return promptWidth + visibleWidth
 }
 
 func (r *RequestUserInput) advance() Action {

@@ -438,6 +438,53 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, finish.Status)
 	})
 
+	t.Run("does not replace assistant content with subagent_finish summary", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.TextContent{Text: "full final answer with details"},
+					message.Finish{Reason: message.FinishReasonEndTurn},
+				},
+			})
+			require.NoError(t, err)
+			_, err = env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
+						Status:  message.ToolResultSubtaskStatusCompleted,
+						Summary: "short structured summary",
+					}),
+				},
+			})
+			require.NoError(t, err)
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "test",
+			SessionTitle:    "Test",
+			SubagentType:    config.AgentGeneral,
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "full final answer with details", resp.Content)
+		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		require.True(t, ok)
+		assert.Equal(t, "short structured summary", finish.Summary)
+	})
+
 	t.Run("missing finish policy warns when finish is absent", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
@@ -758,6 +805,32 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.InDelta(t, 0.05, updated.Cost, 1e-9)
 	})
+}
+
+func TestTaskGraphResultMetadataUsesShortTaskRefs(t *testing.T) {
+	t.Parallel()
+
+	result := withTaskGraphOutputMetadata(taskGraphNodeResult{
+		Task: taskGraphTask{
+			ID:          "Review the auth provider and document every observed issue in detail",
+			Description: "Review auth",
+		},
+		TaskRef:        taskGraphTaskRef(0, "Review the auth provider and document every observed issue in detail"),
+		Status:         message.ToolResultSubtaskStatusCompleted,
+		ChildSessionID: "child-session-1",
+		Content:        strings.Repeat("x", taskGraphOutputPreviewCharsLimit+200),
+	})
+
+	child := reduceNodeToChildSession(result)
+	require.True(t, strings.HasPrefix(child.TaskRef, "0-review-the-auth-provider"))
+	require.Equal(t, "child-session-1", child.SessionID)
+	require.True(t, child.HasFullOutput)
+	require.NotEmpty(t, child.Preview)
+	require.Equal(t, taskGraphOutputPreviewCharsLimit, len([]rune(child.Preview)))
+
+	details := taskGraphOutputDetailsForModel([]taskGraphNodeResult{result})
+	require.Contains(t, details, "full output: subtask://"+child.TaskRef)
+	require.Contains(t, details, "Review auth")
 }
 
 func TestBackgroundAgentMessengerReusesChildSession(t *testing.T) {

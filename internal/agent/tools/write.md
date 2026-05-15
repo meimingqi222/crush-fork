@@ -23,8 +23,8 @@ Creates or updates files in filesystem for saving/modifying text content.
 </cross_platform>
 
 <tips>
-- Use View tool first to examine existing files before modifying
-- Use View on the parent directory to verify location when creating new files
+- Use read tool first to examine existing files before modifying
+- Use read on the parent directory to verify location when creating new files
 - Combine with Glob/Grep to find and modify multiple files
 - Include descriptive comments when changing existing code
 </tips>

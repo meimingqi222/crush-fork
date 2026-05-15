@@ -18,4 +18,4 @@ Search workspace symbols using the Language Server Protocol (LSP).
 
 <tips>
 - Use this when you know a symbol name but not the file.
-- Combine with lsp_definition or view once you identify the target file.
+- Combine with lsp_definition or read once you identify the target file.

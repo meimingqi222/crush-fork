@@ -28,22 +28,22 @@ func TestIsReadOnlyAgent(t *testing.T) {
 		},
 		{
 			name:         "legacy read-only tools returns false",
-			allowedTools: []string{"glob", "grep", "ls", "view"},
+			allowedTools: []string{"glob", "grep", "ls", "read"},
 			expected:     false,
 		},
 		{
 			name:         "read-only tools returns true",
-			allowedTools: []string{"glob", "grep", "tool_search", "view"},
+			allowedTools: []string{"glob", "grep", "tool_search", "read"},
 			expected:     true,
 		},
 		{
 			name:         "read-only tools with sourcegraph returns true",
-			allowedTools: []string{"sourcegraph", "view", "grep", "lsp_definition", "lsp_workspace_symbols"},
+			allowedTools: []string{"sourcegraph", "read", "grep", "lsp_definition", "lsp_workspace_symbols"},
 			expected:     true,
 		},
 		{
 			name:         "mixed tools returns false",
-			allowedTools: []string{"glob", "edit", "view"},
+			allowedTools: []string{"glob", "edit", "read"},
 			expected:     false,
 		},
 		{
@@ -101,7 +101,7 @@ func TestPromptForAgentBuildIncludesConfiguredRolePrompt(t *testing.T) {
 		ID:               config.AgentGeneral,
 		Role:             "executor",
 		AdditionalPrompt: "Verify before handoff.",
-		AllowedTools:     []string{"edit", "view"},
+		AllowedTools:     []string{"edit", "read"},
 	}, true)
 	require.NoError(t, err)
 
@@ -121,11 +121,11 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 
 	// hashline_edit functionality is now integrated into the edit tool via
 	// its operations[] parameter, so the AllowedTools list only needs the
-	// core editing tools. The view tool provides hashline anchors via
-	// view(hashline=true).
+	// core editing tools. The read tool provides hashline anchors via
+	// read(hashline=true).
 	promptBuilder, err := promptForAgent(config.Agent{
 		ID:           config.AgentGeneral,
-		AllowedTools: []string{"view", "edit", "write"},
+		AllowedTools: []string{"read", "edit", "write"},
 	}, true)
 	require.NoError(t, err)
 
@@ -133,8 +133,8 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 	require.NoError(t, err)
 	// Guidance about hashline-anchored edits via the edit tool's operations[]
 	assert.Contains(t, built, "operations[]")
-	// The view tool's hashline mode should be referenced
-	assert.Contains(t, built, "view(hashline=true)")
+	// The read tool's hashline mode should be referenced
+	assert.Contains(t, built, "read(hashline=true)")
 	// Should explain when hashline mode is preferred
 	assert.Contains(t, built, "brittle")
 }
@@ -155,7 +155,7 @@ func TestPromptForAgentBuildIncludesLifecyclePolicyAndInitialPrompt(t *testing.T
 		Memory:        "isolated",
 		Isolation:     "session",
 		Background:    &background,
-		AllowedTools:  []string{"view"},
+		AllowedTools:  []string{"read"},
 	}, true)
 	require.NoError(t, err)
 
@@ -181,7 +181,7 @@ func TestPromptForAgentOmitContextFilesSkipsProjectAndGlobalContext(t *testing.T
 
 	promptBuilder, err := promptForAgent(config.Agent{
 		ID:               config.AgentGeneral,
-		AllowedTools:     []string{"view"},
+		AllowedTools:     []string{"read"},
 		OmitContextFiles: true,
 	}, true)
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestPromptForAgentContextPathsOverrideUsesAgentSpecificPaths(t *testing.T) 
 
 	promptBuilder, err := promptForAgent(config.Agent{
 		ID:           config.AgentGeneral,
-		AllowedTools: []string{"view"},
+		AllowedTools: []string{"read"},
 		ContextPaths: []string{overrideDir},
 	}, true)
 	require.NoError(t, err)

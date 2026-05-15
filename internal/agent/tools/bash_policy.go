@@ -258,7 +258,7 @@ func validateRestrictedGitPipeline(pipeline *syntax.BinaryCmd) error {
 		return fmt.Errorf("restricted git bash: first pipeline stage must be a direct git command: %w", err)
 	}
 	if err := validateRestrictedGitArgs(firstArgs); err != nil {
-		return fmt.Errorf("%w. Use glob, grep, or view tools for file exploration instead of bash", err)
+		return fmt.Errorf("%w. Use glob, grep, or read tools for file exploration instead of bash", err)
 	}
 
 	// Remaining stages: must be approved read-only filter commands.
@@ -522,7 +522,7 @@ func validateRestrictedGitArgs(args []string) error {
 		return fmt.Errorf("restricted git bash requires a git command")
 	}
 	if args[0] != "git" {
-		return fmt.Errorf("restricted git bash only allows direct git commands (got %q). Use the glob, grep, or view tools for file exploration instead", args[0])
+		return fmt.Errorf("restricted git bash only allows direct git commands (got %q). Use the glob, grep, or read tools for file exploration instead", args[0])
 	}
 
 	i := 1

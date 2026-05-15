@@ -253,3 +253,95 @@ func TestSubtaskResultToolInfersLatestReducerChildSession(t *testing.T) {
 	require.Contains(t, resp.Content, "Session: child-session-b")
 	require.Contains(t, resp.Content, "latest reducer child result")
 }
+
+func TestSubtaskResultToolResolvesTaskRef(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	reducerResult := message.ToolResult{
+		ToolCallID: "agent-call-1",
+		Name:       "agent",
+		Content:    "Task output: subtask://0-review",
+	}.WithReducer(message.ToolResultReducer{
+		Summary: "Completed 1/1 subtasks.",
+		ChildSessions: []message.ToolResultReducerChildSession{
+			{
+				TaskID:        "very-long-review-task-id-that-the-model-should-not-need",
+				TaskRef:       "0-review",
+				SessionID:     "child-session-review",
+				Status:        message.ToolResultSubtaskStatusCompleted,
+				Preview:       "preview text",
+				OutputChars:   12,
+				HasFullOutput: true,
+			},
+		},
+	})
+
+	stub.bySession["parent-session-task-ref"] = []message.Message{
+		{
+			ID:   "tool-msg-1",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				reducerResult,
+				message.Finish{Reason: message.FinishReasonToolUse},
+			},
+		},
+	}
+	stub.bySession["child-session-review"] = []message.Message{
+		{
+			ID:   "assistant-msg-review",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "full review result"},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "parent-session-task-ref")
+	resp, err := runSubtaskResultTool(t, ctx, tool, SubtaskResultParams{TaskRef: "subtask://0-review"})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "Session: child-session-review")
+	require.Contains(t, resp.Content, "Task ref: 0-review")
+	require.Contains(t, resp.Content, "full review result")
+}
+
+func TestSubtaskResultToolFallsBackToSubagentFinishMetadata(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	stub.bySession["child-session-finish"] = []message.Message{
+		{
+			ID:   "tool-msg-finish",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{
+					ToolCallID: "finish-call",
+					Name:       "subagent_finish",
+					Content:    "",
+				}.WithSubagentFinish(message.ToolResultSubagentFinish{
+					Status:       message.ToolResultSubtaskStatusCompletedWithWarnings,
+					Summary:      "structured finish summary",
+					FilesTouched: []string{"internal/a.go"},
+					TestResults:  []string{"go test ./internal/agent"},
+				}),
+				message.Finish{Reason: message.FinishReasonToolUse},
+			},
+		},
+	}
+
+	resp, err := runSubtaskResultTool(t, context.Background(), tool, SubtaskResultParams{
+		SessionID: "child-session-finish",
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "Session: child-session-finish")
+	require.Contains(t, resp.Content, "structured finish summary")
+	require.Contains(t, resp.Content, "internal/a.go")
+	require.NotContains(t, resp.Content, "No assistant response found")
+}

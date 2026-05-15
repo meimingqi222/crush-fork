@@ -34,7 +34,7 @@ func TestMessageIsThinkingEndsWhenToolCallStarts(t *testing.T) {
 
 	msg.AddToolCall(ToolCall{
 		ID:   "call-1",
-		Name: "view",
+		Name: "read",
 	})
 
 	require.False(t, msg.IsThinking())
@@ -96,7 +96,7 @@ func TestSetReasoningThinkingPreservesMetadata(t *testing.T) {
 func TestStripTextualToolCallProtocol(t *testing.T) {
 	t.Parallel()
 
-	cleaned, changed := StripTextualToolCallProtocol("before\n<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>\nafter")
+	cleaned, changed := StripTextualToolCallProtocol("before\n<|tool_calls_section_begin|><|tool_call_begin|>functions.read:25<|tool_call_argument_begin|>{\"path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>\nafter")
 
 	require.True(t, changed)
 	require.Equal(t, "before\n\nafter", cleaned)

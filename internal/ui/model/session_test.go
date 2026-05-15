@@ -111,6 +111,83 @@ func TestOpenSelectedChildSessionUsesCurrentSelection(t *testing.T) {
 	require.Equal(t, firstChild.ID, msg.sessionID)
 }
 
+func TestOpenSelectedTaskNodeFallsBackToTaskRefMetadata(t *testing.T) {
+	t.Parallel()
+
+	ui, parent, _, _, _, _ := testSessionUI(t)
+	ui.session = parent
+
+	child, err := ui.com.App.Sessions.CreateTaskSession(context.Background(), "retry-child-session", parent.ID, "Retry child")
+	require.NoError(t, err)
+	_, err = ui.com.App.Messages.Create(context.Background(), parent.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{
+				ToolCallID: "call-general",
+				Name:       agent.AgentToolName,
+				Content:    "Task output: subtask://0-review",
+			}.WithReducer(message.ToolResultReducer{
+				ChildSessions: []message.ToolResultReducerChildSession{
+					{TaskID: "review", TaskRef: "0-review", SessionID: child.ID, Status: message.ToolResultSubtaskStatusCompleted},
+				},
+			}),
+			message.Finish{Reason: message.FinishReasonToolUse},
+		},
+	})
+	require.NoError(t, err)
+
+	node := uichat.NewTaskNodeItem(ui.com.Styles, "call-general", "review", "Review", "Review", "general", "missing-child-session")
+	node.SetTaskRef("0-review")
+	ui.chat.SetMessages(node)
+	require.True(t, ui.chat.SelectMessage(node.ID()))
+
+	cmd := ui.openSelectedChildSession()
+	require.NotNil(t, cmd)
+	msg, ok := cmd().(openChildSessionMsg)
+	require.True(t, ok)
+	require.Equal(t, child.ID, msg.sessionID)
+}
+
+func TestOpenSelectedTaskNodePrefersTaskRefMetadata(t *testing.T) {
+	t.Parallel()
+
+	ui, parent, _, _, _, _ := testSessionUI(t)
+	ui.session = parent
+
+	staleChildID := ui.com.App.Sessions.CreateAgentToolSessionID("msg-1", "call-general::review")
+	_, err := ui.com.App.Sessions.CreateTaskSession(context.Background(), staleChildID, parent.ID, "Stale child")
+	require.NoError(t, err)
+	finalChild, err := ui.com.App.Sessions.CreateTaskSession(context.Background(), staleChildID+"::retry-1", parent.ID, "Retry child")
+	require.NoError(t, err)
+	_, err = ui.com.App.Messages.Create(context.Background(), parent.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{
+				ToolCallID: "call-general",
+				Name:       agent.AgentToolName,
+				Content:    "Task output: subtask://0-review",
+			}.WithReducer(message.ToolResultReducer{
+				ChildSessions: []message.ToolResultReducerChildSession{
+					{TaskID: "review", TaskRef: "0-review", SessionID: finalChild.ID, Status: message.ToolResultSubtaskStatusCompleted},
+				},
+			}),
+			message.Finish{Reason: message.FinishReasonToolUse},
+		},
+	})
+	require.NoError(t, err)
+
+	node := uichat.NewTaskNodeItem(ui.com.Styles, "call-general", "review", "Review", "Review", "general", staleChildID)
+	node.SetTaskRef("0-review")
+	ui.chat.SetMessages(node)
+	require.True(t, ui.chat.SelectMessage(node.ID()))
+
+	cmd := ui.openSelectedChildSession()
+	require.NotNil(t, cmd)
+	msg, ok := cmd().(openChildSessionMsg)
+	require.True(t, ok)
+	require.Equal(t, finalChild.ID, msg.sessionID)
+}
+
 func TestOpenParentSessionSelectsOriginatingTool(t *testing.T) {
 	t.Parallel()
 

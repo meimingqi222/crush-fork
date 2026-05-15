@@ -90,7 +90,7 @@ func TestToolResultAutoReviewRoundTripUsesStructuredField(t *testing.T) {
 	}
 
 	result := ToolResult{
-		Name: "view",
+		Name: "read",
 	}.WithAutoReview(review)
 
 	parsed, ok := result.AutoReview()

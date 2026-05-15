@@ -106,7 +106,7 @@ func NewSourcegraphTool(client *http.Client) fantasy.AgentTool {
 
 			resp, err := client.Do(req)
 			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to fetch URL: %w", err)
+				return fantasy.ToolResponse{}, fmt.Errorf("failed to read URL: %w", err)
 			}
 			defer resp.Body.Close()
 

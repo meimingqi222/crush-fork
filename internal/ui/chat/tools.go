@@ -248,8 +248,8 @@ func NewToolMessageItem(
 		item = NewJobWaitToolMessageItem(sty, toolCall, result, canceled)
 	case tools.JobKillToolName:
 		item = NewJobKillToolMessageItem(sty, toolCall, result, canceled)
-	case tools.ViewToolName:
-		item = NewViewToolMessageItem(sty, toolCall, result, canceled)
+	case tools.ReadToolName:
+		item = NewReadToolMessageItem(sty, toolCall, result, canceled)
 	case tools.WriteToolName:
 		item = NewWriteToolMessageItem(sty, toolCall, result, canceled)
 	case tools.EditToolName:
@@ -260,8 +260,6 @@ func NewToolMessageItem(
 		item = NewGrepToolMessageItem(sty, toolCall, result, canceled)
 	case tools.DownloadToolName:
 		item = NewDownloadToolMessageItem(sty, toolCall, result, canceled)
-	case tools.FetchToolName:
-		item = NewFetchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.SourcegraphToolName:
 		item = NewSourcegraphToolMessageItem(sty, toolCall, result, canceled)
 	case tools.DiagnosticsToolName:
@@ -946,11 +944,11 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			cmd = strings.ReplaceAll(cmd, "\t", "    ")
 			return fmt.Sprintf("**Command:** %s", cmd)
 		}
-	case tools.ViewToolName:
-		var params tools.ViewParams
+	case tools.ReadToolName:
+		var params tools.ReadParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			var parts []string
-			parts = append(parts, fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.FilePath)))
+			parts = append(parts, fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.Path)))
 			if params.Limit > 0 {
 				parts = append(parts, fmt.Sprintf("**Limit:** %d", params.Limit))
 			}
@@ -968,19 +966,6 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 		var params tools.WriteParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			return fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.FilePath))
-		}
-	case tools.FetchToolName:
-		var params tools.FetchParams
-		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
-			var parts []string
-			parts = append(parts, fmt.Sprintf("**URL:** %s", params.URL))
-			if params.Format != "" {
-				parts = append(parts, fmt.Sprintf("**Format:** %s", params.Format))
-			}
-			if params.Timeout > 0 {
-				parts = append(parts, fmt.Sprintf("**Timeout:** %ds", params.Timeout))
-			}
-			return strings.Join(parts, "\n")
 		}
 	case tools.AgenticFetchToolName:
 		var params tools.AgenticFetchParams
@@ -1090,14 +1075,12 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 	switch t.toolCall.Name {
 	case tools.BashToolName:
 		return t.formatBashResultForCopy()
-	case tools.ViewToolName:
-		return t.formatViewResultForCopy()
+	case tools.ReadToolName:
+		return t.formatReadResultForCopy()
 	case tools.EditToolName:
 		return t.formatEditResultForCopy()
 	case tools.WriteToolName:
 		return t.formatWriteResultForCopy()
-	case tools.FetchToolName:
-		return t.formatFetchResultForCopy()
 	case tools.AgenticFetchToolName:
 		return t.formatAgenticFetchResultForCopy()
 	case tools.WebFetchToolName:
@@ -1134,13 +1117,13 @@ func (t *baseToolMessageItem) formatBashResultForCopy() string {
 	return fmt.Sprintf("```bash\n%s\n```", output)
 }
 
-// formatViewResultForCopy formats view tool results for clipboard.
-func (t *baseToolMessageItem) formatViewResultForCopy() string {
+// formatReadResultForCopy formats read tool results for clipboard.
+func (t *baseToolMessageItem) formatReadResultForCopy() string {
 	if t.result == nil {
 		return ""
 	}
 
-	var meta tools.ViewResponseMetadata
+	var meta tools.ReadResponseMetadata
 	if t.result.Metadata != "" {
 		json.Unmarshal([]byte(t.result.Metadata), &meta)
 	}
@@ -1150,8 +1133,8 @@ func (t *baseToolMessageItem) formatViewResultForCopy() string {
 	}
 
 	lang := ""
-	if meta.FilePath != "" {
-		ext := strings.ToLower(filepath.Ext(meta.FilePath))
+	if meta.Path != "" {
+		ext := strings.ToLower(filepath.Ext(meta.Path))
 		switch ext {
 		case ".go":
 			lang = "go"
@@ -1294,34 +1277,6 @@ func (t *baseToolMessageItem) formatWriteResultForCopy() string {
 	return result.String()
 }
 
-// formatFetchResultForCopy formats fetch tool results for clipboard.
-func (t *baseToolMessageItem) formatFetchResultForCopy() string {
-	if t.result == nil {
-		return ""
-	}
-
-	var params tools.FetchParams
-	if json.Unmarshal([]byte(t.toolCall.Input), &params) != nil {
-		return t.result.Content
-	}
-
-	var result strings.Builder
-	if params.URL != "" {
-		fmt.Fprintf(&result, "URL: %s\n", params.URL)
-	}
-	if params.Format != "" {
-		fmt.Fprintf(&result, "Format: %s\n", params.Format)
-	}
-	if params.Timeout > 0 {
-		fmt.Fprintf(&result, "Timeout: %ds\n", params.Timeout)
-	}
-	result.WriteString("\n")
-
-	result.WriteString(t.result.Content)
-
-	return result.String()
-}
-
 // formatAgenticFetchResultForCopy formats agentic fetch tool results for clipboard.
 func (t *baseToolMessageItem) formatAgenticFetchResultForCopy() string {
 	if t.result == nil {
@@ -1400,8 +1355,6 @@ func prettifyToolName(name string) string {
 		return "Download"
 	case tools.EditToolName:
 		return "Edit"
-	case tools.FetchToolName:
-		return "Fetch"
 	case tools.AgenticFetchToolName:
 		return "Agentic Fetch"
 	case tools.WebFetchToolName:
@@ -1418,7 +1371,7 @@ func prettifyToolName(name string) string {
 		return "To-Do"
 	case tools.RequestUserInputToolName:
 		return "Request User Input"
-	case tools.ViewToolName:
+	case tools.ReadToolName:
 		return "Read"
 	case tools.WriteToolName:
 		return "Write"

@@ -21,8 +21,8 @@ const BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 var multipleNewlinesRe = regexp.MustCompile(`\n{3,}`)
 
-// FetchURLAndConvert fetches a URL and converts HTML content to markdown.
-func FetchURLAndConvert(ctx context.Context, client *http.Client, url string) (string, error) {
+// ReadURLAndConvert reads a URL and converts HTML content to markdown.
+func ReadURLAndConvert(ctx context.Context, client *http.Client, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -35,7 +35,7 @@ func FetchURLAndConvert(ctx context.Context, client *http.Client, url string) (s
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch URL: %w", err)
+		return "", fmt.Errorf("failed to read URL: %w", err)
 	}
 	defer resp.Body.Close()
 

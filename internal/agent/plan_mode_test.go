@@ -49,7 +49,7 @@ func TestRiskLevelForTool(t *testing.T) {
 
 	require.Equal(t, toolRiskDelegation, riskLevelForTool(AgentToolName))
 	require.Equal(t, toolRiskNetwork, riskLevelForTool(tools.AgenticFetchToolName))
-	require.Equal(t, toolRiskRead, riskLevelForTool(tools.ViewToolName))
+	require.Equal(t, toolRiskRead, riskLevelForTool(tools.ReadToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.WriteToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.EditToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.RetainToolName))
@@ -61,16 +61,15 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 	t.Parallel()
 
 	baseTools := []string{
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.BashToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
-		tools.ViewToolName,
 	}
 
 	require.Equal(t, []string{
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.BashToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
@@ -78,23 +77,23 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModeDefault, nil))
 
 	require.Equal(t, []string{
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModeDefault, []string{tools.BashToolName}))
 
 	require.Equal(t, []string{
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
-	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModePlan, []string{tools.ViewToolName}))
+	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModePlan, []string{tools.ReadToolName}))
 
 	require.Equal(t, []string{
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
-	}, filterToolsForRiskPolicy([]string{AgentToolName, tools.AgenticFetchToolName, tools.ViewToolName}, session.CollaborationModePlan, nil))
+	}, filterToolsForRiskPolicy([]string{AgentToolName, tools.AgenticFetchToolName, tools.ReadToolName}, session.CollaborationModePlan, nil))
 
 	require.Equal(t, []string{
 		tools.LSPDefinitionToolName,
@@ -118,9 +117,8 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		AgentToolName,
 		"bash",
 		"grep",
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.GlobToolName,
-		tools.FetchToolName,
 		tools.AgenticFetchToolName,
 		tools.EditToolName,
 		tools.WriteToolName,
@@ -140,9 +138,8 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		AgentToolName,
 		"bash",
 		"grep",
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.GlobToolName,
-		tools.FetchToolName,
 		tools.AgenticFetchToolName,
 		tools.EditToolName,
 		tools.WriteToolName,
@@ -160,7 +157,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 
 	require.Equal(t, []string{
 		"grep",
-		tools.ViewToolName,
+		tools.ReadToolName,
 		tools.GlobToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,

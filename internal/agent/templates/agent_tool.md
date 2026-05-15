@@ -20,11 +20,11 @@ When NOT to use the Agent tool:
 - **CRITICAL: NEVER spawn a subagent for file reading tasks.** This includes:
   - Reading single or multiple files and returning their contents
   - Reading files without analysis, transformation, or synthesis
-  - Tasks that can be accomplished with direct `view`, `glob`, or `grep` tool calls
+  - Tasks that can be accomplished with direct `read`, `glob`, or `grep` tool calls
   - Example violations: "Read file X", "Get contents of files A, B, C", "Read these files and return them"
-- **This rule applies equally to `explore`.** Do NOT use `explore` as a file-content relay. Prompts like "read these N files completely and return their contents" sent to `explore` are pure waste: the subagent reads the files, burns its output tokens echoing them back, and the primary agent still has to process them. `explore` exists to *search, locate, and summarize* — not to act as a proxy `view` call.
+- **This rule applies equally to `explore`.** Do NOT use `explore` as a file-content relay. Prompts like "read these N files completely and return their contents" sent to `explore` are pure waste: the subagent reads the files, burns its output tokens echoing them back, and the primary agent still has to process them. `explore` exists to *search, locate, and summarize* — not to act as a proxy `read` call.
 - **Why this matters:** Spawning a subagent just to read files wastes an entire LLM turn and session context. The subagent will spend output tokens returning file contents that you could have read directly.
-- **Correct approach:** Call `view`/`glob`/`grep` directly in your current response. These tools support parallel invocation, so you can read multiple files simultaneously without subagent overhead.
+- **Correct approach:** Call `read`/`glob`/`grep` directly in your current response. These tools support parallel invocation, so you can read multiple files simultaneously without subagent overhead.
 - If the next step depends immediately on the result, do the work directly instead of delegating and waiting.
 - Do not delegate tiny, tightly-coupled edits that are faster to do in the current thread.
 - Do not delegate lightweight isolated single-file operations when direct tool calls are likely cheaper in tokens and just as fast.

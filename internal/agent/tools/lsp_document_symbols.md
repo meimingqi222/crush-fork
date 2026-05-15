@@ -18,4 +18,4 @@ List document symbols for a specific file using the Language Server Protocol (LS
 
 <tips>
 - Use this to understand file structure before making edits.
-- Combine with view and lsp_definition for targeted navigation.
+- Combine with read and lsp_definition for targeted navigation.

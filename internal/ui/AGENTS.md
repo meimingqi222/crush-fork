@@ -133,9 +133,9 @@ tool names to specific types:
 | File                  | Tools rendered                                 |
 | --------------------- | ---------------------------------------------- |
 | `chat/bash.go`        | Bash, JobOutput, JobKill                       |
-| `chat/file.go`        | View, Write, Edit, Download         |
+| `chat/file.go`        | Read, Write, Edit, Download         |
 | `chat/search.go`      | Glob, Grep, LS, Sourcegraph                    |
-| `chat/fetch.go`       | Fetch, WebFetch, WebSearch                     |
+| `chat/fetch.go`       | WebFetch, WebSearch                            |
 | `chat/agent.go`       | Agent, AgenticFetch                            |
 | `chat/diagnostics.go` | Diagnostics                                    |
 | `chat/references.go`  | References                                     |

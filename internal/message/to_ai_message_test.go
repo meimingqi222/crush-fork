@@ -120,7 +120,7 @@ func TestToAIMessage_DropsTextualToolCallProtocolOnlyReasoning(t *testing.T) {
 		Role: Assistant,
 		Parts: []ContentPart{
 			ReasoningContent{
-				Thinking: "<|tool_calls_section_begin|><|tool_call_begin|>functions.view:25<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>",
+				Thinking: "<|tool_calls_section_begin|><|tool_call_begin|>functions.read:25<|tool_call_argument_begin|>{\"path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>",
 			},
 		},
 	}
@@ -171,7 +171,7 @@ func TestToAIMessage_ReasoningWithToolCallWithoutSignatureUsesRedactedData(t *te
 				Thinking:  "my thoughts",
 				Signature: "",
 			},
-			ToolCall{ID: "call-1", Name: "view", Input: `{"file_path":"main.go"}`},
+			ToolCall{ID: "call-1", Name: "read", Input: `{"path":"main.go"}`},
 		},
 	}
 

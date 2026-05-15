@@ -1407,7 +1407,7 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 
 		tc := toolItem.ToolCall()
 		messageID := toolItem.MessageID()
-		for _, task := range params.Tasks {
+		for i, task := range params.Tasks {
 			taskID := strings.TrimSpace(task.ID)
 			if taskID == "" {
 				continue
@@ -1428,6 +1428,7 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 			if status, ok := statuses[taskID]; ok {
 				node.SetCompletionStatus(status)
 			}
+			node.SetTaskRef(taskGraphTaskRef(i, taskID))
 			result = append(result, node)
 		}
 	}
@@ -1789,7 +1790,7 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 	}
 
 	var items []chat.MessageItem
-	for _, task := range params.Tasks {
+	for i, task := range params.Tasks {
 		taskID := strings.TrimSpace(task.ID)
 		if taskID == "" {
 			continue
@@ -1802,7 +1803,7 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 			messageID,
 			fmt.Sprintf("%s::%s", tc.ID, taskID),
 		)
-		items = append(items, chat.NewTaskNodeItem(
+		node := chat.NewTaskNodeItem(
 			m.com.Styles,
 			tc.ID,
 			taskID,
@@ -1810,7 +1811,9 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 			strings.TrimSpace(task.Prompt),
 			task.SubagentType,
 			childSessionID,
-		))
+		)
+		node.SetTaskRef(taskGraphTaskRef(i, taskID))
+		items = append(items, node)
 	}
 	return items
 }

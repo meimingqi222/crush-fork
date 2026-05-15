@@ -10,7 +10,7 @@ Fetches content from a web URL (for use by sub-agents).
 <features>
 - Automatically converts HTML to markdown for easier analysis
 - For large pages (>50KB), saves content to a temporary file and provides the path
-- You can then use grep/view tools to search through the file
+- You can then use grep/read tools to search through the file
 - Handles UTF-8 content validation
 </features>
 

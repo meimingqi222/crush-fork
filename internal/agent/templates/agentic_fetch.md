@@ -9,9 +9,9 @@ Use this tool when you need to:
 - Research topics by searching and following links
 
 DO NOT use this tool when:
-- You just need raw content without analysis (use fetch instead - faster and cheaper)
-- You want direct access to API responses or JSON (use fetch instead)
-- You don't need the content processed or interpreted (use fetch instead)
+- You just need raw content without analysis (use read instead - faster and cheaper)
+- You want direct access to API responses or JSON (use read instead)
+- You don't need the content processed or interpreted (use read instead)
 </when_to_use>
 
 <usage>
@@ -34,7 +34,7 @@ DO NOT use this tool when:
 - The sub-agent can perform multiple searches and fetch multiple pages to gather comprehensive information.
 - This tool is read-only and does not modify any files.
 - Results will be summarized if the content is very large.
-- This tool uses AI processing and costs more tokens than the simple fetch tool.
+- This tool uses AI processing and costs more tokens than reading the URL directly.
 </usage_notes>
 
 <limitations>
@@ -50,8 +50,8 @@ DO NOT use this tool when:
 - Be specific in your prompt about what information you want
 - For research tasks, omit the URL and let the agent search and follow relevant links
 - For complex pages, ask the agent to focus on specific sections
-- The agent has access to web_search, web_fetch, grep, and view tools
-- If you just need raw content, use the fetch tool instead to save tokens
+- The agent has access to web_search, web_fetch, grep, and read tools
+- If you just need raw content, use the read tool instead to save tokens
 </tips>
 
 <examples>

@@ -43,6 +43,7 @@ type ToolResultSubtaskResult struct {
 	ChildSessionID   string                  `json:"child_session_id,omitempty"`
 	ParentToolCallID string                  `json:"parent_tool_call_id,omitempty"`
 	ParentMessageID  string                  `json:"parent_message_id,omitempty"`
+	TaskRef          string                  `json:"task_ref,omitempty"`
 	Status           ToolResultSubtaskStatus `json:"status,omitempty"`
 }
 
@@ -77,10 +78,14 @@ type ToolResultReducer struct {
 }
 
 type ToolResultReducerChildSession struct {
-	TaskID      string                  `json:"task_id,omitempty"`
-	Description string                  `json:"description,omitempty"`
-	SessionID   string                  `json:"session_id,omitempty"`
-	Status      ToolResultSubtaskStatus `json:"status,omitempty"`
+	TaskID        string                  `json:"task_id,omitempty"`
+	TaskRef       string                  `json:"task_ref,omitempty"`
+	Description   string                  `json:"description,omitempty"`
+	SessionID     string                  `json:"session_id,omitempty"`
+	Status        ToolResultSubtaskStatus `json:"status,omitempty"`
+	Preview       string                  `json:"preview,omitempty"`
+	HasFullOutput bool                    `json:"has_full_output,omitempty"`
+	OutputChars   int                     `json:"output_chars,omitempty"`
 }
 
 func (r ToolResultReducer) isEmpty() bool {

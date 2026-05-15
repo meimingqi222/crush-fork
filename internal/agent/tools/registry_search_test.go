@@ -9,7 +9,7 @@ import (
 func TestSearchRegistryEntries_DeferredAndExposedFilters(t *testing.T) {
 	entries := []RegistryEntry{
 		{
-			Name:        "view",
+			Name:        "read",
 			Description: "read file",
 			Source:      "builtin",
 			Metadata: ToolMetadata{
@@ -32,7 +32,7 @@ func TestSearchRegistryEntries_DeferredAndExposedFilters(t *testing.T) {
 
 	defaultResults := SearchRegistryEntries(entries, "", RegistrySearchOptions{Limit: 10})
 	require.Len(t, defaultResults, 1)
-	require.Equal(t, "view", defaultResults[0].Name)
+	require.Equal(t, "read", defaultResults[0].Name)
 
 	withDeferred := SearchRegistryEntries(entries, "", RegistrySearchOptions{Limit: 10, IncludeDeferred: true})
 	require.Len(t, withDeferred, 2)
@@ -40,5 +40,5 @@ func TestSearchRegistryEntries_DeferredAndExposedFilters(t *testing.T) {
 
 	exposedOnly := SearchRegistryEntries(entries, "", RegistrySearchOptions{Limit: 10, IncludeDeferred: true, ExposedOnly: true})
 	require.Len(t, exposedOnly, 1)
-	require.Equal(t, "view", exposedOnly[0].Name)
+	require.Equal(t, "read", exposedOnly[0].Name)
 }

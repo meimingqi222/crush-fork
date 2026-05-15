@@ -1,0 +1,971 @@
+package tools
+
+import (
+	"bufio"
+	"cmp"
+	"context"
+	_ "embed"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	pathpkg "path"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"charm.land/fantasy"
+	md "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/PuerkitoBio/goquery"
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/imageutil"
+	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/skills"
+)
+
+//go:embed read.md
+var readDescription []byte
+
+type ReadParams struct {
+	Path               string   `json:"path" description:"The path to read - can be a file path or URL (http:// or https://)"`
+	Offset             int      `json:"offset,omitempty" description:"The line number to start reading from (0-based, for files only)"`
+	Limit              int      `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000, for files only)"`
+	Format             string   `json:"format,omitempty" description:"The format to return URL content in: text, markdown, or html (for URLs only)"`
+	Hashline           bool     `json:"hashline,omitempty" description:"If true, include hashline anchors in the output for line-addressable editing"`
+	WaitForDiagnostics *bool    `json:"wait_for_diagnostics,omitempty" description:"If true, wait for LSP diagnostics (default: true, for files only)"`
+	Ignore             []string `json:"ignore,omitempty" description:"List of glob patterns to ignore (when path is a directory)"`
+	Depth              int      `json:"depth,omitempty" description:"The maximum directory depth to traverse (when path is a directory)"`
+	Timeout            int      `json:"timeout,omitempty" description:"Optional timeout in seconds for URL requests (max 120)"`
+}
+
+type ReadPermissionsParams struct {
+	Path               string   `json:"path"`
+	Offset             int      `json:"offset"`
+	Limit              int      `json:"limit"`
+	Format             string   `json:"format,omitempty"`
+	Hashline           bool     `json:"hashline,omitempty"`
+	WaitForDiagnostics *bool    `json:"wait_for_diagnostics,omitempty"`
+	Ignore             []string `json:"ignore,omitempty"`
+	Depth              int      `json:"depth,omitempty"`
+	Timeout            int      `json:"timeout,omitempty"`
+}
+
+type ReadResourceType string
+
+const (
+	ReadResourceUnset ReadResourceType = ""
+	ReadResourceSkill ReadResourceType = "skill"
+)
+
+type ReadResponseMetadata struct {
+	Path                string           `json:"path"`
+	Content             string           `json:"content"`
+	Hashline            bool             `json:"hashline,omitempty"`
+	ResourceType        ReadResourceType `json:"resource_type,omitempty"`
+	ResourceName        string           `json:"resource_name,omitempty"`
+	ResourceDescription string           `json:"resource_description,omitempty"`
+	RecoveredBy         string           `json:"recovered_by,omitempty"`
+	RecoveryAction      string           `json:"recovery_action,omitempty"`
+	FallbackTool        string           `json:"fallback_tool,omitempty"`
+	FallbackToolQuery   string           `json:"fallback_tool_query,omitempty"`
+	IsDirectory         bool             `json:"is_directory,omitempty"`
+	IsURL               bool             `json:"is_url,omitempty"`
+}
+
+const (
+	ReadToolName     = "read"
+	MaxReadSize      = 1 * 1024 * 1024 // 1MB
+	MaxURLReadSize   = 1 * 1024 * 1024 // 1MB
+	DefaultReadLimit = 2000
+	MaxLineLength    = 2000
+)
+
+type textReadLine struct {
+	Raw     string
+	Display string
+}
+
+type textReadResult struct {
+	Lines      []textReadLine
+	HasMore    bool
+	Total      int
+	TotalKnown bool
+}
+
+var errReadOffsetBeyondEOF = errors.New("offset is beyond end of file")
+
+func NewReadTool(
+	lspManager *lsp.Manager,
+	permissions permission.Service,
+	filetracker filetracker.Service,
+	workingDir string,
+	lsConfig config.ToolLs,
+	httpClient *http.Client,
+	skillsPaths ...string,
+) fantasy.AgentTool {
+	if httpClient == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConns = 100
+		transport.MaxIdleConnsPerHost = 10
+		transport.IdleConnTimeout = 90 * time.Second
+
+		httpClient = &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		}
+	}
+
+	return fantasy.NewParallelAgentTool(
+		ReadToolName,
+		string(readDescription),
+		func(ctx context.Context, params ReadParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if params.Path == "" {
+				return fantasy.NewTextErrorResponse("path is required"), nil
+			}
+
+			// Check if it's a URL
+			if strings.HasPrefix(params.Path, "http://") || strings.HasPrefix(params.Path, "https://") {
+				return handleURLRead(ctx, params, call, permissions, httpClient)
+			}
+
+			// Handle file path
+			return handleFileRead(ctx, params, call, lspManager, permissions, filetracker, workingDir, lsConfig, skillsPaths...)
+		})
+}
+
+func handleURLRead(
+	ctx context.Context,
+	params ReadParams,
+	call fantasy.ToolCall,
+	permissions permission.Service,
+	client *http.Client,
+) (fantasy.ToolResponse, error) {
+	format := strings.ToLower(params.Format)
+	if format != "" && format != "text" && format != "markdown" && format != "html" {
+		return fantasy.NewTextErrorResponse("Format must be one of: text, markdown, html"), nil
+	}
+	if format == "" {
+		format = "markdown"
+	}
+
+	sessionID := GetSessionFromContext(ctx)
+	if sessionID == "" {
+		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required")
+	}
+
+	permissionResponse, err := RequestPermission(ctx, permissions,
+		permission.CreatePermissionRequest{
+			SessionID:   sessionID,
+			Path:        params.Path,
+			ToolCallID:  call.ID,
+			ToolName:    ReadToolName,
+			Action:      "read_url",
+			Description: fmt.Sprintf("Read URL content: %s", params.Path),
+			Params:      ReadPermissionsParams(params),
+		},
+	)
+	if err != nil {
+		return fantasy.ToolResponse{}, err
+	}
+	if permissionResponse != nil {
+		return *permissionResponse, nil
+	}
+
+	// maxURLReadTimeoutSeconds is the maximum allowed timeout for URL read requests (2 minutes).
+	const maxURLReadTimeoutSeconds = 120
+
+	// Handle timeout with context
+	requestCtx := ctx
+	if params.Timeout > 0 {
+		if params.Timeout > maxURLReadTimeoutSeconds {
+			params.Timeout = maxURLReadTimeoutSeconds
+		}
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(params.Timeout)*time.Second)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(requestCtx, "GET", params.Path, nil)
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", "crush/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("failed to read URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("Request failed with status code: %d", resp.StatusCode)), nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxURLReadSize))
+	if err != nil {
+		return fantasy.NewTextErrorResponse("Failed to read response body: " + err.Error()), nil
+	}
+
+	content := string(body)
+
+	validUTF8 := utf8.ValidString(content)
+	if !validUTF8 {
+		return fantasy.NewTextErrorResponse("Response content is not valid UTF-8"), nil
+	}
+	contentType := resp.Header.Get("Content-Type")
+
+	switch format {
+	case "text":
+		if strings.Contains(contentType, "text/html") {
+			text, err := extractTextFromHTML(content)
+			if err != nil {
+				return fantasy.NewTextErrorResponse("Failed to extract text from HTML: " + err.Error()), nil
+			}
+			content = text
+		}
+
+	case "markdown":
+		if strings.Contains(contentType, "text/html") {
+			markdown, err := convertHTMLToMarkdown(content)
+			if err != nil {
+				return fantasy.NewTextErrorResponse("Failed to convert HTML to Markdown: " + err.Error()), nil
+			}
+			content = markdown
+		}
+
+		content = "```\n" + content + "\n```"
+
+	case "html":
+		// return only the body of the HTML document
+		if strings.Contains(contentType, "text/html") {
+			doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+			if err != nil {
+				return fantasy.NewTextErrorResponse("Failed to parse HTML: " + err.Error()), nil
+			}
+			body, err := doc.Find("body").Html()
+			if err != nil {
+				return fantasy.NewTextErrorResponse("Failed to extract body from HTML: " + err.Error()), nil
+			}
+			if body == "" {
+				return fantasy.NewTextErrorResponse("No body content found in HTML"), nil
+			}
+			content = "<html>\n<body>\n" + body + "\n</body>\n</html>"
+		}
+	}
+	// Truncate content if it exceeds max URL read size.
+	if int64(len(content)) > MaxURLReadSize {
+		content = content[:MaxURLReadSize]
+		content += fmt.Sprintf("\n\n[Content truncated to %d bytes]", MaxURLReadSize)
+	}
+
+	meta := ReadResponseMetadata{
+		Path:  params.Path,
+		IsURL: true,
+	}
+	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(content), meta), nil
+}
+
+func handleFileRead(
+	ctx context.Context,
+	params ReadParams,
+	call fantasy.ToolCall,
+	lspManager *lsp.Manager,
+	permissions permission.Service,
+	filetracker filetracker.Service,
+	workingDir string,
+	lsConfig config.ToolLs,
+	skillsPaths ...string,
+) (fantasy.ToolResponse, error) {
+	// Use session-specific working directory from context if available.
+	effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
+
+	// Handle relative paths
+	filePath := filepathext.SmartJoin(effectiveWorkingDir, params.Path)
+
+	// Check if file is outside working directory and request permission if needed
+	absWorkingDir, err := filepath.Abs(effectiveWorkingDir)
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("error resolving working directory: %w", err)
+	}
+
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("error resolving file path: %w", err)
+	}
+
+	relPath, err := filepath.Rel(absWorkingDir, absFilePath)
+	isOutsideWorkDir := err != nil || strings.HasPrefix(relPath, "..")
+	isSkillFile := isInSkillsPath(absFilePath, skillsPaths)
+
+	sessionID := GetSessionFromContext(ctx)
+	if sessionID == "" {
+		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for accessing files outside working directory")
+	}
+
+	// Request permission for files outside working directory, unless it's a skill file.
+	if isOutsideWorkDir && !isSkillFile {
+		permissionResponse, permReqErr := RequestPermission(ctx, permissions,
+			permission.CreatePermissionRequest{
+				SessionID:   sessionID,
+				Path:        absFilePath,
+				ToolCallID:  call.ID,
+				ToolName:    ReadToolName,
+				Action:      "read",
+				Description: fmt.Sprintf("Read file outside working directory: %s", absFilePath),
+				Params:      ReadPermissionsParams(params),
+			},
+		)
+		if permReqErr != nil {
+			return fantasy.ToolResponse{}, permReqErr
+		}
+		if permissionResponse != nil {
+			return *permissionResponse, nil
+		}
+	}
+
+	// Check if file exists
+	requestedFilePath := filePath
+	var recovery readPathRecovery
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if !isOutsideWorkDir {
+				if recovered, ok := recoverMissingReadPath(absWorkingDir, relPath); ok {
+					if recoveredInfo, statErr := os.Stat(recovered.FilePath); statErr == nil {
+						filePath = recovered.FilePath
+						fileInfo = recoveredInfo
+						recovery = recovered
+						err = nil
+					} else {
+						err = statErr
+					}
+				}
+			}
+			if err != nil && os.IsNotExist(err) {
+				suggestions := findReadSuggestions(requestedFilePath)
+				message := fmt.Sprintf("File not found: %s", requestedFilePath)
+				if len(suggestions) > 0 {
+					message += fmt.Sprintf("\n\nDid you mean one of these?\n%s", strings.Join(suggestions, "\n"))
+				}
+				return fantasy.WithResponseMetadata(
+					fantasy.NewTextErrorResponse(message),
+					newMissingReadMetadata(requestedFilePath, suggestions),
+				), nil
+			}
+		}
+		if err != nil {
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("error accessing file: %v", err)), nil
+		}
+	}
+
+	// Check if it's a directory — automatically list its contents.
+	if fileInfo.IsDir() {
+		lsParams := LSParams{Ignore: params.Ignore, Depth: params.Depth}
+		out, _, lsErr := ListDirectoryTree(filePath, lsParams, lsConfig)
+		if lsErr != nil {
+			return fantasy.NewTextErrorResponse(lsErr.Error()), nil
+		}
+		meta := ReadResponseMetadata{Path: filePath, Content: out, IsDirectory: true}
+		meta.applyRecovery(recovery)
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextResponse(out),
+			meta,
+		), nil
+	}
+
+	isSupportedImage, mimeType := getImageMimeType(filePath)
+
+	// Set default limit if not provided (no limit for SKILL.md files)
+	if params.Limit <= 0 {
+		if isSkillFile {
+			params.Limit = 1000000 // Effectively no limit for skill files
+		} else {
+			params.Limit = DefaultReadLimit
+		}
+	}
+
+	if isSupportedImage {
+		if !GetSupportsImagesFromContext(ctx) {
+			modelName := GetModelNameFromContext(ctx)
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
+		}
+
+		imageData, readErr := os.ReadFile(filePath)
+		if readErr != nil {
+			return fantasy.ToolResponse{}, fmt.Errorf("error reading image file: %w", readErr)
+		}
+
+		// Compress image if it exceeds 1MB.
+		config := imageutil.DefaultCompressionConfig()
+		result, compressErr := imageutil.CompressImage(imageData, mimeType, config)
+		if compressErr != nil {
+			slog.Warn("Failed to compress image, using original", "error", compressErr, "path", filePath)
+			// Fall through with original data.
+			result = &imageutil.CompressResult{
+				Data:          imageData,
+				MimeType:      mimeType,
+				WasCompressed: false,
+			}
+		}
+
+		meta := ReadResponseMetadata{Path: filePath}
+		meta.applyRecovery(recovery)
+		return fantasy.WithResponseMetadata(fantasy.NewImageResponse(result.Data, result.MimeType), meta), nil
+	}
+
+	// Read the file content.
+	readResult, err := readTextFileLines(filePath, params.Offset, params.Limit)
+	if err != nil {
+		if errors.Is(err, errReadOffsetBeyondEOF) {
+			return fantasy.NewTextErrorResponse(
+				fmt.Sprintf("Offset %d is beyond end of file (%d lines)", params.Offset, readResult.Total),
+			), nil
+		}
+		return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
+	}
+	lines := readResult.Lines
+	content := joinDisplayLines(lines)
+	if !utf8.ValidString(content) {
+		return fantasy.NewTextErrorResponse("File content is not valid UTF-8"), nil
+	}
+
+	openInLSPs(ctx, lspManager, filePath)
+	if shouldWaitForDiagnostics(params.WaitForDiagnostics) {
+		waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
+	}
+	output := "<file>\n"
+	if params.Hashline {
+		output += addHashlineLineNumbers(lines, params.Offset+1)
+	} else {
+		output += addLineNumbers(lines, params.Offset+1)
+	}
+
+	nextOffset := params.Offset + len(lines)
+	if len(lines) > 0 {
+		startLine := params.Offset + 1
+		endLine := params.Offset + len(lines)
+		if readResult.HasMore {
+			output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use offset=%d to continue.)",
+				startLine, endLine, nextOffset)
+		} else if readResult.TotalKnown {
+			output += fmt.Sprintf("\n\n(Showing lines %d-%d. End of file - total %d lines.)",
+				startLine, endLine, readResult.Total)
+		}
+	} else if readResult.TotalKnown {
+		output += fmt.Sprintf("\n\n(End of file - total %d lines.)", readResult.Total)
+	}
+	output += "\n</file>\n"
+	output += getDiagnostics(filePath, lspManager)
+	filetracker.RecordRead(ctx, sessionID, filePath)
+
+	meta := ReadResponseMetadata{
+		Path:     filePath,
+		Content:  content,
+		Hashline: params.Hashline,
+	}
+	meta.applyRecovery(recovery)
+	if isSkillFile {
+		if skill, err := skills.Parse(filePath); err == nil {
+			meta.ResourceType = ReadResourceSkill
+			meta.ResourceName = skill.Name
+			meta.ResourceDescription = skill.Description
+		}
+	}
+
+	return fantasy.WithResponseMetadata(
+		fantasy.NewTextResponse(output),
+		meta,
+	), nil
+}
+
+func newMissingReadMetadata(filePath string, suggestions []string) ReadResponseMetadata {
+	metadata := ReadResponseMetadata{Path: filePath}
+	if len(suggestions) == 0 {
+		return metadata
+	}
+	metadata.RecoveredBy = "file_not_found_suggestions"
+	metadata.RecoveryAction = fmt.Sprintf("File %q was not found. Try one of the suggested paths from the error message.", filePath)
+	return metadata
+}
+
+type readPathRecovery struct {
+	FilePath       string
+	RecoveredBy    string
+	RecoveryAction string
+}
+
+func (metadata *ReadResponseMetadata) applyRecovery(recovery readPathRecovery) {
+	if recovery.RecoveredBy == "" {
+		return
+	}
+	metadata.RecoveredBy = recovery.RecoveredBy
+	metadata.RecoveryAction = recovery.RecoveryAction
+}
+
+func slashClean(path string) string {
+	return pathpkg.Clean(filepath.ToSlash(path))
+}
+
+func recoverMissingReadPath(absWorkingDir, requestedRelPath string) (readPathRecovery, bool) {
+	if requestedRelPath == "." || requestedRelPath == "" || strings.HasPrefix(requestedRelPath, ".."+string(filepath.Separator)) {
+		return readPathRecovery{}, false
+	}
+
+	requestedSuffix := slashClean(requestedRelPath)
+	if requestedSuffix == "." || strings.HasPrefix(requestedSuffix, "../") {
+		return readPathRecovery{}, false
+	}
+
+	var suffixMatches []string
+	var extensionMatches []string
+	walkErr := filepath.WalkDir(absWorkingDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == absWorkingDir {
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(absWorkingDir, path)
+		if relErr != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+			return nil
+		}
+
+		normalizedRelPath := slashClean(relPath)
+		if normalizedRelPath == requestedSuffix || strings.HasSuffix(normalizedRelPath, "/"+requestedSuffix) {
+			suffixMatches = append(suffixMatches, path)
+		}
+		if entry.IsDir() && pathpkg.Ext(requestedSuffix) != "" {
+			correctedSuffix := slashClean(strings.TrimSuffix(requestedSuffix, pathpkg.Ext(requestedSuffix)))
+			if correctedSuffix != "." && (normalizedRelPath == correctedSuffix || strings.HasSuffix(normalizedRelPath, "/"+correctedSuffix)) {
+				extensionMatches = append(extensionMatches, path)
+			}
+		}
+
+		return nil
+	})
+	if walkErr != nil {
+		return readPathRecovery{}, false
+	}
+
+	if len(suffixMatches) == 1 {
+		return readPathRecovery{
+			FilePath:       suffixMatches[0],
+			RecoveredBy:    "unique_suffix_recovery",
+			RecoveryAction: fmt.Sprintf("Recovered missing read path %q to unique workspace match %q.", requestedRelPath, suffixMatches[0]),
+		}, true
+	}
+	if len(suffixMatches) == 0 && len(extensionMatches) == 1 {
+		return readPathRecovery{
+			FilePath:       extensionMatches[0],
+			RecoveredBy:    "directory_extension_recovery",
+			RecoveryAction: fmt.Sprintf("Recovered missing read path %q to unique directory match %q after removing the file extension.", requestedRelPath, extensionMatches[0]),
+		}, true
+	}
+
+	return readPathRecovery{}, false
+}
+
+func findReadSuggestions(filePath string) []string {
+	dir := filepath.Dir(filePath)
+	base := filepath.Base(filePath)
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var suggestions []string
+	for _, entry := range dirEntries {
+		if strings.Contains(strings.ToLower(entry.Name()), strings.ToLower(base)) ||
+			strings.Contains(strings.ToLower(base), strings.ToLower(entry.Name())) {
+			suggestions = append(suggestions, filepath.Join(dir, entry.Name()))
+			if len(suggestions) >= 3 {
+				break
+			}
+		}
+	}
+	return suggestions
+}
+
+func shouldWaitForDiagnostics(wait *bool) bool {
+	if wait == nil {
+		return true
+	}
+	return *wait
+}
+
+func addLineNumbers(lines []textReadLine, startLine int) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	var result []string
+	for i, line := range lines {
+		lineNum := i + startLine
+		numStr := fmt.Sprintf("%d", lineNum)
+
+		if len(numStr) >= 6 {
+			result = append(result, fmt.Sprintf("%s|%s", numStr, line.Display))
+		} else {
+			paddedNum := fmt.Sprintf("%6s", numStr)
+			result = append(result, fmt.Sprintf("%s|%s", paddedNum, line.Display))
+		}
+	}
+
+	return strings.Join(result, "\n")
+}
+
+func addHashlineLineNumbers(lines []textReadLine, startLine int) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	result := make([]string, 0, len(lines))
+	for i, line := range lines {
+		lineNum := i + startLine
+		result = append(result, fmt.Sprintf("%6s#%s|%s", fmt.Sprintf("%d", lineNum), computeHashlineID(lineNum, line.Raw), line.Display))
+	}
+
+	return strings.Join(result, "\n")
+}
+
+func joinDisplayLines(lines []textReadLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+
+	displayLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		displayLines = append(displayLines, line.Display)
+	}
+
+	return strings.Join(displayLines, "\n")
+}
+
+func readTextFileLines(filePath string, offset, limit int) (textReadResult, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return textReadResult{}, err
+	}
+	defer file.Close()
+
+	scanner := NewLineScanner(file)
+	skipped := 0
+	if offset > 0 {
+		for skipped < offset && scanner.Scan() {
+			skipped++
+		}
+		if err = scanner.Err(); err != nil {
+			return textReadResult{}, err
+		}
+		if skipped < offset {
+			return textReadResult{Total: skipped, TotalKnown: true}, errReadOffsetBeyondEOF
+		}
+	}
+
+	// Pre-allocate slice with expected capacity.
+	lines := make([]textReadLine, 0, limit)
+
+	for len(lines) < limit && scanner.Scan() {
+		rawLine := scanner.Text()
+		displayLine := rawLine
+		if len(displayLine) > MaxLineLength {
+			displayLine = displayLine[:MaxLineLength] + "..."
+		}
+		lines = append(lines, textReadLine{
+			Raw:     rawLine,
+			Display: displayLine,
+		})
+	}
+
+	// Peek one more line only when we filled the limit.
+	hasMore := len(lines) == limit && scanner.Scan()
+
+	if err := scanner.Err(); err != nil {
+		return textReadResult{}, err
+	}
+
+	result := textReadResult{
+		Lines:      lines,
+		HasMore:    hasMore,
+		TotalKnown: !hasMore,
+	}
+	if result.TotalKnown {
+		result.Total = offset + len(lines)
+	}
+
+	return result, nil
+}
+
+func getImageMimeType(filePath string) (bool, string) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return true, "image/jpeg"
+	case ".png":
+		return true, "image/png"
+	case ".gif":
+		return true, "image/gif"
+	case ".webp":
+		return true, "image/webp"
+	default:
+		return false, ""
+	}
+}
+
+type LineScanner struct {
+	scanner *bufio.Scanner
+}
+
+func NewLineScanner(r io.Reader) *LineScanner {
+	scanner := bufio.NewScanner(r)
+	// Increase buffer size to handle large lines (e.g., minified JSON, HTML)
+	// Default is 64KB, set to 1MB
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	return &LineScanner{
+		scanner: scanner,
+	}
+}
+
+func (s *LineScanner) Scan() bool {
+	return s.scanner.Scan()
+}
+
+func (s *LineScanner) Text() string {
+	return s.scanner.Text()
+}
+
+func (s *LineScanner) Err() error {
+	return s.scanner.Err()
+}
+
+// isInSkillsPath checks if filePath is within any of the configured skills
+// directories. Returns true for files that can be read without permission
+// prompts and without size limits.
+//
+// Note that symlinks are resolved to prevent path traversal attacks via
+// symbolic links.
+func isInSkillsPath(filePath string, skillsPaths []string) bool {
+	if len(skillsPaths) == 0 {
+		return false
+	}
+
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return false
+	}
+
+	evalFilePath, err := filepath.EvalSymlinks(absFilePath)
+	if err != nil {
+		return false
+	}
+
+	for _, skillsPath := range skillsPaths {
+		absSkillsPath, err := filepath.Abs(skillsPath)
+		if err != nil {
+			continue
+		}
+
+		evalSkillsPath, err := filepath.EvalSymlinks(absSkillsPath)
+		if err != nil {
+			continue
+		}
+
+		relPath, err := filepath.Rel(evalSkillsPath, evalFilePath)
+		if err == nil && !strings.HasPrefix(relPath, "..") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractTextFromHTML(html string) (string, error) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return "", err
+	}
+
+	text := doc.Find("body").Text()
+	text = strings.Join(strings.Fields(text), " ")
+
+	return text, nil
+}
+
+func convertHTMLToMarkdown(html string) (string, error) {
+	converter := md.NewConverter("", true, nil)
+
+	markdown, err := converter.ConvertString(html)
+	if err != nil {
+		return "", err
+	}
+
+	return markdown, nil
+}
+
+// LSParams holds parameters for directory listing.
+type LSParams struct {
+	Path   string   `json:"path,omitempty" description:"The path to the directory to list (defaults to current working directory)"`
+	Ignore []string `json:"ignore,omitempty" description:"List of glob patterns to ignore"`
+	Depth  int      `json:"depth,omitempty" description:"The maximum depth to traverse"`
+}
+
+type NodeType string
+
+const (
+	NodeTypeFile      NodeType = "file"
+	NodeTypeDirectory NodeType = "directory"
+)
+
+type TreeNode struct {
+	Name     string      `json:"name"`
+	Path     string      `json:"path"`
+	Type     NodeType    `json:"type"`
+	Children []*TreeNode `json:"children,omitempty"`
+}
+
+type LSResponseMetadata struct {
+	NumberOfFiles int  `json:"number_of_files"`
+	Truncated     bool `json:"truncated"`
+}
+
+const maxLSFiles = 1000
+
+func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolLs) (string, LSResponseMetadata, error) {
+	if _, err := os.Stat(searchPath); os.IsNotExist(err) {
+		return "", LSResponseMetadata{}, fmt.Errorf("path does not exist: %s", searchPath)
+	}
+
+	depth, limit := lsConfig.Limits()
+	maxFiles := cmp.Or(limit, maxLSFiles)
+	files, truncated, err := fsext.ListDirectory(
+		searchPath,
+		params.Ignore,
+		cmp.Or(params.Depth, depth),
+		maxFiles,
+	)
+	if err != nil {
+		return "", LSResponseMetadata{}, fmt.Errorf("error listing directory: %w", err)
+	}
+
+	metadata := LSResponseMetadata{
+		NumberOfFiles: len(files),
+		Truncated:     truncated,
+	}
+	tree := createFileTree(files, searchPath)
+
+	var output string
+	if truncated {
+		output = fmt.Sprintf("There are more than %d files in the directory. Use a more specific path or use the Glob tool to find specific files. The first %[1]d files and directories are included below.\n", maxFiles)
+	}
+	if depth > 0 {
+		output = fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.\n", cmp.Or(params.Depth, depth))
+	}
+	return output + "\n" + printTree(tree, searchPath), metadata, nil
+}
+
+func createFileTree(sortedPaths []string, rootPath string) []*TreeNode {
+	root := []*TreeNode{}
+	pathMap := make(map[string]*TreeNode)
+
+	for _, path := range sortedPaths {
+		relativePath := strings.TrimPrefix(path, rootPath)
+		parts := strings.Split(relativePath, string(filepath.Separator))
+		currentPath := ""
+		var parentPath string
+
+		var cleanParts []string
+		for _, part := range parts {
+			if part != "" {
+				cleanParts = append(cleanParts, part)
+			}
+		}
+		parts = cleanParts
+
+		if len(parts) == 0 {
+			continue
+		}
+
+		for i, part := range parts {
+			if currentPath == "" {
+				currentPath = part
+			} else {
+				currentPath = filepath.Join(currentPath, part)
+			}
+
+			if _, exists := pathMap[currentPath]; exists {
+				parentPath = currentPath
+				continue
+			}
+
+			isLastPart := i == len(parts)-1
+			isDir := !isLastPart || strings.HasSuffix(relativePath, string(filepath.Separator))
+			nodeType := NodeTypeFile
+			if isDir {
+				nodeType = NodeTypeDirectory
+			}
+			newNode := &TreeNode{
+				Name:     part,
+				Path:     currentPath,
+				Type:     nodeType,
+				Children: []*TreeNode{},
+			}
+
+			pathMap[currentPath] = newNode
+
+			if i > 0 && parentPath != "" {
+				if parent, ok := pathMap[parentPath]; ok {
+					parent.Children = append(parent.Children, newNode)
+				}
+			} else {
+				root = append(root, newNode)
+			}
+
+			parentPath = currentPath
+		}
+	}
+
+	return root
+}
+
+func printTree(tree []*TreeNode, rootPath string) string {
+	var result strings.Builder
+
+	result.WriteString("- ")
+	result.WriteString(filepath.ToSlash(rootPath))
+	if rootPath[len(rootPath)-1] != '/' {
+		result.WriteByte('/')
+	}
+	result.WriteByte('\n')
+
+	for _, node := range tree {
+		printNode(&result, node, 1)
+	}
+
+	return result.String()
+}
+
+func printNode(builder *strings.Builder, node *TreeNode, level int) {
+	indent := strings.Repeat("  ", level)
+
+	nodeName := node.Name
+	if node.Type == NodeTypeDirectory {
+		nodeName = nodeName + "/"
+	}
+
+	fmt.Fprintf(builder, "%s- %s\n", indent, nodeName)
+
+	if node.Type == NodeTypeDirectory && len(node.Children) > 0 {
+		for _, child := range node.Children {
+			printNode(builder, child, level+1)
+		}
+	}
+}

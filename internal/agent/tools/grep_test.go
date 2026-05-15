@@ -99,7 +99,7 @@ func TestRunGrepSearchReportsMissingSearchPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, result.matches)
 	require.Equal(t, "path_validation", result.metadata.RecoveredBy)
-	require.Equal(t, ViewToolName, result.metadata.FallbackTool)
+	require.Equal(t, ReadToolName, result.metadata.FallbackTool)
 	require.Equal(t, []string{"path"}, result.metadata.RecoveredParameters)
 }
 

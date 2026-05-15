@@ -28,7 +28,7 @@ the complete picture and the task is simple, doing it yourself is often faster.
 Every non-trivial request follows four phases.  Do not skip or reorder them.
 
 ## Phase 1 — Research  (read-only, no code changes)
-Use view, grep, glob, and lsp_* tools directly to map the codebase.
+Use read, grep, glob, and lsp_* tools directly to map the codebase.
 For open-ended exploration where you do not yet know which files to read,
 launch explore subagents in parallel to gather evidence, not to make final
 review or correctness decisions.
@@ -60,10 +60,10 @@ request is addressed.  Fix issues found here.
 - Long-running operations that don't block your critical path
 
 **Execute directly when (you already have everything needed):**
-- You know exact file paths → call view/grep/glob directly, no subagent
+- You know exact file paths → call read/grep/glob directly, no subagent
 - The request is "read/list files and return raw contents" (single or multiple files)
-  → always execute directly with view/glob/grep, in parallel when helpful
-- Single tool call (view, grep, glob, bash)
+  → always execute directly with read/glob/grep, in parallel when helpful
+- Single tool call (read, grep, glob, bash)
 - Tightly-coupled edits where next step depends on current result
 - Single-file or <10 line edits
 - You have complete context and execution is faster than delegation
@@ -75,7 +75,7 @@ request is addressed.  Fix issues found here.
 
 **Cost comparison (be honest with yourself):**
   ✗  Agent { prompt: "Read coordinator.go lines 400-600" }  → wastes 1 LLM turn
-  ✓  view(coordinator.go, offset=400, limit=200)             → instant, no overhead
+  ✓  read(coordinator.go, offset=400, limit=200)             → instant, no overhead
 
   ✗  "I'll delegate this simple edit to a subagent"          → context transfer + new session
   ✓  "I have the file open and know the exact change"        → one edit tool call

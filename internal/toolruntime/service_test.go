@@ -18,7 +18,7 @@ func TestDeleteSessionRemovesAllStatesAndPublishesDeletedEvents(t *testing.T) {
 	events := svc.Subscribe(ctx)
 	first := State{SessionID: "session-1", ToolCallID: "call-1", ToolName: "bash", Status: StatusRunning}
 	second := State{SessionID: "session-1", ToolCallID: "call-2", ToolName: "write", Status: StatusCompleted}
-	other := State{SessionID: "session-2", ToolCallID: "call-9", ToolName: "view", Status: StatusPending}
+	other := State{SessionID: "session-2", ToolCallID: "call-9", ToolName: "read", Status: StatusPending}
 
 	svc.Publish(first)
 	svc.Publish(second)
