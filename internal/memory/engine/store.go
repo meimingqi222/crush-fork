@@ -104,6 +104,14 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 		conditions = append(conditions, "session_id = ?")
 		args = append(args, *filter.SessionID)
 	}
+	for _, tag := range filter.Tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = ?)")
+		args = append(args, tag)
+	}
 	if filter.AfterTime != nil {
 		conditions = append(conditions, "created_at >= ?")
 		args = append(args, *filter.AfterTime)
@@ -270,6 +278,62 @@ func (s *sqliteEventStore) GetMaxWatermark(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("getting max watermark: %w", err)
 	}
 	return watermark, nil
+}
+
+// RecentSessions returns distinct session IDs ordered by most-recent event
+// time descending. When sinceUnix is zero, the time filter is skipped.
+func (s *sqliteEventStore) RecentSessions(ctx context.Context, sinceUnix int64, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if sinceUnix > 0 {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT session_id, MAX(created_at) AS latest
+			FROM memory_events
+			WHERE session_id IS NOT NULL AND session_id != ''
+			  AND created_at >= ?
+			GROUP BY session_id
+			ORDER BY latest DESC
+			LIMIT ?`, sinceUnix, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT session_id, MAX(created_at) AS latest
+			FROM memory_events
+			WHERE session_id IS NOT NULL AND session_id != ''
+			GROUP BY session_id
+			ORDER BY latest DESC
+			LIMIT ?`, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing recent sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var (
+			sessionID string
+			latest    int64
+		)
+		if err := rows.Scan(&sessionID, &latest); err != nil {
+			return nil, fmt.Errorf("scanning recent session row: %w", err)
+		}
+		if sessionID == "" {
+			continue
+		}
+		ids = append(ids, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating recent sessions: %w", err)
+	}
+	return ids, nil
 }
 
 func (s *sqliteEventStore) Close() error {

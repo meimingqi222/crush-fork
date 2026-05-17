@@ -33,7 +33,6 @@ type fakeEnv struct {
 	lspClients  *csync.Map[string, *lsp.Client]
 }
 
-
 const emptyTodoReminder = `<system_reminder>This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
 If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
 If not, please feel free to ignore. Again do not mention this message to the user.</system_reminder>`
@@ -57,7 +56,6 @@ func (p *testTodoReminderPlugin) Init(context.Context, plugin.PluginInput) (plug
 }
 
 func (p *testTodoReminderPlugin) Close(context.Context) error { return nil }
-
 
 func testEnv(t *testing.T) fakeEnv {
 	plugin.Reset()

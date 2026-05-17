@@ -111,6 +111,54 @@ func TestPromptForAgentBuildIncludesConfiguredRolePrompt(t *testing.T) {
 	assert.Contains(t, built, "Verify before handoff.")
 }
 
+func TestPromptForAgentUsesReadOnlyTemplateForNamedReadOnlySubagents(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Options.ContextPaths = nil
+
+	for _, agentID := range []string{config.AgentPlan, config.AgentLibrarian} {
+		agentID := agentID
+		t.Run(agentID, func(t *testing.T) {
+			promptBuilder, err := promptForAgent(config.Agent{
+				ID:           agentID,
+				AllowedTools: []string{"bash", "glob", "grep", "read", "tool_search"},
+			}, true)
+			require.NoError(t, err)
+
+			built, err := promptBuilder.Build(t.Context(), "", "", cfg)
+			require.NoError(t, err)
+			assert.Contains(t, built, "You are a read-only research subagent.")
+			assert.NotContains(t, built, "READ BEFORE EDITING")
+		})
+	}
+}
+
+func TestPromptForAgentUsesReviewTemplateForReviewSubagent(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Options.ContextPaths = nil
+
+	promptBuilder, err := promptForAgent(config.Agent{
+		ID:           config.AgentReview,
+		Role:         "reviewer",
+		AllowedTools: []string{"bash", "glob", "grep", "read", "tool_search"},
+	}, true)
+	require.NoError(t, err)
+
+	built, err := promptBuilder.Build(t.Context(), "", "", cfg)
+	require.NoError(t, err)
+	assert.Contains(t, built, "You are a read-only code review subagent.")
+	assert.Contains(t, built, "final code-review specialist")
+	assert.NotContains(t, built, "not the final reviewer")
+	assert.NotContains(t, built, "READ BEFORE EDITING")
+}
+
 func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 	t.Parallel()
 

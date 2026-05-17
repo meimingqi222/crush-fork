@@ -281,6 +281,8 @@ func parseQuickClassifierDecision(raw string) bool {
 
 func parseAutoClassification(raw string) (permission.AutoClassification, error) {
 	raw = strings.TrimSpace(raw)
+	raw = thinkTagRegex.ReplaceAllString(raw, "")
+	raw = strings.TrimSpace(raw)
 	if matches := autoClassifierCodeFenceRegex.FindStringSubmatch(raw); len(matches) == 2 {
 		raw = strings.TrimSpace(matches[1])
 	}

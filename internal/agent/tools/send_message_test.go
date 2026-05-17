@@ -28,7 +28,7 @@ func TestSendMessageToolTargetsMailboxTask(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
-	require.Contains(t, resp.Content, "task task-a")
+	require.Contains(t, resp.Content, "agent task-a")
 
 	envelopes, err := service.Consume("mb-1", "task-a")
 	require.NoError(t, err)

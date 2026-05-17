@@ -16,6 +16,31 @@ import (
 
 type sessionCompactingPurposeContextKey struct{}
 
+// compactionRescueContextKey carries a Markdown-formatted "memory rescue"
+// block that must be injected into the compaction prompt so durable memories
+// survive session summarization. The payload is produced by
+// engine.PrepareCompactionRescue via MemoryEngineHooks.OnBeforeCompaction.
+type compactionRescueContextKey struct{}
+
+// withCompactionRescue attaches a non-empty memory-rescue payload to ctx.
+// Empty payloads are dropped to keep the context clean.
+func withCompactionRescue(ctx context.Context, payload string) context.Context {
+	if strings.TrimSpace(payload) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, compactionRescueContextKey{}, payload)
+}
+
+// compactionRescueFromContext returns the rescue payload previously attached
+// via withCompactionRescue, or an empty string when no payload was set.
+func compactionRescueFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	payload, _ := ctx.Value(compactionRescueContextKey{}).(string)
+	return payload
+}
+
 type chatRequestState struct {
 	Messages         []message.Message
 	History          []fantasy.Message

@@ -67,6 +67,11 @@ const (
 	SelectedModelTypeLarge          SelectedModelType = "large"
 	SelectedModelTypeSmall          SelectedModelType = "small"
 	SelectedModelTypeBackground     SelectedModelType = "background_model"
+	SelectedModelTypePlan           SelectedModelType = "plan"
+	SelectedModelTypeReview         SelectedModelType = "review"
+	SelectedModelTypeDesigner       SelectedModelType = "designer"
+	SelectedModelTypeLibrarian      SelectedModelType = "librarian"
+	SelectedModelTypeQuickTask      SelectedModelType = "quick_task"
 
 	// Deprecated: kept only for backward-compatible config loading.
 	SelectedModelTypeHandoff SelectedModelType = "handoff"
@@ -78,10 +83,15 @@ const (
 )
 
 const (
-	AgentCoder   string = "coder"
-	AgentTask    string = "task"
-	AgentGeneral string = "general"
-	AgentExplore string = "explore"
+	AgentCoder     string = "coder"
+	AgentTask      string = "task"
+	AgentGeneral   string = "general"
+	AgentExplore   string = "explore"
+	AgentPlan      string = "plan"
+	AgentReview    string = "review"
+	AgentDesigner  string = "designer"
+	AgentLibrarian string = "librarian"
+	AgentQuickTask string = "quick_task"
 )
 
 type AgentMode string
@@ -102,12 +112,35 @@ func NormalizeAgentMode(mode AgentMode) AgentMode {
 }
 
 func CanonicalSubagentID(id string) string {
-	switch id {
+	switch strings.TrimSpace(id) {
 	case "", AgentTask:
 		return AgentExplore
 	default:
-		return id
+		return strings.TrimSpace(id)
 	}
+}
+
+func RequestedSubagentID(id string) string {
+	switch strings.TrimSpace(id) {
+	case "", AgentTask:
+		return AgentExplore
+	case "planner":
+		return AgentPlan
+	case "reviewer":
+		return AgentReview
+	case "quick", "quick-task":
+		return AgentQuickTask
+	default:
+		return strings.TrimSpace(id)
+	}
+}
+
+func ResolveSubagentID(agents map[string]Agent, id string) string {
+	canonicalID := CanonicalSubagentID(id)
+	if _, ok := agents[canonicalID]; ok {
+		return canonicalID
+	}
+	return RequestedSubagentID(id)
 }
 
 type SelectedModel struct {
@@ -326,6 +359,220 @@ type MemoryConfig struct {
 	// RetainEveryNTurns controls how often transcript windows are retained
 	// when using the hindsight backend. Defaults to 3.
 	RetainEveryNTurns int `json:"retain_every_n_turns,omitempty" jsonschema:"description=Retain transcript window every N turns (hindsight backend),default=3"`
+
+	// MentalModels controls the layered Mental Models materializer that
+	// generates stable, low-frequency-updated summary files for user
+	// preferences, project conventions, decisions, and known pitfalls.
+	// Enabled by default; disable via mental_models.enabled=false.
+	MentalModels *MemoryMentalModelsConfig `json:"mental_models,omitempty" jsonschema:"description=Mental Models materializer configuration"`
+
+	// BackgroundMaterialize controls the periodic background materializer
+	// that keeps materialized views up to date during long sessions.
+	BackgroundMaterialize *MemoryBackgroundMaterializeConfig `json:"background_materialize,omitempty" jsonschema:"description=Background materializer configuration"`
+
+	// CompactionRecall controls active recall during pre-compaction so the
+	// summary prompt receives the most relevant past memories.
+	CompactionRecall *MemoryCompactionRecallConfig `json:"compaction_recall,omitempty" jsonschema:"description=Compaction-time recall configuration"`
+
+	// Reranker controls optional reranking of FTS5 candidates before they
+	// are returned by Retrieve(). Heuristic has zero model cost; embedding
+	// uses local lightweight hashing by default and is only wired for the
+	// local backend. Hindsight uses its remote recall implementation instead.
+	Reranker *MemoryRerankerConfig `json:"reranker,omitempty" jsonschema:"description=Retrieve reranker configuration"`
+
+	// Embeddings controls the optional local embedding reranker. The default
+	// hashing backend downloads no model files and only reranks candidates.
+	Embeddings *MemoryEmbeddingsConfig `json:"embeddings,omitempty" jsonschema:"description=Local memory embedding reranker configuration"`
+
+	// Rollout controls the per-session rollout summary materializer.
+	Rollout *MemoryRolloutConfig `json:"rollout,omitempty" jsonschema:"description=Per-session rollout summary configuration"`
+}
+
+// MemoryMentalModelsConfig configures the Mental Models materializer.
+type MemoryMentalModelsConfig struct {
+	Enabled       *bool   `json:"enabled,omitempty" jsonschema:"description=Enable Mental Models materializer,default=true"`
+	MaxBytesShare float64 `json:"max_bytes_share,omitempty" jsonschema:"description=Maximum fraction of recall budget allocated to mental models,default=0.5"`
+}
+
+// IsEnabled returns true unless explicitly disabled.
+func (c *MemoryMentalModelsConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// GetMaxBytesShare returns the configured share (0..1] with default 0.5.
+func (c *MemoryMentalModelsConfig) GetMaxBytesShare() float64 {
+	if c == nil || c.MaxBytesShare <= 0 || c.MaxBytesShare > 1 {
+		return 0.5
+	}
+	return c.MaxBytesShare
+}
+
+// MemoryBackgroundMaterializeConfig configures background materialization.
+type MemoryBackgroundMaterializeConfig struct {
+	Enabled     *bool  `json:"enabled,omitempty" jsonschema:"description=Enable background materializer,default=true"`
+	IntervalSec int    `json:"interval_seconds,omitempty" jsonschema:"description=Background materialization interval in seconds,default=300"`
+	EveryNTurns int    `json:"every_n_turns,omitempty" jsonschema:"description=Force materialization every N idle turns,default=10"`
+	_           string `json:"-"`
+}
+
+// IsEnabled returns false unless explicitly enabled.
+func (c *MemoryBackgroundMaterializeConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// GetIntervalSeconds returns the configured interval (>0) with default 300s.
+func (c *MemoryBackgroundMaterializeConfig) GetIntervalSeconds() int {
+	if c == nil || c.IntervalSec <= 0 {
+		return 300
+	}
+	return c.IntervalSec
+}
+
+// GetEveryNTurns returns the per-turn cadence (>0) with default 10.
+func (c *MemoryBackgroundMaterializeConfig) GetEveryNTurns() int {
+	if c == nil || c.EveryNTurns <= 0 {
+		return 10
+	}
+	return c.EveryNTurns
+}
+
+// MemoryCompactionRecallConfig configures pre-compaction recall.
+type MemoryCompactionRecallConfig struct {
+	Enabled   *bool `json:"enabled,omitempty" jsonschema:"description=Enable compaction-time recall,default=true"`
+	TopK      int   `json:"top_k,omitempty" jsonschema:"description=Maximum events to inject into compaction prompt,default=5"`
+	MaxBytes  int   `json:"max_bytes,omitempty" jsonschema:"description=Maximum byte budget for compaction rescue payload,default=2048"`
+	UseRerank *bool `json:"use_rerank,omitempty" jsonschema:"description=Use the configured reranker during compaction recall,default=false"`
+}
+
+// IsEnabled returns true unless explicitly disabled.
+func (c *MemoryCompactionRecallConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// GetTopK returns the configured top-K with default 5.
+func (c *MemoryCompactionRecallConfig) GetTopK() int {
+	if c == nil || c.TopK <= 0 {
+		return 5
+	}
+	return c.TopK
+}
+
+// GetMaxBytes returns the configured byte budget with default 2048.
+func (c *MemoryCompactionRecallConfig) GetMaxBytes() int {
+	if c == nil || c.MaxBytes <= 0 {
+		return 2048
+	}
+	return c.MaxBytes
+}
+
+// GetUseRerank returns whether to invoke the reranker during compaction recall.
+func (c *MemoryCompactionRecallConfig) GetUseRerank() bool {
+	if c == nil || c.UseRerank == nil {
+		return false
+	}
+	return *c.UseRerank
+}
+
+// MemoryRerankerConfig configures retrieve reranking.
+type MemoryRerankerConfig struct {
+	Enabled       *bool  `json:"enabled,omitempty" jsonschema:"description=Enable reranker on Retrieve(),default=false"`
+	Type          string `json:"type,omitempty" jsonschema:"description=Reranker implementation,enum=heuristic,enum=embedding,enum=hybrid,enum=llm,default=heuristic"`
+	MaxCandidates int    `json:"max_candidates,omitempty" jsonschema:"description=Maximum candidates fed to the reranker,default=30"`
+}
+
+// IsEnabled returns false unless explicitly enabled.
+func (c *MemoryRerankerConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// GetType returns the reranker type with default "heuristic".
+func (c *MemoryRerankerConfig) GetType() string {
+	if c == nil || strings.TrimSpace(c.Type) == "" {
+		return "heuristic"
+	}
+	return strings.ToLower(strings.TrimSpace(c.Type))
+}
+
+// GetMaxCandidates returns the configured candidate cap with default 30.
+func (c *MemoryRerankerConfig) GetMaxCandidates() int {
+	if c == nil || c.MaxCandidates <= 0 {
+		return 30
+	}
+	return c.MaxCandidates
+}
+
+// MemoryEmbeddingsConfig configures the local embedding reranker.
+type MemoryEmbeddingsConfig struct {
+	Enabled    *bool  `json:"enabled,omitempty" jsonschema:"description=Enable local embedding reranker,default=false"`
+	Backend    string `json:"backend,omitempty" jsonschema:"description=Embedding backend,enum=hashing,default=hashing"`
+	Dimensions int    `json:"dimensions,omitempty" jsonschema:"description=Hashing embedding dimensions,default=384"`
+}
+
+// IsEnabled returns false unless explicitly enabled.
+func (c *MemoryEmbeddingsConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// BackendName returns the embedding backend with default "hashing".
+func (c *MemoryEmbeddingsConfig) BackendName() string {
+	if c == nil || strings.TrimSpace(c.Backend) == "" {
+		return "hashing"
+	}
+	return strings.ToLower(strings.TrimSpace(c.Backend))
+}
+
+// GetDimensions returns the configured vector dimensions with default 384.
+func (c *MemoryEmbeddingsConfig) GetDimensions() int {
+	if c == nil || c.Dimensions <= 0 {
+		return 384
+	}
+	return c.Dimensions
+}
+
+// MemoryRolloutConfig configures per-session rollout summaries.
+type MemoryRolloutConfig struct {
+	Enabled   *bool `json:"enabled,omitempty" jsonschema:"description=Enable per-session rollout summary materializer,default=true"`
+	MaxKeep   int   `json:"max_keep,omitempty" jsonschema:"description=Maximum rollout files retained on disk,default=200"`
+	MinEvents int   `json:"min_events,omitempty" jsonschema:"description=Minimum durable events before a rollout summary is written,default=3"`
+}
+
+// IsEnabled returns true unless explicitly disabled.
+func (c *MemoryRolloutConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// GetMaxKeep returns the max files retained (>0) with default 200.
+func (c *MemoryRolloutConfig) GetMaxKeep() int {
+	if c == nil || c.MaxKeep <= 0 {
+		return 200
+	}
+	return c.MaxKeep
+}
+
+// GetMinEvents returns the minimum event count threshold with default 3.
+func (c *MemoryRolloutConfig) GetMinEvents() int {
+	if c == nil || c.MinEvents <= 0 {
+		return 3
+	}
+	return c.MinEvents
 }
 
 // BackendName returns the effective memory backend.
@@ -637,8 +884,9 @@ type Agent struct {
 	OmitContextFiles bool      `json:"omit_context_files,omitempty" jsonschema:"description=Skip project and global context file injection for this agent,default=false"`
 	// This is the id of the system prompt used by the agent
 	Disabled bool `json:"disabled,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema:"description=Reasoning effort level for this agent,enum=low,enum=medium,enum=high,enum=max"`
 
-	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=large,enum=small,default=large"`
+	Model SelectedModelType `json:"model" jsonschema:"required,description=The model slot to use for this agent (large, small, or a custom key in models),default=large"`
 
 	// The available tools for the agent
 	//  if this is nil, all tools are available
@@ -654,6 +902,11 @@ type Agent struct {
 
 	// Overrides the context paths for this agent
 	ContextPaths []string `json:"context_paths,omitempty"`
+
+	// New fields for subagent system redesign
+
+	// Spawns lists subagent types this agent can spawn (e.g., ["explore"] or ["*"] for any).
+	Spawns []string `json:"spawns,omitempty" jsonschema:"description=Subagent types this agent can spawn,example=explore,example=*"`
 }
 
 type Tools struct {
@@ -844,8 +1097,27 @@ func (c *Config) GetModel(provider, model string) *catwalk.Model {
 	return nil
 }
 
+func (c *Config) SelectedModelForType(modelType SelectedModelType) (SelectedModel, bool) {
+	if c == nil {
+		return SelectedModel{}, false
+	}
+	if model, ok := c.Models[modelType]; ok {
+		return model, true
+	}
+	switch modelType {
+	case SelectedModelTypePlan, SelectedModelTypeReview, SelectedModelTypeDesigner:
+		model, ok := c.Models[SelectedModelTypeLarge]
+		return model, ok
+	case SelectedModelTypeLibrarian, SelectedModelTypeQuickTask:
+		model, ok := c.Models[SelectedModelTypeSmall]
+		return model, ok
+	default:
+		return SelectedModel{}, false
+	}
+}
+
 func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfig {
-	model, ok := c.Models[modelType]
+	model, ok := c.SelectedModelForType(modelType)
 	if !ok {
 		return nil
 	}
@@ -856,7 +1128,7 @@ func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfi
 }
 
 func (c *Config) GetModelByType(modelType SelectedModelType) *catwalk.Model {
-	model, ok := c.Models[modelType]
+	model, ok := c.SelectedModelForType(modelType)
 	if !ok {
 		return nil
 	}
@@ -935,9 +1207,32 @@ func allToolNames() []string {
 		"todos",
 		"send_message",
 		"task_stop",
+		"subagent_finish",
 		"subtask_result",
 		"write",
 	}
+}
+
+func resolveResearchTools(tools []string) []string {
+	researchTools := []string{
+		"agentic_fetch",
+		"bash",
+		"glob",
+		"grep",
+		"lsp_declaration",
+		"lsp_definition",
+		"lsp_diagnostics",
+		"lsp_document_symbols",
+		"lsp_hover",
+		"lsp_implementation",
+		"lsp_references",
+		"lsp_type_definition",
+		"lsp_workspace_symbols",
+		"read",
+		"subagent_finish",
+		"tool_search",
+	}
+	return filterSlice(tools, researchTools, true)
 }
 
 func resolveAllowedTools(allTools []string, disabledTools []string) []string {
@@ -952,6 +1247,32 @@ func resolveReadOnlyTools(tools []string) []string {
 	readOnlyTools := []string{"bash", "glob", "grep", "read", "tool_search"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
+}
+
+var readOnlyResearchToolNames = []string{
+	"bash",
+	"glob",
+	"grep",
+	"lsp_declaration",
+	"lsp_definition",
+	"lsp_diagnostics",
+	"lsp_document_symbols",
+	"lsp_hover",
+	"lsp_implementation",
+	"lsp_references",
+	"lsp_type_definition",
+	"lsp_workspace_symbols",
+	"read",
+	"subagent_finish",
+	"tool_search",
+}
+
+func resolvePlanningTools(tools []string) []string {
+	return filterSlice(tools, readOnlyResearchToolNames, true)
+}
+
+func resolveReviewTools(tools []string) []string {
+	return filterSlice(tools, readOnlyResearchToolNames, true)
 }
 
 func resolvePrimaryTools(tools []string) []string {
@@ -977,6 +1298,10 @@ func filterSlice(data []string, mask []string, include bool) []string {
 }
 
 func builtinAgents(primaryTools, generalTools, exploreTools, contextPaths []string) map[string]Agent {
+	planningTools := resolvePlanningTools(primaryTools)
+	researchTools := resolveResearchTools(primaryTools)
+	reviewTools := resolveReviewTools(primaryTools)
+
 	return map[string]Agent{
 		AgentCoder: {
 			ID:           AgentCoder,
@@ -1000,6 +1325,76 @@ func builtinAgents(primaryTools, generalTools, exploreTools, contextPaths []stri
 			Isolation:        "session",
 			Mode:             AgentModeSubagent,
 			Model:            SelectedModelTypeLarge,
+			ContextPaths:     contextPaths,
+			AllowedTools:     generalTools,
+		},
+		AgentPlan: {
+			ID:               AgentPlan,
+			Name:             "Plan",
+			Description:      "A read-only architecture and planning subagent for complex multi-file changes. It produces executable implementation plans with concrete files, sequence, edge cases, and verification steps; use it before substantial implementation, not for tiny edits.",
+			Role:             "planner",
+			AdditionalPrompt: "Act as a read-only software architect: understand requirements, explore relevant code paths, compare alternatives, and return an executable plan with concrete files, ordered steps, edge cases, and verification. Do not edit files or run builds, tests, package managers, or non-git shell commands.",
+			Memory:           "inherit",
+			Isolation:        "session",
+			Mode:             AgentModeSubagent,
+			Model:            SelectedModelTypePlan,
+			ContextPaths:     contextPaths,
+			AllowedTools:     planningTools,
+			AllowedMCP:       map[string][]string{},
+			Spawns:           []string{AgentExplore},
+		},
+		AgentReview: {
+			ID:               AgentReview,
+			Name:             "Review",
+			Description:      "A code-review subagent for final bug, regression, correctness, and security analysis. It runs on a large/review-capable model by default, is read-only, and returns patch-anchored findings for the primary agent to verify.",
+			Role:             "reviewer",
+			AdditionalPrompt: "Act as a code-review specialist: inspect the current diff and relevant surrounding code, identify only provable bugs the author would want fixed before merge, and return patch-anchored findings with file:line evidence, priority, confidence, and a concise verdict. Do not edit files, approve changes blindly, or run builds, tests, package managers, or non-git shell commands.",
+			Memory:           "inherit",
+			Isolation:        "session",
+			Mode:             AgentModeSubagent,
+			Model:            SelectedModelTypeReview,
+			ContextPaths:     contextPaths,
+			AllowedTools:     reviewTools,
+			AllowedMCP:       map[string][]string{},
+			Spawns:           []string{AgentExplore},
+		},
+		AgentDesigner: {
+			ID:               AgentDesigner,
+			Name:             "Designer",
+			Description:      "A UI/UX implementation and review subagent for visual refinement, accessibility, interaction states, and frontend polish. It may edit files and run targeted verification when delegated UI work requires it.",
+			Role:             "designer",
+			AdditionalPrompt: "Act as a UI/UX specialist: reuse existing components and tokens, implement explicit loading/empty/error/disabled/focus states, check accessibility and responsive behavior, avoid generic AI-looking design patterns, and keep changes minimal and consistent with the codebase.",
+			Memory:           "inherit",
+			Isolation:        "session",
+			Mode:             AgentModeSubagent,
+			Model:            SelectedModelTypeDesigner,
+			ContextPaths:     contextPaths,
+			AllowedTools:     generalTools,
+		},
+		AgentLibrarian: {
+			ID:               AgentLibrarian,
+			Name:             "Librarian",
+			Description:      "A source-verified library/API research subagent. It answers dependency, framework, and external API questions from local source, official documentation, and exact version evidence rather than model memory.",
+			Role:             "researcher",
+			AdditionalPrompt: "Act as a source-verified librarian: answer dependency, framework, and external API questions by reading local dependencies first, then official documentation or source when needed. Every claim should cite source paths, versions, or URLs. Do not edit project files or rely on training-data memory for API details.",
+			Memory:           "inherit",
+			Isolation:        "session",
+			Mode:             AgentModeSubagent,
+			Model:            SelectedModelTypeLibrarian,
+			ContextPaths:     contextPaths,
+			AllowedTools:     researchTools,
+			AllowedMCP:       map[string][]string{},
+		},
+		AgentQuickTask: {
+			ID:               AgentQuickTask,
+			Name:             "Quick Task",
+			Description:      "A low-cost worker for strictly mechanical, well-scoped updates or data collection. Use it only when the task is small, unambiguous, and does not require deep reasoning or review judgment.",
+			Role:             "executor",
+			AdditionalPrompt: "Act as a fast mechanical worker: complete only the assigned small, unambiguous task; avoid broad redesign, deep review, or exploratory scope creep; run only narrow verification when needed; return a minimal handoff.",
+			Memory:           "inherit",
+			Isolation:        "session",
+			Mode:             AgentModeSubagent,
+			Model:            SelectedModelTypeQuickTask,
 			ContextPaths:     contextPaths,
 			AllowedTools:     generalTools,
 		},
@@ -1078,6 +1473,9 @@ func mergeAgentConfig(base, override Agent) Agent {
 	if override.ContextPaths != nil {
 		merged.ContextPaths = override.ContextPaths
 	}
+	if override.Spawns != nil {
+		merged.Spawns = override.Spawns
+	}
 
 	return merged
 }
@@ -1099,7 +1497,8 @@ func agentConfigsEqual(a, b Agent) bool {
 		slices.Equal(a.AllowedTools, b.AllowedTools) &&
 		taskGovernanceEqual(a.TaskGovernance, b.TaskGovernance) &&
 		slices.Equal(a.ContextPaths, b.ContextPaths) &&
-		maps.EqualFunc(a.AllowedMCP, b.AllowedMCP, slices.Equal)
+		maps.EqualFunc(a.AllowedMCP, b.AllowedMCP, slices.Equal) &&
+		slices.Equal(a.Spawns, b.Spawns)
 }
 
 func taskGovernanceEqual(a, b *TaskGovernance) bool {

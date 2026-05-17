@@ -30,7 +30,7 @@ func TestDenialQueue_Push(t *testing.T) {
 
 	entries := q.Entries()
 	require.Len(t, entries, 3)
-	require.Equal(t, "4", entries[0].Request.ID)  // most recent first
+	require.Equal(t, "4", entries[0].Request.ID) // most recent first
 	require.Equal(t, "3", entries[1].Request.ID)
 	require.Equal(t, "2", entries[2].Request.ID)
 	require.Equal(t, "reason4", entries[0].Reason)
@@ -64,7 +64,7 @@ func TestDenialQueue_Take(t *testing.T) {
 	entry := q.Push(req, "reason", true)
 
 	require.Equal(t, 1, q.Size())
-	
+
 	// Take existing entry
 	taken := q.Take(entry.ID)
 	require.NotNil(t, taken)
@@ -108,7 +108,7 @@ func TestDenialQueue_Clear(t *testing.T) {
 func TestDenialQueue_DefaultSize(t *testing.T) {
 	q := NewDenialQueue(0) // Should use default
 	require.Equal(t, 0, q.Size())
-	
+
 	// Fill to default max (10)
 	for i := 0; i < 15; i++ {
 		q.Push(permission.PermissionRequest{ID: string(rune('a' + i)), ToolCallID: string(rune('a' + i))}, "reason", true)
@@ -158,8 +158,8 @@ func TestActionSummary(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "nil entry",
-			entry: nil,
+			name:     "nil entry",
+			entry:    nil,
 			expected: "unknown action",
 		},
 		{
@@ -167,7 +167,7 @@ func TestActionSummary(t *testing.T) {
 			entry: &DenialEntry{
 				Request: permission.PermissionRequest{
 					ToolName: "bash",
-					Params: map[string]any{"command": "ls -la"},
+					Params:   map[string]any{"command": "ls -la"},
 				},
 			},
 			expected: "ls -la",
@@ -184,7 +184,7 @@ func TestActionSummary(t *testing.T) {
 			entry: &DenialEntry{
 				Request: permission.PermissionRequest{
 					ToolName: "edit",
-					Params: map[string]any{"file_path": "/tmp/test.go"},
+					Params:   map[string]any{"file_path": "/tmp/test.go"},
 				},
 			},
 			expected: "edit /tmp/test.go",
@@ -194,7 +194,7 @@ func TestActionSummary(t *testing.T) {
 			entry: &DenialEntry{
 				Request: permission.PermissionRequest{
 					ToolName: "write",
-					Params: map[string]any{"file_path": "/tmp/new.go"},
+					Params:   map[string]any{"file_path": "/tmp/new.go"},
 				},
 			},
 			expected: "write /tmp/new.go",

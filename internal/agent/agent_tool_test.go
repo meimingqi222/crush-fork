@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"charm.land/fantasy"
@@ -37,20 +38,30 @@ func TestSubagentConfigSupportsConfiguredSubagents(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg.Config().Agents = map[string]config.Agent{
-		"reviewer": {
+		"custom-reviewer": {
 			Mode:         config.AgentModeSubagent,
 			Description:  "Reviews changes before handoff.",
 			AllowedTools: []string{"read"},
+		},
+		"reviewer": {
+			Mode:         config.AgentModeSubagent,
+			Description:  "Configured reviewer should win over built-in alias.",
+			AllowedTools: []string{"grep", "read"},
 		},
 	}
 	cfg.SetupAgents()
 
 	coord := &coordinator{cfg: cfg}
 
-	agentCfg, err := coord.subagentConfig("reviewer")
+	agentCfg, err := coord.subagentConfig("custom-reviewer")
+	require.NoError(t, err)
+	assert.Equal(t, "custom-reviewer", agentCfg.ID)
+	assert.Equal(t, []string{"read"}, agentCfg.AllowedTools)
+
+	agentCfg, err = coord.subagentConfig("reviewer")
 	require.NoError(t, err)
 	assert.Equal(t, "reviewer", agentCfg.ID)
-	assert.Equal(t, []string{"read"}, agentCfg.AllowedTools)
+	assert.Equal(t, []string{"grep", "read"}, agentCfg.AllowedTools)
 }
 
 func TestBuildAgentToolDescriptionDeduplicatesExploreAlias(t *testing.T) {
@@ -63,6 +74,11 @@ func TestBuildAgentToolDescriptionDeduplicatesExploreAlias(t *testing.T) {
 
 	assert.Contains(t, description, "- general:")
 	assert.Contains(t, description, "- explore:")
+	assert.Contains(t, description, "- plan:")
+	assert.Contains(t, description, "- review:")
+	assert.Contains(t, description, "- designer:")
+	assert.Contains(t, description, "- librarian:")
+	assert.Contains(t, description, "- quick_task:")
 	assert.Equal(t, 1, strings.Count(description, "- explore:"))
 }
 
@@ -78,6 +94,9 @@ func TestBuildAgentToolDescriptionEmphasizesParallelDelegation(t *testing.T) {
 	assert.Contains(t, description, "use a single Agent call with the `tasks` array")
 	assert.Contains(t, description, "Prefer early delegation for bounded work")
 	assert.Contains(t, description, "Use `explore` only for evidence gathering, not final judgment")
+	assert.Contains(t, description, "Use `review` for final code review")
+	assert.Contains(t, description, "Use `plan` for architecture planning")
+	assert.Contains(t, description, "Use `librarian` for source-verified")
 	assert.Contains(t, description, "Do not delegate final code review, correctness approval, or bug triage decisions to `explore`")
 	assert.Contains(t, description, "restricted `bash` tool")
 	assert.Contains(t, description, "git diff")
@@ -159,6 +178,134 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 		exploreNames = append(exploreNames, tool.Info().Name)
 	}
 	assert.Equal(t, []string{"bash", "glob", "grep", "read", "tool_search"}, exploreNames)
+
+	reviewTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentReview], session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	reviewNames := make([]string, 0, len(reviewTools))
+	for _, tool := range reviewTools {
+		reviewNames = append(reviewNames, tool.Info().Name)
+	}
+	assert.Contains(t, reviewNames, "bash")
+	assert.Contains(t, reviewNames, "read")
+	assert.Contains(t, reviewNames, tools.ReferencesToolName)
+	assert.Contains(t, reviewNames, tools.SubagentFinishToolName)
+	assert.NotContains(t, reviewNames, "edit")
+	assert.NotContains(t, reviewNames, "write")
+	assert.NotContains(t, reviewNames, AgentToolName)
+
+	librarianTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentLibrarian], session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	librarianNames := make([]string, 0, len(librarianTools))
+	for _, tool := range librarianTools {
+		librarianNames = append(librarianNames, tool.Info().Name)
+	}
+	assert.Contains(t, librarianNames, tools.AgenticFetchToolName)
+	assert.Contains(t, librarianNames, tools.SubagentFinishToolName)
+	assert.NotContains(t, librarianNames, "edit")
+	assert.NotContains(t, librarianNames, "write")
+
+	quickTaskTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentQuickTask], session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	quickTaskNames := make([]string, 0, len(quickTaskTools))
+	for _, tool := range quickTaskTools {
+		quickTaskNames = append(quickTaskNames, tool.Info().Name)
+	}
+	assert.Contains(t, quickTaskNames, "edit")
+	assert.Contains(t, quickTaskNames, "write")
+	assert.Contains(t, quickTaskNames, tools.SubagentFinishToolName)
+	assert.NotContains(t, quickTaskNames, AgentToolName)
+}
+
+func TestBuildToolsAllowsRecursiveAgentToolWhenConfigured(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: true, AllowRecursiveAgents: true}
+	agentCfg := cfg.Config().Agents[config.AgentGeneral]
+	agentCfg.AllowedTools = append(agentCfg.AllowedTools, AgentToolName)
+
+	coord := &coordinator{
+		cfg:         cfg,
+		sessions:    env.sessions,
+		messages:    env.messages,
+		permissions: env.permissions,
+		userInput:   nil,
+		history:     env.history,
+		filetracker: *env.filetracker,
+		lspManager:  lsp.NewManager(cfg),
+	}
+
+	runtime := buildSubagentRuntimeContext(
+		"parent-session",
+		"child-session",
+		"msg-1",
+		"call-1",
+		subagentTask{Name: "task", SubagentType: config.AgentGeneral},
+		agentCfg,
+		ParentPermissionContext{SessionID: "parent-session", AllowedTools: []string{AgentToolName, tools.ReadToolName}},
+		agentCfg.AllowedTools,
+		"session",
+		env.workingDir,
+		nil,
+	)
+	applySubagentRuntimeConfig(&runtime, cfg.Config().EffectiveSubagentRuntime())
+
+	toolSet, err := coord.buildTools(withSubagentRuntimeContext(t.Context(), runtime), agentCfg, session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	var names []string
+	for _, tool := range toolSet {
+		names = append(names, tool.Info().Name)
+	}
+	assert.Contains(t, names, AgentToolName)
+}
+
+func TestBuildToolsDoesNotBypassDisabledAgentToolForRecursiveSubagents(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	cfg.Config().Options.DisabledTools = []string{AgentToolName}
+	cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: true, AllowRecursiveAgents: true}
+	agentCfg := cfg.Config().Agents[config.AgentGeneral]
+	agentCfg.AllowedTools = append(agentCfg.AllowedTools, AgentToolName)
+
+	coord := &coordinator{
+		cfg:         cfg,
+		sessions:    env.sessions,
+		messages:    env.messages,
+		permissions: env.permissions,
+		userInput:   nil,
+		history:     env.history,
+		filetracker: *env.filetracker,
+		lspManager:  lsp.NewManager(cfg),
+	}
+
+	runtime := buildSubagentRuntimeContext(
+		"parent-session",
+		"child-session",
+		"msg-1",
+		"call-1",
+		subagentTask{Name: "task", SubagentType: config.AgentGeneral},
+		agentCfg,
+		ParentPermissionContext{SessionID: "parent-session", AllowedTools: []string{AgentToolName, tools.ReadToolName}, ExternalDeny: []string{AgentToolName}},
+		agentCfg.AllowedTools,
+		"session",
+		env.workingDir,
+		nil,
+	)
+	applySubagentRuntimeConfig(&runtime, cfg.Config().EffectiveSubagentRuntime())
+
+	toolSet, err := coord.buildTools(withSubagentRuntimeContext(t.Context(), runtime), agentCfg, session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	var names []string
+	for _, tool := range toolSet {
+		names = append(names, tool.Info().Name)
+	}
+	assert.NotContains(t, names, AgentToolName)
 }
 
 func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
@@ -183,7 +330,7 @@ func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
 		"child-session",
 		"msg-1",
 		"call-1",
-		taskGraphTask{ID: "task", SubagentType: config.AgentExplore},
+		subagentTask{Name: "task", SubagentType: config.AgentExplore},
 		agentCfg,
 		ParentPermissionContext{SessionID: "parent-session", AllowedTools: []string{tools.ReadToolName, tools.ToolSearchToolName}},
 		agentCfg.AllowedTools,
@@ -321,9 +468,9 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 }
 
 func TestValidateExploreDelegationsBlocksFileContentRelay(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID: "relay",
-		Prompt: "Read internal/agent/agent.go and internal/agent/coordinator.go " +
+	message := validateExploreDelegations([]subagentTask{{
+		Name: "relay",
+		Assignment: "Read internal/agent/agent.go and internal/agent/coordinator.go " +
 			"completely and return their full contents.",
 		SubagentType: config.AgentExplore,
 	}})
@@ -334,20 +481,20 @@ func TestValidateExploreDelegationsBlocksFileContentRelay(t *testing.T) {
 }
 
 func TestValidateExploreDelegationsAllowsQuestionableExplorePrompts(t *testing.T) {
-	tasks := []taskGraphTask{
+	tasks := []subagentTask{
 		{
-			ID:           "review-evidence",
-			Prompt:       "Review the current diff and report file:line evidence for the primary agent to verify.",
+			Name:         "review-evidence",
+			Assignment:   "Find changed files in the current diff and report file:line evidence for the primary agent to verify.",
 			SubagentType: config.AgentExplore,
 		},
 		{
-			ID:           "test-command-reference",
-			Prompt:       "Find where go test ./internal/agent is documented. Do not run it.",
+			Name:         "test-command-reference",
+			Assignment:   "Find where go test ./internal/agent is documented. Do not run it.",
 			SubagentType: config.AgentExplore,
 		},
 		{
-			ID:           "fix-location",
-			Prompt:       "Locate the code likely responsible for the fix in coordinator.go and return concise evidence.",
+			Name:         "fix-location",
+			Assignment:   "Locate the code likely responsible for the fix in coordinator.go and return concise evidence.",
 			SubagentType: config.AgentExplore,
 		},
 	}
@@ -356,9 +503,9 @@ func TestValidateExploreDelegationsAllowsQuestionableExplorePrompts(t *testing.T
 }
 
 func TestValidateExploreDelegationsAllowsCodeLocationSearch(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID: "locate",
-		Prompt: "Locate the files and symbols involved in MCP authentication state " +
+	message := validateExploreDelegations([]subagentTask{{
+		Name: "locate",
+		Assignment: "Locate the files and symbols involved in MCP authentication state " +
 			"rendering. Return concise file:line references and observed facts only.",
 		SubagentType: config.AgentExplore,
 	}})
@@ -367,9 +514,9 @@ func TestValidateExploreDelegationsAllowsCodeLocationSearch(t *testing.T) {
 }
 
 func TestValidateExploreDelegationsAllowsNegatedBuildTestLintInstruction(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID: "locate",
-		Prompt: "Locate red frame layer implementation. Return key files and line references. " +
+	message := validateExploreDelegations([]subagentTask{{
+		Name: "locate",
+		Assignment: "Locate red frame layer implementation. Return key files and line references. " +
 			"Do not run any build, test, lint, or non-git shell commands.",
 		SubagentType: config.AgentExplore,
 	}})
@@ -378,9 +525,9 @@ func TestValidateExploreDelegationsAllowsNegatedBuildTestLintInstruction(t *test
 }
 
 func TestValidateExploreDelegationsAllowsChineseNegatedBuildTestLintInstruction(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID:           "locate",
-		Prompt:       "定位红色图框图层实现。不要运行任何构建、测试、lint 或非 git shell 命令。",
+	message := validateExploreDelegations([]subagentTask{{
+		Name:         "locate",
+		Assignment:   "定位红色图框图层实现。不要运行任何构建、测试、lint 或非 git shell 命令。",
 		SubagentType: config.AgentExplore,
 	}})
 
@@ -388,21 +535,85 @@ func TestValidateExploreDelegationsAllowsChineseNegatedBuildTestLintInstruction(
 }
 
 func TestValidateExploreDelegationsAllowsChineseImplementationLookup(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID:           "locate",
-		Prompt:       "定位 MCP 认证状态渲染的实现入口，只返回简洁的 file:line 证据。",
+	message := validateExploreDelegations([]subagentTask{{
+		Name:         "locate",
+		Assignment:   "定位 MCP 认证状态渲染的实现入口，只返回简洁的 file:line 证据。",
 		SubagentType: config.AgentExplore,
 	}})
 
 	assert.Empty(t, message)
 }
 
+func TestValidateExploreDelegationsBlocksFinalReviewInExplore(t *testing.T) {
+	message := validateExploreDelegations([]subagentTask{{
+		Name:         "explore-review",
+		Assignment:   "Review the current diff and decide whether it is safe to merge.",
+		SubagentType: config.AgentExplore,
+	}})
+
+	require.NotEmpty(t, message)
+	assert.Contains(t, message, "review` subagent")
+}
+
+func TestValidateReviewDelegationsBlocksImplementation(t *testing.T) {
+	message := validateExploreDelegations([]subagentTask{{
+		Name:         "review-fix",
+		Assignment:   "Review the current diff and fix any bugs you find.",
+		SubagentType: config.AgentReview,
+	}})
+
+	require.NotEmpty(t, message)
+	assert.Contains(t, message, "read-only")
+}
+
+func TestValidateReviewDelegationsAllowsNegatedMutation(t *testing.T) {
+	message := validateExploreDelegations([]subagentTask{{
+		Name:         "review-only",
+		Assignment:   "Review the current diff. Do not modify files or run tests.",
+		SubagentType: config.AgentReview,
+	}})
+
+	assert.Empty(t, message)
+}
+
+func TestValidatePlanAndLibrarianDelegationsBlockMutation(t *testing.T) {
+	planMessage := validateExploreDelegations([]subagentTask{{
+		Name:         "plan-fix",
+		Assignment:   "Plan and implement the fix.",
+		SubagentType: config.AgentPlan,
+	}})
+	require.NotEmpty(t, planMessage)
+	assert.Contains(t, planMessage, "architecture planning")
+
+	librarianMessage := validateExploreDelegations([]subagentTask{{
+		Name:         "library-fix",
+		Assignment:   "Check the library API and edit the integration.",
+		SubagentType: config.AgentLibrarian,
+	}})
+	require.NotEmpty(t, librarianMessage)
+	assert.Contains(t, librarianMessage, "dependency/API research")
+}
+
 func TestValidateExploreDelegationsOnlyAppliesToExplore(t *testing.T) {
-	message := validateExploreDelegations([]taskGraphTask{{
-		ID:           "general-review",
-		Prompt:       "Review the current diff and decide whether it is safe to merge.",
+	message := validateExploreDelegations([]subagentTask{{
+		Name:         "general-review",
+		Assignment:   "Review the current diff and decide whether it is safe to merge.",
 		SubagentType: config.AgentGeneral,
 	}})
+
+	assert.Empty(t, message)
+}
+
+func TestValidateSubagentDelegationsPreservesConfiguredAliasNames(t *testing.T) {
+	agents := map[string]config.Agent{
+		"reviewer": {Name: "reviewer", Mode: config.AgentModeSubagent},
+	}
+
+	message := validateSubagentDelegations([]subagentTask{{
+		Name:         "custom-reviewer",
+		Assignment:   "Review the current diff and fix any bugs you find.",
+		SubagentType: "reviewer",
+	}}, agents)
 
 	assert.Empty(t, message)
 }
@@ -417,61 +628,115 @@ func runAgentToolForTest(t *testing.T, tool fantasy.AgentTool, params AgentParam
 	return tool.Run(ctx, fantasy.ToolCall{ID: "call-1", Name: AgentToolName, Input: string(input)})
 }
 
-func TestAgentToolUsesTaskGraphWhenTasksProvided(t *testing.T) {
-	env := testEnv(t)
-	cfg, err := config.Init(env.workingDir, "", false)
-	require.NoError(t, err)
-
-	coord := &coordinator{cfg: cfg}
-	called := false
-	coord.taskGraphScheduler = func(_ context.Context, params taskGraphParams) (fantasy.ToolResponse, error) {
-		called = true
-		require.Equal(t, "session-1", params.SessionID)
-		require.Equal(t, "msg-1", params.AgentMessageID)
-		require.Equal(t, "call-1", params.ToolCallID)
-		require.Len(t, params.Tasks, 2)
-		require.Equal(t, "collect", params.Tasks[0].ID)
-		require.Equal(t, []string{"collect"}, params.Tasks[1].DependsOn)
-		return fantasy.NewTextResponse("graph"), nil
-	}
-
-	tool, err := coord.agentTool(t.Context())
-	require.NoError(t, err)
-
-	resp, err := runAgentToolForTest(t, tool, AgentParams{Tasks: []AgentTaskParams{
-		{ID: "collect", Prompt: "collect info", SubagentType: "explore", Description: "Collect"},
-		{ID: "summarize", Prompt: "summarize info", SubagentType: "general", DependsOn: []string{"collect"}},
-	}})
-	require.NoError(t, err)
-	require.True(t, called)
-	require.Equal(t, "graph", resp.Content)
-}
-
-func TestAgentToolKeepsSinglePromptPathCompatible(t *testing.T) {
+func TestAgentToolParsesTasksCorrectly(t *testing.T) {
 	env := testEnv(t)
 	cfg, err := config.Init(env.workingDir, "", false)
 	require.NoError(t, err)
 
 	coord := &coordinator{cfg: cfg}
 	coord.subAgentFactory = func(_ context.Context, requestedType string) (SessionAgent, config.Agent, error) {
-		return &mockSessionAgent{}, config.Agent{ID: config.CanonicalSubagentID(requestedType), Mode: config.AgentModeSubagent}, nil
-	}
-
-	called := false
-	coord.taskGraphScheduler = func(_ context.Context, params taskGraphParams) (fantasy.ToolResponse, error) {
-		called = true
-		require.Equal(t, "call-1", params.ToolCallID)
-		require.Len(t, params.Tasks, 1)
-		require.Equal(t, "task", params.Tasks[0].ID)
-		require.Equal(t, "fix issue", params.Tasks[0].Prompt)
-		return fantasy.NewTextResponse("single"), nil
+		return &mockSessionAgent{}, config.Agent{Name: config.RequestedSubagentID(requestedType), Mode: config.AgentModeSubagent}, nil
 	}
 
 	tool, err := coord.agentTool(t.Context())
 	require.NoError(t, err)
 
-	resp, err := runAgentToolForTest(t, tool, AgentParams{Prompt: "fix issue", SubagentType: "general"})
+	input, err := json.Marshal(AgentParams{Tasks: []AgentTaskParams{
+		{Name: "collect", Assignment: "collect info", SubagentType: "explore", Description: "Collect"},
+		{Name: "summarize", Assignment: "summarize info", SubagentType: "general"},
+	}})
 	require.NoError(t, err)
-	require.True(t, called)
-	require.Equal(t, "single", resp.Content)
+
+	ctx := context.WithValue(context.Background(), tools.SessionIDContextKey, "session-1")
+	ctx = context.WithValue(ctx, tools.MessageIDContextKey, "msg-1")
+	_, _ = tool.Run(ctx, fantasy.ToolCall{ID: "call-1", Name: AgentToolName, Input: string(input)})
+}
+
+func TestAgentToolParsesSinglePromptCorrectly(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	coord := &coordinator{cfg: cfg}
+	coord.subAgentFactory = func(_ context.Context, requestedType string) (SessionAgent, config.Agent, error) {
+		return &mockSessionAgent{}, config.Agent{Name: config.RequestedSubagentID(requestedType), Mode: config.AgentModeSubagent}, nil
+	}
+
+	tool, err := coord.agentTool(t.Context())
+	require.NoError(t, err)
+
+	input, err := json.Marshal(AgentParams{Prompt: "fix issue", SubagentType: "general"})
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), tools.SessionIDContextKey, "session-1")
+	ctx = context.WithValue(ctx, tools.MessageIDContextKey, "msg-1")
+	_, _ = tool.Run(ctx, fantasy.ToolCall{ID: "call-1", Name: AgentToolName, Input: string(input)})
+}
+
+func TestTaskGraphSemaphoreUsesGlobalRuntimeLimit(t *testing.T) {
+	semaphores := make(map[string]chan struct{})
+	var semMu sync.Mutex
+
+	semaphore := subagentSemaphoreForAgent(
+		config.Agent{Name: config.AgentGeneral, Mode: config.AgentModeSubagent},
+		config.SubagentRuntimeConfig{MaxConcurrency: 2},
+		semaphores,
+		&semMu,
+	)
+
+	require.NotNil(t, semaphore)
+	require.Equal(t, 2, cap(semaphore))
+	assert.True(t, semaphore == subagentSemaphoreForAgent(
+		config.Agent{Name: config.AgentExplore, Mode: config.AgentModeSubagent},
+		config.SubagentRuntimeConfig{MaxConcurrency: 2},
+		semaphores,
+		&semMu,
+	))
+}
+
+func TestTaskGraphSemaphoreAgentLimitOverridesRuntimeLimit(t *testing.T) {
+	semaphores := make(map[string]chan struct{})
+	var semMu sync.Mutex
+	limit := 1
+
+	semaphore := subagentSemaphoreForAgent(
+		config.Agent{
+			Name: config.AgentGeneral,
+			Mode: config.AgentModeSubagent,
+			TaskGovernance: &config.TaskGovernance{
+				MaxConcurrent: &limit,
+			},
+		},
+		config.SubagentRuntimeConfig{MaxConcurrency: 4},
+		semaphores,
+		&semMu,
+	)
+
+	require.NotNil(t, semaphore)
+	require.Equal(t, 1, cap(semaphore))
+}
+
+func TestTaskGraphSemaphoreKeepsCustomAliasAgentBucket(t *testing.T) {
+	semaphores := make(map[string]chan struct{})
+	var semMu sync.Mutex
+	customLimit := 1
+	builtInLimit := 2
+
+	custom := subagentSemaphoreForAgent(
+		config.Agent{ID: "reviewer", Mode: config.AgentModeSubagent, TaskGovernance: &config.TaskGovernance{MaxConcurrent: &customLimit}},
+		config.SubagentRuntimeConfig{MaxConcurrency: 4},
+		semaphores,
+		&semMu,
+	)
+	builtIn := subagentSemaphoreForAgent(
+		config.Agent{ID: config.AgentReview, Mode: config.AgentModeSubagent, TaskGovernance: &config.TaskGovernance{MaxConcurrent: &builtInLimit}},
+		config.SubagentRuntimeConfig{MaxConcurrency: 4},
+		semaphores,
+		&semMu,
+	)
+
+	require.NotNil(t, custom)
+	require.NotNil(t, builtIn)
+	require.Equal(t, 1, cap(custom))
+	require.Equal(t, 2, cap(builtIn))
 }

@@ -15,20 +15,20 @@ const (
 )
 
 type Envelope struct {
-	MailboxID    string       `json:"mailbox_id"`
-	TargetTaskID string       `json:"target_task_id,omitempty"`
-	Kind         EnvelopeKind `json:"kind"`
-	Message      string       `json:"message,omitempty"`
-	Reason       string       `json:"reason,omitempty"`
-	CreatedAt    int64        `json:"created_at"`
+	MailboxID     string       `json:"mailbox_id"`
+	TargetAgentID string       `json:"target_agent_id,omitempty"`
+	Kind          EnvelopeKind `json:"kind"`
+	Message       string       `json:"message,omitempty"`
+	Reason        string       `json:"reason,omitempty"`
+	CreatedAt     int64        `json:"created_at"`
 }
 
 type Service interface {
-	Open(mailboxID string, taskIDs []string) error
+	Open(mailboxID string, agentIDs []string) error
 	Close(mailboxID string)
-	Send(mailboxID, taskID, message string) (Envelope, error)
-	Stop(mailboxID, taskID, reason string) (Envelope, error)
-	Consume(mailboxID, taskID string) ([]Envelope, error)
+	Send(mailboxID, agentID, message string) (Envelope, error)
+	Stop(mailboxID, agentID, reason string) (Envelope, error)
+	Consume(mailboxID, agentID string) ([]Envelope, error)
 }
 
 type service struct {
@@ -37,7 +37,7 @@ type service struct {
 }
 
 type mailbox struct {
-	tasks  map[string]struct{}
+	agents map[string]struct{}
 	queues map[string][]Envelope
 }
 
@@ -45,32 +45,32 @@ func NewService() Service {
 	return &service{mailboxes: map[string]*mailbox{}}
 }
 
-func (s *service) Open(mailboxID string, taskIDs []string) error {
+func (s *service) Open(mailboxID string, agentIDs []string) error {
 	id := strings.TrimSpace(mailboxID)
 	if id == "" {
 		return fmt.Errorf("mailbox_id is required")
 	}
-	if len(taskIDs) == 0 {
-		return fmt.Errorf("task_ids is required")
+	if len(agentIDs) == 0 {
+		return fmt.Errorf("agent_ids is required")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tasks := make(map[string]struct{}, len(taskIDs))
-	queues := make(map[string][]Envelope, len(taskIDs))
-	for _, taskID := range taskIDs {
-		trimmed := strings.TrimSpace(taskID)
+	agents := make(map[string]struct{}, len(agentIDs))
+	queues := make(map[string][]Envelope, len(agentIDs))
+	for _, agentID := range agentIDs {
+		trimmed := strings.TrimSpace(agentID)
 		if trimmed == "" {
 			continue
 		}
-		tasks[trimmed] = struct{}{}
+		agents[trimmed] = struct{}{}
 		queues[trimmed] = []Envelope{}
 	}
-	if len(tasks) == 0 {
-		return fmt.Errorf("task_ids is required")
+	if len(agents) == 0 {
+		return fmt.Errorf("agent_ids is required")
 	}
-	s.mailboxes[id] = &mailbox{tasks: tasks, queues: queues}
+	s.mailboxes[id] = &mailbox{agents: agents, queues: queues}
 	return nil
 }
 
@@ -84,7 +84,7 @@ func (s *service) Close(mailboxID string) {
 	s.mu.Unlock()
 }
 
-func (s *service) Send(mailboxID, taskID, message string) (Envelope, error) {
+func (s *service) Send(mailboxID, agentID, message string) (Envelope, error) {
 	msg := strings.TrimSpace(message)
 	if msg == "" {
 		return Envelope{}, fmt.Errorf("message is required")
@@ -95,35 +95,35 @@ func (s *service) Send(mailboxID, taskID, message string) (Envelope, error) {
 		Message:   msg,
 		CreatedAt: time.Now().UnixMilli(),
 	}
-	if err := s.enqueue(env, strings.TrimSpace(taskID)); err != nil {
+	if err := s.enqueue(env, strings.TrimSpace(agentID)); err != nil {
 		return Envelope{}, err
 	}
-	env.TargetTaskID = strings.TrimSpace(taskID)
+	env.TargetAgentID = strings.TrimSpace(agentID)
 	return env, nil
 }
 
-func (s *service) Stop(mailboxID, taskID, reason string) (Envelope, error) {
+func (s *service) Stop(mailboxID, agentID, reason string) (Envelope, error) {
 	env := Envelope{
 		MailboxID: strings.TrimSpace(mailboxID),
 		Kind:      EnvelopeKindStop,
 		Reason:    strings.TrimSpace(reason),
 		CreatedAt: time.Now().UnixMilli(),
 	}
-	if err := s.enqueue(env, strings.TrimSpace(taskID)); err != nil {
+	if err := s.enqueue(env, strings.TrimSpace(agentID)); err != nil {
 		return Envelope{}, err
 	}
-	env.TargetTaskID = strings.TrimSpace(taskID)
+	env.TargetAgentID = strings.TrimSpace(agentID)
 	return env, nil
 }
 
-func (s *service) Consume(mailboxID, taskID string) ([]Envelope, error) {
+func (s *service) Consume(mailboxID, agentID string) ([]Envelope, error) {
 	id := strings.TrimSpace(mailboxID)
-	task := strings.TrimSpace(taskID)
+	agent := strings.TrimSpace(agentID)
 	if id == "" {
 		return nil, fmt.Errorf("mailbox_id is required")
 	}
-	if task == "" {
-		return nil, fmt.Errorf("task_id is required")
+	if agent == "" {
+		return nil, fmt.Errorf("agent_id is required")
 	}
 
 	s.mu.Lock()
@@ -132,19 +132,19 @@ func (s *service) Consume(mailboxID, taskID string) ([]Envelope, error) {
 	if !ok {
 		return nil, fmt.Errorf("mailbox %q not found", id)
 	}
-	if _, ok := box.tasks[task]; !ok {
-		return nil, fmt.Errorf("task %q not found in mailbox %q", task, id)
+	if _, ok := box.agents[agent]; !ok {
+		return nil, fmt.Errorf("agent %q not found in mailbox %q", agent, id)
 	}
-	queue := box.queues[task]
+	queue := box.queues[agent]
 	if len(queue) == 0 {
 		return nil, nil
 	}
 	out := append([]Envelope(nil), queue...)
-	box.queues[task] = box.queues[task][:0]
+	box.queues[agent] = box.queues[agent][:0]
 	return out, nil
 }
 
-func (s *service) enqueue(envelope Envelope, taskID string) error {
+func (s *service) enqueue(envelope Envelope, agentID string) error {
 	mailboxID := strings.TrimSpace(envelope.MailboxID)
 	if mailboxID == "" {
 		return fmt.Errorf("mailbox_id is required")
@@ -157,18 +157,18 @@ func (s *service) enqueue(envelope Envelope, taskID string) error {
 		return fmt.Errorf("mailbox %q not found", mailboxID)
 	}
 
-	if taskID != "" {
-		if _, ok := box.tasks[taskID]; !ok {
-			return fmt.Errorf("task %q not found in mailbox %q", taskID, mailboxID)
+	if agentID != "" {
+		if _, ok := box.agents[agentID]; !ok {
+			return fmt.Errorf("agent %q not found in mailbox %q", agentID, mailboxID)
 		}
-		envelope.TargetTaskID = taskID
-		box.queues[taskID] = append(box.queues[taskID], envelope)
+		envelope.TargetAgentID = agentID
+		box.queues[agentID] = append(box.queues[agentID], envelope)
 		return nil
 	}
 
-	envelope.TargetTaskID = ""
-	for currentTaskID := range box.tasks {
-		box.queues[currentTaskID] = append(box.queues[currentTaskID], envelope)
+	envelope.TargetAgentID = ""
+	for currentAgentID := range box.agents {
+		box.queues[currentAgentID] = append(box.queues[currentAgentID], envelope)
 	}
 	return nil
 }

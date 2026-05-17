@@ -34,9 +34,7 @@ func TestTranscriptRetainerRetainsWindow(t *testing.T) {
 	require.Len(t, gotReq.Items, 1)
 	require.Equal(t, "USER: hi", gotReq.Items[0].Content)
 	require.Equal(t, "transcript:sess-1:3", gotReq.Items[0].DocumentID)
-	require.Contains(t, gotReq.Items[0].Tags, "scope:session")
 	require.Contains(t, gotReq.Items[0].Tags, "kind:transcript_window")
-	require.Contains(t, gotReq.Items[0].Tags, "session:sess-1")
 	require.Contains(t, gotReq.Items[0].Tags, "project:crush")
 }
 

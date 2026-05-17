@@ -13,7 +13,7 @@ import (
 func TestSubagentFinishToolReturnsStructuredMetadata(t *testing.T) {
 	t.Parallel()
 
-	tool := NewSubagentFinishTool()
+	tool := NewSubagentFinishTool(nil)
 	input, err := json.Marshal(SubagentFinishParams{
 		Status:       string(message.ToolResultSubtaskStatusCompletedWithWarnings),
 		Summary:      "done with warning",
@@ -41,7 +41,7 @@ func TestSubagentFinishToolReturnsStructuredMetadata(t *testing.T) {
 func TestSubagentFinishToolRejectsInvalidStatuses(t *testing.T) {
 	t.Parallel()
 
-	tool := NewSubagentFinishTool()
+	tool := NewSubagentFinishTool(nil)
 	input, err := json.Marshal(SubagentFinishParams{Status: string(message.ToolResultSubtaskStatusRunning)})
 	require.NoError(t, err)
 

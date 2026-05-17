@@ -34,17 +34,18 @@ func (r *TranscriptRetainer) RetainTranscript(ctx context.Context, sessionID str
 	if turnCount < 0 {
 		return fmt.Errorf("turn count must be non-negative")
 	}
+	// Tags follow oh-my-pi's per-project-tagged pattern:
+	// - kind:transcript_window identifies the content type
+	// - project:xxx (from retainTags) provides project-level filtering when scoping=per-project-tagged
+	// - session_id is kept in metadata only, not as a tag, to avoid polluting recall
 	item := RetainItem{
 		Content:    content,
 		Context:    "crush transcript",
 		DocumentID: fmt.Sprintf("transcript:%s:%d", sessionID, turnCount),
 		Tags: appendUniqueTags([]string{
-			"scope:session",
 			"kind:transcript_window",
-			"session:" + sessionID,
 		}, r.retainTags...),
 		Metadata: map[string]string{
-			"scope":      "session",
 			"kind":       "transcript_window",
 			"session_id": sessionID,
 			"turn":       fmt.Sprint(turnCount),

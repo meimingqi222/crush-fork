@@ -440,16 +440,21 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	if c.hasSession {
 		commands = append(commands, NewCommandItem(c.com.Styles, "summarize", "Summarize Session", "", ActionSummarize{SessionID: c.sessionID}))
 		commands = append(commands, NewCommandItem(c.com.Styles, "handoff", "Handoff", "", ActionOpenDialog{HandoffID}))
-		if c.mode == session.CollaborationModePlan {
+		switch c.mode {
+		case session.CollaborationModePlan:
 			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Exit Plan Mode", "", ActionTogglePlanMode{SessionID: c.sessionID, NextMode: session.CollaborationModeDefault}))
 			if strings.TrimSpace(c.proposedPlan) != "" {
 				commands = append(commands, NewCommandItem(c.com.Styles, "execute_proposed_plan", "Execute Proposed Plan", "", ActionExecuteProposedPlan{SessionID: c.sessionID, Plan: c.proposedPlan}))
 			}
-		} else {
+		case session.CollaborationModeOrchestrate:
+			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_orchestrate_mode", "Exit Orchestrate Mode", "", ActionToggleOrchestrateMode{SessionID: c.sessionID, NextMode: session.CollaborationModeDefault}))
+		default:
 			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Enter Plan Mode", "", ActionTogglePlanMode{SessionID: c.sessionID, NextMode: session.CollaborationModePlan}))
+			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_orchestrate_mode", "Enter Orchestrate Mode", "", ActionToggleOrchestrateMode{SessionID: c.sessionID, NextMode: session.CollaborationModeOrchestrate}))
 		}
 	} else {
 		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Enter Plan Mode", "", ActionTogglePlanMode{NextMode: session.CollaborationModePlan}))
+		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_orchestrate_mode", "Enter Orchestrate Mode", "", ActionToggleOrchestrateMode{NextMode: session.CollaborationModeOrchestrate}))
 	}
 
 	if c.mode != session.CollaborationModePlan {

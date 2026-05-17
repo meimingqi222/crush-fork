@@ -454,34 +454,6 @@ func isChildSessionToolCall(toolName string) bool {
 	}
 }
 
-func taskGraphTaskRef(index int, taskID string) string {
-	slug := taskGraphTaskRefSlug(taskID)
-	if slug == "" {
-		slug = "task"
-	}
-	return fmt.Sprintf("%d-%s", index, slug)
-}
-
-func taskGraphTaskRefSlug(taskID string) string {
-	taskID = strings.ToLower(strings.TrimSpace(taskID))
-	var b strings.Builder
-	prevDash := false
-	for _, r := range taskID {
-		if b.Len() >= 48 {
-			break
-		}
-		allowed := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if allowed {
-			b.WriteRune(r)
-			prevDash = false
-		} else if !prevDash && b.Len() > 0 {
-			b.WriteByte('-')
-			prevDash = true
-		}
-	}
-	return strings.Trim(b.String(), "-")
-}
-
 func childSessionIDForTaskRef(app *app.App, parentSessionID, taskRef string) string {
 	if app == nil || app.Messages == nil {
 		return ""

@@ -15,19 +15,27 @@ func TestRetrieverUsesRemoteOnlyRecall(t *testing.T) {
 	t.Parallel()
 
 	var seenPath string
-	var gotReq RecallRequest
+	var gotReqs []RecallRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		require.Equal(t, http.MethodPost, r.Method)
 		require.Equal(t, "Bearer token-1", r.Header.Get("Authorization"))
 
+		var gotReq RecallRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
 		require.Contains(t, gotReq.Query, "project context")
+		gotReqs = append(gotReqs, gotReq)
 
+		results := []map[string]any{
+			{"id": "mem-1", "text": "Use SQLite for local storage.", "type": "decision"},
+		}
+		if len(gotReq.Tags) == 0 {
+			results = []map[string]any{
+				{"id": "global-1", "text": "Prefer concise answers.", "type": "preference"},
+			}
+		}
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-			"results": []map[string]any{
-				{"id": "mem-1", "text": "Use SQLite for local storage.", "type": "decision"},
-			},
+			"results": results,
 		}))
 	}))
 	defer server.Close()
@@ -39,17 +47,22 @@ func TestRetrieverUsesRemoteOnlyRecall(t *testing.T) {
 	recall, err := retriever.Recall(context.Background(), map[string]any{"session_id": "sess-1"})
 	require.NoError(t, err)
 	require.Equal(t, "/v1/default/banks/bank-1/memories/recall", seenPath)
-	require.Equal(t, []string{"project:crush-abc123"}, gotReq.Tags)
-	require.Equal(t, "any", gotReq.TagsMatch)
+	require.Len(t, gotReqs, 2)
+	require.Equal(t, []string{"project:crush-abc123"}, gotReqs[0].Tags)
+	require.Equal(t, "any", gotReqs[0].TagsMatch)
+	require.Empty(t, gotReqs[1].Tags)
 	require.Contains(t, recall, "<hindsight_memories>")
 	require.Contains(t, recall, "Use SQLite for local storage.")
+	require.Contains(t, recall, "Prefer concise answers.")
 }
 
 func TestRetrieverRetrieveQueriesHindsight(t *testing.T) {
 	t.Parallel()
 
 	var gotQuery string
+	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		require.Equal(t, "/v1/default/banks/crush/memories/recall", r.URL.Path)
 		var req RecallRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
@@ -76,6 +89,7 @@ func TestRetrieverRetrieveQueriesHindsight(t *testing.T) {
 		"max_tokens": 256,
 	})
 	require.NoError(t, err)
+	require.Equal(t, 1, calls)
 	require.Equal(t, "schema pitfall", gotQuery)
 	require.Len(t, events, 1)
 	require.Equal(t, "hindsight:remote-1", events[0].ID)
@@ -118,7 +132,6 @@ func TestRetrieverRetrieveForwardsFiltersAsTags(t *testing.T) {
 		"repo:crush",
 		"scope:project",
 		"kind:pitfall",
-		"session:sess-1",
 	}, gotReq.Tags)
 }
 

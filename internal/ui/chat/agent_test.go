@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent"
@@ -47,10 +48,10 @@ func TestAgentToolMessageItemRendersTaskListForTaskGraph(t *testing.T) {
 
 	params, err := json.Marshal(agent.AgentParams{
 		Tasks: []agent.AgentTaskParams{
-			{ID: "t1", Description: "Search references", Prompt: "Find usages", SubagentType: "explore"},
-			{ID: "t2", Description: "Apply patch", Prompt: "Implement fix", SubagentType: "general"},
-			{ID: "t3", Description: "Run tests", Prompt: "Run targeted tests", SubagentType: "general"},
-			{ID: "t4", Description: "Summarize", Prompt: "Write summary", SubagentType: "general"},
+			{Name: "t1", Description: "Search references", Assignment: "Find usages", SubagentType: "explore"},
+			{Name: "t2", Description: "Apply patch", Assignment: "Implement fix", SubagentType: "general"},
+			{Name: "t3", Description: "Run tests", Assignment: "Run targeted tests", SubagentType: "general"},
+			{Name: "t4", Description: "Summarize", Assignment: "Write summary", SubagentType: "general"},
 		},
 	})
 	require.NoError(t, err)
@@ -99,13 +100,13 @@ func TestAgentToolMessageItemRendersChildSessionStatus(t *testing.T) {
 	require.Contains(t, rendered, "Retrying in 3 seconds")
 }
 
-func TestAgentToolMessageItemRendersTaskDependenciesAndStatuses(t *testing.T) {
+func TestAgentToolMessageItemRendersTaskStatuses(t *testing.T) {
 	t.Parallel()
 
 	params, err := json.Marshal(agent.AgentParams{
 		Tasks: []agent.AgentTaskParams{
-			{ID: "t1", Description: "Index code", Prompt: "Build map", SubagentType: "explore"},
-			{ID: "t2", Description: "Apply fix", Prompt: "Patch", SubagentType: "general", DependsOn: []string{"t1"}},
+			{Name: "t1", Description: "Index code", Assignment: "Build map", SubagentType: "explore"},
+			{Name: "t2", Description: "Apply fix", Assignment: "Patch", SubagentType: "general"},
 		},
 	})
 	require.NoError(t, err)
@@ -125,21 +126,21 @@ func TestAgentToolMessageItemRendersTaskDependenciesAndStatuses(t *testing.T) {
 	rendered := ansi.Strip(item.Render(140))
 	require.Contains(t, rendered, "done 1 · running 0 · pending 0 · failed 1")
 	require.Contains(t, rendered, "[Explore] Index code")
-	require.Contains(t, rendered, "[General] Apply fix (after: t1)")
+	require.Contains(t, rendered, "[General] Apply fix")
 }
 
-func TestAgentToolMessageItemRendersCompletedWarningsAndBlockedStatuses(t *testing.T) {
+func TestAgentToolMessageItemRendersCompletedWarningsStatuses(t *testing.T) {
 	t.Parallel()
 
 	params, err := json.Marshal(agent.AgentParams{
 		Tasks: []agent.AgentTaskParams{
-			{ID: "t1", Description: "Collect data", Prompt: "Inspect logs", SubagentType: "explore"},
-			{ID: "t2", Description: "Patch config", Prompt: "Update settings", SubagentType: "general", DependsOn: []string{"t1"}},
+			{Name: "t1", Description: "Collect data", Assignment: "Inspect logs", SubagentType: "explore"},
+			{Name: "t2", Description: "Patch config", Assignment: "Update settings", SubagentType: "general"},
 		},
 	})
 	require.NoError(t, err)
 
-	resultContent := "Summary\n- t1: completed_with_warnings\n- t2: blocked"
+	resultContent := "Summary\n- t1: completed_with_warnings\n- t2: completed"
 	theme := styles.DefaultStyles()
 	item := NewAgentToolMessageItem(&theme, message.ToolCall{
 		ID:       "tool-warn-blocked",
@@ -152,9 +153,9 @@ func TestAgentToolMessageItemRendersCompletedWarningsAndBlockedStatuses(t *testi
 	}, false)
 
 	rendered := ansi.Strip(item.Render(140))
-	require.Contains(t, rendered, "done 1 · running 0 · pending 0 · blocked 1")
+	require.Contains(t, rendered, "done 2 · running 0 · pending 0")
 	require.Contains(t, rendered, "[Explore] Collect data")
-	require.Contains(t, rendered, "[General] Patch config (after: t1)")
+	require.Contains(t, rendered, "[General] Patch config")
 }
 
 func TestAgentToolMessageItemCollapsesNestedToolsByDefault(t *testing.T) {
@@ -338,7 +339,74 @@ func TestBashToolMessageItemRuntimeFailedOverridesNonErrorResult(t *testing.T) {
 
 	rendered := ansi.Strip(item.Render(100))
 	require.Contains(t, rendered, styles.ToolError)
+	require.Contains(t, rendered, "exit code 1")
 	require.NotContains(t, rendered, styles.ToolSuccess)
+}
+
+func TestBashToolMessageItemFailedResultShowsFullOutputPreview(t *testing.T) {
+	t.Parallel()
+
+	input, err := json.Marshal(agenttools.BashParams{Command: "go test ./internal/ui/model", Description: "test"})
+	require.NoError(t, err)
+
+	failure := strings.Join([]string{
+		"--- FAIL: TestExample (2.11s)",
+		"    testing.go:1464: TempDir RemoveAll cleanup: unlinkat C:/tmp/state/logs/crush.log: The process cannot access the file because it is being used by another process.",
+		"FAIL",
+	}, "\n")
+	meta, err := json.Marshal(agenttools.BashResponseMetadata{Output: failure})
+	require.NoError(t, err)
+
+	theme := styles.DefaultStyles()
+	item := NewBashToolMessageItem(&theme, message.ToolCall{
+		ID:       "tool-failed-result",
+		Name:     agenttools.BashToolName,
+		Input:    string(input),
+		Finished: true,
+	}, &message.ToolResult{
+		ToolCallID: "tool-failed-result",
+		Name:       agenttools.BashToolName,
+		Content:    failure,
+		Metadata:   string(meta),
+		IsError:    true,
+	}, false)
+
+	rendered := ansi.Strip(item.Render(160))
+	require.Contains(t, rendered, styles.ToolError)
+	require.Contains(t, rendered, "TempDir RemoveAll cleanup")
+	require.Contains(t, rendered, "crush.log")
+}
+
+func TestBashToolMessageItemFinalResultPrefersResultOverStaleRuntimeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	input, err := json.Marshal(agenttools.BashParams{Command: "printf final", Description: "final"})
+	require.NoError(t, err)
+	meta, err := json.Marshal(agenttools.BashResponseMetadata{Output: "final output"})
+	require.NoError(t, err)
+
+	theme := styles.DefaultStyles()
+	item := NewBashToolMessageItem(&theme, message.ToolCall{
+		ID:       "tool-final-result",
+		Name:     agenttools.BashToolName,
+		Input:    string(input),
+		Finished: true,
+	}, &message.ToolResult{
+		ToolCallID: "tool-final-result",
+		Name:       agenttools.BashToolName,
+		Content:    "final output",
+		Metadata:   string(meta),
+	}, false)
+	item.SetRuntimeState(&toolruntime.State{
+		ToolCallID:   "tool-final-result",
+		ToolName:     agenttools.BashToolName,
+		Status:       toolruntime.StatusCompleted,
+		SnapshotText: "stale partial output",
+	})
+
+	rendered := ansi.Strip(item.Render(100))
+	require.Contains(t, rendered, "final output")
+	require.NotContains(t, rendered, "stale partial output")
 }
 
 func TestAssistantMessageOnlyRendersProposedPlanWithPlanExitToolCall(t *testing.T) {

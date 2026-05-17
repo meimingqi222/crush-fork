@@ -23,7 +23,7 @@ func TestTaskStopToolTargetsMailboxTask(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
-	require.Contains(t, resp.Content, "task task-b")
+	require.Contains(t, resp.Content, "agent task-b")
 
 	envelopes, err := service.Consume("mb-1", "task-b")
 	require.NoError(t, err)

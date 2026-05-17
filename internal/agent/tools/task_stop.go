@@ -17,7 +17,7 @@ const TaskStopToolName = "task_stop"
 
 type TaskStopParams struct {
 	MailboxID string `json:"mailbox_id" description:"Mailbox identifier to request cancellation in"`
-	TaskID    string `json:"task_id,omitempty" description:"Optional task ID to cancel; omit to cancel all tasks"`
+	TaskID    string `json:"task_id,omitempty" description:"Optional agent name to cancel; omit to cancel all agents"`
 	Reason    string `json:"reason,omitempty" description:"Optional cancellation reason"`
 }
 
@@ -37,10 +37,10 @@ func NewTaskStopTool(service mailbox.Service) fantasy.AgentTool {
 			if err != nil {
 				return fantasy.NewTextErrorResponse(strings.TrimSpace(err.Error())), nil
 			}
-			if envelope.TargetTaskID == "" {
+			if envelope.TargetAgentID == "" {
 				return fantasy.NewTextResponse(fmt.Sprintf("Stop requested for mailbox %s.", envelope.MailboxID)), nil
 			}
-			return fantasy.NewTextResponse(fmt.Sprintf("Stop requested for task %s in mailbox %s.", envelope.TargetTaskID, envelope.MailboxID)), nil
+			return fantasy.NewTextResponse(fmt.Sprintf("Stop requested for agent %s in mailbox %s.", envelope.TargetAgentID, envelope.MailboxID)), nil
 		},
 	)
 }

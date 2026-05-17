@@ -36,6 +36,31 @@ Output rules:
 - Do not end a planning turn with a completed plan unless you also called plan_exit.
 </collaboration_mode>`
 
+const orchestrateModeSystemPrompt = `<collaboration_mode>
+You are in Orchestrate Mode.
+
+Orchestrate Mode rules override any conflicting instruction that tells you to edit code yourself.
+
+You decompose, dispatch, verify, and iterate. You do **not** edit code. Every file mutation goes through a subagent.
+
+Your tool budget is:
+- Reading for planning (read, grep, glob, diagnostics)
+- ` + "`agent`" + ` for dispatching subagents
+- ` + "`irc`" + ` for inter-agent coordination
+- ` + "`bash`" + ` for verification commands only (type checks, tests, lint)
+- ` + "`todos`" + ` for tracking progress
+
+Rules:
+1. Do not edit files yourself, even for small changes. Delegate all edits to subagents.
+2. Decompose work into self-contained assignments with explicit file paths, change steps, edge cases, and acceptance criteria.
+3. Parallelize maximally: tasks with non-overlapping file scopes should run as a single ` + "`agent`" + ` call with the ` + "`tasks`" + ` array.
+4. Subagents can coordinate via the ` + "`irc`" + ` tool. If task B needs only a small piece of information from task A, run them in parallel — B can ask A over IRC.
+5. Verify after every batch: run type checks, tests, or lint on the union of changed files. Do not proceed on a red gate.
+6. If a subagent returns incomplete or wrong work, dispatch a corrective subagent — do not fix it yourself.
+7. Do not mark work complete based solely on subagent self-reports — verify with gates.
+8. Do not add work the user did not request, and do not relabel unfinished work as "follow-up" or "MVP".
+</collaboration_mode>`
+
 const autoModeSystemPrompt = `<permission_mode>
 You are in Auto Mode.
 
@@ -131,10 +156,37 @@ var planModeFileInspectToolNames = map[string]struct{}{
 	tools.MemoryStatusToolName:        {},
 }
 
+var orchestrateModeAllowedToolNames = map[string]struct{}{
+	tools.GlobToolName:                {},
+	tools.GrepToolName:                {},
+	tools.ReadToolName:                {},
+	tools.DiagnosticsToolName:         {},
+	tools.ReferencesToolName:          {},
+	tools.LSPDeclarationToolName:      {},
+	tools.LSPDefinitionToolName:       {},
+	tools.LSPImplementationToolName:   {},
+	tools.LSPTypeDefinitionToolName:   {},
+	tools.LSPHoverToolName:            {},
+	tools.LSPDocumentSymbolsToolName:  {},
+	tools.LSPWorkspaceSymbolsToolName: {},
+	tools.BashToolName:                {},
+	AgentToolName:                     {},
+	tools.IrcToolName:                 {},
+	tools.TodosToolName:               {},
+	tools.RequestUserInputToolName:    {},
+	tools.RecallToolName:              {},
+	tools.ReflectToolName:             {},
+	tools.MemoryStatusToolName:        {},
+	tools.ToolSearchToolName:          {},
+	tools.AgenticFetchToolName:        {},
+}
+
 func collaborationModePrompt(mode session.CollaborationMode) string {
 	switch mode {
 	case session.CollaborationModePlan:
 		return planModeSystemPrompt
+	case session.CollaborationModeOrchestrate:
+		return orchestrateModeSystemPrompt
 	default:
 		return ""
 	}
@@ -218,23 +270,38 @@ func removeDisabledToolNames(toolNames []string, disabledToolNames []string) []s
 
 func filterToolsForRiskPolicy(toolNames []string, mode session.CollaborationMode, disabledToolNames []string) []string {
 	filtered := deduplicateToolNames(toolNames)
-	if mode != session.CollaborationModePlan {
+
+	switch mode {
+	case session.CollaborationModePlan:
+		planModeTools := make([]string, 0, len(filtered)+2)
+		for _, toolName := range filtered {
+			if isPlanModeToolAllowed(toolName) {
+				planModeTools = append(planModeTools, toolName)
+			}
+		}
+		if !slices.Contains(planModeTools, tools.RequestUserInputToolName) {
+			planModeTools = append(planModeTools, tools.RequestUserInputToolName)
+		}
+		if !slices.Contains(planModeTools, tools.PlanExitToolName) {
+			planModeTools = append(planModeTools, tools.PlanExitToolName)
+		}
+		return planModeTools
+
+	case session.CollaborationModeOrchestrate:
+		orchestrateTools := make([]string, 0, len(filtered))
+		for _, toolName := range filtered {
+			if _, ok := orchestrateModeAllowedToolNames[toolName]; ok {
+				orchestrateTools = append(orchestrateTools, toolName)
+			}
+		}
+		if !slices.Contains(orchestrateTools, tools.RequestUserInputToolName) {
+			orchestrateTools = append(orchestrateTools, tools.RequestUserInputToolName)
+		}
+		return orchestrateTools
+
+	default:
 		return removeDisabledToolNames(filtered, disabledToolNames)
 	}
-
-	planModeTools := make([]string, 0, len(filtered)+2)
-	for _, toolName := range filtered {
-		if isPlanModeToolAllowed(toolName) {
-			planModeTools = append(planModeTools, toolName)
-		}
-	}
-	if !slices.Contains(planModeTools, tools.RequestUserInputToolName) {
-		planModeTools = append(planModeTools, tools.RequestUserInputToolName)
-	}
-	if !slices.Contains(planModeTools, tools.PlanExitToolName) {
-		planModeTools = append(planModeTools, tools.PlanExitToolName)
-	}
-	return planModeTools
 }
 
 func filterToolsForCollaborationMode(toolNames []string, mode session.CollaborationMode) []string {

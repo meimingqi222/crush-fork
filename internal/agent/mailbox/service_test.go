@@ -15,7 +15,7 @@ func TestServiceSendAndConsumeTargeted(t *testing.T) {
 	env, err := svc.Send("mb-1", "a", "hello")
 	require.NoError(t, err)
 	require.Equal(t, EnvelopeKindMessage, env.Kind)
-	require.Equal(t, "a", env.TargetTaskID)
+	require.Equal(t, "a", env.TargetAgentID)
 
 	messagesA, err := svc.Consume("mb-1", "a")
 	require.NoError(t, err)
@@ -61,8 +61,8 @@ func TestServiceErrorsForUnknownMailboxOrTask(t *testing.T) {
 	require.ErrorContains(t, err, `mailbox "missing" not found`)
 
 	_, err = svc.Send("mb-3", "missing", "x")
-	require.ErrorContains(t, err, `task "missing" not found in mailbox "mb-3"`)
+	require.ErrorContains(t, err, `agent "missing" not found in mailbox "mb-3"`)
 
 	err = svc.Open("mb-4", nil)
-	require.ErrorContains(t, err, "task_ids is required")
+	require.ErrorContains(t, err, "agent_ids is required")
 }

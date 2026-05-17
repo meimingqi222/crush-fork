@@ -105,7 +105,11 @@ func isTrustedLocalReadOnlyToolResult(toolResult message.ToolResult) bool {
 	case tools.GlobToolName,
 		tools.GrepToolName,
 		tools.DiagnosticsToolName,
-		tools.ReferencesToolName:
+		tools.ReferencesToolName,
+		tools.RecallToolName,
+		tools.ReflectToolName,
+		tools.MemoryStatusToolName,
+		tools.CrushInfoToolName:
 		return true
 	case tools.BashToolName:
 		return isTrustedLocalReadOnlyBashToolResult(toolResult)
@@ -195,6 +199,8 @@ func buildToolOutputGuardPrompt(cfg *config.Config, toolResult message.ToolResul
 }
 
 func parseToolOutputGuard(raw string) (toolOutputGuardResponse, error) {
+	raw = strings.TrimSpace(raw)
+	raw = thinkTagRegex.ReplaceAllString(raw, "")
 	raw = strings.TrimSpace(raw)
 	if matches := autoClassifierCodeFenceRegex.FindStringSubmatch(raw); len(matches) == 2 {
 		raw = strings.TrimSpace(matches[1])

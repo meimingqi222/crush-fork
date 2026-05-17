@@ -180,6 +180,7 @@ type SessionAgent interface {
 	ResumeQueue(sessionID string)
 	IsQueuePaused(sessionID string) bool
 	PrioritizeQueuedPrompt(sessionID string, index int) bool
+	RespondAsBackground(ctx context.Context, from, message string) (string, error)
 }
 
 type Model struct {
@@ -193,7 +194,10 @@ type Model struct {
 // are optional (nil when engine is disabled).
 type MemoryEngineHooks struct {
 	// OnBeforeCompaction is called before session summarization/compaction.
-	OnBeforeCompaction func(ctx context.Context, sessionID string)
+	// The returned string, when non-empty, is a Markdown-formatted "rescue"
+	// payload that the agent injects into the compaction prompt so durable
+	// memories survive summarization.
+	OnBeforeCompaction func(ctx context.Context, sessionID string) string
 	// AfterTurnIdle is called after each successful LLM turn.
 	AfterTurnIdle func(ctx context.Context, sessionID string)
 	// OnSessionClosed is called when a session is closed/deleted.
@@ -2128,7 +2132,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			compactionTrigger = sessionCompactionTriggerNormal
 		}
 		if a.memoryEngineHooks != nil && a.memoryEngineHooks.OnBeforeCompaction != nil {
-			a.memoryEngineHooks.OnBeforeCompaction(context.Background(), call.SessionID)
+			rescuePayload := a.memoryEngineHooks.OnBeforeCompaction(context.Background(), call.SessionID)
+			if rescuePayload != "" {
+				genCtx = withCompactionRescue(genCtx, rescuePayload)
+			}
 		}
 		if summarizeErr := a.Summarize(withSessionCompactingPurpose(copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent), compactionTrigger.Purpose()), call.SessionID, call.ProviderOptions); summarizeErr != nil {
 			return nil, summarizeErr
@@ -2501,6 +2508,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		compacting.Context = append(compacting.Context, fileContext...)
 	}
 
+	// Inject memory rescue (top durable events from MemoryEngine) when the
+	// caller attached one via withCompactionRescue. The rescue block must
+	// appear at the top of the additional context so the summarizer copies
+	// or paraphrases the events into the new summary.
+	if rescue := compactionRescueFromContext(ctx); rescue != "" {
+		compacting.Context = append([]string{rescue}, compacting.Context...)
+	}
+
 	genCtx, cancel := context.WithCancel(ctx)
 	genCtx = copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent)
 	a.activeRequests.Set(sessionID, cancel)
@@ -2756,6 +2771,56 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		a.asyncUpdateSessionMemory(ctx, sessionID)
 	}
 	return err
+}
+
+func (a *sessionAgent) RespondAsBackground(ctx context.Context, from, message string) (string, error) {
+	prompt := fmt.Sprintf("<irc>\nYou received an IRC message from agent `%s`.\n\nReply briefly and directly using the conversation context already available to you. Do **not** call any tools. The reply you write is delivered back to `%s` as your answer.\n\nMessage:\n%s\n</irc>", from, from, message)
+
+	bgModel := a.largeModel.Get()
+	systemPrompt := a.systemPrompt.Get()
+	var providerOpts fantasy.ProviderOptions
+	if a.backgroundModel != nil {
+		bgModel = a.backgroundModel.model
+		providerOpts = getProviderOptions(bgModel, a.backgroundModel.provider)
+	} else {
+		providerOpts = getProviderOptions(bgModel, config.ProviderConfig{})
+	}
+
+	noThink := false
+	bgModel.ModelCfg.Think = &noThink
+
+	agent := fantasy.NewAgent(
+		bgModel.Model,
+		fantasy.WithSystemPrompt(systemPrompt),
+		fantasy.WithMaxOutputTokens(512),
+		fantasy.WithUserAgent("crush-irc-bg"),
+	)
+
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := agent.Generate(
+		callCtx,
+		fantasy.AgentCall{
+			Prompt:          prompt,
+			ProviderOptions: providerOpts,
+			PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+				prepared.Messages = options.Messages
+				return callCtx, prepared, nil
+			},
+		},
+	)
+	if err != nil {
+		return "", fmt.Errorf("irc background response failed: %w", err)
+	}
+	if resp == nil {
+		return "", nil
+	}
+	reply := resp.Response.Content.Text()
+	if len([]rune(reply)) > 500 {
+		reply = string([]rune(reply)[:500]) + "…"
+	}
+	return reply, nil
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {

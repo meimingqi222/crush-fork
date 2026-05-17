@@ -242,6 +242,20 @@ func TestNew_RestoresDefaultPluginRuntimeWhenInitCoderAgentFails(t *testing.T) {
 	})
 }
 
+func TestNew_EnablesDefaultLocalMemoryWhenMemoryConfigMissing(t *testing.T) {
+	conn, store := setupMessageSubscriberDependencies(t)
+
+	store.Config().Options.Memory = nil
+	app, err := New(t.Context(), conn, store)
+	require.NoError(t, err)
+	require.NotNil(t, app)
+	require.NotNil(t, app.MemoryEngine)
+	require.Equal(t, "local", app.MemoryEngine.Backend())
+	t.Cleanup(func() {
+		app.Shutdown()
+	})
+}
+
 func setupMessageSubscriberDependencies(t *testing.T) (*sql.DB, *config.ConfigStore) {
 	t.Helper()
 	workingDir := t.TempDir()

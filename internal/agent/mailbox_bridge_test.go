@@ -15,7 +15,7 @@ func TestTaskGraphMailboxBridgeUpdatesTodosAndConsumesMessages(t *testing.T) {
 	sessionItem, err := env.sessions.Create(context.Background(), "mailbox-bridge")
 	require.NoError(t, err)
 	svc := mailbox.NewService()
-	bridge, err := newTaskGraphMailboxBridge(svc, env.sessions, sessionItem.ID, "mb-1", []taskGraphTask{{ID: "a", Description: "Task A"}})
+	bridge, err := newSubagentBridge(svc, env.sessions, sessionItem.ID, "mb-1", []subagentTask{{Name: "a", Description: "Task A"}})
 	require.NoError(t, err)
 	defer bridge.Close()
 
@@ -45,7 +45,7 @@ func TestTaskGraphMailboxBridgeStopEffect(t *testing.T) {
 	sessionItem, err := env.sessions.Create(context.Background(), "mailbox-bridge-stop")
 	require.NoError(t, err)
 	svc := mailbox.NewService()
-	bridge, err := newTaskGraphMailboxBridge(svc, env.sessions, sessionItem.ID, "mb-2", []taskGraphTask{{ID: "a", Description: "Task A"}})
+	bridge, err := newSubagentBridge(svc, env.sessions, sessionItem.ID, "mb-2", []subagentTask{{Name: "a", Description: "Task A"}})
 	require.NoError(t, err)
 	defer bridge.Close()
 

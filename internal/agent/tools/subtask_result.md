@@ -7,7 +7,7 @@ Parameters:
 - session_id (optional): The actual child session ID from an earlier Agent tool result. Usually omit this and the tool will use the most recent child session in the current conversation.
 - agent_id (optional): The agent ID from a background agent (alternative to session_id)
 - offset (optional): Character offset to start from for pagination (0-based)
-- limit (optional): Maximum characters to return (default 40000, max 80000)
+- limit (optional): Maximum characters to return (default 80000, max 200000)
 
 Usage notes:
 - Use this when you need more detail from a subagent's work than the summary provided in the Agent tool response

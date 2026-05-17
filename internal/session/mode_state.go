@@ -37,6 +37,10 @@ func (s ModeState) IsPlanMode() bool {
 	return NormalizeCollaborationMode(string(s.CollaborationMode)) == CollaborationModePlan
 }
 
+func (s ModeState) IsOrchestrateMode() bool {
+	return NormalizeCollaborationMode(string(s.CollaborationMode)) == CollaborationModeOrchestrate
+}
+
 type ModeTransition struct {
 	Previous ModeState
 	Current  ModeState

@@ -450,7 +450,7 @@ func backgroundAgentSubtaskResult(entry *backgroundAgentEntry) message.ToolResul
 }
 
 // runBackgroundTask executes a task graph in the background and returns immediately.
-func (c *coordinator) runBackgroundTask(ctx context.Context, params taskGraphParams) (fantasy.ToolResponse, error) {
+func (c *coordinator) runBackgroundTask(ctx context.Context, params subagentBatchParams) (fantasy.ToolResponse, error) {
 	description := "background task"
 	if len(params.Tasks) == 1 && params.Tasks[0].Description != "" {
 		description = params.Tasks[0].Description
@@ -466,7 +466,7 @@ func (c *coordinator) runBackgroundTask(ctx context.Context, params taskGraphPar
 		if runtime, ok := subagentRuntimeFromContext(ctx); ok {
 			bgCtx = withSubagentRuntimeContext(bgCtx, runtime)
 		}
-		result, err := c.runTaskGraphDirect(bgCtx, params)
+		result, err := c.runSubagents(bgCtx, params)
 		if err != nil {
 			slog.Error("Background agent failed", "agent_id", agentID, "error", err)
 			c.backgroundAgents.Fail(agentID, err.Error())

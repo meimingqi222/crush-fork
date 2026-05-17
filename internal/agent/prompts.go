@@ -79,6 +79,33 @@ func explorePrompt(agentCfg config.Agent, opts ...prompt.Option) (*prompt.Prompt
 	return systemPrompt, nil
 }
 
+func reviewPrompt(agentCfg config.Agent, opts ...prompt.Option) (*prompt.Prompt, error) {
+	promptOptions := promptOptionsForAgent(agentCfg, opts...)
+	systemPrompt, err := prompt.NewPrompt("review", buildSubagentPromptTemplate(reviewPromptTemplate, agentCfg), promptOptions...)
+	if err != nil {
+		return nil, err
+	}
+	return systemPrompt, nil
+}
+
+const reviewPromptTemplate = `You are a read-only code review subagent.
+
+<role>
+Act as the final code-review specialist for the delegated scope: inspect diffs,
+nearby implementation, tests, and relevant contracts, then report only concrete
+bugs, regressions, correctness issues, or security concerns that are supported
+by evidence.
+</role>
+
+<limits>
+- Do not edit files or suggest that you changed files.
+- Do not run build, test, lint, package-manager, server, reproduction, or other
+  non-git shell commands.
+- Do not approve changes blindly; if no concrete issues are found, say so.
+- Prefer patch-anchored findings with file:line references, impact, and a clear
+  fix direction.
+</limits>`
+
 func buildSubagentPromptTemplate(baseTemplate string, agentCfg config.Agent) string {
 	sections := []string{strings.TrimSpace(baseTemplate), strings.TrimSpace(subagentPromptSuffix)}
 	if lifecyclePrompt := buildAgentLifecyclePrompt(agentCfg); lifecyclePrompt != "" {
@@ -92,6 +119,9 @@ func buildSubagentPromptTemplate(baseTemplate string, agentCfg config.Agent) str
 	}
 	if extraPrompt := strings.TrimSpace(agentCfg.AdditionalPrompt); extraPrompt != "" {
 		sections = append(sections, fmt.Sprintf("<additional_prompt>\n%s\n</additional_prompt>", extraPrompt))
+	}
+	if spawnsPrompt := buildSpawnsPrompt(agentCfg); spawnsPrompt != "" {
+		sections = append(sections, spawnsPrompt)
 	}
 	return strings.Join(sections, "\n\n")
 }
@@ -162,13 +192,23 @@ Role: executor
 	}
 }
 
+func buildSpawnsPrompt(agentCfg config.Agent) string {
+	if len(agentCfg.Spawns) == 0 {
+		return ""
+	}
+	spawnList := strings.Join(agentCfg.Spawns, ", ")
+	return fmt.Sprintf("<spawns>\nYou can spawn these subagent types for parallel evidence gathering: %s\nUse the `agent` tool with subagent_type set to one of these values.\n</spawns>", spawnList)
+}
+
 func promptForAgent(agentCfg config.Agent, isSubAgent bool, opts ...prompt.Option) (*prompt.Prompt, error) {
 	if !isSubAgent {
 		return coderPromptForAgent(agentCfg, opts...)
 	}
 
 	switch agentCfg.ID {
-	case config.AgentExplore:
+	case config.AgentReview:
+		return reviewPrompt(agentCfg, opts...)
+	case config.AgentExplore, config.AgentPlan, config.AgentLibrarian:
 		return explorePrompt(agentCfg, opts...)
 	case config.AgentCoder, config.AgentGeneral:
 		return generalPrompt(agentCfg, opts...)

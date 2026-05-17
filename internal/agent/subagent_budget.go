@@ -6,19 +6,24 @@ import (
 )
 
 const (
-	taskGraphMailboxMessagesLimit      = 6
-	taskGraphMailboxPromptCharsLimit   = 1_800
-	taskGraphOutputPreviewCharsLimit   = 5_000
-	taskGraphOutputPerTaskCharsLimit   = 20_000
-	taskGraphOutputAggregateCharsLimit = 80_000
-	taskGraphReducerMessageCharsLimit  = 280
-	taskGraphTodoContentCharsLimit     = 240
-	taskGraphTodoNodeContentCharsLimit = 120
-	taskGraphTodoMailboxCharsLimit     = 80
-	subAgentResponseCharsLimit         = 30_000
+	subagentMailboxMessagesLimit    = 6
+	subagentMailboxPromptCharsLimit = 1_800
+	// subagentOutputPreviewCharsLimit is used only for the TUI/metadata
+	// preview row (ToolResultReducerChildSession.Preview). The model-facing
+	// output uses the full Content (subAgentResponseCharsLimit) so the
+	// parent agent does not need to call subtask_result for every fan-out
+	// task.
+	subagentOutputPreviewCharsLimit   = 5_000
+	subagentOutputPerTaskCharsLimit   = 40_000
+	subagentOutputAggregateCharsLimit = 160_000
+	subagentReducerMessageCharsLimit  = 280
+	subagentTodoContentCharsLimit     = 240
+	subagentTodoNodeContentCharsLimit = 120
+	subagentTodoMailboxCharsLimit     = 80
+	subAgentResponseCharsLimit        = 30_000
 )
 
-func taskGraphCompactText(value string) string {
+func compactText(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
@@ -26,7 +31,7 @@ func taskGraphCompactText(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
-func taskGraphEllipsize(value string, maxRunes int) (string, bool) {
+func ellipsizeText(value string, maxRunes int) (string, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", false
@@ -44,7 +49,7 @@ func taskGraphEllipsize(value string, maxRunes int) (string, bool) {
 	return string(runes[:maxRunes-1]) + "…", true
 }
 
-func taskGraphPromptWithMailboxMessages(basePrompt string, messages []string) string {
+func promptWithMailboxMessages(basePrompt string, messages []string) string {
 	base := strings.TrimSpace(basePrompt)
 	if base == "" {
 		base = "Continue with the assigned task."
@@ -53,25 +58,25 @@ func taskGraphPromptWithMailboxMessages(basePrompt string, messages []string) st
 		return base
 	}
 
-	start := max(0, len(messages)-taskGraphMailboxMessagesLimit)
+	start := max(0, len(messages)-subagentMailboxMessagesLimit)
 	selected := make([]string, 0, len(messages)-start+1)
 	used := 0
 	for _, raw := range messages[start:] {
-		msg := taskGraphCompactText(raw)
+		msg := compactText(raw)
 		if msg == "" {
 			continue
 		}
 		runeLen := len([]rune(msg))
-		if used+runeLen > taskGraphMailboxPromptCharsLimit {
-			remaining := taskGraphMailboxPromptCharsLimit - used
+		if used+runeLen > subagentMailboxPromptCharsLimit {
+			remaining := subagentMailboxPromptCharsLimit - used
 			if remaining <= 0 {
 				break
 			}
-			trimmed, _ := taskGraphEllipsize(msg, remaining)
+			trimmed, _ := ellipsizeText(msg, remaining)
 			if trimmed != "" {
 				selected = append(selected, trimmed)
 			}
-			used = taskGraphMailboxPromptCharsLimit
+			used = subagentMailboxPromptCharsLimit
 			break
 		}
 		selected = append(selected, msg)
@@ -94,12 +99,12 @@ func taskGraphPromptWithMailboxMessages(basePrompt string, messages []string) st
 	return base + "\n\nMailbox messages:\n- " + strings.Join(selected, "\n- ")
 }
 
-func taskGraphModelSafeSubAgentText(content, sessionID string) string {
-	content = taskGraphCompactText(content)
+func modelSafeSubAgentText(content, sessionID string) string {
+	content = compactText(content)
 	if content == "" {
 		return ""
 	}
-	trimmed, truncated := taskGraphEllipsize(content, subAgentResponseCharsLimit)
+	trimmed, truncated := ellipsizeText(content, subAgentResponseCharsLimit)
 	if !truncated {
 		return trimmed
 	}

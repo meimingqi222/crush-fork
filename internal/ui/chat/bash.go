@@ -110,17 +110,19 @@ func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		return header
 	}
 
-	if earlyState, ok := toolEarlyStateContent(sty, opts, cappedWidth); ok {
-		return joinToolParts(header, earlyState)
-	}
-
 	if !opts.HasResult() {
+		if earlyState, ok := toolEarlyStateContent(sty, opts, cappedWidth); ok {
+			return joinToolParts(header, earlyState)
+		}
 		return header
 	}
 
 	output := meta.Output
 	if output == "" && opts.Result.Content != tools.BashNoOutput {
 		output = opts.Result.Content
+	}
+	if opts.RuntimeState != nil && opts.RuntimeState.SnapshotText != "" && (opts.Status == ToolStatusError || opts.Status == ToolStatusCanceled) {
+		output = opts.RuntimeState.SnapshotText
 	}
 	if output == "" {
 		return header

@@ -56,9 +56,11 @@ func (m *mockWritePermissionService) ClearSkillContext()               {}
 func (m *mockWritePermissionService) GetSkillContext() (string, []string) {
 	return "", nil
 }
+
 func (m *mockWritePermissionService) GetDenialQueue(string) permission.DenialQueueReader {
 	return nil
 }
+
 func (m *mockWritePermissionService) GetDenialQueueEditor(string) permission.DenialQueueEditor {
 	return nil
 }

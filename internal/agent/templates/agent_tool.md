@@ -6,7 +6,12 @@ Available subagent types:
 When to use the Agent tool:
 - **Use `explore` only for evidence gathering, not final judgment.** The `explore` subagent runs on a smaller, faster, cheaper model by default and is purpose-built for parallel context discovery. Treat it like Claude Code/opencode-style research subagents: ask it to map files, locate symbols, summarize diffs, collect local git facts, and return file:line evidence for the primary model to analyze.
 - Open-ended codebase exploration, pattern hunting, implementation lookup, dependency tracing, and diff summarization should usually use the `explore` subagent.
-- **Do not delegate final code review, correctness approval, or bug triage decisions to `explore`.** The primary model must own final review conclusions because `explore` commonly uses a weaker small model and may miss subtle defects. `explore` can collect the relevant diff snippets, history, references, and candidate concerns for the primary agent to verify.
+- **Do not delegate final code review, correctness approval, or bug triage decisions to `explore`.** Use `review` for final code review so the work runs on a large/review-capable model with a read-only review prompt. `explore` can collect the relevant diff snippets, history, references, and candidate concerns for the primary agent or review subagent to verify.
+- Use `plan` for architecture planning before complex multi-file work; it is read-only and should return concrete files, sequence, edge cases, and verification steps rather than implementation. `plan` can spawn `explore` for parallel evidence gathering.
+- Use `review` for final code review; it runs on a large/review-capable model, is read-only, and returns patch-anchored findings. `review` is **blocking** — the main flow waits for it to complete. `review` can spawn `explore` for parallel evidence gathering.
+- Use `librarian` for source-verified dependency, framework, or external API research; it should cite local dependency source or official documentation instead of relying on model memory.
+- Use `designer` for UI/UX implementation and review; it has full tool access and can edit files and run verification.
+- Use `quick_task` only for small, mechanical, unambiguous tasks where a low-cost worker is appropriate; use `general` for normal implementation and verification work.
 - The `explore` subagent is read-only and has a restricted `bash` tool for direct local read-only git inspection only. It is suitable for `git diff`, `git status`, `git log`, `git show`, `git blame`, `git rev-parse`, `git merge-base`, and `git ls-files`, but not for mutating git commands, wrapper shells, build/test commands, package managers, linters, or general shell work.
 - **Do not assign build, test, lint, or reproduction tasks to `explore`.** Commands such as `go test`, `go build`, `npm test`, `pytest`, `cargo test`, `make`, `task`, or any command needing `2>&1`/general shell execution require the primary agent or a `general` subagent.
 - Independent implementation tasks, test reproduction, final code-review passes, or file-local refactors that can proceed without blocking your immediate next step should usually use the `general` subagent or remain with the primary agent.
@@ -39,4 +44,22 @@ Usage notes:
 5. The subagent's outputs should generally be trusted unless they conflict with stronger evidence in the current thread.
 6. Do not treat this tool as a last resort. Prefer early delegation for bounded work that can unblock or parallelize the main task.
 7. If you choose delegation, make the tool call first rather than narrating a future intention to delegate.
-8. **Use the `tasks` array for 2+ tasks.** Tasks with no `depends_on` run in parallel; tasks with dependencies run after their prerequisites complete. The `tasks` array provides budget control, concurrency limiting, retry support, and a unified result — always prefer it over launching multiple separate Agent calls.
+8. **Use the `tasks` array for 2+ tasks.** All tasks in the array run in parallel. Each task must be self-contained with its own complete instructions in the `assignment` field. Use the `context` field to share background information across all tasks. The `tasks` array provides budget control, concurrency limiting, retry support, and a unified result — always prefer it over launching multiple separate Agent calls.
+
+## IRC coordination between subagents
+
+Subagents launched in the same `tasks` array can communicate with each other and with you via the `irc` tool. Each subagent receives its own agent ID and a list of visible peers at startup.
+
+**When IRC enables more parallelism:**
+- If task B depends on a small piece of information from task A (a type signature, a config key, a file path), you can often run A and B in parallel. B can ask A for the missing piece over IRC instead of waiting for A to finish first.
+- **Still sequence** when one task produces a large, evolving contract (generated types, schema migration, core module API) that the other consumes wholesale — IRC round-trips do not replace a finished artifact.
+
+**How to write assignments that use IRC:**
+- Tell each subagent its role and what peers it can reach: "If you need information from another agent, use `irc` with op=send to ask."
+- Keep IRC usage to quick questions and coordination — not long-form content transfer.
+- Subagents should not use IRC to ask questions that their own tools (read, grep, glob) can answer.
+
+**Verification after parallel work:**
+- After a batch of subagents completes, verify their combined output before proceeding. Run type checks, tests, or lint on the union of changed files.
+- If a subagent's work has minor issues, you may fix them directly if the fix is small and obvious. For significant gaps, dispatch a fix-up subagent.
+- Do not mark work complete based solely on subagent self-reports — verify with gates.

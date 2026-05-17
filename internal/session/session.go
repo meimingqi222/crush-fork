@@ -44,14 +44,17 @@ func NormalizeTodoStatus(status string) TodoStatus {
 type CollaborationMode string
 
 const (
-	CollaborationModeDefault CollaborationMode = "default"
-	CollaborationModePlan    CollaborationMode = "plan"
+	CollaborationModeDefault     CollaborationMode = "default"
+	CollaborationModePlan        CollaborationMode = "plan"
+	CollaborationModeOrchestrate CollaborationMode = "orchestrate"
 )
 
 func NormalizeCollaborationMode(mode string) CollaborationMode {
 	switch CollaborationMode(mode) {
 	case CollaborationModePlan:
 		return CollaborationModePlan
+	case CollaborationModeOrchestrate:
+		return CollaborationModeOrchestrate
 	default:
 		return CollaborationModeDefault
 	}

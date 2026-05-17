@@ -82,22 +82,14 @@ func (l *List) AtBottom() bool {
 		return true
 	}
 
-	// Calculate the height from offsetIdx to the end.
-	var totalHeight int
-	for idx := l.offsetIdx; idx < len(l.items); idx++ {
-		if totalHeight > l.height {
-			// No need to calculate further, we're already past the viewport height
-			return false
-		}
-		item := l.getItem(idx)
-		itemHeight := item.height
-		if l.gap > 0 && idx > l.offsetIdx {
-			itemHeight += l.gap
-		}
-		totalHeight += itemHeight
+	lastIdx, lastOffsetLine, _ := l.lastOffsetItem()
+	if l.offsetIdx < lastIdx {
+		return false
 	}
-
-	return totalHeight-l.offsetLine <= l.height
+	if l.offsetIdx == lastIdx {
+		return l.offsetLine >= lastOffsetLine
+	}
+	return true
 }
 
 // SetReverse shows the list in reverse order.
@@ -193,7 +185,8 @@ func (l *List) ScrollBy(lines int) {
 	}
 
 	if lines > 0 {
-		if l.AtBottom() {
+		lastOffsetIdx, lastOffsetLine, _ := l.lastOffsetItem()
+		if l.offsetIdx > lastOffsetIdx || (l.offsetIdx == lastOffsetIdx && l.offsetLine >= lastOffsetLine) {
 			// Already at bottom
 			return
 		}
@@ -217,7 +210,6 @@ func (l *List) ScrollBy(lines int) {
 			currentItem = l.getItem(l.offsetIdx)
 		}
 
-		lastOffsetIdx, lastOffsetLine, _ := l.lastOffsetItem()
 		if l.offsetIdx > lastOffsetIdx || (l.offsetIdx == lastOffsetIdx && l.offsetLine > lastOffsetLine) {
 			// Clamp to bottom
 			l.offsetIdx = lastOffsetIdx

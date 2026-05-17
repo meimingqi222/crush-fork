@@ -3,9 +3,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"charm.land/fantasy"
+
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/toolruntime"
@@ -344,4 +346,124 @@ func TestSubtaskResultToolFallsBackToSubagentFinishMetadata(t *testing.T) {
 	require.Contains(t, resp.Content, "structured finish summary")
 	require.Contains(t, resp.Content, "internal/a.go")
 	require.NotContains(t, resp.Content, "No assistant response found")
+}
+
+func TestSubtaskResultToolReturnsAllNonAckAssistantResponses(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	firstOutput := "### 所有渲染器的分类\n\n| 文件 | 函数 | 风险 |\n| --- | --- | --- |\n| bash.go:79 | Bash.RenderTool | 已修复 |"
+	secondOutput := "### 结论\n\n无新 High-severity 问题。"
+	stub.bySession["child-session-ack"] = []message.Message{
+		{
+			ID:   "assistant-msg-first",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: firstOutput},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+		{
+			ID:   "assistant-msg-second",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: secondOutput},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+		{
+			ID:   "tool-msg-finish",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{
+					ToolCallID: "finish-call",
+					Name:       "subagent_finish",
+					Content:    "Subagent completed.",
+				}.WithSubagentFinish(message.ToolResultSubagentFinish{
+					Status:  message.ToolResultSubtaskStatusCompleted,
+					Summary: "short structured summary",
+				}),
+				message.Finish{Reason: message.FinishReasonToolUse},
+			},
+		},
+		{
+			ID:   "assistant-msg-ack",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "The task is complete."},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+
+	resp, err := runSubtaskResultTool(t, context.Background(), tool, SubtaskResultParams{
+		SessionID: "child-session-ack",
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "Session: child-session-ack")
+	require.Contains(t, resp.Content, "## Response 1")
+	require.Contains(t, resp.Content, "## Response 2")
+	require.Contains(t, resp.Content, "所有渲染器的分类")
+	require.Contains(t, resp.Content, "bash.go:79")
+	require.Contains(t, resp.Content, "无新 High-severity 问题")
+	require.NotContains(t, resp.Content, "The task is complete")
+	require.NotContains(t, resp.Content, "short structured summary")
+}
+
+func TestSubtaskResultToolDefaultLimitReturnsAtLeastTwentyKTokens(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	fullOutput := strings.Repeat("x", 79_950)
+	stub.bySession["child-session-large"] = []message.Message{
+		{
+			ID:   "assistant-msg-large",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: fullOutput},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+
+	resp, err := runSubtaskResultTool(t, context.Background(), tool, SubtaskResultParams{
+		SessionID: "child-session-large",
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.GreaterOrEqual(t, len([]rune(resp.Content)), 79_950)
+	require.NotContains(t, resp.Content, "Output truncated")
+}
+
+func TestSubtaskResultToolCapsLimitAtTwoHundredK(t *testing.T) {
+	t.Parallel()
+
+	stub := newSubtaskResultMessageStub()
+	tool := NewSubtaskResultTool(stub)
+
+	fullOutput := strings.Repeat("x", 219_950)
+	stub.bySession["child-session-huge"] = []message.Message{
+		{
+			ID:   "assistant-msg-huge",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: fullOutput},
+				message.Finish{Reason: message.FinishReasonEndTurn},
+			},
+		},
+	}
+
+	resp, err := runSubtaskResultTool(t, context.Background(), tool, SubtaskResultParams{
+		SessionID: "child-session-huge",
+		Limit:     500_000,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "characters 0-200000")
+	require.Contains(t, resp.Content, "characters omitted")
 }

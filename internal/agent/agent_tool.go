@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,70 +22,19 @@ import (
 var agentToolDescription []byte
 
 type AgentTaskParams struct {
-	ID              string   `json:"id" description:"The unique task identifier used for dependency references"`
-	Description     string   `json:"description,omitempty" description:"A short title for the delegated task"`
-	Prompt          string   `json:"prompt" description:"The task for the agent to perform"`
-	SubagentType    string   `json:"subagent_type,omitempty" description:"The subagent type to use: general, explore, or a configured subagent name"`
-	DependsOn       []string `json:"depends_on,omitempty" description:"Task IDs that must complete successfully before this task runs"`
-	RunInBackground bool     `json:"run_in_background,omitempty" description:"Run this task in the background and return immediately with a task ID"`
+	Name         string `json:"name,omitempty" description:"A short identifier for the task (e.g. AuthLoader, FixTests)"`
+	Description  string `json:"description,omitempty" description:"A short title for the delegated task"`
+	Assignment   string `json:"assignment" description:"The full task instructions for the subagent to perform"`
+	SubagentType string `json:"subagent_type,omitempty" description:"The subagent type to use: general, quick_task, explore, plan, review, designer, librarian, or a configured subagent name"`
 }
 
 type AgentParams struct {
 	Description     string            `json:"description,omitempty" description:"A short title for the delegated task"`
 	Prompt          string            `json:"prompt,omitempty" description:"The task for the agent to perform"`
-	SubagentType    string            `json:"subagent_type,omitempty" description:"The subagent type to use: general, explore, or a configured subagent name"`
-	Tasks           []AgentTaskParams `json:"tasks,omitempty" description:"Optional task graph with dependency-aware delegation"`
+	SubagentType    string            `json:"subagent_type,omitempty" description:"The subagent type to use: general, quick_task, explore, plan, review, designer, librarian, or a configured subagent name"`
+	Tasks           []AgentTaskParams `json:"tasks,omitempty" description:"Optional list of independent tasks to execute in parallel"`
+	Context         string            `json:"context,omitempty" description:"Shared background information for all subagents"`
 	RunInBackground bool              `json:"run_in_background,omitempty" description:"Run the agent in the background and return immediately with an agent ID"`
-}
-
-// UnmarshalJSON implements custom JSON unmarshalling for AgentParams.
-// It handles the case where the LLM incorrectly sends the "tasks" field as a
-// JSON-encoded string instead of an array (e.g. `"tasks": "[...]"` instead
-// of `"tasks": [...]`).
-func (p *AgentParams) UnmarshalJSON(data []byte) error {
-	type plain AgentParams
-	if err := json.Unmarshal(data, (*plain)(p)); err == nil {
-		return nil
-	}
-
-	// Fallback: try to recover tasks from a JSON-encoded string.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	tasksRaw, hasTasks := raw["tasks"]
-	if !hasTasks {
-		// No tasks field at all; re-run the normal unmarshal to get the
-		// original error.
-		return json.Unmarshal(data, (*plain)(p))
-	}
-
-	// Check if tasks is a string containing a JSON array.
-	var tasksStr string
-	if err := json.Unmarshal(tasksRaw, &tasksStr); err != nil {
-		// Not a string – return the original typed unmarshal error.
-		return json.Unmarshal(data, (*plain)(p))
-	}
-
-	var tasks []AgentTaskParams
-	if err := json.Unmarshal([]byte(tasksStr), &tasks); err != nil {
-		return fmt.Errorf("failed to parse tasks string as JSON array: %w", err)
-	}
-
-	slog.Warn("Recovered AgentParams.Tasks from JSON string (LLM sent string instead of array)")
-
-	// Remove tasks from raw so the rest can be unmarshalled normally.
-	delete(raw, "tasks")
-	patched, err := json.Marshal(raw)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(patched, (*plain)(p)); err != nil {
-		return err
-	}
-	p.Tasks = tasks
-	return nil
 }
 
 const (
@@ -116,37 +64,41 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 				"run_in_background", params.RunInBackground,
 			)
 
-			// Unified path: construct task graph and delegate to runTaskGraph
-			var tasks []taskGraphTask
+			var tasks []subagentTask
 			if len(params.Tasks) > 0 {
-				for _, task := range params.Tasks {
-					if strings.TrimSpace(task.ID) == "" {
-						return fantasy.NewTextErrorResponse("task id is required"), nil
-					}
-					if strings.TrimSpace(task.Prompt) == "" {
-						slog.Warn("Agent task missing prompt",
-							"task_id", task.ID,
+				for i, task := range params.Tasks {
+					assignment := strings.TrimSpace(task.Assignment)
+					if assignment == "" {
+						slog.Warn("Agent task missing assignment",
+							"task_index", i,
+							"task_name", task.Name,
 							"description", task.Description,
 						)
 						return fantasy.NewTextErrorResponse(fmt.Sprintf(
-							"task %q is missing the required \"prompt\" field. "+
-								"The \"prompt\" field must contain the full task instructions. "+
+							"task %d is missing the required \"assignment\" field. "+
+								"The \"assignment\" field must contain the full task instructions. "+
 								"The \"description\" field (currently %q) is only a short display label. "+
-								"Please retry with a \"prompt\" field containing the detailed task instructions.",
-							task.ID, task.Description,
+								"Please retry with an \"assignment\" field containing the detailed task instructions.",
+							i, task.Description,
 						)), nil
 					}
-					tasks = append(tasks, taskGraphTask{
-						ID:              strings.TrimSpace(task.ID),
-						Description:     task.Description,
-						Prompt:          task.Prompt,
-						SubagentType:    task.SubagentType,
-						DependsOn:       task.DependsOn,
-						RunInBackground: task.RunInBackground,
+					name := strings.TrimSpace(task.Name)
+					if name == "" {
+						name = fmt.Sprintf("task_%d", i)
+					}
+					description := strings.TrimSpace(task.Description)
+					if description == "" {
+						subagentType := config.RequestedSubagentID(strings.TrimSpace(task.SubagentType))
+						description = defaultSubagentDescription(subagentType, assignment)
+					}
+					tasks = append(tasks, subagentTask{
+						Name:         name,
+						Description:  description,
+						Assignment:   assignment,
+						SubagentType: task.SubagentType,
 					})
 				}
 			} else {
-				// Single-task case: convert to single-node task graph
 				if params.Prompt == "" {
 					slog.Warn("Agent tool missing prompt",
 						"description", params.Description,
@@ -160,28 +112,27 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 				}
 				description := strings.TrimSpace(params.Description)
 				if description == "" {
-					// Use subagent type to determine default description
-					subagentType := config.CanonicalSubagentID(strings.TrimSpace(params.SubagentType))
+					subagentType := config.RequestedSubagentID(strings.TrimSpace(params.SubagentType))
 					description = defaultSubagentDescription(subagentType, params.Prompt)
 				}
-				tasks = []taskGraphTask{{
-					ID:              "task",
-					Description:     description,
-					Prompt:          params.Prompt,
-					SubagentType:    params.SubagentType,
-					RunInBackground: params.RunInBackground,
+				tasks = []subagentTask{{
+					Name:         "task",
+					Description:  description,
+					Assignment:   params.Prompt,
+					SubagentType: params.SubagentType,
 				}}
 			}
 
-			if message := validateExploreDelegations(tasks); message != "" {
+			if message := c.validateSubagentDelegations(tasks); message != "" {
 				return fantasy.NewTextErrorResponse(message), nil
 			}
 
-			return c.runTaskGraph(ctx, taskGraphParams{
+			return c.runSubagents(ctx, subagentBatchParams{
 				SessionID:       sessionID,
 				AgentMessageID:  agentMessageID,
 				ToolCallID:      call.ID,
 				Tasks:           tasks,
+				Context:         params.Context,
 				RunInBackground: params.RunInBackground,
 			})
 		}), nil
@@ -194,7 +145,7 @@ func (c *coordinator) buildAgentToolDescription() string {
 		if config.NormalizeAgentMode(agentCfg.Mode) == config.AgentModePrimary {
 			continue
 		}
-		canonicalID := config.CanonicalSubagentID(agentCfg.ID)
+		canonicalID := config.ResolveSubagentID(c.cfg.Config().Agents, agentCfg.ID)
 		if _, ok := seen[canonicalID]; ok {
 			continue
 		}
@@ -213,20 +164,43 @@ func (c *coordinator) buildAgentToolDescription() string {
 	return strings.ReplaceAll(string(agentToolDescription), "{agents}", strings.Join(entries, "\n"))
 }
 
-func validateExploreDelegations(tasks []taskGraphTask) string {
+func (c *coordinator) validateSubagentDelegations(tasks []subagentTask) string {
+	return validateSubagentDelegations(tasks, c.cfg.Config().Agents)
+}
+
+func validateExploreDelegations(tasks []subagentTask) string {
+	return validateSubagentDelegations(tasks, nil)
+}
+
+func validateSubagentDelegations(tasks []subagentTask, agents map[string]config.Agent) string {
 	for _, task := range tasks {
-		if config.CanonicalSubagentID(strings.TrimSpace(task.SubagentType)) != config.AgentExplore {
-			continue
+		subagentType := config.ResolveSubagentID(agents, strings.TrimSpace(task.SubagentType))
+		if subagentType == config.AgentExplore {
+			if reason := exploreDelegationViolation(task.Assignment); reason != "" {
+				return fmt.Sprintf(
+					"task %q cannot use `explore`: %s\n\n"+
+						"`explore` is only for quick codebase discovery: locating relevant files, symbols, call chains, "+
+						"and concise file:line evidence. Use direct primary reads for full-file reads, `review` for final code review, "+
+						"and `general` for implementation, reproduction, build, test, lint, or other execution tasks.",
+					task.Name,
+					reason,
+				)
+			}
 		}
-		if reason := exploreDelegationViolation(task.Prompt); reason != "" {
-			return fmt.Sprintf(
-				"task %q cannot use `explore`: %s\n\n"+
-					"`explore` is only for quick codebase discovery: locating relevant files, symbols, call chains, "+
-					"and concise file:line evidence. The primary agent must do final review decisions and direct full-file reads. "+
-					"Use `general` for implementation, reproduction, build, test, lint, or other execution tasks.",
-				task.ID,
-				reason,
-			)
+		if subagentType == config.AgentReview {
+			if reason := reviewDelegationViolation(task.Assignment); reason != "" {
+				return fmt.Sprintf("task %q cannot use `review`: %s", task.Name, reason)
+			}
+		}
+		if subagentType == config.AgentPlan {
+			if reason := planDelegationViolation(task.Assignment); reason != "" {
+				return fmt.Sprintf("task %q cannot use `plan`: %s", task.Name, reason)
+			}
+		}
+		if subagentType == config.AgentLibrarian {
+			if reason := librarianDelegationViolation(task.Assignment); reason != "" {
+				return fmt.Sprintf("task %q cannot use `librarian`: %s", task.Name, reason)
+			}
 		}
 	}
 	return ""
@@ -251,7 +225,82 @@ func exploreDelegationViolation(prompt string) string {
 	}) {
 		return "full-file content relay belongs in the primary agent with direct file reads"
 	}
+	if looksLikeFinalReview(text) {
+		return "final code review belongs in the `review` subagent, not `explore`"
+	}
 	return ""
+}
+
+func reviewDelegationViolation(prompt string) string {
+	text := strings.ToLower(prompt)
+	if containsAnyUnnegatedLower(text, mutatingOrTestMarkers()) {
+		return "`review` is read-only and for code-review findings; use `general` for fixes or test execution"
+	}
+	return ""
+}
+
+func planDelegationViolation(prompt string) string {
+	text := strings.ToLower(prompt)
+	if containsAnyUnnegatedLower(text, mutatingOrTestMarkers()) {
+		return "`plan` is read-only and for architecture planning; use `general` for fixes or test execution"
+	}
+	return ""
+}
+
+func librarianDelegationViolation(prompt string) string {
+	text := strings.ToLower(prompt)
+	if containsAnyUnnegatedLower(text, mutatingOrTestMarkers()) {
+		return "`librarian` is read-only and for source-verified dependency/API research; use `general` for fixes"
+	}
+	return ""
+}
+
+func mutatingOrTestMarkers() []string {
+	return []string{
+		"implement the",
+		"implement a",
+		"implement this",
+		"modify code",
+		"modify file",
+		"modify the",
+		"edit file",
+		"edit the",
+		"write code",
+		"write file",
+		"write the",
+		"fix bug",
+		"fix the",
+		"fix any",
+		"run tests",
+		"go test",
+		"npm test",
+		"pytest",
+		"cargo test",
+		"执行测试",
+		"运行测试",
+		"修改代码",
+		"修改文件",
+		"实现修复",
+		"修复问题",
+		"修复 bug",
+	}
+}
+
+func looksLikeFinalReview(text string) bool {
+	return containsAnyLower(text, []string{
+		"final code review",
+		"review the current diff",
+		"review this diff",
+		"review these changes",
+		"decide whether",
+		"safe to merge",
+		"approve",
+		"bug triage",
+		"审阅",
+		"代码审查",
+		"代码评审",
+		"是否安全",
+	})
 }
 
 func containsAnyLower(text string, markers []string) bool {
@@ -259,6 +308,25 @@ func containsAnyLower(text string, markers []string) bool {
 		if strings.Contains(text, marker) {
 			return true
 		}
+	}
+	return false
+}
+
+func containsAnyUnnegatedLower(text string, markers []string) bool {
+	for _, marker := range markers {
+		index := strings.Index(text, marker)
+		if index < 0 {
+			continue
+		}
+		prefix := text[:index]
+		window := prefix
+		if len(window) > 32 {
+			window = window[len(window)-32:]
+		}
+		if containsAnyLower(window, []string{"do not ", "don't ", "without ", "禁止", "不要", "不得"}) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -287,7 +355,7 @@ func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType st
 }
 
 func (c *coordinator) subagentConfig(requestedType string) (config.Agent, error) {
-	subagentType := config.CanonicalSubagentID(strings.TrimSpace(requestedType))
+	subagentType := config.ResolveSubagentID(c.cfg.Config().Agents, strings.TrimSpace(requestedType))
 	agentCfg, ok := c.cfg.Config().Agents[subagentType]
 	if !ok {
 		return config.Agent{}, fmt.Errorf("unknown subagent type: %s", subagentType)

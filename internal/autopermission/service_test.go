@@ -74,9 +74,11 @@ func (m *mockPermissionService) ClearSkillContext()               {}
 func (m *mockPermissionService) GetSkillContext() (string, []string) {
 	return "", nil
 }
+
 func (m *mockPermissionService) GetDenialQueue(string) permission.DenialQueueReader {
 	return nil
 }
+
 func (m *mockPermissionService) GetDenialQueueEditor(string) permission.DenialQueueEditor {
 	return nil
 }
@@ -362,7 +364,7 @@ func TestAutoPermission_AutoModeExplicitAllowListSkipsClassifierAndPrompt(t *tes
 	require.Zero(t, classifier.calls)
 }
 
-func TestAutoPermission_AutoModeExplicitAllowListDoesNotBypassAlwaysManualRules(t *testing.T) {
+func TestAutoPermission_AutoModeExplicitAllowListRoutesRiskyBashToGuardian(t *testing.T) {
 	t.Parallel()
 
 	base := &mockPermissionService{
@@ -391,9 +393,9 @@ func TestAutoPermission_AutoModeExplicitAllowListDoesNotBypassAlwaysManualRules(
 	require.NoError(t, err)
 	require.True(t, granted)
 	require.Equal(t, 1, base.promptCalls)
-	require.Zero(t, classifier.calls)
+	require.Equal(t, 1, classifier.calls)
 	require.NotNil(t, base.lastPrompt.AutoReview)
-	require.Equal(t, permission.AutoReviewTriggerAlwaysManual, base.lastPrompt.AutoReview.Trigger)
+	require.Equal(t, permission.AutoReviewTriggerClassifierBlock, base.lastPrompt.AutoReview.Trigger)
 }
 
 func TestAutoPermission_AutoModeExplicitAllowListIgnoresBroadBash(t *testing.T) {
@@ -926,9 +928,9 @@ func TestAutoPermission_AutoModeSensitiveWorkspaceWriteFallsBackToPrompt(t *test
 	require.NoError(t, err)
 	require.True(t, granted)
 	require.Equal(t, 1, base.promptCalls)
-	require.Zero(t, classifier.calls)
+	require.Equal(t, 1, classifier.calls)
 	require.NotNil(t, base.lastPrompt.AutoReview)
-	require.Equal(t, permission.AutoReviewTriggerAlwaysManual, base.lastPrompt.AutoReview.Trigger)
+	require.Equal(t, permission.AutoReviewTriggerClassifierBlock, base.lastPrompt.AutoReview.Trigger)
 }
 
 func TestAutoPermission_AutoModeSubagentWithoutParentAuthorityBlocks(t *testing.T) {
@@ -1305,14 +1307,36 @@ func TestIsAlwaysManual(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "url read always manual",
-			req:  permission.PermissionRequest{ToolName: tools.ReadToolName, Action: "read_url"},
+			name: "download preapproved host not manual",
+			req: permission.PermissionRequest{
+				ToolName: tools.DownloadToolName,
+				Action:   "download",
+				Params: tools.DownloadPermissionsParams{
+					URL: "https://docs.python.org/3/library/os.html",
+				},
+			},
+			want: false,
+		},
+		{
+			name: "download non-preapproved host is manual",
+			req: permission.PermissionRequest{
+				ToolName: tools.DownloadToolName,
+				Action:   "download",
+				Params: tools.DownloadPermissionsParams{
+					URL: "https://evil.com/malware.zip",
+				},
+			},
 			want: true,
 		},
 		{
-			name: "agentic fetch always manual",
+			name: "url read not always manual",
+			req:  permission.PermissionRequest{ToolName: tools.ReadToolName, Action: "read_url"},
+			want: false,
+		},
+		{
+			name: "agentic fetch not always manual",
 			req:  permission.PermissionRequest{ToolName: tools.AgenticFetchToolName, Action: "agentic_fetch"},
-			want: true,
+			want: false,
 		},
 		{
 			name: "high risk bash manual",

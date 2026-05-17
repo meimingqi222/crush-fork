@@ -362,12 +362,6 @@ func (s *service) handleAutoModeRequest(ctx context.Context, sessionAuthorityID 
 	case PolicyRequirementForbidden:
 		return false, policyBlockedError("Auto Mode policy blocked this action.", decision.Reason)
 	case PolicyRequirementNeedsApproval:
-		if decision.Source == "always_manual" {
-			return s.promptWithEscalation(ctx, withAutoReview(req, permission.AutoReview{
-				Trigger: permission.AutoReviewTriggerAlwaysManual,
-				Reason:  decision.Reason,
-			}))
-		}
 		return s.handlePolicyApproval(ctx, sessionAuthorityID, req, decision)
 	default:
 		return s.handleGuardianReview(ctx, sessionAuthorityID, req, "Auto Mode policy requires guardian review for this action.")
@@ -773,9 +767,11 @@ func policyFromConfig(cfg *config.AutoMode) (ApprovalPolicyConfig, []ExecPolicyR
 func isAutoModeAllowlistedRequest(req permission.PermissionRequest) bool {
 	switch req.ToolName {
 	case tools.ReadToolName:
-		return req.Action == "read"
+		return req.Action == "read" || req.Action == "read_url"
 	case tools.GrepToolName, tools.GlobToolName:
 		return req.Action == "search"
+	case tools.AgenticFetchToolName:
+		return req.Action == "agentic_fetch"
 	case tools.DiagnosticsToolName,
 		tools.ReferencesToolName,
 		tools.LSPDeclarationToolName,
@@ -894,10 +890,12 @@ func isSensitiveWorkspacePath(path, workingDir string) bool {
 
 func isAlwaysManual(req permission.PermissionRequest, workingDir string) bool {
 	switch req.ToolName {
-	case tools.DownloadToolName, tools.AgenticFetchToolName:
+	case tools.DownloadToolName:
+		// Allow downloads from preapproved code-related hosts in Auto Mode.
+		if urlStr := tools.ExtractURLFromPermissionRequest(req.Params); urlStr != "" && tools.IsPreapprovedURL(urlStr) {
+			return false
+		}
 		return true
-	case tools.ReadToolName:
-		return req.Action == "read_url"
 	case tools.BashToolName:
 		return isHighRiskBashRequest(req)
 	case tools.EditToolName, tools.WriteToolName:

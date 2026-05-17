@@ -68,11 +68,11 @@ import (
 
 type agentToolParams struct {
 	Tasks []struct {
-		ID           string   `json:"id"`
-		Description  string   `json:"description,omitempty"`
-		Prompt       string   `json:"prompt,omitempty"`
-		SubagentType string   `json:"subagent_type,omitempty"`
-		DependsOn    []string `json:"depends_on,omitempty"`
+		ID           string `json:"id,omitempty"`
+		Name         string `json:"name,omitempty"`
+		Description  string `json:"description,omitempty"`
+		Assignment   string `json:"assignment,omitempty"`
+		SubagentType string `json:"subagent_type,omitempty"`
 	} `json:"tasks,omitempty"`
 }
 
@@ -1408,7 +1408,10 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 		tc := toolItem.ToolCall()
 		messageID := toolItem.MessageID()
 		for i, task := range params.Tasks {
-			taskID := strings.TrimSpace(task.ID)
+			taskID := strings.TrimSpace(task.Name)
+			if taskID == "" {
+				taskID = strings.TrimSpace(task.ID)
+			}
 			if taskID == "" {
 				continue
 			}
@@ -1421,14 +1424,14 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 				tc.ID,
 				taskID,
 				strings.TrimSpace(task.Description),
-				strings.TrimSpace(task.Prompt),
+				strings.TrimSpace(task.Assignment),
 				task.SubagentType,
 				childSessionID,
 			)
 			if status, ok := statuses[taskID]; ok {
 				node.SetCompletionStatus(status)
 			}
-			node.SetTaskRef(taskGraphTaskRef(i, taskID))
+			node.SetTaskRef(agent.SubagentTaskRef(i, taskID, tc.ID))
 			result = append(result, node)
 		}
 	}
@@ -1791,7 +1794,7 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 
 	var items []chat.MessageItem
 	for i, task := range params.Tasks {
-		taskID := strings.TrimSpace(task.ID)
+		taskID := strings.TrimSpace(task.Name)
 		if taskID == "" {
 			continue
 		}
@@ -1808,11 +1811,11 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 			tc.ID,
 			taskID,
 			strings.TrimSpace(task.Description),
-			strings.TrimSpace(task.Prompt),
+			strings.TrimSpace(task.Assignment),
 			task.SubagentType,
 			childSessionID,
 		)
-		node.SetTaskRef(taskGraphTaskRef(i, taskID))
+		node.SetTaskRef(agent.SubagentTaskRef(i, taskID, tc.ID))
 		items = append(items, node)
 	}
 	return items
@@ -2101,6 +2104,35 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			status := "Plan Mode disabled"
 			if msg.NextMode == session.CollaborationModePlan {
 				status = "Plan Mode enabled"
+			}
+			return planModeChangedMsg{SessionID: sessionID, Status: status}
+		})
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionToggleOrchestrateMode:
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before changing Orchestrate Mode..."))
+			break
+		}
+		cmds = append(cmds, func() tea.Msg {
+			ctx := context.Background()
+			sessionID := msg.SessionID
+			if sessionID == "" {
+				if msg.NextMode != session.CollaborationModeOrchestrate {
+					return util.ReportError(errors.New("cannot exit Orchestrate Mode without an active session"))()
+				}
+				newSession, err := m.com.App.Sessions.Create(ctx, "New Session")
+				if err != nil {
+					return util.ReportError(err)()
+				}
+				sessionID = newSession.ID
+			}
+			_, err := m.com.App.Sessions.UpdateCollaborationMode(ctx, sessionID, msg.NextMode)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			status := "Orchestrate Mode disabled"
+			if msg.NextMode == session.CollaborationModeOrchestrate {
+				status = "Orchestrate Mode enabled"
 			}
 			return planModeChangedMsg{SessionID: sessionID, Status: status}
 		})

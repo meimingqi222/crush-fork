@@ -26,9 +26,11 @@ func DeriveSubagentPermissions(parent ParentPermissionContext, profile SubagentP
 	}
 	allowed = unionToolNames(allowed, mandatorySubagentToolNames())
 
+	externalDeny := normalizeToolNames(parent.ExternalDeny)
+	_, agentExternallyDenied := toToolSet(externalDeny)[AgentToolName]
 	denied := unionToolNames(
 		parent.DeniedTools,
-		parent.ExternalDeny,
+		externalDeny,
 		profile.DenyTools,
 		globalSubagentDeniedTools(),
 	)
@@ -41,10 +43,11 @@ func DeriveSubagentPermissions(parent ParentPermissionContext, profile SubagentP
 
 	allowed = subtractToolNames(allowed, denied)
 	return DerivedSubagentPermissions{
-		AllowedTools: toToolSet(allowed),
-		DeniedTools:  toToolSet(denied),
-		ReadOnly:     profile.ReadOnly,
-		CanSpawn:     profile.CanSpawn,
+		AllowedTools:              toToolSet(allowed),
+		DeniedTools:               toToolSet(denied),
+		ReadOnly:                  profile.ReadOnly,
+		CanSpawn:                  profile.CanSpawn,
+		AgentToolExternallyDenied: agentExternallyDenied,
 	}
 }
 

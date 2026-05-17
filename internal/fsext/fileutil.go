@@ -114,9 +114,8 @@ func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) (
 	walker := NewFastGlobWalker(searchPath)
 	found := csync.NewSlice[FileInfo]()
 	conf := fastwalk.Config{
-		Follow:  true,
-		ToSlash: fastwalk.DefaultToSlash(),
-		Sort:    fastwalk.SortFilesFirst,
+		Follow: true,
+		Sort:   fastwalk.SortFilesFirst,
 	}
 	err := fastwalk.Walk(&conf, searchPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {

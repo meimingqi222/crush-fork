@@ -31,6 +31,11 @@ func enableNativeToolParallelism(tool fantasy.AgentTool, metadata agenttools.Too
 	}
 }
 
+func subagentCanSpawn(ctx context.Context) bool {
+	runtime, ok := subagentRuntimeFromContext(ctx)
+	return ok && runtime.Permissions.CanSpawn
+}
+
 func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent, mode session.CollaborationMode, registry *toolRegistry) ([]registeredTool, error) {
 	registered := make([]registeredTool, 0, 48)
 
@@ -44,7 +49,11 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		registered = append(registered, registeredTool{tool: tool, metadata: entry.Metadata})
 	}
 
-	if config.NormalizeAgentMode(agent.Mode) != config.AgentModeSubagent && slices.Contains(agent.AllowedTools, AgentToolName) {
+	allowAgentTool := slices.Contains(agent.AllowedTools, AgentToolName)
+	if runtime, ok := subagentRuntimeFromContext(ctx); ok && runtime.Permissions.CanSpawn {
+		allowAgentTool = true
+	}
+	if allowAgentTool && (config.NormalizeAgentMode(agent.Mode) != config.AgentModeSubagent || subagentCanSpawn(ctx)) {
 		agentTool, err := c.agentTool(ctx)
 		if err != nil {
 			return nil, err
@@ -77,15 +86,11 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 			DisableBackground:       true,
 			DescriptionOverride:     agenttools.RestrictedGitBashDescription(),
 		}
-	} else if agent.ID == config.AgentExplore {
-		// Explore agent: no git-only restriction — it already cannot edit/write
-		// files (those tools are absent from its AllowedTools list). The system
-		// prompt guides it to use read-only operations. Mirroring opencode's
-		// approach: rely on tool-level constraints (no edit/write) rather than
-		// bash-level constraints, so useful git plumbing commands (cat-file,
-		// ls-tree, …) and command chains (cd && git diff) work without errors.
+	} else if subagentIDIsReadOnly(config.CanonicalSubagentID(agent.ID)) {
 		bashOpts = agenttools.BashToolOptions{
-			DisableBackground: true,
+			RestrictedToGitReadOnly: true,
+			DisableBackground:       true,
+			DescriptionOverride:     agenttools.RestrictedGitBashDescription(),
 		}
 	}
 
@@ -113,11 +118,12 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),
+		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewSubtaskResultTool(c.messages),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
 	if config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent {
-		builtin = append(builtin, agenttools.NewSubagentFinishTool())
+		builtin = append(builtin, agenttools.NewSubagentFinishTool(c.messages))
 	}
 	for _, tool := range builtin {
 		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))

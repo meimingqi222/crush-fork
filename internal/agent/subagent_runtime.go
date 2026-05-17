@@ -16,20 +16,21 @@ const (
 	SubagentProfileCoordinator SubagentProfileKind = "coordinator"
 	SubagentProfileGeneral     SubagentProfileKind = "general"
 	SubagentProfileExplore     SubagentProfileKind = "explore"
+	SubagentProfilePlan        SubagentProfileKind = "plan"
 	SubagentProfileReview      SubagentProfileKind = "review"
 	SubagentProfileGuardian    SubagentProfileKind = "guardian"
 )
 
 type SubagentProfile struct {
-	Name         string
-	Kind         SubagentProfileKind
-	Mode         string
-	Description  string
-	CanSpawn     bool
-	ReadOnly     bool
-	ToolNames    []string
-	DenyTools    []string
-	ResultSchema string
+	Name        string
+	Kind        SubagentProfileKind
+	Mode        string
+	Description string
+	CanSpawn    bool
+	ReadOnly    bool
+	ToolNames   []string
+	DenyTools   []string
+	Spawns      []string
 }
 
 type SubagentToolProfile struct {
@@ -53,10 +54,11 @@ func (p SubagentToolProfile) Allows(toolName string) bool {
 }
 
 type DerivedSubagentPermissions struct {
-	AllowedTools map[string]struct{}
-	DeniedTools  map[string]struct{}
-	ReadOnly     bool
-	CanSpawn     bool
+	AllowedTools              map[string]struct{}
+	DeniedTools               map[string]struct{}
+	ReadOnly                  bool
+	CanSpawn                  bool
+	AgentToolExternallyDenied bool
 }
 
 // ApprovalAuthority is reserved for future explicit parent-delegated approval
@@ -106,12 +108,9 @@ const (
 // SubagentResultContract defines the expected completion contract for a subagent.
 // MaxSummaryBytes and MaxStructuredDataBytes are reserved for future size limits.
 type SubagentResultContract struct {
-	Required               bool
-	SchemaName             string
-	AllowRawTextFallback   bool
-	MissingFinishPolicy    MissingFinishPolicy
-	MaxSummaryBytes        int // TODO: not yet enforced at runtime
-	MaxStructuredDataBytes int // TODO: not yet enforced at runtime
+	Required             bool
+	AllowRawTextFallback bool
+	MissingFinishPolicy  MissingFinishPolicy
 }
 
 type SubagentRetryPolicyKind string
@@ -142,7 +141,7 @@ func (s SideEffectSummary) HasAny() bool {
 		s.ApprovalGranted
 }
 
-func ShouldRetrySubagent(result taskGraphNodeResult, runtime SubagentRuntimeContext, sideEffects SideEffectSummary) bool {
+func ShouldRetrySubagent(result subagentResult, runtime SubagentRuntimeContext, sideEffects SideEffectSummary) bool {
 	if result.Status == message.ToolResultSubtaskStatusCanceled ||
 		result.Status == message.ToolResultSubtaskStatusBlocked ||
 		statusReleasesDependents(result.Status) {
@@ -244,7 +243,7 @@ func subagentRuntimeFromContext(ctx context.Context) (SubagentRuntimeContext, bo
 	return runtime, ok
 }
 
-func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageID, parentToolCallID string, task taskGraphTask, agentCfg config.Agent, parentPermissions ParentPermissionContext, availableTools []string, effectiveIsolation, workspaceRoot string, eventSink SubagentEventSink) SubagentRuntimeContext {
+func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageID, parentToolCallID string, task subagentTask, agentCfg config.Agent, parentPermissions ParentPermissionContext, availableTools []string, effectiveIsolation, workspaceRoot string, eventSink SubagentEventSink) SubagentRuntimeContext {
 	profile := subagentProfileForAgent(agentCfg)
 	permissions := DeriveSubagentPermissions(parentPermissions, profile, availableTools)
 	toolProfile := subagentToolProfileFromPermissions(permissions)
@@ -253,7 +252,7 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 		ChildSessionID:   strings.TrimSpace(childSessionID),
 		ParentMessageID:  strings.TrimSpace(parentMessageID),
 		ParentToolCallID: strings.TrimSpace(parentToolCallID),
-		TaskID:           strings.TrimSpace(task.ID),
+		TaskID:           strings.TrimSpace(task.Name),
 		TaskDescription:  strings.TrimSpace(task.Description),
 		AgentProfile:     profile,
 		ToolProfile:      toolProfile,
@@ -262,7 +261,7 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 			SessionID:       strings.TrimSpace(parentSessionID),
 			ParentSessionID: strings.TrimSpace(parentSessionID),
 			ChildSessionID:  strings.TrimSpace(childSessionID),
-			TaskID:          strings.TrimSpace(task.ID),
+			TaskID:          strings.TrimSpace(task.Name),
 		},
 		Workspace: SubagentWorkspacePolicy{
 			Root:      strings.TrimSpace(workspaceRoot),
@@ -285,19 +284,35 @@ func subagentProfileForAgent(agentCfg config.Agent) SubagentProfile {
 		Name:        canonicalID,
 		Description: strings.TrimSpace(agentCfg.Description),
 		Mode:        string(config.NormalizeAgentMode(agentCfg.Mode)),
-		CanSpawn:    false,
-		ReadOnly:    canonicalID == config.AgentExplore,
+		CanSpawn:    len(agentCfg.Spawns) > 0,
+		ReadOnly:    subagentIDIsReadOnly(canonicalID),
 		ToolNames:   append([]string(nil), agentCfg.AllowedTools...),
+		Spawns:      append([]string(nil), agentCfg.Spawns...),
 	}
 	switch canonicalID {
 	case config.AgentExplore:
 		profile.Kind = SubagentProfileExplore
-	case config.AgentGeneral, config.AgentCoder:
+	case config.AgentReview:
+		profile.Kind = SubagentProfileReview
+	case config.AgentPlan:
+		profile.Kind = SubagentProfilePlan
+	case config.AgentLibrarian:
+		profile.Kind = SubagentProfileExplore
+	case config.AgentGeneral, config.AgentCoder, config.AgentDesigner, config.AgentQuickTask:
 		profile.Kind = SubagentProfileGeneral
 	default:
 		profile.Kind = SubagentProfileGeneral
 	}
 	return profile
+}
+
+func subagentIDIsReadOnly(canonicalID string) bool {
+	switch canonicalID {
+	case config.AgentExplore, config.AgentPlan, config.AgentReview, config.AgentLibrarian:
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneToolSet(src map[string]struct{}) map[string]struct{} {
@@ -333,16 +348,13 @@ func subagentIsolationKind(value string) SubagentIsolationKind {
 
 func subagentResultContract(profile SubagentProfile) SubagentResultContract {
 	contract := SubagentResultContract{
-		Required:               true,
-		SchemaName:             strings.TrimSpace(profile.ResultSchema),
-		AllowRawTextFallback:   true,
-		MaxSummaryBytes:        8 * 1024,
-		MaxStructuredDataBytes: 64 * 1024,
+		Required:             true,
+		AllowRawTextFallback: true,
 	}
 	switch profile.Kind {
 	case SubagentProfileExplore:
 		contract.MissingFinishPolicy = MissingFinishRetryThenWarn
-	case SubagentProfileReview:
+	case SubagentProfilePlan, SubagentProfileReview:
 		contract.MissingFinishPolicy = MissingFinishRetryThenWarn
 	case SubagentProfileGuardian:
 		contract.AllowRawTextFallback = false
@@ -358,6 +370,40 @@ func applySubagentRuntimeConfig(runtime *SubagentRuntimeContext, runtimeCfg conf
 		return
 	}
 	runtime.Result.Required = runtimeCfg.StructuredCompletionRequired
+
+	// CanSpawn is true if:
+	// 1. The agent has a non-empty Spawns list (from config or builtin), OR
+	// 2. AllowRecursiveAgents is true and the agent is not read-only (legacy fallback)
+	canSpawn := len(runtime.AgentProfile.Spawns) > 0
+	if !canSpawn {
+		canSpawn = runtimeCfg.AllowRecursiveAgents && !runtime.AgentProfile.ReadOnly
+	}
+	if runtime.Permissions.AgentToolExternallyDenied {
+		canSpawn = false
+	}
+	runtime.AgentProfile.CanSpawn = canSpawn
+	runtime.Permissions.CanSpawn = canSpawn
+	if canSpawn {
+		delete(runtime.Permissions.DeniedTools, AgentToolName)
+		delete(runtime.ToolProfile.Denied, AgentToolName)
+		if runtime.Permissions.AllowedTools != nil {
+			runtime.Permissions.AllowedTools[AgentToolName] = struct{}{}
+		}
+		if runtime.ToolProfile.Allowed != nil {
+			runtime.ToolProfile.Allowed[AgentToolName] = struct{}{}
+		}
+	} else {
+		if runtime.Permissions.DeniedTools == nil {
+			runtime.Permissions.DeniedTools = make(map[string]struct{})
+		}
+		if runtime.ToolProfile.Denied == nil {
+			runtime.ToolProfile.Denied = make(map[string]struct{})
+		}
+		runtime.Permissions.DeniedTools[AgentToolName] = struct{}{}
+		runtime.ToolProfile.Denied[AgentToolName] = struct{}{}
+		delete(runtime.Permissions.AllowedTools, AgentToolName)
+		delete(runtime.ToolProfile.Allowed, AgentToolName)
+	}
 	if policy := parseMissingFinishPolicy(runtimeCfg.MissingFinishPolicy); policy != "" {
 		runtime.Result.MissingFinishPolicy = policy
 	}

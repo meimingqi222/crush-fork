@@ -38,6 +38,10 @@ func (m *mockEventStore) GetMaxWatermark(_ context.Context) (int64, error) {
 	return 0, nil
 }
 
+func (m *mockEventStore) RecentSessions(_ context.Context, _ int64, _ int) ([]string, error) {
+	return nil, nil
+}
+
 func (m *mockEventStore) Close() error {
 	return nil
 }

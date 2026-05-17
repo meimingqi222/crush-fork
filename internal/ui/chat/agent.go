@@ -177,7 +177,6 @@ type agentTaskRenderEntry struct {
 	description  string
 	prompt       string
 	subagentType string
-	dependsOn    []string
 }
 
 // RenderTool implements the [ToolRenderer] interface.
@@ -494,11 +493,10 @@ func collectAgentTaskEntries(params agent.AgentParams) []agentTaskRenderEntry {
 
 	for _, task := range params.Tasks {
 		tasks = append(tasks, agentTaskRenderEntry{
-			id:           strings.TrimSpace(task.ID),
+			id:           strings.TrimSpace(task.Name),
 			description:  strings.TrimSpace(task.Description),
-			prompt:       strings.TrimSpace(task.Prompt),
+			prompt:       strings.TrimSpace(task.Assignment),
 			subagentType: config.CanonicalSubagentID(task.SubagentType),
-			dependsOn:    append([]string(nil), task.DependsOn...),
 		})
 	}
 	return tasks
@@ -558,9 +556,6 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 		subagentLabel := titleCase(entry.subagentType)
 		if subagentLabel != "" {
 			label = fmt.Sprintf("[%s] %s", subagentLabel, label)
-		}
-		if deps := formatTaskDependencies(entry.dependsOn); deps != "" {
-			label += " " + deps
 		}
 
 		status := taskStatusIcon(sty, statusesByID[entry.id], opts, entry.id)
@@ -640,18 +635,7 @@ func summarizeTaskStatusCounts(tasks []agentTaskRenderEntry, statuses map[string
 		case taskStatusBlocked:
 			blocked++
 		default:
-			depsBlocked := false
-			for _, dep := range task.dependsOn {
-				if _, ok := completedSet[strings.TrimSpace(dep)]; !ok {
-					depsBlocked = true
-					break
-				}
-			}
-			if depsBlocked {
-				pending++
-			} else {
-				inProgress++
-			}
+			inProgress++
 		}
 	}
 	return completed, failed, canceled, blocked, inProgress, pending
@@ -680,23 +664,6 @@ func taskStatusIcon(sty *styles.Styles, status message.ToolResultSubtaskStatus, 
 		}
 		return sty.Tool.IconPending.String()
 	}
-}
-
-func formatTaskDependencies(dependsOn []string) string {
-	if len(dependsOn) == 0 {
-		return ""
-	}
-	cleaned := make([]string, 0, len(dependsOn))
-	for _, dep := range dependsOn {
-		dep = strings.TrimSpace(dep)
-		if dep != "" {
-			cleaned = append(cleaned, dep)
-		}
-	}
-	if len(cleaned) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("(after: %s)", strings.Join(cleaned, ", "))
 }
 
 func renderChildSessionStatus(sty *styles.Styles, width int, text string, isError bool) string {

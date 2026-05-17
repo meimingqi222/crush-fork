@@ -34,6 +34,13 @@ type EventStore interface {
 	// GetMaxWatermark returns the highest watermark across all events.
 	GetMaxWatermark(ctx context.Context) (int64, error)
 
+	// RecentSessions returns distinct session IDs whose events were created
+	// at or after the given Unix-seconds timestamp, ordered by most-recent
+	// event time descending. Empty session IDs are filtered out. When
+	// sinceUnix is zero, the store returns the most recently active sessions
+	// regardless of time. The limit caps the number of returned IDs.
+	RecentSessions(ctx context.Context, sinceUnix int64, limit int) ([]string, error)
+
 	// Close releases the underlying database resources.
 	Close() error
 }

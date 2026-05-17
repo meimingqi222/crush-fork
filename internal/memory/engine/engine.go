@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -46,6 +47,19 @@ type Engine struct {
 
 	// throttle
 	workingMemoryThrottle time.Duration
+
+	// reranker (optional) applied during Retrieve and compaction recall.
+	reranker Reranker
+
+	// Background materialization
+	bgInterval    time.Duration
+	bgEveryNTurns int
+	bgTurnCounter int
+	bgStop        chan struct{}
+	bgDone        chan struct{}
+	bgStarted     bool
+	bgMu          sync.Mutex
+	lastBgRun     *time.Time
 }
 
 const consolidationCheckpointView = "_pipeline_consolidation"
@@ -55,6 +69,13 @@ type Config struct {
 	Enabled               bool
 	Backend               string
 	WorkingMemoryThrottle time.Duration
+
+	// BackgroundInterval enables a periodic background materializer when > 0.
+	BackgroundInterval time.Duration
+	// BackgroundEveryNTurns triggers an opportunistic materialization after
+	// the given number of idle turns even before BackgroundInterval elapses.
+	// Set to 0 to disable turn-counter triggering.
+	BackgroundEveryNTurns int
 }
 
 // New creates a new memory Engine with the given SQLite database and config.
@@ -74,6 +95,8 @@ func New(db *sql.DB, cfg Config) *Engine {
 		backend:               backend,
 		sessionStates:         make(map[string]*sessionState),
 		workingMemoryThrottle: throttle,
+		bgInterval:            cfg.BackgroundInterval,
+		bgEveryNTurns:         cfg.BackgroundEveryNTurns,
 	}
 }
 
@@ -155,6 +178,8 @@ func (e *Engine) TriggerMaterialization(ctx context.Context) error {
 // TriggerConsolidation runs the consolidation pipeline on unprocessed events.
 // It queries events above the last consolidated watermark, passes them to the
 // Consolidator, and appends the resulting consolidated events to the store.
+// Uses a database-level lease to prevent multiple instances from running
+// consolidation simultaneously.
 func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 	if !e.enabled || e.consolidator == nil {
 		return nil
@@ -163,6 +188,18 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		slog.Debug("Memory engine in degraded mode, skipping consolidation")
 		return nil
 	}
+
+	// Try to acquire global consolidation lease.
+	lease, err := e.acquireConsolidationLease(ctx)
+	if err != nil {
+		slog.Debug("Consolidation lease acquisition failed, skipping", "error", err)
+		return nil
+	}
+	if lease == nil {
+		slog.Debug("Consolidation lease held by another instance, skipping")
+		return nil
+	}
+	defer e.releaseConsolidationLease(ctx, lease)
 
 	e.pipelineMu.Lock()
 	defer e.pipelineMu.Unlock()
@@ -224,6 +261,77 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		"watermark", e.lastConsolidatedWatermark,
 	)
 	return nil
+}
+
+const (
+	consolidationLeaseKey     = "consolidation_global"
+	consolidationLeaseSeconds = 180
+)
+
+// consolidationLease represents an acquired consolidation lease.
+type consolidationLease struct {
+	token      string
+	acquiredAt time.Time
+}
+
+// acquireConsolidationLease attempts to acquire a global lease for consolidation.
+// Returns nil if another instance holds the lease.
+func (e *Engine) acquireConsolidationLease(ctx context.Context) (*consolidationLease, error) {
+	if e.db == nil {
+		return nil, nil
+	}
+
+	now := time.Now().Unix()
+	token := fmt.Sprintf("lease-%d-%s", now, randomString(8))
+
+	result, err := e.db.ExecContext(ctx, `
+		INSERT INTO memory_materialized_views (id, view_name, watermark, schema_version, created_at, updated_at)
+		VALUES (?, ?, 1, 1, ?, ?)
+		ON CONFLICT(view_name) DO UPDATE SET
+			watermark = 1,
+			updated_at = excluded.updated_at
+		WHERE view_name = ?
+		  AND (watermark = 0 OR updated_at IS NULL OR updated_at < ?)
+	`, "lease-"+consolidationLeaseKey, consolidationLeaseKey, now, now, consolidationLeaseKey, now-consolidationLeaseSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring consolidation lease: %w", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return nil, nil
+	}
+
+	return &consolidationLease{token: token, acquiredAt: time.Now()}, nil
+}
+
+// releaseConsolidationLease releases the consolidation lease.
+func (e *Engine) releaseConsolidationLease(ctx context.Context, lease *consolidationLease) {
+	if e.db == nil || lease == nil {
+		return
+	}
+
+	now := time.Now().Unix()
+	_, _ = e.db.ExecContext(ctx, `
+		UPDATE memory_materialized_views
+		SET watermark = 0, updated_at = ?
+		WHERE view_name = ?
+	`, now, consolidationLeaseKey)
+}
+
+func randomString(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		for i := range b {
+			b[i] = letters[i%len(letters)]
+		}
+		return string(b)
+	}
+	for i := range b {
+		b[i] = letters[int(b[i])%len(letters)]
+	}
+	return string(b)
 }
 
 // Enabled returns whether the memory engine is enabled.
@@ -319,6 +427,25 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 		state.pendingWrites += len(events)
 	}
 	e.sessionMu.Unlock()
+
+	// Turn-counter trigger: opportunistic background materialization even
+	// when this turn produced no directly materializable events. This keeps
+	// memory views fresh during long planning/inspection sessions where
+	// extraction happens but consolidation is deferred.
+	if e.bgEveryNTurns > 0 {
+		e.bgMu.Lock()
+		e.bgTurnCounter++
+		fire := e.bgTurnCounter >= e.bgEveryNTurns
+		if fire {
+			e.bgTurnCounter = 0
+		}
+		e.bgMu.Unlock()
+		if fire {
+			if err := e.runBackgroundPass(ctx); err != nil {
+				slog.Warn("Turn-counter background materialization failed", "error", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -589,6 +716,7 @@ func (e *Engine) queryViewStatuses(ctx context.Context) ([]MaterializedViewStatu
 
 // Close releases all resources held by the engine.
 func (e *Engine) Close() error {
+	e.stopBackground()
 	if e.store != nil {
 		return e.store.Close()
 	}

@@ -39,8 +39,6 @@ func NewReflectTool(retriever engine.Retriever) fantasy.AgentTool {
 			}
 			if params.SessionID != "" {
 				opts["session_id"] = params.SessionID
-			} else if sessionID := GetSessionFromContext(ctx); sessionID != "" {
-				opts["session_id"] = sessionID
 			}
 
 			result, err := retriever.Reflect(ctx, params.Query, opts)

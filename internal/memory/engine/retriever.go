@@ -2,49 +2,82 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"unicode"
+	"time"
+	"unicode/utf8"
 )
 
 // SummaryRetriever implements the Retriever interface by reading from
-// materialized views (memory_summary.md) and the EventStore.
-// It is the primary recall path for prompt injection.
+// materialized views (memory_summary.md, mental_models/*.md, rollouts/*.md)
+// and the EventStore. It is the primary recall path for prompt injection.
 type SummaryRetriever struct {
-	store     EventStore
-	outputDir string
+	store         EventStore
+	db            *sql.DB
+	outputDir     string
+	reranker      Reranker
+	mentalMaxLen  int // max bytes from mental_models layer when budget unset
+	maxCandidates int
 }
 
 // NewSummaryRetriever creates a SummaryRetriever that reads materialized
 // views from outputDir and falls back to EventStore queries when views
 // are not yet available.
-func NewSummaryRetriever(store EventStore, outputDir string) *SummaryRetriever {
+func NewSummaryRetriever(store EventStore, db *sql.DB, outputDir string) *SummaryRetriever {
 	return &SummaryRetriever{
-		store:     store,
-		outputDir: outputDir,
+		store:         store,
+		db:            db,
+		outputDir:     outputDir,
+		mentalMaxLen:  4096,
+		maxCandidates: 30,
 	}
+}
+
+// WithReranker installs a Reranker on the SummaryRetriever; subsequent
+// Retrieve calls re-order FTS5/keyword candidates through it before
+// truncating to limit. Pass nil to disable.
+func (r *SummaryRetriever) WithReranker(rr Reranker) *SummaryRetriever {
+	r.reranker = rr
+	return r
+}
+
+// WithMaxCandidates sets the candidate cap used before reranking.
+func (r *SummaryRetriever) WithMaxCandidates(maxCandidates int) *SummaryRetriever {
+	if maxCandidates > 0 {
+		r.maxCandidates = maxCandidates
+	}
+	return r
 }
 
 // Recall returns a formatted summary block for prompt injection.
 // It reads from:
-//  1. memory_summary.md (materialized user + project summary)
-//  2. EventStore for current session working memory
+//  1. mental_models/*.md (stable layer: preferences, conventions, pitfalls)
+//  2. memory_summary.md  (recent corpus snapshot)
+//  3. EventStore for current session working memory
 //
-// If materialized views are not yet available, it falls back to
-// querying the EventStore directly for the most important events.
+// If no materialized views are available, it falls back to querying the
+// EventStore for the most important durable events.
 func (r *SummaryRetriever) Recall(ctx context.Context, opts map[string]any) (string, error) {
 	var parts []string
 
-	// 1. Read materialized summary from disk (user + project).
+	// 1. Stable mental models — always read in a fixed order.
+	if mm := r.readMentalModels(); mm != "" {
+		parts = append(parts, mm)
+	}
+
+	// 2. Recent corpus snapshot.
 	summaryContent, err := r.readFile("memory_summary.md")
 	if err == nil && summaryContent != "" {
 		parts = append(parts, summaryContent)
 	}
 
-	// 2. Read working memory for current session from EventStore.
+	// 3. Working memory for the current session.
 	if sessionID, ok := opts["session_id"].(string); ok && sessionID != "" {
 		wmContent := r.readWorkingMemory(ctx, sessionID)
 		if wmContent != "" {
@@ -52,12 +85,76 @@ func (r *SummaryRetriever) Recall(ctx context.Context, opts map[string]any) (str
 		}
 	}
 
-	// 3. Fallback: if nothing from files/working memory, build from Events.
 	if len(parts) == 0 {
 		return r.recallFromEvents(ctx)
 	}
-
 	return strings.Join(parts, "\n\n"), nil
+}
+
+// readMentalModels concatenates the per-model Markdown files in a fixed
+// order so the prompt sees a stable, deduplicated mental-model layer.
+func (r *SummaryRetriever) readMentalModels() string {
+	if r.outputDir == "" {
+		return ""
+	}
+	dir := filepath.Join(r.outputDir, "mental_models")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	type entry struct {
+		name string
+		data []byte
+	}
+	files := make([]entry, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".md") || name == "index.md" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		files = append(files, entry{name: name, data: data})
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+
+	var b strings.Builder
+	b.WriteString("<mental_models>\n")
+	limit := r.mentalMaxLen
+	used := 0
+	for _, f := range files {
+		piece := strings.TrimSpace(string(f.data))
+		if piece == "" {
+			continue
+		}
+		if limit > 0 && used+len(piece) > limit {
+			remaining := limit - used
+			if remaining > 256 {
+				piece = piece[:remaining]
+				for len(piece) > 0 && !utf8.ValidString(piece) {
+					piece = piece[:len(piece)-1]
+				}
+				b.WriteString(piece)
+				b.WriteString("\n…(mental models truncated)\n")
+				used = limit
+			}
+			break
+		}
+		b.WriteString(piece)
+		b.WriteString("\n\n")
+		used += len(piece) + 2
+	}
+	b.WriteString("</mental_models>")
+	return b.String()
 }
 
 // Reflect synthesizes across multiple memory events to answer a query
@@ -120,10 +217,18 @@ func (r *SummaryRetriever) Reflect(ctx context.Context, query string, opts map[s
 
 // Retrieve returns the most relevant memory events for a given context.
 // opts may include "scope", "kind", "session_id", "limit" to filter results.
+// Uses FTS5 full-text search with BM25 ranking for better accuracy.
 func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[string]any) ([]MemoryEvent, error) {
 	limit := 20
 	if configuredLimit, ok := opts["limit"].(int); ok && configuredLimit > 0 {
 		limit = configuredLimit
+	}
+	maxCandidates := r.maxCandidates
+	if maxCandidates <= 0 {
+		maxCandidates = 30
+	}
+	if configuredMaxCandidates, ok := opts["max_candidates"].(int); ok && configuredMaxCandidates > 0 {
+		maxCandidates = configuredMaxCandidates
 	}
 
 	filter := EventFilter{
@@ -145,6 +250,33 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 		return r.store.Query(ctx, filter)
 	}
 
+	// Try FTS5 search first if db is available.
+	if r.db != nil {
+		// Over-fetch to feed the reranker and to give loose bilingual queries
+		// enough candidates without scanning the whole event store.
+		fetchLimit := limit
+		if fetchLimit < maxCandidates {
+			fetchLimit = maxCandidates
+		}
+		events, err := r.ftsSearch(ctx, query, filter, fetchLimit, true)
+		if err == nil && len(events) == 0 {
+			events, err = r.ftsSearch(ctx, query, filter, fetchLimit, false)
+		}
+		if err == nil && len(events) > 0 {
+			if r.reranker != nil {
+				if reranked, rerr := r.reranker.Rerank(ctx, query, events); rerr == nil && len(reranked) > 0 {
+					events = reranked
+				}
+			}
+			if len(events) > limit {
+				events = events[:limit]
+			}
+			return events, nil
+		}
+		// Fallback to keyword matching if FTS fails or returns no results.
+	}
+
+	// Fallback: in-memory keyword matching.
 	filter.Limit = 1000
 	events, err := r.store.Query(ctx, filter)
 	if err != nil {
@@ -152,11 +284,162 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 	}
 
 	ranked := rankMemoryEvents(query, events)
+	if len(ranked) == 0 && len(events) > 0 {
+		ranked = events
+	}
+	if r.reranker != nil {
+		if reranked, rerr := r.reranker.Rerank(ctx, query, ranked); rerr == nil && len(reranked) > 0 {
+			ranked = reranked
+		}
+	}
 	if len(ranked) > limit {
 		ranked = ranked[:limit]
 	}
 
 	return ranked, nil
+}
+
+// ftsSearch uses SQLite FTS5 for full-text search with BM25 ranking.
+func (r *SummaryRetriever) ftsSearch(ctx context.Context, query string, filter EventFilter, limit int, strict bool) ([]MemoryEvent, error) {
+	// Build the FTS query with optional scope/kind/session filters.
+	// FTS5 MATCH supports boolean operators: AND, OR, NOT, and phrase queries with quotes.
+	ftsQuery := sanitizeFTSQuery(query, strict)
+	if ftsQuery == "" {
+		return nil, nil
+	}
+
+	var conditions []string
+	var args []any
+
+	// Add the FTS MATCH condition.
+	conditions = append(conditions, "memory_events_fts MATCH ?")
+	args = append(args, ftsQuery)
+
+	// Add scope filter if specified.
+	if filter.Scope != nil {
+		conditions = append(conditions, "e.scope = ?")
+		args = append(args, string(*filter.Scope))
+	}
+	if filter.Kind != nil {
+		conditions = append(conditions, "e.kind = ?")
+		args = append(args, string(*filter.Kind))
+	}
+	if filter.SessionID != nil {
+		conditions = append(conditions, "e.session_id = ?")
+		args = append(args, *filter.SessionID)
+	}
+
+	whereClause := strings.Join(conditions, " AND ")
+
+	// Query FTS5 with BM25 ranking and join with memory_events for full data.
+	// bm25(memory_events_fts) returns lower scores for better matches.
+	querySQL := fmt.Sprintf(`
+		SELECT e.id, e.session_id, e.scope, e.kind, e.content, e.summary,
+		       e.source_json, e.source_hash, e.confidence, e.importance,
+		       e.supersedes, e.tags_json, e.watermark, e.created_at, e.updated_at, e.expires_at
+		FROM memory_events_fts fts
+		JOIN memory_events e ON fts.id = e.id
+		WHERE %s
+		ORDER BY bm25(memory_events_fts)
+		LIMIT ?
+	`, whereClause)
+	args = append(args, limit)
+
+	rows, err := r.db.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("FTS search: %w", err)
+	}
+	defer rows.Close()
+
+	var events []MemoryEvent
+	for rows.Next() {
+		var (
+			event      MemoryEvent
+			sessionID  string
+			sourceJSON string
+			sourceHash string
+			tagsJSON   string
+			createdAt  int64
+			updatedAt  int64
+			expiresAt  sql.NullInt64
+		)
+		if err := rows.Scan(
+			&event.ID,
+			&sessionID,
+			&event.Scope,
+			&event.Kind,
+			&event.Content,
+			&event.Summary,
+			&sourceJSON,
+			&sourceHash,
+			&event.Confidence,
+			&event.Importance,
+			&event.Supersedes,
+			&tagsJSON,
+			&event.Watermark,
+			&createdAt,
+			&updatedAt,
+			&expiresAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning FTS result: %w", err)
+		}
+
+		if err := json.Unmarshal([]byte(sourceJSON), &event.Source); err != nil {
+			slog.Warn("FTS search: skipping event with invalid source_json", "event_id", event.ID, "error", err)
+			continue
+		}
+		if event.Source.SessionID == "" {
+			event.Source.SessionID = sessionID
+		}
+		if err := json.Unmarshal([]byte(tagsJSON), &event.Tags); err != nil {
+			slog.Warn("FTS search: skipping event with invalid tags_json", "event_id", event.ID, "error", err)
+			continue
+		}
+
+		event.CreatedAt = time.Unix(createdAt, 0)
+		event.UpdatedAt = time.Unix(updatedAt, 0)
+		if expiresAt.Valid {
+			t := time.Unix(expiresAt.Int64, 0)
+			event.ExpiresAt = &t
+		}
+
+		events = append(events, event)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating FTS results: %w", err)
+	}
+
+	return events, nil
+}
+
+// sanitizeFTSQuery escapes special characters and prepares the query for FTS5.
+func sanitizeFTSQuery(query string, strict bool) string {
+	// FTS5 special characters: " ' ( ) * ^ ~
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return ""
+	}
+
+	// Remove problematic characters that could cause syntax errors.
+	query = strings.Map(func(r rune) rune {
+		if r == '"' || r == '\'' || r == '(' || r == ')' || r == '*' || r == '^' || r == '~' {
+			return ' '
+		}
+		return r
+	}, query)
+
+	terms := rawQueryTerms(query)
+	if !strict {
+		terms = queryTerms(query)
+	}
+	if len(terms) == 0 {
+		return ""
+	}
+	if strict {
+		return strings.Join(terms, " AND ")
+	}
+	return strings.Join(terms, " OR ")
 }
 
 type scoredMemoryEvent struct {
@@ -206,25 +489,6 @@ func rankMemoryEvents(query string, events []MemoryEvent) []MemoryEvent {
 		ranked = append(ranked, item.event)
 	}
 	return ranked
-}
-
-func queryTerms(query string) []string {
-	seen := make(map[string]struct{})
-	rawTerms := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
-	})
-	terms := make([]string, 0, len(rawTerms))
-	for _, term := range rawTerms {
-		if len([]rune(term)) < 2 {
-			continue
-		}
-		if _, ok := seen[term]; ok {
-			continue
-		}
-		seen[term] = struct{}{}
-		terms = append(terms, term)
-	}
-	return terms
 }
 
 func (r *SummaryRetriever) readFile(name string) (string, error) {

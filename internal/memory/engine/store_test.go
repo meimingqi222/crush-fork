@@ -78,7 +78,39 @@ func setupTestDB(t *testing.T) *sql.DB {
 		schema_version INTEGER NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL
-	);`
+	);
+
+	CREATE VIRTUAL TABLE IF NOT EXISTS memory_events_fts USING fts5(
+		id UNINDEXED,
+		content,
+		summary,
+		scope,
+		kind,
+		tags,
+		tokenize='porter unicode61'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS memory_events_fts_insert AFTER INSERT ON memory_events
+	BEGIN
+		INSERT INTO memory_events_fts (id, content, summary, scope, kind, tags)
+		VALUES (NEW.id, NEW.content, NEW.summary, NEW.scope, NEW.kind, COALESCE((SELECT group_concat(value, ' ') FROM json_each(NEW.tags_json)), ''));
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS memory_events_fts_update AFTER UPDATE ON memory_events
+	BEGIN
+		UPDATE memory_events_fts SET
+			content = NEW.content,
+			summary = NEW.summary,
+			scope = NEW.scope,
+			kind = NEW.kind,
+			tags = COALESCE((SELECT group_concat(value, ' ') FROM json_each(NEW.tags_json)), '')
+		WHERE id = NEW.id;
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS memory_events_fts_delete AFTER DELETE ON memory_events
+	BEGIN
+		DELETE FROM memory_events_fts WHERE id = OLD.id;
+	END;`
 
 	_, err = db.Exec(schema)
 	require.NoError(t, err)

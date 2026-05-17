@@ -148,7 +148,7 @@ func (c *coordinator) selectedModelWithOverride(
 	isSubAgent bool,
 	override func(*config.SelectedModel),
 ) (Model, config.ProviderConfig, error) {
-	selectedModel, ok := c.cfg.Config().Models[modelType]
+	selectedModel, ok := c.cfg.Config().SelectedModelForType(modelType)
 	if !ok {
 		return Model{}, config.ProviderConfig{}, fmt.Errorf("model type %q not configured", modelType)
 	}

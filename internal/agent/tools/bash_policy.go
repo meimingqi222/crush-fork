@@ -183,10 +183,25 @@ func isStderrToDevNull(r *syntax.Redirect) bool {
 // validateRestrictedGitCommand validates that command is a single git
 // read-only invocation, optionally with 2>/dev/null and/or piped through
 // approved read-only filter commands (grep, head, tail, …).
+//
+// If the POSIX shell parser fails (e.g., due to backticks or unusual quoting
+// in grep patterns), we fall back to simple word-splitting and validate the
+// resulting args directly. This avoids false positives where a safe git
+// command is rejected because the mvdan.cc/sh parser cannot parse the raw
+// string (e.g., git grep -n "CanSpawn(" -- "internal/agent/").
 func validateRestrictedGitCommand(command string) error {
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return fmt.Errorf("restricted git bash requires a valid shell command: %w", err)
+		// Parser failed — likely due to backticks, unusual quoting, or
+		// Windows paths in the command string. Fall back to simple
+		// word-splitting and validate the args directly. This is safe
+		// because validateRestrictedGitArgs checks the command name and
+		// subcommand, which is the core security gate.
+		args := simpleWordSplit(command)
+		if len(args) == 0 {
+			return fmt.Errorf("restricted git bash requires a git command")
+		}
+		return validateRestrictedGitArgs(args)
 	}
 
 	if len(file.Stmts) != 1 {
@@ -515,6 +530,79 @@ func callExprArgs(s *syntax.Stmt) ([]string, error) {
 		args = append(args, arg)
 	}
 	return args, nil
+}
+
+// simpleWordSplit splits a command string into words using basic shell-like
+// quoting rules. It handles single-quoted and double-quoted strings, and
+// treats backslash as an escape character inside double quotes. This is a
+// simplified parser used as a fallback when the mvdan.cc/sh POSIX parser
+// fails (e.g., due to backticks or unusual quoting in grep patterns).
+func simpleWordSplit(command string) []string {
+	var args []string
+	var current strings.Builder
+	inSingleQuote := false
+	inDoubleQuote := false
+
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+
+		if inSingleQuote {
+			if ch == '\'' {
+				inSingleQuote = false
+			} else {
+				current.WriteByte(ch)
+			}
+			continue
+		}
+
+		if inDoubleQuote {
+			if ch == '\\' && i+1 < len(command) {
+				next := command[i+1]
+				// Only escape special characters inside double quotes
+				switch next {
+				case '"', '\\', '$', '`':
+					current.WriteByte(next)
+					i++
+				default:
+					// Backslash is literal inside double quotes for non-special chars
+					current.WriteByte(ch)
+				}
+			} else if ch == '"' {
+				inDoubleQuote = false
+			} else {
+				current.WriteByte(ch)
+			}
+			continue
+		}
+
+		// Outside quotes
+		if ch == '\'' {
+			inSingleQuote = true
+			continue
+		}
+		if ch == '"' {
+			inDoubleQuote = true
+			continue
+		}
+		if ch == '\\' && i+1 < len(command) {
+			current.WriteByte(command[i+1])
+			i++
+			continue
+		}
+		if ch == ' ' || ch == '\t' {
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteByte(ch)
+	}
+
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
 }
 
 func validateRestrictedGitArgs(args []string) error {

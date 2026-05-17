@@ -82,6 +82,10 @@ func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOp
 	return nil
 }
 
+func (m *mockSessionAgent) RespondAsBackground(_ context.Context, _, _ string) (string, error) {
+	return "mock irc reply", nil
+}
+
 // newTestCoordinator creates a minimal coordinator for unit testing runSubAgent.
 func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCfg config.ProviderConfig) *coordinator {
 	cfg, err := config.Init(env.workingDir, "", false)
@@ -485,6 +489,59 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, "short structured summary", finish.Summary)
 	})
 
+	t.Run("skips generic completion ack when selecting parent response", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.TextContent{Text: "detailed subagent report"},
+					message.Finish{Reason: message.FinishReasonEndTurn},
+				},
+			})
+			require.NoError(t, err)
+			_, err = env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Assistant,
+				Parts: []message.ContentPart{
+					message.TextContent{Text: "The task is complete."},
+					message.Finish{Reason: message.FinishReasonEndTurn},
+				},
+			})
+			require.NoError(t, err)
+			_, err = env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
+						Status:  message.ToolResultSubtaskStatusCompleted,
+						Summary: "short structured summary",
+					}),
+				},
+			})
+			require.NoError(t, err)
+			return agentResultWithText("The task is complete."), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "test",
+			SessionTitle:    "Test",
+			SubagentType:    config.AgentGeneral,
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "detailed subagent report", resp.Content)
+		assert.NotEqual(t, "short structured summary", resp.Content)
+	})
+
 	t.Run("missing finish policy warns when finish is absent", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
@@ -814,27 +871,77 @@ func TestRunSubAgent(t *testing.T) {
 func TestTaskGraphResultMetadataUsesShortTaskRefs(t *testing.T) {
 	t.Parallel()
 
-	result := withTaskGraphOutputMetadata(taskGraphNodeResult{
-		Task: taskGraphTask{
-			ID:          "Review the auth provider and document every observed issue in detail",
+	result := withSubagentOutputMetadata(subagentResult{
+		Task: subagentTask{
+			Name:        "Review the auth provider and document every observed issue in detail",
 			Description: "Review auth",
 		},
-		TaskRef:        taskGraphTaskRef(0, "Review the auth provider and document every observed issue in detail"),
+		TaskRef:        SubagentTaskRef(0, "Review the auth provider and document every observed issue in detail", ""),
 		Status:         message.ToolResultSubtaskStatusCompleted,
 		ChildSessionID: "child-session-1",
-		Content:        strings.Repeat("x", taskGraphOutputPreviewCharsLimit+200),
+		Content:        strings.Repeat("x", subagentOutputPerTaskCharsLimit+200),
 	})
 
-	child := reduceNodeToChildSession(result)
+	child := reduceResultToChildSession(result)
 	require.True(t, strings.HasPrefix(child.TaskRef, "0-review-the-auth-provider"))
 	require.Equal(t, "child-session-1", child.SessionID)
 	require.True(t, child.HasFullOutput)
 	require.NotEmpty(t, child.Preview)
-	require.Equal(t, taskGraphOutputPreviewCharsLimit, len([]rune(child.Preview)))
+	require.Equal(t, subagentOutputPreviewCharsLimit, len([]rune(child.Preview)))
 
-	details := taskGraphOutputDetailsForModel([]taskGraphNodeResult{result})
+	details := subagentOutputDetailsForModel([]subagentResult{result})
 	require.Contains(t, details, "full output: subtask://"+child.TaskRef)
 	require.Contains(t, details, "Review auth")
+}
+
+func TestShortToolCallPrefix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		toolCallID string
+		want       string
+	}{
+		{"empty string", "", ""},
+		{"whitespace only", "   ", ""},
+		{"normal call_ prefix", "call_96be1a2b", "96be1a"},
+		{"short id after prefix", "call_1", "1"},
+		{"no call_ prefix long", "abc123def456", "abc123"},
+		{"no call_ prefix short", "ab", "ab"},
+		{"medium id after prefix", "call_xy", "xy"},
+		{"trims whitespace", "  call_96be1a2b  ", "96be1a"},
+		{"bare call_", "call_", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, ShortToolCallPrefix(tt.toolCallID))
+		})
+	}
+}
+
+func TestSubagentTaskRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		index      int
+		taskID     string
+		toolCallID string
+		want       string
+	}{
+		{"no toolCallID", 0, "Review auth", "", "0-review-auth"},
+		{"with toolCallID", 1, "Fix bug", "call_96be1a2b", "96be1a-1-fix-bug"},
+		{"empty slug fallback", 0, "", "call_abc123", "abc123-0-task"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, SubagentTaskRef(tt.index, tt.taskID, tt.toolCallID))
+		})
+	}
 }
 
 func TestBackgroundAgentMessengerReusesChildSession(t *testing.T) {
@@ -843,6 +950,7 @@ func TestBackgroundAgentMessengerReusesChildSession(t *testing.T) {
 
 	env := testEnv(t)
 	coord := newTestCoordinator(t, env, providerID, providerCfg)
+	coord.cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: false}
 	coord.backgroundAgents = newBackgroundAgentRegistry()
 
 	parentSession, err := env.sessions.Create(t.Context(), "Parent")
@@ -860,20 +968,21 @@ func TestBackgroundAgentMessengerReusesChildSession(t *testing.T) {
 
 	agentID := coord.runBackgroundTaskNode(
 		t.Context(),
-		taskGraphParams{
+		subagentBatchParams{
 			SessionID:      parentSession.ID,
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
 		},
-		taskGraphTask{
-			ID:           "task-a",
-			Prompt:       "initial prompt",
+		subagentTask{
+			Name:         "task-a",
+			Assignment:   "initial prompt",
 			SubagentType: "general",
 		},
 		agent,
 		config.Agent{ID: "general", Description: "general", Mode: config.AgentModeSubagent},
 		"Background test",
 		"general",
+		nil,
 	)
 
 	require.Eventually(t, func() bool {
@@ -901,12 +1010,70 @@ func TestBackgroundAgentMessengerReusesChildSession(t *testing.T) {
 	require.Equal(t, first.sessionID, second.sessionID)
 }
 
+func TestBackgroundAgentMessengerRequiresStructuredFinish(t *testing.T) {
+	t.Skip("TODO: background agent structured finish retry not yet implemented")
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, providerID, providerCfg)
+	coord.cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: true}
+	coord.backgroundAgents = newBackgroundAgentRegistry()
+
+	parentSession, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+
+	runCount := 0
+	agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+		runCount++
+		if strings.Contains(call.Prompt, "Call subagent_finish exactly once now") {
+			_, createErr := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
+						Status:       message.ToolResultSubtaskStatusBlocked,
+						Summary:      "structured done",
+						FilesTouched: []string{"internal/agent/coordinator.go"},
+						Artifacts:    []string{"file:internal/agent/coordinator.go"},
+					}),
+				},
+			})
+			require.NoError(t, createErr)
+		}
+		return agentResultWithText("done"), nil
+	})
+
+	agentID := coord.runBackgroundTaskNode(
+		t.Context(),
+		subagentBatchParams{SessionID: parentSession.ID, AgentMessageID: "msg-1", ToolCallID: "call-1"},
+		subagentTask{Name: "task-a", Assignment: "initial prompt", SubagentType: "general"},
+		agent,
+		config.Agent{ID: "general", Description: "general", Mode: config.AgentModeSubagent},
+		"Background test",
+		"general",
+		nil,
+	)
+
+	require.Eventually(t, func() bool {
+		entry, ok := coord.backgroundAgents.Get(agentID)
+		return ok && entry.Status == backgroundAgentStatusCompleted && entry.ChildSessionID != ""
+	}, 2*time.Second, 20*time.Millisecond)
+	require.GreaterOrEqual(t, runCount, 2)
+
+	entry, ok := coord.backgroundAgents.Get(agentID)
+	require.True(t, ok)
+	require.Equal(t, "structured done", entry.Summary)
+	require.Equal(t, []string{"internal/agent/coordinator.go"}, entry.FilesTouched)
+	require.Equal(t, []string{"file:internal/agent/coordinator.go"}, entry.Artifacts)
+}
+
 func TestBackgroundAgentMessengerResolvesAgentName(t *testing.T) {
 	const providerID = "test-provider"
 	providerCfg := config.ProviderConfig{ID: providerID}
 
 	env := testEnv(t)
 	coord := newTestCoordinator(t, env, providerID, providerCfg)
+	coord.cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: false}
 	coord.backgroundAgents = newBackgroundAgentRegistry()
 
 	parentSession, err := env.sessions.Create(t.Context(), "Parent")
@@ -920,12 +1087,13 @@ func TestBackgroundAgentMessengerResolvesAgentName(t *testing.T) {
 
 	agentID := coord.runBackgroundTaskNode(
 		t.Context(),
-		taskGraphParams{SessionID: parentSession.ID, AgentMessageID: "msg-1", ToolCallID: "call-1"},
-		taskGraphTask{ID: "task-a", Prompt: "initial prompt", SubagentType: "general"},
+		subagentBatchParams{SessionID: parentSession.ID, AgentMessageID: "msg-1", ToolCallID: "call-1"},
+		subagentTask{Name: "task-a", Assignment: "initial prompt", SubagentType: "general"},
 		agent,
 		config.Agent{ID: "general", Description: "general", Mode: config.AgentModeSubagent},
 		"Background test",
 		"general",
+		nil,
 	)
 
 	require.Eventually(t, func() bool {
@@ -950,6 +1118,51 @@ func TestBackgroundAgentMessengerResolvesAgentName(t *testing.T) {
 	second := <-records
 	require.Equal(t, "initial prompt", first.Prompt)
 	require.Equal(t, "follow-up by name", second.Prompt)
+}
+
+func TestBackgroundTaskNodeAcquiresSemaphoreDuringExecution(t *testing.T) {
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, providerID, providerCfg)
+	coord.cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: false}
+	coord.backgroundAgents = newBackgroundAgentRegistry()
+
+	parentSession, err := env.sessions.Create(t.Context(), "Parent")
+	require.NoError(t, err)
+
+	runs := make(chan struct{}, 1)
+	agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+		runs <- struct{}{}
+		return agentResultWithText("done"), nil
+	})
+
+	semaphore := make(chan struct{}, 1)
+	semaphore <- struct{}{}
+	agentID := coord.runBackgroundTaskNode(
+		t.Context(),
+		subagentBatchParams{SessionID: parentSession.ID, AgentMessageID: "msg-1", ToolCallID: "call-1"},
+		subagentTask{Name: "task-a", Assignment: "initial prompt", SubagentType: "general"},
+		agent,
+		config.Agent{ID: "general", Description: "general", Mode: config.AgentModeSubagent},
+		"Background test",
+		"general",
+		semaphore,
+	)
+
+	select {
+	case <-runs:
+		t.Fatal("background node ran before semaphore was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+	<-semaphore
+
+	require.Eventually(t, func() bool {
+		entry, ok := coord.backgroundAgents.Get(agentID)
+		return ok && entry.Status == backgroundAgentStatusCompleted
+	}, 2*time.Second, 20*time.Millisecond)
+	require.Len(t, runs, 1)
 }
 
 func TestCollectTaskGraphArtifactsExtractsFilesAndShells(t *testing.T) {
@@ -997,7 +1210,7 @@ func TestCollectTaskGraphArtifactsExtractsFilesAndShells(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	artifacts, filesTouched, patchPlan, testResults, followups := coord.collectTaskGraphArtifacts(t.Context(), childSession.ID)
+	artifacts, filesTouched, patchPlan, testResults, followups := coord.collectSubagentArtifacts(t.Context(), childSession.ID)
 	require.Equal(t, []string{"file:/tmp/example.go", "shell:shell-1"}, artifacts)
 	require.Equal(t, []string{"/tmp/example.go"}, filesTouched)
 	require.Equal(t, []string{"apply generated patch"}, patchPlan)
@@ -1094,11 +1307,12 @@ func TestBuildAgentModels_ContextWindowOverride(t *testing.T) {
 
 	providerID := "openai"
 	providerCfg := config.ProviderConfig{
-		ID:   providerID,
+		ID: providerID,
 		Type: catwalk.TypeOpenAICompat,
 		Models: []catwalk.Model{
 			{ID: "big", Name: "Big", ContextWindow: 200_000, DefaultMaxTokens: 32_000},
 			{ID: "small", Name: "Small", ContextWindow: 128_000, DefaultMaxTokens: 8_000},
+			{ID: "review", Name: "Review", ContextWindow: 512_000, DefaultMaxTokens: 16_000},
 		},
 	}
 	cfg.Config().Providers.Set(providerID, providerCfg)
@@ -1115,6 +1329,10 @@ func TestBuildAgentModels_ContextWindowOverride(t *testing.T) {
 		MaxTokens: 8_000,
 		// No override for small model.
 	}
+	cfg.Config().Models[config.SelectedModelTypeReview] = config.SelectedModel{
+		Provider: providerID,
+		Model:    "review",
+	}
 
 	coord := &coordinator{cfg: cfg}
 	large, small, err := coord.buildAgentModels(t.Context(), false)
@@ -1122,6 +1340,12 @@ func TestBuildAgentModels_ContextWindowOverride(t *testing.T) {
 	require.Equal(t, int64(400_000), large.CatwalkCfg.ContextWindow)
 	require.Equal(t, int64(128_000), small.CatwalkCfg.ContextWindow)
 	require.Equal(t, int64(262_144), large.CatwalkCfg.Options.ProviderOptions["max_prompt_tokens"])
+
+	review, providerCfg, err := coord.resolveAgentInferenceModel(t.Context(), config.Agent{Model: config.SelectedModelTypeReview}, true, large, small)
+	require.NoError(t, err)
+	require.Equal(t, providerID, providerCfg.ID)
+	require.Equal(t, "review", review.ModelCfg.Model)
+	require.Equal(t, int64(512_000), review.CatwalkCfg.ContextWindow)
 }
 
 func TestFilterAttachmentsForModelSupport(t *testing.T) {
@@ -1194,7 +1418,7 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 	t.Run("returns error when selected model is missing from provider config", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
-			ID:     "test-provider",
+			ID:   "test-provider",
 			Models: []catwalk.Model{{ID: "other-model", SupportsImages: false}},
 		})
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}
@@ -1352,7 +1576,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude 4.6 uses effort without budget thinking", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:                     "claude-sonnet-4.6",
+				ID:                   "claude-sonnet-4.6",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
 			},
@@ -1373,7 +1597,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude opus 4-7 uses effort without budget thinking", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:                     "claude-opus-4-7",
+				ID:                   "claude-opus-4-7",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
 			},
@@ -1393,7 +1617,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude opus 4.7 canReason enables effort by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-opus-4.7",
+				ID:      "claude-opus-4.7",
 				CanReason: true,
 			},
 		}
@@ -1413,7 +1637,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := true
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-opus-4-6",
+				ID:      "claude-opus-4-6",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{
@@ -1435,7 +1659,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("older claude uses budget thinking without effort", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:                     "claude-sonnet-4",
+				ID:                   "claude-sonnet-4",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
 			},
@@ -1456,7 +1680,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("canReason model enables thinking by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-sonnet-4",
+				ID:      "claude-sonnet-4",
 				CanReason: true,
 			},
 		}
@@ -1477,7 +1701,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := false
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-sonnet-4",
+				ID:      "claude-sonnet-4",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{
@@ -1500,7 +1724,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := false
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-sonnet-4.6",
+				ID:      "claude-sonnet-4.6",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{
@@ -1532,7 +1756,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude 4.6 canReason enables effort by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-sonnet-4.6",
+				ID:      "claude-sonnet-4.6",
 				CanReason: true,
 			},
 		}
@@ -1559,7 +1783,7 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		// Use a non-responses model ID so mergeCallOptions returns *ProviderOptions.
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "custom-reasoning-model",
+				ID:      "custom-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1575,7 +1799,7 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		// Use a non-responses model ID so mergeCallOptions returns *ProviderOptions.
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "custom-reasoning-model",
+				ID:      "custom-reasoning-model",
 				CanReason: true,
 			},
 		}
@@ -1590,7 +1814,7 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "some-reasoning-model",
+				ID:      "some-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1611,7 +1835,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-sonnet-4",
+				ID:      "claude-sonnet-4",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1633,7 +1857,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "custom-reasoning-model",
+				ID:      "custom-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1653,7 +1877,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "custom-reasoning-model",
+				ID:      "custom-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1711,14 +1935,14 @@ func TestBuildProvider_PreservesHyperBaseURL(t *testing.T) {
 
 	env := testEnv(t)
 	coord := newTestCoordinator(t, env, hyper.Name, config.ProviderConfig{
-		ID:      hyper.Name,
+		ID:    hyper.Name,
 		Type:    hyper.Name,
 		BaseURL: "https://hyper.example.test/api/v1/fantasy",
 		APIKey:  "test-key",
 	})
 
 	provider, err := coord.buildProvider(config.ProviderConfig{
-		ID:      hyper.Name,
+		ID:    hyper.Name,
 		Type:    hyper.Name,
 		BaseURL: "https://hyper.example.test/api/v1/fantasy",
 		APIKey:  "test-key",
@@ -1747,7 +1971,7 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 	t.Parallel()
 
 	providerCfg := config.ProviderConfig{
-		ID:     "test-provider",
+		ID:   "test-provider",
 		Type:   catwalk.TypeOpenAICompat,
 		Models: []catwalk.Model{{ID: "test-model"}},
 	}

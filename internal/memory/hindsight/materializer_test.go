@@ -46,6 +46,10 @@ func (m *mockEventStore) GetMaxWatermark(context.Context) (int64, error) {
 	return maxWatermark, nil
 }
 
+func (m *mockEventStore) RecentSessions(context.Context, int64, int) ([]string, error) {
+	return nil, nil
+}
+
 func (m *mockEventStore) Close() error {
 	return nil
 }
@@ -111,7 +115,6 @@ func TestMaterializerReplicatesDurableEventsOnly(t *testing.T) {
 	require.Contains(t, retained[0].Tags, "scope:project")
 	require.Contains(t, retained[0].Tags, "kind:decision")
 	require.Contains(t, retained[0].Tags, "project:crush-abc123")
-	require.Contains(t, retained[0].Tags, "session:sess-1")
 	require.Equal(t, "durable-1", retained[0].DocumentID)
 
 	var watermark int64

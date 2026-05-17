@@ -21,12 +21,12 @@ type SubtaskResultParams struct {
 	SessionID string `json:"session_id,omitempty" description:"Optional child session ID from a previous Agent tool call. Omit to use the most recent child session in the current conversation."`
 	AgentID   string `json:"agent_id,omitempty" description:"The agent ID from a background agent (alternative to session_id)"`
 	Offset    int    `json:"offset,omitempty" description:"Line offset to start from (0-based, for paginating long outputs)"`
-	Limit     int    `json:"limit,omitempty" description:"Maximum number of characters to return (default 40000, max 80000)"`
+	Limit     int    `json:"limit,omitempty" description:"Maximum number of characters to return (default 80000, max 200000)"`
 }
 
 func NewSubtaskResultTool(messages message.Service) fantasy.AgentTool {
-	const defaultLimit = 40_000
-	const maxLimit = 80_000
+	const defaultLimit = 80_000
+	const maxLimit = 200_000
 
 	return fantasy.NewAgentTool(
 		SubtaskResultToolName,
@@ -94,7 +94,7 @@ func subtaskResultFromTarget(ctx context.Context, messages message.Service, targ
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to load session %s: %s", sessionID, err))
 	}
 
-	if text, ok := latestAssistantText(msgs); ok {
+	if text, ok := assistantResponseText(msgs); ok {
 		return fantasy.NewTextResponse(paginateSubtaskResult(formatSubtaskSessionText(sessionID, target.TaskRef, text), offset, limit))
 	}
 	if text, ok := latestSessionFallbackText(msgs); ok {
@@ -133,7 +133,7 @@ func subtaskResultFromBackgroundAgentIfFound(ctx context.Context, messages messa
 	if childSessionID != "" && messages != nil {
 		msgs, err := messages.List(ctx, childSessionID)
 		if err == nil {
-			if text, ok := latestAssistantText(msgs); ok {
+			if text, ok := assistantResponseText(msgs); ok {
 				content = text
 			}
 		}
@@ -143,9 +143,10 @@ func subtaskResultFromBackgroundAgentIfFound(ctx context.Context, messages messa
 	return fantasy.NewTextResponse(fmt.Sprintf("Agent %q (%s):\n\n%s", agentID, status, result)), true
 }
 
-func latestAssistantText(msgs []message.Message) (string, bool) {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		msg := msgs[i]
+func assistantResponseText(msgs []message.Message) (string, bool) {
+	responses := make([]string, 0)
+	var fallback string
+	for _, msg := range msgs {
 		if msg.Role != message.Assistant || msg.IsSummaryMessage {
 			continue
 		}
@@ -153,9 +154,42 @@ func latestAssistantText(msgs []message.Message) (string, bool) {
 		if text == "" {
 			continue
 		}
-		return text, true
+		if IsSubtaskCompletionAck(text) {
+			if fallback == "" {
+				fallback = text
+			}
+			continue
+		}
+		responses = append(responses, text)
 	}
-	return "", false
+	if len(responses) == 0 {
+		if fallback != "" {
+			return fallback, true
+		}
+		return "", false
+	}
+	if len(responses) == 1 {
+		return responses[0], true
+	}
+
+	var b strings.Builder
+	b.WriteString("Assistant responses:")
+	for i, response := range responses {
+		fmt.Fprintf(&b, "\n\n## Response %d\n%s", i+1, response)
+	}
+	return strings.TrimSpace(b.String()), true
+}
+
+func IsSubtaskCompletionAck(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	normalized = strings.Trim(normalized, ".!。！")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	switch normalized {
+	case "done", "complete", "completed", "task complete", "task completed", "the task is complete", "the task is completed", "subagent completed", "subagent complete", "完成", "已完成", "任务完成":
+		return true
+	default:
+		return false
+	}
 }
 
 func latestSessionFallbackText(msgs []message.Message) (string, bool) {
@@ -253,10 +287,7 @@ func paginateSubtaskResult(content string, offset, limit int) string {
 	if offset > len(runes) {
 		offset = len(runes)
 	}
-	end := offset + limit
-	if end > len(runes) {
-		end = len(runes)
-	}
+	end := min(offset+limit, len(runes))
 	truncated := offset > 0 || end < len(runes)
 	result := string(runes[offset:end])
 	if truncated {

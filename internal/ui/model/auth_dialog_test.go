@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -105,7 +106,10 @@ func testModelCommon(t *testing.T) *common.Common {
 
 	application, err := app.New(t.Context(), conn, store)
 	require.NoError(t, err)
-	t.Cleanup(application.Shutdown)
+	t.Cleanup(func() {
+		application.Shutdown()
+		_ = log.ResetForTesting()
+	})
 
 	application.AgentCoordinator = &mockQueueCoordinator{}
 	return common.DefaultCommon(application)

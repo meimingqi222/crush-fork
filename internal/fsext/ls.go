@@ -288,7 +288,6 @@ func ListDirectory(initialPath string, ignorePatterns []string, depth, limit int
 
 	conf := fastwalk.Config{
 		Follow:   true,
-		ToSlash:  fastwalk.DefaultToSlash(),
 		Sort:     fastwalk.SortDirsFirst,
 		MaxDepth: depth,
 	}

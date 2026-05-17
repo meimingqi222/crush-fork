@@ -64,6 +64,10 @@ type (
 		SessionID string
 		NextMode  session.CollaborationMode
 	}
+	ActionToggleOrchestrateMode struct {
+		SessionID string
+		NextMode  session.CollaborationMode
+	}
 	ActionExecuteProposedPlan struct {
 		SessionID string
 		Plan      string

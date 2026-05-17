@@ -208,10 +208,24 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 
 	// Wire the local memory engine before creating the coder agent so the
 	// agent receives working-memory stores and compaction hooks at construction.
-	if cfg.Options != nil && cfg.Options.Memory.IsEnabled() {
+	if cfg.Options != nil && memoryConfigEnabled(cfg.Options.Memory) {
 		memCfg := cfg.Options.Memory
+		if memCfg == nil {
+			memCfg = &config.MemoryConfig{}
+		}
 		backend := memCfg.BackendName()
-		eng := engine.New(conn, engine.Config{Enabled: true, Backend: backend})
+		var bgInterval time.Duration
+		var bgEveryNTurns int
+		if backend == "local" && memCfg.BackgroundMaterialize.IsEnabled() {
+			bgInterval = time.Duration(memCfg.BackgroundMaterialize.GetIntervalSeconds()) * time.Second
+			bgEveryNTurns = memCfg.BackgroundMaterialize.GetEveryNTurns()
+		}
+		eng := engine.New(conn, engine.Config{
+			Enabled:               true,
+			Backend:               backend,
+			BackgroundInterval:    bgInterval,
+			BackgroundEveryNTurns: bgEveryNTurns,
+		})
 		startupMaterialization := true
 
 		switch backend {
@@ -254,7 +268,25 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))
 			eng.SetMaterializer(engine.NewMemoryMDMaterializer(conn, eng.EventStore(), writer))
 			eng.SetMaterializer(engine.NewSkillsMaterializer(conn, eng.EventStore(), writer))
-			eng.SetRetriever(engine.NewSummaryRetriever(eng.EventStore(), writer.OutputDir()))
+			if memCfg.MentalModels.IsEnabled() {
+				eng.SetMaterializer(engine.NewMentalModelsMaterializer(conn, eng.EventStore(), writer, engine.DefaultMentalModels()))
+			}
+			if memCfg.Rollout.IsEnabled() {
+				eng.SetMaterializer(engine.NewRolloutSummaryMaterializer(
+					conn, eng.EventStore(), writer,
+					memCfg.Rollout.GetMaxKeep(),
+					memCfg.Rollout.GetMinEvents(),
+				))
+			}
+			summaryRetriever := engine.NewSummaryRetriever(eng.EventStore(), conn, writer.OutputDir())
+			if memCfg.Reranker.GetMaxCandidates() > 0 {
+				summaryRetriever.WithMaxCandidates(memCfg.Reranker.GetMaxCandidates())
+			}
+			if rerank := buildLocalMemoryReranker(memCfg); rerank != nil {
+				summaryRetriever.WithReranker(rerank)
+				eng.SetReranker(rerank)
+			}
+			eng.SetRetriever(summaryRetriever)
 		}
 
 		if startupMaterialization {
@@ -264,6 +296,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 				}
 			}()
 		}
+
+		// Start the background materializer goroutine. It is a no-op when
+		// the configured interval is 0 (e.g. hindsight backend has none).
+		eng.StartBackgroundMaterializer(context.Background())
 
 		memoryEngine = eng
 		app.MemoryEngine = eng
@@ -812,6 +848,46 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func memoryConfigEnabled(memCfg *config.MemoryConfig) bool {
+	if memCfg == nil {
+		return true
+	}
+	return memCfg.IsEnabled()
+}
+
+func buildLocalMemoryReranker(memCfg *config.MemoryConfig) engine.Reranker {
+	if memCfg == nil {
+		return nil
+	}
+	if memCfg.Embeddings != nil && memCfg.Embeddings.IsEnabled() {
+		switch memCfg.Embeddings.BackendName() {
+		case "hashing", "":
+			return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(memCfg.Embeddings.GetDimensions()))
+		default:
+			slog.Warn("Memory embedding backend not implemented, falling back to hashing",
+				"backend", memCfg.Embeddings.BackendName())
+			return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(memCfg.Embeddings.GetDimensions()))
+		}
+	}
+	if !memCfg.Reranker.IsEnabled() {
+		return nil
+	}
+	switch memCfg.Reranker.GetType() {
+	case "embedding", "hybrid":
+		dimensions := 384
+		if memCfg.Embeddings != nil {
+			dimensions = memCfg.Embeddings.GetDimensions()
+		}
+		return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(dimensions))
+	case "heuristic", "":
+		return engine.NewHeuristicReranker()
+	default:
+		slog.Warn("Memory reranker type not implemented, falling back to heuristic",
+			"type", memCfg.Reranker.GetType())
+		return engine.NewHeuristicReranker()
+	}
 }
 
 // Subscribe sends events to the TUI as tea.Msgs.

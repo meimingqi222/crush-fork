@@ -136,15 +136,18 @@ func shouldReplicate(evt engine.MemoryEvent) bool {
 	return evt.Confidence >= 0.5
 }
 
+// eventTags builds tags for a memory event following oh-my-pi's pattern:
+// - kind:xxx identifies the memory type (decision, preference, procedure, etc.)
+// - scope:xxx distinguishes project/user/global level knowledge
+// - project:xxx (from baseTags) provides project-level filtering when scoping=per-project-tagged
+// - session_id is kept in metadata only, not as a tag, to avoid polluting recall
+// - evt.Tags are preserved for custom tagging
 func eventTags(evt engine.MemoryEvent, baseTags []string) []string {
 	tags := []string{
-		"scope:" + string(evt.Scope),
 		"kind:" + string(evt.Kind),
+		"scope:" + string(evt.Scope),
 	}
 	tags = appendUniqueTags(tags, baseTags...)
-	if evt.Source.SessionID != "" {
-		tags = appendUniqueTags(tags, "session:"+evt.Source.SessionID)
-	}
 	tags = appendUniqueTags(tags, evt.Tags...)
 	return tags
 }

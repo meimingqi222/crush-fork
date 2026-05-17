@@ -20,4 +20,4 @@ Rules:
 - Do not pass non-terminal statuses.
 - `summary` is required for successful completion unless structured data is sufficient.
 - `error` is required for `failed` and `blocked`.
-- Only the first successful `subagent_finish` call is accepted for a session.
+- Only the first `subagent_finish` call is accepted; subsequent calls return an error.

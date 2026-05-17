@@ -86,7 +86,7 @@ func NewPolicyEngine(evaluators ...PolicyEvaluator) *PolicyEngine {
 
 func NewDefaultPolicyEngine(execRules []ExecPolicyRule) *PolicyEngine {
 	return NewPolicyEngine(
-		PolicyEvaluatorFunc(alwaysManualPolicyEvaluator),
+		PolicyEvaluatorFunc(preapprovedNetworkToolPolicyEvaluator),
 		PolicyEvaluatorFunc(workspaceWritePolicyEvaluator),
 		PolicyEvaluatorFunc(readOnlyToolPolicyEvaluator),
 		BashPolicyEvaluator{Rules: execRules},
@@ -147,17 +147,6 @@ func normalizePolicyDecision(decision PolicyDecision) PolicyDecision {
 	return decision
 }
 
-func alwaysManualPolicyEvaluator(_ context.Context, req permission.PermissionRequest, pctx PolicyRequestContext) PolicyDecision {
-	if !isAlwaysManual(req, pctx.WorkingDir) {
-		return PolicyDecision{}
-	}
-	return PolicyDecision{
-		Requirement: PolicyRequirementNeedsApproval,
-		Reason:      "This action always requires manual confirmation.",
-		Source:      "always_manual",
-	}
-}
-
 func workspaceWritePolicyEvaluator(_ context.Context, req permission.PermissionRequest, pctx PolicyRequestContext) PolicyDecision {
 	if !isAcceptEditsEquivalentRequest(req, pctx.WorkingDir) {
 		return PolicyDecision{}
@@ -171,6 +160,29 @@ func workspaceWritePolicyEvaluator(_ context.Context, req permission.PermissionR
 	default:
 		return PolicyDecision{Requirement: PolicyRequirementNeedsApproval, Reason: "Auto Mode workspace write policy requires manual approval.", Source: "workspace_write"}
 	}
+}
+
+func preapprovedNetworkToolPolicyEvaluator(_ context.Context, req permission.PermissionRequest, _ PolicyRequestContext) PolicyDecision {
+	// Only consider network tools that fetch external content.
+	if req.ToolName != tools.DownloadToolName &&
+		req.ToolName != tools.ReadToolName &&
+		req.ToolName != tools.AgenticFetchToolName {
+		return PolicyDecision{}
+	}
+
+	urlStr := tools.ExtractURLFromPermissionRequest(req.Params)
+	if urlStr == "" {
+		return PolicyDecision{}
+	}
+
+	if tools.IsPreapprovedURL(urlStr) {
+		return PolicyDecision{
+			Requirement: PolicyRequirementAllow,
+			Reason:      "preapproved host allowed this network request",
+			Source:      "preapproved_host",
+		}
+	}
+	return PolicyDecision{}
 }
 
 func readOnlyToolPolicyEvaluator(_ context.Context, req permission.PermissionRequest, _ PolicyRequestContext) PolicyDecision {

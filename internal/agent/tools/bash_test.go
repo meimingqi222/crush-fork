@@ -70,9 +70,11 @@ func (m *mockBashPermissionService) ClearSkillContext()               {}
 func (m *mockBashPermissionService) GetSkillContext() (string, []string) {
 	return "", nil
 }
+
 func (m *mockBashPermissionService) GetDenialQueue(string) permission.DenialQueueReader {
 	return nil
 }
+
 func (m *mockBashPermissionService) GetDenialQueueEditor(string) permission.DenialQueueEditor {
 	return nil
 }
@@ -397,6 +399,47 @@ func TestRestrictedGitBashTool_DisablesBackgroundExecution(t *testing.T) {
 	})
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "background execution is disabled")
+}
+
+func TestSimpleWordSplit(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected []string
+	}{
+		{`git status --short`, []string{"git", "status", "--short"}},
+		{`git -C D:/code/project grep -n "CanSpawn(" -- "internal/agent/"`, []string{"git", "-C", "D:/code/project", "grep", "-n", "CanSpawn(", "--", "internal/agent/"}},
+		{`git log --oneline | grep "feat"`, []string{"git", "log", "--oneline", "|", "grep", "feat"}},
+		{`git diff -- 'internal/config/config.go'`, []string{"git", "diff", "--", "internal/config/config.go"}},
+		{`git show HEAD:'path/to/file'`, []string{"git", "show", "HEAD:path/to/file"}},
+		{``, nil},
+		{`   `, nil},
+	}
+
+	for _, tc := range cases {
+		result := simpleWordSplit(tc.input)
+		require.Equal(t, tc.expected, result, "simpleWordSplit(%q)", tc.input)
+	}
+}
+
+func TestValidateRestrictedGitCommand_FallbackOnParseFailure(t *testing.T) {
+	// Commands with backticks or unusual quoting that mvdan.cc/sh can't parse
+	// should fall back to simple word-splitting and still validate correctly.
+
+	// Safe git command with parens in pattern — parser would fail, fallback should allow
+	err := validateRestrictedGitCommand(`git -C D:/code/project grep -n "CanSpawn(" -- "internal/agent/"`)
+	require.NoError(t, err, "fallback should allow safe git grep with parens in pattern")
+
+	// Safe git command with simple args — parser succeeds, normal path
+	err = validateRestrictedGitCommand("git status --short")
+	require.NoError(t, err)
+
+	// Unsafe command — should still be blocked even with fallback
+	err = validateRestrictedGitCommand("git checkout main")
+	require.Error(t, err, "fallback should still block mutating commands")
+
+	// Non-git command — should still be blocked even with fallback
+	err = validateRestrictedGitCommand("rm -rf /")
+	require.Error(t, err, "fallback should block non-git commands")
 }
 
 func TestBashTool_BlocksWrapperShellCommands(t *testing.T) {

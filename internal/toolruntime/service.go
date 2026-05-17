@@ -219,6 +219,17 @@ func ServiceFromContext(ctx context.Context) Service {
 	return service
 }
 
+type ircAgentIDKey struct{}
+
+func WithIrcAgentID(ctx context.Context, agentID string) context.Context {
+	return context.WithValue(ctx, ircAgentIDKey{}, agentID)
+}
+
+func IrcAgentIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(ircAgentIDKey{}).(string)
+	return id
+}
+
 func Report(ctx context.Context, state State) {
 	service := ServiceFromContext(ctx)
 	if service == nil {

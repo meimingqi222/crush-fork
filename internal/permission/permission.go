@@ -143,7 +143,6 @@ type AutoReviewTrigger string
 
 const (
 	AutoReviewTriggerClassifierBlock       AutoReviewTrigger = "classifier_block"
-	AutoReviewTriggerAlwaysManual          AutoReviewTrigger = "always_manual"
 	AutoReviewTriggerClassifierUnavailable AutoReviewTrigger = "classifier_unavailable"
 	AutoReviewTriggerClassifierFailed      AutoReviewTrigger = "classifier_failed"
 	AutoReviewTriggerClassifierSuspended   AutoReviewTrigger = "classifier_suspended"

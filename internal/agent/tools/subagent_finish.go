@@ -31,11 +31,17 @@ type SubagentFinishParams struct {
 	Data         json.RawMessage `json:"data,omitempty" description:"Optional structured JSON payload"`
 }
 
-func NewSubagentFinishTool() fantasy.AgentTool {
+func NewSubagentFinishTool(messages message.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		SubagentFinishToolName,
 		string(subagentFinishDescription),
-		func(_ context.Context, params SubagentFinishParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		func(ctx context.Context, params SubagentFinishParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			sessionID := strings.TrimSpace(GetSessionFromContext(ctx))
+			if sessionID != "" && messages != nil {
+				if alreadyCalled(ctx, messages, sessionID) {
+					return fantasy.NewTextErrorResponse("subagent_finish has already been called for this session. Do not call it again."), nil
+				}
+			}
 			finish, err := validateSubagentFinishParams(params)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
@@ -45,6 +51,25 @@ func NewSubagentFinishTool() fantasy.AgentTool {
 			return response, nil
 		},
 	)
+}
+
+// alreadyCalled checks whether subagent_finish was already invoked in this session.
+func alreadyCalled(ctx context.Context, messages message.Service, sessionID string) bool {
+	msgs, err := messages.List(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != message.Tool {
+			continue
+		}
+		for _, toolResult := range msgs[i].ToolResults() {
+			if _, ok := toolResult.SubagentFinish(); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateSubagentFinishParams(params SubagentFinishParams) (message.ToolResultSubagentFinish, error) {
