@@ -499,9 +499,9 @@ Agent ID: %s
 Description: %s
 
 The agent is now running in the background. To retrieve the result later:
-- Use the subtask_result tool with agent_id="%s"
+- Use the yield tool from the subagent to submit the complete result
 
 You can continue with other work while the agent runs.`,
-		agentID, description, agentID,
+		agentID, description,
 	)), nil
 }

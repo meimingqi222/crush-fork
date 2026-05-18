@@ -22,6 +22,7 @@ This tool is not PowerShell. Use direct POSIX-style commands or the dedicated Vi
 - Command required, working_dir optional (defaults to current directory)
 - IMPORTANT: Always provide a brief `description` parameter (under 30 chars) summarizing what the command does, try to keep it under 30 characters or so
 - IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use View instead of 'cat'/'head'/'tail'/'ls'
+- If you must search from bash, use 'rg' (ripgrep) instead of 'grep' for much better performance
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)
 - Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)

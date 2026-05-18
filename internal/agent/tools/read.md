@@ -1,7 +1,7 @@
 Reads file contents or URL content with flexible output formatting.
 
 <usage>
-- Provide path (file path or URL starting with http:// or https://)
+- Provide path (file path or URL starting with http:// or https://) (required)
 - For files: optional offset/limit for pagination, hashline for line-addressable editing
 - For URLs: optional format (text, markdown, html) and timeout
 - When path is a directory, returns a directory tree listing
@@ -21,9 +21,9 @@ Reads file contents or URL content with flexible output formatting.
 
 <file_reading>
 When path is a file:
-- Offset: start from specific line (0-based)
-- Limit: number of lines to read (default 2000)
-- Hashline: include hash anchors for line-addressable editing
+- Offset (optional): start from specific line (0-based)
+- Limit (optional): number of lines to read (default 2000)
+- Hashline (optional): include hash anchors for line-addressable editing
 - Wait for LSP diagnostics by default for code intelligence
 </file_reading>
 
@@ -57,7 +57,7 @@ When path is a directory:
 - Do not use read to probe guessed paths. First ground uncertain paths with Glob, Grep, a directory read, or a path returned by another tool.
 - When a file is not found, follow the returned glob, parent-directory, or grep suggestion before retrying read.
 - For large files: use offset parameter for specific sections
-- When output says `Use offset=<n> to continue`, pass that exact offset in the next read call
+- When output says `Use offset=<n> to continue`, pass that exact offset and the same path in the next read call
 - Set `hashline=true` when preparing line-addressable edits
 - Pass a directory path to get a directory tree listing
 - For URLs, markdown format is usually best for AI processing

@@ -119,11 +119,10 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewSendMessageTool(c.mailbox),
 		agenttools.NewTaskStopTool(c.mailbox),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
-		agenttools.NewSubtaskResultTool(c.messages),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
 	if config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent {
-		builtin = append(builtin, agenttools.NewSubagentFinishTool(c.messages))
+		builtin = append(builtin, agenttools.NewYieldTool(c.messages), agenttools.NewSubagentFinishTool(c.messages))
 	}
 	for _, tool := range builtin {
 		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))

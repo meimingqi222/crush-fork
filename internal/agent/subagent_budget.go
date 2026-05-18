@@ -10,9 +10,10 @@ const (
 	subagentMailboxPromptCharsLimit = 1_800
 	// subagentOutputPreviewCharsLimit is used only for the TUI/metadata
 	// preview row (ToolResultReducerChildSession.Preview). The model-facing
-	// output uses the full Content (subAgentResponseCharsLimit) so the
-	// parent agent does not need to call subtask_result for every fan-out
-	// task.
+	// output uses the full Content. When a subagent calls yield, the full
+	// result bypasses subAgentResponseCharsLimit; otherwise the fallback path
+	// still caps text at that limit so the parent agent does not need to
+	// call subtask_result for every fan-out task.
 	subagentOutputPreviewCharsLimit   = 5_000
 	subagentOutputPerTaskCharsLimit   = 40_000
 	subagentOutputAggregateCharsLimit = 160_000

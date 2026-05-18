@@ -489,7 +489,7 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, "short structured summary", finish.Summary)
 	})
 
-	t.Run("skips generic completion ack when selecting parent response", func(t *testing.T) {
+	t.Run("uses yield data when subagent calls yield", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -500,16 +500,18 @@ func TestRunSubAgent(t *testing.T) {
 			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
 				Role: message.Assistant,
 				Parts: []message.ContentPart{
-					message.TextContent{Text: "detailed subagent report"},
+					message.TextContent{Text: "The task is complete."},
 					message.Finish{Reason: message.FinishReasonEndTurn},
 				},
 			})
 			require.NoError(t, err)
 			_, err = env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-				Role: message.Assistant,
+				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.TextContent{Text: "The task is complete."},
-					message.Finish{Reason: message.FinishReasonEndTurn},
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Data:   "detailed subagent report via yield",
+						Status: "completed",
+					}),
 				},
 			})
 			require.NoError(t, err)
@@ -538,7 +540,7 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.False(t, resp.IsError)
-		assert.Equal(t, "detailed subagent report", resp.Content)
+		assert.Equal(t, "detailed subagent report via yield", resp.Content)
 		assert.NotEqual(t, "short structured summary", resp.Content)
 	})
 
@@ -1307,7 +1309,7 @@ func TestBuildAgentModels_ContextWindowOverride(t *testing.T) {
 
 	providerID := "openai"
 	providerCfg := config.ProviderConfig{
-		ID: providerID,
+		ID:   providerID,
 		Type: catwalk.TypeOpenAICompat,
 		Models: []catwalk.Model{
 			{ID: "big", Name: "Big", ContextWindow: 200_000, DefaultMaxTokens: 32_000},
@@ -1418,7 +1420,7 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 	t.Run("returns error when selected model is missing from provider config", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
-			ID:   "test-provider",
+			ID:     "test-provider",
 			Models: []catwalk.Model{{ID: "other-model", SupportsImages: false}},
 		})
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}
@@ -1576,7 +1578,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude 4.6 uses effort without budget thinking", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:                   "claude-sonnet-4.6",
+				ID:                     "claude-sonnet-4.6",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
 			},
@@ -1597,7 +1599,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude opus 4-7 uses effort without budget thinking", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:                   "claude-opus-4-7",
+				ID:                     "claude-opus-4-7",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
 			},
@@ -1617,7 +1619,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude opus 4.7 canReason enables effort by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-opus-4.7",
+				ID:        "claude-opus-4.7",
 				CanReason: true,
 			},
 		}
@@ -1637,7 +1639,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := true
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-opus-4-6",
+				ID:        "claude-opus-4-6",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{
@@ -1659,7 +1661,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("older claude uses budget thinking without effort", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:                   "claude-sonnet-4",
+				ID:                     "claude-sonnet-4",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
 			},
@@ -1680,7 +1682,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("canReason model enables thinking by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-sonnet-4",
+				ID:        "claude-sonnet-4",
 				CanReason: true,
 			},
 		}
@@ -1701,7 +1703,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := false
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-sonnet-4",
+				ID:        "claude-sonnet-4",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{
@@ -1724,7 +1726,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := false
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-sonnet-4.6",
+				ID:        "claude-sonnet-4.6",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{
@@ -1756,7 +1758,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude 4.6 canReason enables effort by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-sonnet-4.6",
+				ID:        "claude-sonnet-4.6",
 				CanReason: true,
 			},
 		}
@@ -1783,7 +1785,7 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		// Use a non-responses model ID so mergeCallOptions returns *ProviderOptions.
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "custom-reasoning-model",
+				ID:        "custom-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1799,7 +1801,7 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		// Use a non-responses model ID so mergeCallOptions returns *ProviderOptions.
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "custom-reasoning-model",
+				ID:        "custom-reasoning-model",
 				CanReason: true,
 			},
 		}
@@ -1814,7 +1816,7 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "some-reasoning-model",
+				ID:        "some-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1835,7 +1837,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "claude-sonnet-4",
+				ID:        "claude-sonnet-4",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1857,7 +1859,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "custom-reasoning-model",
+				ID:        "custom-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1877,7 +1879,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		t.Parallel()
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:      "custom-reasoning-model",
+				ID:        "custom-reasoning-model",
 				CanReason: true,
 			},
 			ModelCfg: config.SelectedModel{Think: &think},
@@ -1935,14 +1937,14 @@ func TestBuildProvider_PreservesHyperBaseURL(t *testing.T) {
 
 	env := testEnv(t)
 	coord := newTestCoordinator(t, env, hyper.Name, config.ProviderConfig{
-		ID:    hyper.Name,
+		ID:      hyper.Name,
 		Type:    hyper.Name,
 		BaseURL: "https://hyper.example.test/api/v1/fantasy",
 		APIKey:  "test-key",
 	})
 
 	provider, err := coord.buildProvider(config.ProviderConfig{
-		ID:    hyper.Name,
+		ID:      hyper.Name,
 		Type:    hyper.Name,
 		BaseURL: "https://hyper.example.test/api/v1/fantasy",
 		APIKey:  "test-key",
@@ -1971,7 +1973,7 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 	t.Parallel()
 
 	providerCfg := config.ProviderConfig{
-		ID:   "test-provider",
+		ID:     "test-provider",
 		Type:   catwalk.TypeOpenAICompat,
 		Models: []catwalk.Model{{ID: "test-model"}},
 	}

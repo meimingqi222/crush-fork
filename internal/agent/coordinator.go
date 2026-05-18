@@ -3480,7 +3480,15 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		finishResult, hasFinish = c.ensureSubagentFinish(ctx, params, subSession.ID, runtime, result, maxTokens, providerOptions, temperature, topP, topK, frequencyPenalty, presencePenalty)
 	}
 	content := c.subAgentResponseText(ctx, subSession.ID, result)
-	if content == "" && hasFinish && strings.TrimSpace(finishResult.Summary) != "" {
+	var yieldData string
+	var hasYield bool
+	if yd, ok := c.extractYieldFromSession(ctx, subSession.ID); ok {
+		yieldData = yd
+		hasYield = true
+	}
+	if hasYield {
+		content = yieldData
+	} else if content == "" && hasFinish && strings.TrimSpace(finishResult.Summary) != "" {
 		content = strings.TrimSpace(finishResult.Summary)
 	}
 	if content == "" {
@@ -3539,6 +3547,9 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		params.ParentMessageID,
 		status,
 	)
+	if hasYield {
+		response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithYield(message.ToolResultYield{Data: yieldData, Status: string(status)}).Metadata
+	}
 	if hasFinish {
 		response = withSubagentFinishToolResponseMetadata(response, finishResult)
 	}
@@ -3870,11 +3881,12 @@ func subagentSessionDetailsForModel(results []subagentResult) string {
 }
 
 func subagentOutputDetailsForModel(results []subagentResult) string {
-	// Use the full Content (already capped by subAgentResponseCharsLimit)
-	// rather than the 5k UI preview, so the parent agent does not have to
-	// call subtask_result for every parallel fan-out task. Budget is
-	// allocated fairly across tasks that have content, then clamped by the
-	// per-task cap so a single huge task cannot monopolize the aggregate.
+	// Use the full Content (yield results bypass truncation; non-yield
+	// fallback is capped by subAgentResponseCharsLimit) rather than the 5k
+	// UI preview, so the parent agent does not have to call subtask_result
+	// for every parallel fan-out task. Budget is allocated fairly across
+	// tasks that have content, then clamped by the per-task cap so a
+	// single huge task cannot monopolize the aggregate.
 	candidates := make([]int, 0, len(results))
 	for i, result := range results {
 		content := strings.TrimSpace(result.Content)
@@ -4079,9 +4091,39 @@ func (c *coordinator) buildSubagentContextPrefix(ctx context.Context, parentSess
 	return sb.String()
 }
 
+// extractYieldFromSession scans a child session's messages for the most
+// recent yield tool result and returns its data. This lets the parent
+// agent receive the full subagent output without truncation.
+func (c *coordinator) extractYieldFromSession(ctx context.Context, sessionID string) (string, bool) {
+	if c.messages == nil || strings.TrimSpace(sessionID) == "" {
+		return "", false
+	}
+	msgs, err := c.messages.List(ctx, sessionID)
+	if err != nil {
+		return "", false
+	}
+	// Scan in reverse to find the most recent yield result.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != message.Tool {
+			continue
+		}
+		for _, tr := range msgs[i].ToolResults() {
+			if tr.Name != tools.YieldToolName {
+				continue
+			}
+			yield, ok := tr.Yield()
+			if !ok {
+				continue
+			}
+			return strings.TrimSpace(yield.Data), true
+		}
+	}
+	return "", false
+}
+
 func (c *coordinator) subAgentResponseText(ctx context.Context, sessionID string, result *fantasy.AgentResult) string {
 	if result != nil && result.Response.Content != nil {
-		if text := strings.TrimSpace(result.Response.Content.Text()); text != "" && !tools.IsSubtaskCompletionAck(text) {
+		if text := strings.TrimSpace(result.Response.Content.Text()); text != "" {
 			return modelSafeSubAgentText(text, sessionID)
 		}
 	}
@@ -4106,9 +4148,6 @@ func (c *coordinator) subAgentResponseText(ctx context.Context, sessionID string
 			if msg.FinishReason() == message.FinishReasonEndTurn {
 				return ""
 			}
-			continue
-		}
-		if tools.IsSubtaskCompletionAck(text) {
 			continue
 		}
 		return modelSafeSubAgentText(text, sessionID)

@@ -32,4 +32,4 @@ Notes:
 - Messages are delivered best-effort while the mailbox is active.
 - Unknown mailbox, agent, or task IDs return an error response.
 - If an agent is still running, the message is queued and delivered on its next turn.
-- Attempts to send `agent_id` messages to stopped or non-resumable agents return an error. Use the `subtask_result` tool to fetch final output.
+- Attempts to send `agent_id` messages to stopped or non-resumable agents return an error. The subagent should use the `yield` tool to submit its complete result before finishing.

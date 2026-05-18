@@ -4,7 +4,7 @@ Use this tool only from subagent sessions. Call it exactly once at the end of de
 
 Parameters:
 - status: Terminal subagent status (`completed`, `completed_with_warnings`, `failed`, `canceled`, or `blocked`)
-- summary: Human-readable completion summary
+- summary (optional): Brief completion summary. Can be empty if yield has already submitted the full result.
 - artifacts: Output artifacts or references
 - files_touched: Workspace-relative or absolute file paths changed by the task
 - patch_plan: Applied or proposed change steps
@@ -18,6 +18,7 @@ Parameters:
 
 Rules:
 - Do not pass non-terminal statuses.
-- `summary` is required for successful completion unless structured data is sufficient.
+- `summary` is optional when yield has already been called.
+- Focus on structured metadata (files_touched, risks, test_results) rather than repeating the full result.
 - `error` is required for `failed` and `blocked`.
 - Only the first `subagent_finish` call is accepted; subsequent calls return an error.

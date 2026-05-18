@@ -125,6 +125,7 @@ type ToolResult struct {
 	AutoReviewMeta     ToolResultAutoReview     `json:"-"`
 	SubtaskResultMeta  ToolResultSubtaskResult  `json:"-"`
 	SubagentFinishMeta ToolResultSubagentFinish `json:"-"`
+	YieldMeta          ToolResultYield          `json:"-"`
 	ReducerMeta        ToolResultReducer        `json:"-"`
 }
 

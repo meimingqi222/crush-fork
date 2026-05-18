@@ -44,8 +44,6 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "send mailbox messages to running task graph tasks", SearchTags: []string{"mailbox", "taskgraph"}, Direct: true}
 	case tools.TaskStopToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "request task cancellation through mailbox protocol", SearchTags: []string{"mailbox", "taskgraph", "cancel"}, Direct: true}
-	case tools.SubtaskResultToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "fetch complete output from a child session", SearchTags: []string{"subagent", "session", "result"}, Direct: true}
 	case tools.DiagnosticsToolName, tools.ReferencesToolName, tools.LSPDeclarationToolName, tools.LSPDefinitionToolName, tools.LSPImplementationToolName, tools.LSPTypeDefinitionToolName, tools.LSPHoverToolName, tools.LSPDocumentSymbolsToolName, tools.LSPWorkspaceSymbolsToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "query language-server code intelligence", SearchTags: []string{"lsp", "code-intelligence"}, Direct: true}
 	case tools.LSPCodeActionToolName, tools.LSPRenameToolName, tools.LSPFormatToolName:
@@ -54,6 +52,8 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "restart language-server clients", SearchTags: []string{"lsp", "lifecycle"}}
 	case tools.RequestUserInputToolName, tools.PlanExitToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan", "interaction"}, Direct: true}
+	case tools.YieldToolName, tools.SubagentFinishToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "metadata"}}
 	default:
 		return tools.ToolMetadata{RiskHint: "execute"}
 	}

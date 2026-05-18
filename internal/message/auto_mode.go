@@ -118,11 +118,21 @@ func (f ToolResultSubagentFinish) IsEmpty() bool {
 		len(f.Data) == 0
 }
 
+type ToolResultYield struct {
+	Data   string `json:"data,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+func (y ToolResultYield) IsEmpty() bool {
+	return strings.TrimSpace(y.Data) == ""
+}
+
 const (
 	toolResultSubtaskResultMetadataKey  = "subtask_result"
 	toolResultSubagentFinishMetadataKey = "subagent_finish"
 	toolResultReducerMetadataKey        = "reducer"
 	toolResultDeferredToolStateKey      = "deferred_tool_state"
+	toolResultYieldMetadataKey          = "yield"
 )
 
 type ToolResultDeferredToolState struct {
@@ -442,6 +452,66 @@ func (t ToolResult) WithDeferredToolState(state ToolResultDeferredToolState) Too
 		payload = map[string]json.RawMessage{}
 	}
 	payload[toolResultDeferredToolStateKey] = stateData
+
+	merged, err := json.Marshal(payload)
+	if err != nil {
+		return t
+	}
+	t.Metadata = string(merged)
+	return t
+}
+
+func ParseToolResultYield(metadata string) (ToolResultYield, bool) {
+	var yield ToolResultYield
+	if strings.TrimSpace(metadata) == "" {
+		return yield, false
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(metadata), &payload); err != nil {
+		return ToolResultYield{}, false
+	}
+
+	raw, ok := payload[toolResultYieldMetadataKey]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return ToolResultYield{}, false
+	}
+	if err := json.Unmarshal(raw, &yield); err != nil {
+		return ToolResultYield{}, false
+	}
+	if yield.IsEmpty() {
+		return ToolResultYield{}, false
+	}
+	return yield, true
+}
+
+func (t ToolResult) Yield() (ToolResultYield, bool) {
+	if !t.YieldMeta.IsEmpty() {
+		return t.YieldMeta, true
+	}
+	return ParseToolResultYield(t.Metadata)
+}
+
+func (t ToolResult) WithYield(yield ToolResultYield) ToolResult {
+	t.YieldMeta = yield
+	if yield.IsEmpty() {
+		return t
+	}
+	yieldData, err := json.Marshal(yield)
+	if err != nil {
+		return t
+	}
+
+	var payload map[string]json.RawMessage
+	if strings.TrimSpace(t.Metadata) != "" {
+		if err := json.Unmarshal([]byte(t.Metadata), &payload); err != nil {
+			payload = nil
+		}
+	}
+	if payload == nil {
+		payload = map[string]json.RawMessage{}
+	}
+	payload[toolResultYieldMetadataKey] = yieldData
 
 	merged, err := json.Marshal(payload)
 	if err != nil {

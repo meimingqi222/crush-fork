@@ -56,7 +56,7 @@ func TestHandleDelayedClickTogglesTaskNodeNestedOperationsOnce(t *testing.T) {
 	require.Contains(t, expanded, "echo nested")
 }
 
-func TestHandleDelayedClickExpandsSubtaskResultTool(t *testing.T) {
+func TestHandleDelayedClickExpandsGenericToolMessage(t *testing.T) {
 	t.Parallel()
 
 	theme := styles.DefaultStyles()
@@ -64,23 +64,17 @@ func TestHandleDelayedClickExpandsSubtaskResultTool(t *testing.T) {
 	chatModel := NewChat(com)
 	chatModel.SetSize(120, 20)
 
-	input, err := json.Marshal(agenttools.SubtaskResultParams{
-		SessionID: "child-1",
-		Limit:     12000,
-	})
-	require.NoError(t, err)
-
 	result := "Session: child-1\n\n" + strings.Join([]string{
 		"line 1", "line 2", "line 3", "line 4", "line 5",
 		"line 6", "line 7", "line 8", "line 9", "line 10",
 		"line 11", "line 12",
 	}, "\n")
-	item := chat.NewToolMessageItem(&theme, "assistant-1", message.ToolCall{
-		ID:       "subtask-result-1",
-		Name:     agenttools.SubtaskResultToolName,
-		Input:    string(input),
+	item := chat.NewGenericToolMessageItem(&theme, message.ToolCall{
+		ID:       "generic-tool-1",
+		Name:     "some_tool",
+		Input:    "{}",
 		Finished: true,
-	}, &message.ToolResult{ToolCallID: "subtask-result-1", Content: result}, false)
+	}, &message.ToolResult{ToolCallID: "generic-tool-1", Content: result}, false)
 	chatModel.SetMessages(item)
 
 	collapsed := ansi.Strip(item.Render(120))

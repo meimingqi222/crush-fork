@@ -38,7 +38,10 @@ func NewSubagentFinishTool(messages message.Service) fantasy.AgentTool {
 		func(ctx context.Context, params SubagentFinishParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			sessionID := strings.TrimSpace(GetSessionFromContext(ctx))
 			if sessionID != "" && messages != nil {
-				if alreadyCalled(ctx, messages, sessionID) {
+				if toolAlreadyCalled(ctx, messages, sessionID, func(tr message.ToolResult) bool {
+					_, ok := tr.SubagentFinish()
+					return ok
+				}) {
 					return fantasy.NewTextErrorResponse("subagent_finish has already been called for this session. Do not call it again."), nil
 				}
 			}
@@ -53,8 +56,10 @@ func NewSubagentFinishTool(messages message.Service) fantasy.AgentTool {
 	)
 }
 
-// alreadyCalled checks whether subagent_finish was already invoked in this session.
-func alreadyCalled(ctx context.Context, messages message.Service, sessionID string) bool {
+// toolAlreadyCalled checks whether a prior successful tool invocation exists
+// in this session. The checker should inspect the ToolResult metadata to
+// confirm the call actually succeeded (e.g., via SubagentFinish() or Yield()).
+func toolAlreadyCalled(ctx context.Context, messages message.Service, sessionID string, checker func(message.ToolResult) bool) bool {
 	msgs, err := messages.List(ctx, sessionID)
 	if err != nil {
 		return false
@@ -64,7 +69,7 @@ func alreadyCalled(ctx context.Context, messages message.Service, sessionID stri
 			continue
 		}
 		for _, toolResult := range msgs[i].ToolResults() {
-			if _, ok := toolResult.SubagentFinish(); ok {
+			if checker(toolResult) {
 				return true
 			}
 		}
@@ -98,9 +103,9 @@ func validateSubagentFinishParams(params SubagentFinishParams) (message.ToolResu
 		return message.ToolResultSubagentFinish{}, fmt.Errorf("status must be one of completed, completed_with_warnings, failed, canceled, or blocked")
 	}
 
-	if (finish.Status == message.ToolResultSubtaskStatusCompleted || finish.Status == message.ToolResultSubtaskStatusCompletedWithWarnings) && finish.Summary == "" && len(finish.Data) == 0 {
-		return message.ToolResultSubagentFinish{}, fmt.Errorf("summary is required for successful completion when data is empty")
-	}
+	// Summary is no longer required for successful completion since yield
+	// handles the full result text. Only structured metadata (files_touched,
+	// risks, etc.) is needed from subagent_finish.
 	if (finish.Status == message.ToolResultSubtaskStatusFailed || finish.Status == message.ToolResultSubtaskStatusBlocked) && finish.Error == "" {
 		return message.ToolResultSubagentFinish{}, fmt.Errorf("error is required for failed and blocked statuses")
 	}
