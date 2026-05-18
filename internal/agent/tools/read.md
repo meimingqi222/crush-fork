@@ -57,7 +57,7 @@ When path is a directory:
 - Do not use read to probe guessed paths. First ground uncertain paths with Glob, Grep, a directory read, or a path returned by another tool.
 - When a file is not found, follow the returned glob, parent-directory, or grep suggestion before retrying read.
 - For large files: use offset parameter for specific sections
-- When output says `Use offset=<n> to continue`, pass that exact offset and the same path in the next read call
+- When output says `Use offset=<n> to continue`, pass that exact offset and the same path in the next read call. Do not reuse this offset for a different file — always start from offset=0 when reading a new file unless you know its size.
 - Set `hashline=true` when preparing line-addressable edits
 - Pass a directory path to get a directory tree listing
 - For URLs, markdown format is usually best for AI processing

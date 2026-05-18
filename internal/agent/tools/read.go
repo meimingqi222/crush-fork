@@ -81,6 +81,7 @@ type ReadResponseMetadata struct {
 	FallbackToolQuery   string           `json:"fallback_tool_query,omitempty"`
 	IsDirectory         bool             `json:"is_directory,omitempty"`
 	IsURL               bool             `json:"is_url,omitempty"`
+	TotalLines          int              `json:"total_lines,omitempty"`
 }
 
 const (
@@ -438,8 +439,18 @@ func handleFileRead(
 	readResult, err := readTextFileLines(filePath, params.Offset, params.Limit)
 	if err != nil {
 		if errors.Is(err, errReadOffsetBeyondEOF) {
-			return fantasy.NewTextErrorResponse(
-				fmt.Sprintf("Offset %d is beyond end of file (%d lines)", params.Offset, readResult.Total),
+			suggestion := fmt.Sprintf("Use offset=0 to read from the start")
+			if readResult.Total > 0 {
+				suggestion = fmt.Sprintf("Use offset=0 to read from the start, or offset=%d to read the last line", readResult.Total-1)
+			}
+			msg := fmt.Sprintf("Offset %d is beyond end of file (%d lines total). %s.", params.Offset, readResult.Total, suggestion)
+			meta := ReadResponseMetadata{
+				Path:       filePath,
+				TotalLines: readResult.Total,
+			}
+			return fantasy.WithResponseMetadata(
+				fantasy.NewTextErrorResponse(msg),
+				meta,
 			), nil
 		}
 		return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
@@ -483,6 +494,9 @@ func handleFileRead(
 		Path:     filePath,
 		Content:  content,
 		Hashline: params.Hashline,
+	}
+	if readResult.TotalKnown {
+		meta.TotalLines = readResult.Total
 	}
 	meta.applyRecovery(recovery)
 	if isSkillFile {
