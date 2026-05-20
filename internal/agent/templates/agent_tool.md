@@ -53,7 +53,8 @@ Each entry in `tasks` accepts:
 - `description` (required): one-line summary of what the task accomplishes.
 - `assignment` (required): full self-contained instructions for the subagent, including file paths, acceptance criteria, and the exact deliverable.
 - `subagent_type` (optional): subagent kind to spawn (e.g. `explore`, `general`, `review`). Defaults to the orchestrator's configured default when omitted.
-- `output_schema` (optional): JSON Schema describing the structured payload the subagent should return in its `data` field.
+
+The model and structured-output schema are determined by the subagent type's static configuration; they are not per-invocation parameters.
 
 ## Execution model
 
@@ -64,15 +65,11 @@ Tasks are executed in parallel with a concurrency limit. All tasks in a batch st
 Every subagent MUST complete by calling the `subagent_finish` tool exactly once. The structured result returned to the parent has these fields:
 - `status`: terminal status — one of `completed`, `completed_with_warnings`, `failed`, `canceled`, or `blocked`.
 - `summary`: short human-readable summary of what was done.
-- `data`: structured payload (conforms to `output_schema` when one was supplied).
+- `data`: structured payload (conforms to the agent type's configured output schema when one is defined).
 - `error`: error details when `status` is `failed` or `blocked`.
 - `files_touched`: list of files the subagent created or modified.
 
 If a task fails or is blocked, inspect the `error` and `summary`, then decide whether to retry by spawning a fresh task with revised instructions, skip the work, or restructure the plan. There is no automatic retry, no failure budget, and no graph timeout — the orchestrator owns those decisions.
-
-## Model priority override
-
-Use the `model_priority` field on the top-level params to override the default model selection order for all tasks in this invocation. Each entry is a model identifier; the system tries them in order until one is available.
 
 ## IRC coordination between subagents
 

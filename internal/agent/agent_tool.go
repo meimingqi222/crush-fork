@@ -26,7 +26,6 @@ type AgentTaskParams struct {
 	Description  string `json:"description,omitempty" description:"A short title for the delegated task"`
 	Assignment   string `json:"assignment" description:"The full task instructions for the subagent to perform"`
 	SubagentType string `json:"subagent_type,omitempty" description:"The subagent type to use: general, quick_task, explore, plan, review, designer, librarian, or a configured subagent name"`
-	OutputSchema any    `json:"output_schema,omitempty" description:"Expected structured output schema for this task"`
 }
 
 type AgentParams struct {
@@ -36,7 +35,6 @@ type AgentParams struct {
 	Tasks           []AgentTaskParams `json:"tasks,omitempty" description:"Optional list of independent tasks to execute in parallel"`
 	Context         string            `json:"context,omitempty" description:"Shared background information for all subagents"`
 	RunInBackground bool              `json:"run_in_background,omitempty" description:"Run the agent in the background and return immediately with an agent ID"`
-	ModelPriority   []string          `json:"model_priority,omitempty" description:"Override model priority for this invocation"`
 }
 
 const (
@@ -98,7 +96,6 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 						Description:  description,
 						Assignment:   assignment,
 						SubagentType: task.SubagentType,
-						OutputSchema: task.OutputSchema,
 					})
 				}
 			} else {
@@ -137,7 +134,6 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 				Tasks:           tasks,
 				Context:         params.Context,
 				RunInBackground: params.RunInBackground,
-				ModelPriority:   params.ModelPriority,
 			})
 		}), nil
 }
@@ -336,10 +332,6 @@ func containsAnyUnnegatedLower(text string, markers []string) bool {
 }
 
 func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType string) (SessionAgent, config.Agent, error) {
-	return c.buildSubAgentForTypeWithPriority(ctx, requestedType, nil)
-}
-
-func (c *coordinator) buildSubAgentForTypeWithPriority(ctx context.Context, requestedType string, modelPriority []string) (SessionAgent, config.Agent, error) {
 	if c.subAgentFactory != nil {
 		return c.subAgentFactory(ctx, requestedType)
 	}
@@ -347,12 +339,6 @@ func (c *coordinator) buildSubAgentForTypeWithPriority(ctx context.Context, requ
 	agentCfg, err := c.subagentConfig(requestedType)
 	if err != nil {
 		return nil, config.Agent{}, err
-	}
-
-	// Apply per-invocation model priority override. Each entry is treated as
-	// a SelectedModelType; the first one with a configured selection wins.
-	if overridden, ok := c.firstAvailableModelType(modelPriority); ok {
-		agentCfg.Model = overridden
 	}
 
 	promptBuilder, err := promptForAgent(agentCfg, true, prompt.WithWorkingDir(c.cfg.WorkingDir()))
@@ -366,22 +352,6 @@ func (c *coordinator) buildSubAgentForTypeWithPriority(ctx context.Context, requ
 	}
 
 	return subAgent, agentCfg, nil
-}
-
-// firstAvailableModelType returns the first entry in priority that resolves
-// to a configured selected model type, if any.
-func (c *coordinator) firstAvailableModelType(priority []string) (config.SelectedModelType, bool) {
-	for _, entry := range priority {
-		trimmed := strings.TrimSpace(entry)
-		if trimmed == "" {
-			continue
-		}
-		candidate := config.SelectedModelType(trimmed)
-		if _, ok := c.cfg.Config().SelectedModelForType(candidate); ok {
-			return candidate, true
-		}
-	}
-	return "", false
 }
 
 func (c *coordinator) subagentConfig(requestedType string) (config.Agent, error) {

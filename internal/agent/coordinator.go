@@ -2257,12 +2257,6 @@ type subAgentParams struct {
 	SkipHandoffReview         bool
 	SkipStructuredFinishCheck bool
 	IrcAgentID                string
-	// OutputSchema is the per-task output schema override. When non-nil it
-	// takes precedence over the static agent config schema.
-	OutputSchema any
-	// ModelPriority is the per-invocation list of model identifiers used
-	// when resolving the subagent's inference model.
-	ModelPriority []string
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
 	SessionSetup func(sessionID string)
@@ -2274,9 +2268,6 @@ type subagentTask struct {
 	Description  string
 	Assignment   string
 	SubagentType string
-	// OutputSchema is the per-task expected output schema. When non-nil it
-	// overrides the static agent config schema for this task.
-	OutputSchema any
 }
 
 type subagentBatchParams struct {
@@ -2286,9 +2277,6 @@ type subagentBatchParams struct {
 	Tasks           []subagentTask
 	Context         string
 	RunInBackground bool
-	// ModelPriority is the ordered list of model identifiers to attempt
-	// when resolving the subagent inference model for this batch.
-	ModelPriority []string
 }
 
 type subagentResult struct {
@@ -2380,7 +2368,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		prepared[i].Task = t
 		prepared[i].TaskRef = taskRefs[t.Name]
 
-		subAgent, agentCfg, buildErr := c.buildSubAgentForTypeWithPriority(ctx, t.SubagentType, params.ModelPriority)
+		subAgent, agentCfg, buildErr := c.buildSubAgentForType(ctx, t.SubagentType)
 		if buildErr != nil {
 			prepared[i].SkipResult = &subagentResult{
 				Task:    t,
@@ -2452,8 +2440,6 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			AgentBackground:   agentCfg.Background,
 			SkipHandoffReview: true,
 			IrcAgentID:        agentID,
-			OutputSchema:      t.OutputSchema,
-			ModelPriority:     params.ModelPriority,
 		}
 	}
 
@@ -3245,7 +3231,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	}
 
 	// Inject worker identity for permission escalation.
-	runtimeTask := subagentTask{Name: params.ToolCallID, Description: params.SessionTitle, Assignment: params.Prompt, OutputSchema: params.OutputSchema}
+	runtimeTask := subagentTask{Name: params.ToolCallID, Description: params.SessionTitle, Assignment: params.Prompt}
 	runtime := buildSubagentRuntimeContext(
 		params.SessionID,
 		subSession.ID,
