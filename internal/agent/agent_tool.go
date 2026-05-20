@@ -98,6 +98,7 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 						Description:  description,
 						Assignment:   assignment,
 						SubagentType: task.SubagentType,
+						OutputSchema: task.OutputSchema,
 					})
 				}
 			} else {
@@ -136,6 +137,7 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 				Tasks:           tasks,
 				Context:         params.Context,
 				RunInBackground: params.RunInBackground,
+				ModelPriority:   params.ModelPriority,
 			})
 		}), nil
 }
@@ -334,6 +336,10 @@ func containsAnyUnnegatedLower(text string, markers []string) bool {
 }
 
 func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType string) (SessionAgent, config.Agent, error) {
+	return c.buildSubAgentForTypeWithPriority(ctx, requestedType, nil)
+}
+
+func (c *coordinator) buildSubAgentForTypeWithPriority(ctx context.Context, requestedType string, modelPriority []string) (SessionAgent, config.Agent, error) {
 	if c.subAgentFactory != nil {
 		return c.subAgentFactory(ctx, requestedType)
 	}
@@ -341,6 +347,12 @@ func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType st
 	agentCfg, err := c.subagentConfig(requestedType)
 	if err != nil {
 		return nil, config.Agent{}, err
+	}
+
+	// Apply per-invocation model priority override. Each entry is treated as
+	// a SelectedModelType; the first one with a configured selection wins.
+	if overridden, ok := c.firstAvailableModelType(modelPriority); ok {
+		agentCfg.Model = overridden
 	}
 
 	promptBuilder, err := promptForAgent(agentCfg, true, prompt.WithWorkingDir(c.cfg.WorkingDir()))
@@ -354,6 +366,22 @@ func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType st
 	}
 
 	return subAgent, agentCfg, nil
+}
+
+// firstAvailableModelType returns the first entry in priority that resolves
+// to a configured selected model type, if any.
+func (c *coordinator) firstAvailableModelType(priority []string) (config.SelectedModelType, bool) {
+	for _, entry := range priority {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		candidate := config.SelectedModelType(trimmed)
+		if _, ok := c.cfg.Config().SelectedModelForType(candidate); ok {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 func (c *coordinator) subagentConfig(requestedType string) (config.Agent, error) {

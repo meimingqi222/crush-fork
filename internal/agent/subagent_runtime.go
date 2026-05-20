@@ -261,6 +261,12 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 	profile := subagentProfileForAgent(agentCfg)
 	permissions := DeriveSubagentPermissions(parentPermissions, profile, availableTools)
 	toolProfile := subagentToolProfileFromPermissions(permissions)
+	// Per-task OutputSchema takes precedence over the static agent config
+	// schema when explicitly provided.
+	outputSchema := agentCfg.OutputSchema
+	if task.OutputSchema != nil {
+		outputSchema = task.OutputSchema
+	}
 	return SubagentRuntimeContext{
 		ParentSessionID:  strings.TrimSpace(parentSessionID),
 		ChildSessionID:   strings.TrimSpace(childSessionID),
@@ -290,7 +296,7 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 		Result:       subagentResultContract(profile),
 		Events:       eventSink,
 		MaxTurns:     agentCfg.MaxTurns,
-		OutputSchema: agentCfg.OutputSchema,
+		OutputSchema: outputSchema,
 	}
 }
 
