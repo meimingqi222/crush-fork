@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/kaptinlin/jsonschema"
 )
 
 //go:embed subagent_finish.md
@@ -16,9 +18,10 @@ var subagentFinishDescription []byte
 
 const SubagentFinishToolName = "subagent_finish"
 
+// SubagentFinishParams is the input schema for the subagent_finish tool.
 type SubagentFinishParams struct {
 	Status       string          `json:"status" description:"Terminal subagent status: completed, completed_with_warnings, failed, canceled, or blocked"`
-	Summary      string          `json:"summary,omitempty" description:"Human-readable completion summary"`
+	Summary      string          `json:"summary" description:"Human-readable completion summary"`
 	Artifacts    []string        `json:"artifacts,omitempty" description:"Referenced output artifacts"`
 	FilesTouched []string        `json:"files_touched,omitempty" description:"Workspace-relative or absolute file paths changed by the task"`
 	PatchPlan    []string        `json:"patch_plan,omitempty" description:"Applied or proposed change steps"`
@@ -28,10 +31,52 @@ type SubagentFinishParams struct {
 	NextActions  []string        `json:"next_actions,omitempty" description:"Suggested next coordinator actions"`
 	Confidence   string          `json:"confidence,omitempty" description:"Qualitative confidence label"`
 	Error        string          `json:"error,omitempty" description:"Required for failed and blocked statuses"`
-	Data         json.RawMessage `json:"data,omitempty" description:"Optional structured JSON payload"`
+	Data         json.RawMessage `json:"data,omitempty" description:"Optional structured JSON payload validated against OutputSchema if defined"`
 }
 
-func NewSubagentFinishTool(messages message.Service) fantasy.AgentTool {
+// SubagentFinishOption configures optional behavior for the subagent_finish tool.
+type SubagentFinishOption func(*subagentFinishConfig)
+
+type subagentFinishConfig struct {
+	outputSchema any
+}
+
+// WithOutputSchema sets the JSON schema used to validate the data field.
+func WithOutputSchema(schema any) SubagentFinishOption {
+	return func(cfg *subagentFinishConfig) {
+		cfg.outputSchema = schema
+	}
+}
+
+// NewSubagentFinishTool creates the subagent_finish tool. The tool signals
+// loop termination (StopTurn) on successful completion.
+func NewSubagentFinishTool(messages message.Service, opts ...SubagentFinishOption) fantasy.AgentTool {
+	var cfg subagentFinishConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// Compile the output schema once if provided.
+	var compiledSchema *jsonschema.Schema
+	if cfg.outputSchema != nil {
+		schemaBytes, err := json.Marshal(cfg.outputSchema)
+		if err == nil && len(schemaBytes) > 2 { // Skip empty objects "{}".
+			compiler := jsonschema.NewCompiler()
+			compiled, compileErr := compiler.Compile(schemaBytes)
+			if compileErr == nil {
+				compiledSchema = compiled
+			}
+		}
+	}
+
+	// Track schema validation attempts per session to allow one retry before
+	// force-accepting. This prevents infinite loops when the agent cannot
+	// produce conforming output.
+	var (
+		validationAttempts   = make(map[string]int)
+		validationAttemptsMu sync.Mutex
+	)
+
 	return fantasy.NewAgentTool(
 		SubagentFinishToolName,
 		string(subagentFinishDescription),
@@ -45,12 +90,55 @@ func NewSubagentFinishTool(messages message.Service) fantasy.AgentTool {
 					return fantasy.NewTextErrorResponse("subagent_finish has already been called for this session. Do not call it again."), nil
 				}
 			}
+
 			finish, err := validateSubagentFinishParams(params)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
+
+			// Validate data against output schema if configured.
+			if compiledSchema != nil && len(finish.Data) > 0 {
+				validationAttemptsMu.Lock()
+				attempts := validationAttempts[sessionID]
+				validationAttempts[sessionID] = attempts + 1
+				validationAttemptsMu.Unlock()
+
+				var dataValue any
+				if unmarshalErr := json.Unmarshal(finish.Data, &dataValue); unmarshalErr != nil {
+					// First failure: allow retry.
+					if attempts == 0 {
+						return fantasy.NewTextErrorResponse(
+							fmt.Sprintf("Schema validation error: data is not valid JSON: %s. Please fix the data field and retry.", unmarshalErr.Error()),
+						), nil
+					}
+					// Second failure: force-accept to avoid infinite loop.
+				} else {
+					result := compiledSchema.Validate(dataValue)
+					if !result.IsValid() {
+						// First failure: return error to allow retry.
+						if attempts == 0 {
+							errors := result.DetailedErrors()
+							var errParts []string
+							for path, msg := range errors {
+								errParts = append(errParts, fmt.Sprintf("%s: %s", path, msg))
+							}
+							errMsg := strings.Join(errParts, "; ")
+							if errMsg == "" {
+								errMsg = "data does not conform to the expected output schema"
+							}
+							return fantasy.NewTextErrorResponse(
+								fmt.Sprintf("Schema validation failed: %s. Please fix the data field and retry.", errMsg),
+							), nil
+						}
+						// Second failure: force-accept to avoid infinite loop.
+					}
+				}
+			}
+
 			response := fantasy.NewTextResponse(cmpOr(strings.TrimSpace(finish.Summary), terminalStatusSummary(finish)))
 			response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithSubagentFinish(finish).Metadata
+			// Signal the agent loop to terminate immediately after this tool call.
+			response.StopTurn = true
 			return response, nil
 		},
 	)
@@ -103,9 +191,6 @@ func validateSubagentFinishParams(params SubagentFinishParams) (message.ToolResu
 		return message.ToolResultSubagentFinish{}, fmt.Errorf("status must be one of completed, completed_with_warnings, failed, canceled, or blocked")
 	}
 
-	// Summary is no longer required for successful completion since yield
-	// handles the full result text. Only structured metadata (files_touched,
-	// risks, etc.) is needed from subagent_finish.
 	if (finish.Status == message.ToolResultSubtaskStatusFailed || finish.Status == message.ToolResultSubtaskStatusBlocked) && finish.Error == "" {
 		return message.ToolResultSubagentFinish{}, fmt.Errorf("error is required for failed and blocked statuses")
 	}

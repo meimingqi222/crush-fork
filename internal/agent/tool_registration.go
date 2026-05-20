@@ -122,7 +122,11 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
 	if config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent {
-		builtin = append(builtin, agenttools.NewYieldTool(c.messages), agenttools.NewSubagentFinishTool(c.messages))
+		var finishOpts []agenttools.SubagentFinishOption
+		if agent.OutputSchema != nil {
+			finishOpts = append(finishOpts, agenttools.WithOutputSchema(agent.OutputSchema))
+		}
+		builtin = append(builtin, agenttools.NewYieldTool(c.messages), agenttools.NewSubagentFinishTool(c.messages, finishOpts...))
 	}
 	for _, tool := range builtin {
 		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))

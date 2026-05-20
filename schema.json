@@ -72,13 +72,19 @@
         "disabled": {
           "type": "boolean"
         },
-        "model": {
+        "reasoning_effort": {
           "type": "string",
           "enum": [
-            "large",
-            "small"
+            "low",
+            "medium",
+            "high",
+            "max"
           ],
-          "description": "The model type to use for this agent",
+          "description": "Reasoning effort level for this agent"
+        },
+        "model": {
+          "type": "string",
+          "description": "The model slot to use for this agent (large",
           "default": "large"
         },
         "allowed_tools": {
@@ -105,6 +111,38 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "spawns": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "explore",
+              "*"
+            ]
+          },
+          "type": "array",
+          "description": "Subagent types this agent can spawn"
+        },
+        "model_priority": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "claude-opus",
+              "claude-sonnet"
+            ]
+          },
+          "type": "array",
+          "description": "Ordered model priority list for this agent"
+        },
+        "output_schema": {
+          "description": "Expected structured output schema for subagent responses"
+        },
+        "max_turns": {
+          "type": "integer",
+          "description": "Maximum turns for subagent execution (0 = no limit)",
+          "examples": [
+            10
+          ]
         }
       },
       "additionalProperties": false,
@@ -306,6 +344,10 @@
           },
           "type": "object",
           "description": "Named agent configurations"
+        },
+        "subagents": {
+          "$ref": "#/$defs/SubagentRuntimeConfig",
+          "description": "Subagent runtime execution controls"
         }
       },
       "additionalProperties": false,
@@ -715,6 +757,53 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "MemoryBackgroundMaterializeConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable background materializer",
+          "default": true
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "description": "Background materialization interval in seconds",
+          "default": 300
+        },
+        "every_n_turns": {
+          "type": "integer",
+          "description": "Force materialization every N idle turns",
+          "default": 10
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "MemoryCompactionRecallConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable compaction-time recall",
+          "default": true
+        },
+        "top_k": {
+          "type": "integer",
+          "description": "Maximum events to inject into compaction prompt",
+          "default": 5
+        },
+        "max_bytes": {
+          "type": "integer",
+          "description": "Maximum byte budget for compaction rescue payload",
+          "default": 2048
+        },
+        "use_rerank": {
+          "type": "boolean",
+          "description": "Use the configured reranker during compaction recall",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "MemoryConfig": {
       "properties": {
         "enabled": {
@@ -727,7 +816,6 @@
           "enum": [
             "local",
             "hindsight",
-            "transcript",
             "off"
           ],
           "description": "Memory backend to use",
@@ -759,7 +847,119 @@
         },
         "retain_every_n_turns": {
           "type": "integer",
-          "description": "Retain transcript window every N turns (hindsight/transcript backends)",
+          "description": "Retain transcript window every N turns (hindsight backend)",
+          "default": 3
+        },
+        "mental_models": {
+          "$ref": "#/$defs/MemoryMentalModelsConfig",
+          "description": "Mental Models materializer configuration"
+        },
+        "background_materialize": {
+          "$ref": "#/$defs/MemoryBackgroundMaterializeConfig",
+          "description": "Background materializer configuration"
+        },
+        "compaction_recall": {
+          "$ref": "#/$defs/MemoryCompactionRecallConfig",
+          "description": "Compaction-time recall configuration"
+        },
+        "reranker": {
+          "$ref": "#/$defs/MemoryRerankerConfig",
+          "description": "Retrieve reranker configuration"
+        },
+        "embeddings": {
+          "$ref": "#/$defs/MemoryEmbeddingsConfig",
+          "description": "Local memory embedding reranker configuration"
+        },
+        "rollout": {
+          "$ref": "#/$defs/MemoryRolloutConfig",
+          "description": "Per-session rollout summary configuration"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "MemoryEmbeddingsConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable local embedding reranker",
+          "default": false
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "hashing"
+          ],
+          "description": "Embedding backend",
+          "default": "hashing"
+        },
+        "dimensions": {
+          "type": "integer",
+          "description": "Hashing embedding dimensions",
+          "default": 384
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "MemoryMentalModelsConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable Mental Models materializer",
+          "default": true
+        },
+        "max_bytes_share": {
+          "type": "number",
+          "description": "Maximum fraction of recall budget allocated to mental models",
+          "default": 0.5
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "MemoryRerankerConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable reranker on Retrieve()",
+          "default": false
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "heuristic",
+            "embedding",
+            "hybrid",
+            "llm"
+          ],
+          "description": "Reranker implementation",
+          "default": "heuristic"
+        },
+        "max_candidates": {
+          "type": "integer",
+          "description": "Maximum candidates fed to the reranker",
+          "default": 30
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "MemoryRolloutConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable per-session rollout summary materializer",
+          "default": true
+        },
+        "max_keep": {
+          "type": "integer",
+          "description": "Maximum rollout files retained on disk",
+          "default": 200
+        },
+        "min_events": {
+          "type": "integer",
+          "description": "Minimum durable events before a rollout summary is written",
           "default": 3
         }
       },
@@ -898,7 +1098,7 @@
             "type": "string",
             "examples": [
               "bash",
-              "view"
+              "read"
             ]
           },
           "type": "array",
@@ -1100,6 +1300,65 @@
         "provider"
       ]
     },
+    "SubagentRuntimeConfig": {
+      "properties": {
+        "structured_completion_required": {
+          "type": "boolean",
+          "description": "Require built-in subagents to call subagent_finish",
+          "default": true
+        },
+        "missing_finish_policy": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "fail",
+            "retry_then_warn",
+            "retry_then_fail"
+          ],
+          "description": "Policy when a subagent omits subagent_finish",
+          "default": "retry_then_warn"
+        },
+        "default_retry_policy": {
+          "type": "string",
+          "enum": [
+            "never",
+            "read_only_only",
+            "idempotent",
+            "isolated"
+          ],
+          "description": "Default child retry policy",
+          "default": "read_only_only"
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "description": "Maximum subagent concurrency",
+          "default": 4
+        },
+        "allow_recursive_agents": {
+          "type": "boolean",
+          "description": "Allow child agents to spawn children",
+          "default": false
+        },
+        "default_isolation": {
+          "type": "string",
+          "enum": [
+            "none",
+            "worktree",
+            "external_sandbox",
+            "managed_sandbox"
+          ],
+          "description": "Default child isolation mode",
+          "default": "none"
+        },
+        "safe_summary": {
+          "type": "boolean",
+          "description": "Prefer structured finish summaries over raw child output",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "TUIOptions": {
       "properties": {
         "compact_mode": {
@@ -1147,42 +1406,47 @@
             300
           ]
         },
+        "fail_fast": {
+          "type": "boolean",
+          "description": "Stop launching new task graph work after the first task failure",
+          "default": false
+        },
         "retry_budget": {
           "type": "integer",
-          "description": "Number of retry attempts allowed after a task graph task fails",
+          "description": "Deprecated: retries are now handled by the parent LLM and this field is ignored.",
+          "deprecated": true,
           "examples": [
             2
           ]
         },
         "graph_timeout_seconds": {
           "type": "integer",
-          "description": "Maximum number of seconds the entire task graph may run before remaining tasks are canceled",
+          "description": "Deprecated: the task graph concept has been removed and this field is ignored.",
+          "deprecated": true,
           "examples": [
             900
           ]
         },
-        "fail_fast": {
-          "type": "boolean",
-          "description": "Stop launching new task graph work after the first task failure",
-          "default": false
-        },
         "runtime_budget_seconds": {
           "type": "integer",
-          "description": "Maximum number of seconds a shared runtime budget may remain active across delegated work",
+          "description": "Deprecated: shared runtime budgets are no longer enforced and this field is ignored.",
+          "deprecated": true,
           "examples": [
             600
           ]
         },
         "failure_budget": {
           "type": "integer",
-          "description": "Maximum number of failures allowed within the configured failure domain before remaining delegated work is canceled",
+          "description": "Deprecated: failure budgets are no longer enforced and this field is ignored.",
+          "deprecated": true,
           "examples": [
             2
           ]
         },
         "failure_domain": {
           "type": "string",
-          "description": "Logical failure domain name shared by related delegated work",
+          "description": "Deprecated: failure domains are no longer enforced and this field is ignored.",
+          "deprecated": true,
           "examples": [
             "task_graph"
           ]

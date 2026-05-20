@@ -47,6 +47,7 @@ require (
 	github.com/invopop/jsonschema v0.13.0
 	github.com/joho/godotenv v1.5.1
 	github.com/jordanella/go-ansi-paintbrush v0.0.0-20240728195301-b7ad996ecf3d
+	github.com/kaptinlin/jsonschema v0.7.13
 	github.com/lucasb-eyer/go-colorful v1.3.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/modelcontextprotocol/go-sdk v1.4.1
@@ -142,7 +143,6 @@ require (
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kaptinlin/go-i18n v0.4.5 // indirect
 	github.com/kaptinlin/jsonpointer v0.4.20 // indirect
-	github.com/kaptinlin/jsonschema v0.7.13 // indirect
 	github.com/kaptinlin/messageformat-go v0.6.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect

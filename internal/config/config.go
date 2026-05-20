@@ -804,14 +804,39 @@ func (m MCPConfig) SupportsInteractiveAuth() bool {
 }
 
 type TaskGovernance struct {
-	MaxConcurrent        *int   `json:"max_concurrent,omitempty" jsonschema:"description=Maximum number of task graph tasks of this agent type to run concurrently,example=2"`
-	TimeoutSeconds       *int   `json:"timeout_seconds,omitempty" jsonschema:"description=Maximum number of seconds each task graph task may run before timing out,example=300"`
-	RetryBudget          *int   `json:"retry_budget,omitempty" jsonschema:"description=Number of retry attempts allowed after a task graph task fails,example=2"`
-	GraphTimeoutSeconds  *int   `json:"graph_timeout_seconds,omitempty" jsonschema:"description=Maximum number of seconds the entire task graph may run before remaining tasks are canceled,example=900"`
-	FailFast             *bool  `json:"fail_fast,omitempty" jsonschema:"description=Stop launching new task graph work after the first task failure,default=false"`
-	RuntimeBudgetSeconds *int   `json:"runtime_budget_seconds,omitempty" jsonschema:"description=Maximum number of seconds a shared runtime budget may remain active across delegated work,example=600"`
-	FailureBudget        *int   `json:"failure_budget,omitempty" jsonschema:"description=Maximum number of failures allowed within the configured failure domain before remaining delegated work is canceled,example=2"`
-	FailureDomain        string `json:"failure_domain,omitempty" jsonschema:"description=Logical failure domain name shared by related delegated work,example=task_graph"`
+	MaxConcurrent  *int  `json:"max_concurrent,omitempty" jsonschema:"description=Maximum number of task graph tasks of this agent type to run concurrently,example=2"`
+	TimeoutSeconds *int  `json:"timeout_seconds,omitempty" jsonschema:"description=Maximum number of seconds each task graph task may run before timing out,example=300"`
+	FailFast       *bool `json:"fail_fast,omitempty" jsonschema:"description=Stop launching new task graph work after the first task failure,default=false"`
+
+	// Deprecated: RetryBudget is no longer used in the new subagent execution model.
+	RetryBudget *int `json:"retry_budget,omitempty" jsonschema:"description=Deprecated: retries are now handled by the parent LLM and this field is ignored.,example=2"`
+	// Deprecated: GraphTimeoutSeconds is no longer used in the new subagent execution model.
+	GraphTimeoutSeconds *int `json:"graph_timeout_seconds,omitempty" jsonschema:"description=Deprecated: the task graph concept has been removed and this field is ignored.,example=900"`
+	// Deprecated: RuntimeBudgetSeconds is no longer used in the new subagent execution model.
+	RuntimeBudgetSeconds *int `json:"runtime_budget_seconds,omitempty" jsonschema:"description=Deprecated: shared runtime budgets are no longer enforced and this field is ignored.,example=600"`
+	// Deprecated: FailureBudget is no longer used in the new subagent execution model.
+	FailureBudget *int `json:"failure_budget,omitempty" jsonschema:"description=Deprecated: failure budgets are no longer enforced and this field is ignored.,example=2"`
+	// Deprecated: FailureDomain is no longer used in the new subagent execution model.
+	FailureDomain string `json:"failure_domain,omitempty" jsonschema:"description=Deprecated: failure domains are no longer enforced and this field is ignored.,example=task_graph"`
+}
+
+// JSONSchemaExtend marks deprecated TaskGovernance fields as deprecated in
+// the generated schema so editors can warn users away from them.
+func (TaskGovernance) JSONSchemaExtend(schema *jsonschema.Schema) {
+	if schema.Properties == nil {
+		return
+	}
+	for _, name := range []string{
+		"retry_budget",
+		"graph_timeout_seconds",
+		"runtime_budget_seconds",
+		"failure_budget",
+		"failure_domain",
+	} {
+		if prop, ok := schema.Properties.Get(name); ok {
+			prop.Deprecated = true
+		}
+	}
 }
 
 func (t *TaskGovernance) MaxConcurrentLimit() int {
@@ -883,7 +908,7 @@ type Agent struct {
 	Isolation        string    `json:"isolation,omitempty" jsonschema:"description=Isolation hint for this agent,example=workspace,example=session,example=process"`
 	OmitContextFiles bool      `json:"omit_context_files,omitempty" jsonschema:"description=Skip project and global context file injection for this agent,default=false"`
 	// This is the id of the system prompt used by the agent
-	Disabled bool `json:"disabled,omitempty"`
+	Disabled        bool   `json:"disabled,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema:"description=Reasoning effort level for this agent,enum=low,enum=medium,enum=high,enum=max"`
 
 	Model SelectedModelType `json:"model" jsonschema:"required,description=The model slot to use for this agent (large, small, or a custom key in models),default=large"`
@@ -907,6 +932,13 @@ type Agent struct {
 
 	// Spawns lists subagent types this agent can spawn (e.g., ["explore"] or ["*"] for any).
 	Spawns []string `json:"spawns,omitempty" jsonschema:"description=Subagent types this agent can spawn,example=explore,example=*"`
+
+	// ModelPriority is an ordered list of model preferences for this agent.
+	ModelPriority []string `json:"model_priority,omitempty" jsonschema:"description=Ordered model priority list for this agent,example=claude-opus,example=claude-sonnet"`
+	// OutputSchema defines the expected structured output schema for this subagent.
+	OutputSchema any `json:"output_schema,omitempty" jsonschema:"description=Expected structured output schema for subagent responses"`
+	// MaxTurns limits the number of conversation turns for subagent execution. Zero means no limit.
+	MaxTurns int `json:"max_turns,omitempty" jsonschema:"description=Maximum turns for subagent execution (0 = no limit),example=10"`
 }
 
 type Tools struct {

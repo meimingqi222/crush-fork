@@ -145,9 +145,8 @@ type coordinator struct {
 	activatedDeferredBySession map[string]map[string]struct{}
 	knownDeferredToolNames     map[string]bool
 
-	subAgentScheduler subAgentScheduler
-	subAgentFactory   subAgentFactory
-	readyWg           errgroup.Group
+	subAgentFactory subAgentFactory
+	readyWg         errgroup.Group
 
 	// backgroundAgents tracks asynchronously running background agents.
 	backgroundAgents *backgroundAgentRegistry
@@ -2311,17 +2310,10 @@ type subagentReducerInput struct {
 	AttemptCount int
 }
 
-type (
-	subAgentScheduler func(context.Context, subAgentParams) (fantasy.ToolResponse, error)
-	subAgentFactory   func(context.Context, string) (SessionAgent, config.Agent, error)
-)
+type subAgentFactory func(context.Context, string) (SessionAgent, config.Agent, error)
 
 func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
-	scheduler := c.subAgentScheduler
-	if scheduler == nil {
-		scheduler = c.runSubAgentDirect
-	}
-	return scheduler(ctx, params)
+	return c.runSubAgentDirect(ctx, params)
 }
 
 func (p subAgentParams) SubagentTypeOrDefault() string {
@@ -2340,8 +2332,6 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		return fantasy.NewTextErrorResponse("tasks is required"), nil
 	}
 
-	ctx, budgetCancel := subagentContextWithBudget(ctx, params.Tasks, c.cfg.Config().Agents)
-	defer budgetCancel()
 	ctx = toolruntime.WithToolCallID(ctx, params.ToolCallID)
 
 	taskRefs := make(map[string]string, len(params.Tasks))
@@ -2355,276 +2345,203 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 	}
 	defer bridge.Close()
 
-	type indexedResult struct {
-		Index  int
-		Result subagentResult
-	}
-
-	resultCh := make(chan indexedResult, len(params.Tasks))
-	semaphores := make(map[string]chan struct{})
-	var semMu sync.Mutex
-
-	for i, task := range params.Tasks {
-		go func(idx int, t subagentTask) {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					slog.Error("Subagent task panicked", "task_name", t.Name, "panic", recovered)
-					resultCh <- indexedResult{Index: idx, Result: subagentResult{
-						Task:    t,
-						TaskRef: taskRefs[t.Name],
-						Status:  message.ToolResultSubtaskStatusFailed,
-						Content: fmt.Sprintf("Task %q panicked: %v", t.Name, recovered),
-					}}
-				}
-			}()
-
-			if budgetErr := subagentRuntimeBudgetError(ctx); budgetErr != nil {
-				resultCh <- indexedResult{Index: idx, Result: subagentResult{
-					Task:    t,
-					TaskRef: taskRefs[t.Name],
-					Status:  message.ToolResultSubtaskStatusCanceled,
-					Content: strings.TrimSpace(budgetErr.Error()),
-				}}
-				return
-			}
-
-			subAgent, agentCfg, buildErr := c.buildSubAgentForType(ctx, t.SubagentType)
-			if buildErr != nil {
-				resultCh <- indexedResult{Index: idx, Result: subagentResult{
-					Task:    t,
-					TaskRef: taskRefs[t.Name],
-					Status:  message.ToolResultSubtaskStatusFailed,
-					Content: strings.TrimSpace(buildErr.Error()),
-				}}
-				return
-			}
-
-			subagentType := config.ResolveSubagentID(c.cfg.Config().Agents, agentCfg.ID)
-			description := strings.TrimSpace(t.Description)
-			if description == "" {
-				description = defaultSubagentDescription(subagentType, t.Assignment)
-			}
-
-			agentID := fmt.Sprintf("%s::%s", c.mainAgentID, t.Name)
-			c.agentRegistry.Register(AgentRef{
-				ID:          agentID,
-				DisplayName: description,
-				Kind:        AgentKindSub,
-				ParentID:    c.mainAgentID,
-				Status:      AgentStatusRunning,
-				Agent:       subAgent,
-				SessionID:   params.SessionID,
-			})
-			defer c.agentRegistry.Unregister(agentID)
-
-			bridge.MarkInProgress(t.Name)
-
-			semaphore := subagentSemaphoreForAgent(agentCfg, c.cfg.Config().EffectiveSubagentRuntime(), semaphores, &semMu)
-			releaseSemaphore, acquireErr := acquireSubagentSemaphore(ctx, semaphore)
-			if acquireErr != nil {
-				resultCh <- indexedResult{Index: idx, Result: subagentResult{
-					Task:    t,
-					TaskRef: taskRefs[t.Name],
-					Status:  message.ToolResultSubtaskStatusCanceled,
-					Content: strings.TrimSpace(subagentRuntimeBudgetCause(ctx).Error()),
-				}}
-				return
-			}
-			defer releaseSemaphore()
-
-			taskToolCallID := fmt.Sprintf("%s::%s", params.ToolCallID, t.Name)
-			attempts := 1
-			if agentCfg.TaskGovernance != nil {
-				attempts += agentCfg.TaskGovernance.RetryBudgetLimit()
-			}
-
-			mode, modeErr := c.collaborationModeForContext(ctx)
-			if modeErr != nil {
-				resultCh <- indexedResult{Index: idx, Result: subagentResult{
-					Task:    t,
-					TaskRef: taskRefs[t.Name],
-					Status:  message.ToolResultSubtaskStatusFailed,
-					Content: strings.TrimSpace(modeErr.Error()),
-				}}
-				return
-			}
-			parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, mode, params.SessionID)
-			if parentPermissionsErr != nil {
-				resultCh <- indexedResult{Index: idx, Result: subagentResult{
-					Task:    t,
-					TaskRef: taskRefs[t.Name],
-					Status:  message.ToolResultSubtaskStatusFailed,
-					Content: strings.TrimSpace(parentPermissionsErr.Error()),
-				}}
-				return
-			}
-
-			runtimeTask := subagentTask{Name: t.Name, Description: description, Assignment: t.Assignment, SubagentType: subagentType}
-			runtime := buildSubagentRuntimeContext(
-				params.SessionID,
-				"",
-				params.AgentMessageID,
-				taskToolCallID,
-				runtimeTask,
-				agentCfg,
-				parentPermissions,
-				agentCfg.AllowedTools,
-				agentCfg.Isolation,
-				c.cfg.WorkingDir(),
-				coordinatorSubagentEventSink{timeline: c.timeline},
-			)
-			applySubagentRuntimeConfig(&runtime, c.cfg.Config().EffectiveSubagentRuntime())
-			runtime.Retry.MaxAttempts = attempts
-
-			result := subagentResult{Task: t, Attempts: 0}
-			basePrompt := strings.TrimSpace(t.Assignment)
-			if ctx := strings.TrimSpace(params.Context); ctx != "" {
-				basePrompt = fmt.Sprintf("Shared context:\n%s\n\n---\n\n%s", ctx, basePrompt)
-			}
-
-			for attempt := range attempts {
-				attemptPrompt := basePrompt
-				effects, consumeErr := bridge.Consume(t.Name)
-				if consumeErr == nil {
-					if len(effects.Messages) > 0 {
-						attemptPrompt = promptWithMailboxMessages(basePrompt, effects.Messages)
-					}
-					if effects.Stop {
-						result = subagentResult{Task: t, TaskRef: taskRefs[t.Name], Status: message.ToolResultSubtaskStatusCanceled, Content: effects.Reason}
-						break
-					}
-				}
-
-				if ircRoster := renderIrcPeerRoster(c.agentRegistry, agentID); ircRoster != "" {
-					attemptPrompt = attemptPrompt + "\n\n" + ircRoster
-				}
-
-				attemptCtx, attemptCancel := subagentAttemptContext(ctx, agentCfg, t.Name)
-				timeoutCancel := func() {}
-				if agentCfg.TaskGovernance != nil {
-					if timeout := agentCfg.TaskGovernance.Timeout(); timeout > 0 {
-						attemptCtx, timeoutCancel = context.WithTimeout(attemptCtx, timeout)
-					}
-				}
-				cancel := func() { timeoutCancel(); attemptCancel() }
-
-				if c.hookManager != nil {
-					c.hookManager.RunSubagentStart(attemptCtx, subagentAttemptToolCallID(taskToolCallID, attempt), subagentType, params.SessionID)
-				}
-
-				taskRunCh := make(chan struct {
-					response fantasy.ToolResponse
-					err      error
-				}, 1)
-				go func() {
-					defer func() {
-						if recovered := recover(); recovered != nil {
-							taskRunCh <- struct {
-								response fantasy.ToolResponse
-								err      error
-							}{err: fmt.Errorf("task %q subagent panicked: %v", t.Name, recovered)}
-						}
-					}()
-					response, runErr := c.runSubAgent(attemptCtx, subAgentParams{
-						Agent:             subAgent,
-						SessionID:         params.SessionID,
-						AgentMessageID:    params.AgentMessageID,
-						ParentMessageID:   params.AgentMessageID,
-						ToolCallID:        subagentAttemptToolCallID(taskToolCallID, attempt),
-						Prompt:            attemptPrompt,
-						SessionTitle:      formatSubagentSessionTitle(description, subagentType),
-						SubagentType:      subagentType,
-						DelegationMailbox: params.ToolCallID,
-						AgentMemory:       agentCfg.Memory,
-						AgentIsolation:    agentCfg.Isolation,
-						AgentBackground:   agentCfg.Background,
-						SkipHandoffReview: true,
-						IrcAgentID:        agentID,
-					})
-					taskRunCh <- struct {
-						response fantasy.ToolResponse
-						err      error
-					}{response: response, err: runErr}
-				}()
-
-				var (
-					response fantasy.ToolResponse
-					runErr   error
-				)
-				select {
-				case run := <-taskRunCh:
-					response = run.response
-					runErr = run.err
-				case <-attemptCtx.Done():
-					runErr = subagentRuntimeBudgetCause(attemptCtx)
-				}
-				cancel()
-
-				if c.hookManager != nil {
-					c.hookManager.RunSubagentStop(ctx, subagentAttemptToolCallID(taskToolCallID, attempt), subagentType, params.SessionID)
-				}
-
-				if runErr != nil {
-					_ = toolruntime.ReportFailure(attemptCtx, "subagent_run", runErr)
-					status := message.ToolResultSubtaskStatusFailed
-					if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || attemptCtx.Err() != nil {
-						status = message.ToolResultSubtaskStatusCanceled
-					}
-					result = subagentResult{
-						Task:     t,
-						TaskRef:  taskRefs[t.Name],
-						Status:   status,
-						Content:  strings.TrimSpace(runErr.Error()),
-						Attempts: attempt + 1,
-					}
-				} else {
-					result = subagentResultFromResponse(t, response)
-					result.TaskRef = taskRefs[t.Name]
-					result.Attempts = attempt + 1
-					if parentSession, err := c.sessions.Get(ctx, params.SessionID); err == nil && parentSession.PermissionMode == session.PermissionModeAuto {
-						if result.Finish.IsEmpty() && result.Status != message.ToolResultSubtaskStatusFailed {
-							result.Content = message.SanitizedToolResultStub
-						}
-					}
-					if result.ChildSessionID != "" && result.Finish.IsEmpty() {
-						artifacts, filesTouched, patchPlan, testResults, followups := c.collectSubagentArtifacts(ctx, result.ChildSessionID)
-						result.Artifacts = mergeUniqueStrings(result.Artifacts, artifacts)
-						result.FilesTouched = mergeUniqueStrings(result.FilesTouched, filesTouched)
-						result.PatchPlan = mergeUniqueStrings(result.PatchPlan, patchPlan)
-						result.TestResults = mergeUniqueStrings(result.TestResults, testResults)
-						result.Followups = mergeUniqueStrings(result.Followups, followups)
-					}
-					if result.Status == message.ToolResultSubtaskStatusFailed {
-						_ = toolruntime.ReportFailure(attemptCtx, "subagent_result", errors.New(result.Content))
-					}
-				}
-
-				sideEffects := c.sideEffectSummary(ctx, result)
-				if !ShouldRetrySubagent(result, runtime, sideEffects) || attempt == attempts-1 {
-					break
-				}
-			}
-
-			result = withSubagentOutputMetadata(result)
-			bridge.MarkResult(t.Name, result.Status, result.Content)
-
-			switch result.Status {
-			case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings:
-				c.agentRegistry.SetStatus(agentID, AgentStatusCompleted)
-			case message.ToolResultSubtaskStatusCanceled:
-				c.agentRegistry.SetStatus(agentID, AgentStatusAborted)
-			case message.ToolResultSubtaskStatusFailed, message.ToolResultSubtaskStatusBlocked:
-				c.agentRegistry.SetStatus(agentID, AgentStatusAborted)
-			}
-
-			resultCh <- indexedResult{Index: idx, Result: result}
-		}(i, task)
+	// preparedTask collects everything needed to run a single subagent task.
+	// If Skip is non-empty status, the task is recorded as a result without
+	// being submitted to the executor.
+	type preparedTask struct {
+		Task         subagentTask
+		TaskRef      string
+		SubagentType string
+		AgentID      string
+		Params       subAgentParams
+		SkipResult   *subagentResult
 	}
 
 	orderedResults := make([]subagentResult, len(params.Tasks))
-	for range params.Tasks {
-		ir := <-resultCh
-		orderedResults[ir.Index] = ir.Result
+	prepared := make([]preparedTask, len(params.Tasks))
+
+	baseContext := strings.TrimSpace(params.Context)
+
+	// Prepare each task synchronously: build the subagent, register it,
+	// drain mailbox messages, and assemble the runtime parameters.
+	for i, t := range params.Tasks {
+		prepared[i].Task = t
+		prepared[i].TaskRef = taskRefs[t.Name]
+
+		subAgent, agentCfg, buildErr := c.buildSubAgentForType(ctx, t.SubagentType)
+		if buildErr != nil {
+			prepared[i].SkipResult = &subagentResult{
+				Task:    t,
+				TaskRef: taskRefs[t.Name],
+				Status:  message.ToolResultSubtaskStatusFailed,
+				Content: strings.TrimSpace(buildErr.Error()),
+			}
+			continue
+		}
+
+		subagentType := config.ResolveSubagentID(c.cfg.Config().Agents, agentCfg.ID)
+		description := strings.TrimSpace(t.Description)
+		if description == "" {
+			description = defaultSubagentDescription(subagentType, t.Assignment)
+		}
+
+		agentID := fmt.Sprintf("%s::%s", c.mainAgentID, t.Name)
+		c.agentRegistry.Register(AgentRef{
+			ID:          agentID,
+			DisplayName: description,
+			Kind:        AgentKindSub,
+			ParentID:    c.mainAgentID,
+			Status:      AgentStatusRunning,
+			Agent:       subAgent,
+			SessionID:   params.SessionID,
+		})
+		bridge.MarkInProgress(t.Name)
+
+		prepared[i].SubagentType = subagentType
+		prepared[i].AgentID = agentID
+
+		prompt := strings.TrimSpace(t.Assignment)
+		if baseContext != "" {
+			prompt = fmt.Sprintf("Shared context:\n%s\n\n---\n\n%s", baseContext, prompt)
+		}
+
+		if effects, consumeErr := bridge.Consume(t.Name); consumeErr == nil {
+			if len(effects.Messages) > 0 {
+				prompt = promptWithMailboxMessages(prompt, effects.Messages)
+			}
+			if effects.Stop {
+				prepared[i].SkipResult = &subagentResult{
+					Task:    t,
+					TaskRef: taskRefs[t.Name],
+					Status:  message.ToolResultSubtaskStatusCanceled,
+					Content: effects.Reason,
+				}
+				continue
+			}
+		}
+
+		if ircRoster := renderIrcPeerRoster(c.agentRegistry, agentID); ircRoster != "" {
+			prompt = prompt + "\n\n" + ircRoster
+		}
+
+		taskToolCallID := fmt.Sprintf("%s::%s", params.ToolCallID, t.Name)
+		prepared[i].Params = subAgentParams{
+			Agent:             subAgent,
+			SessionID:         params.SessionID,
+			AgentMessageID:    params.AgentMessageID,
+			ParentMessageID:   params.AgentMessageID,
+			ToolCallID:        taskToolCallID,
+			Prompt:            prompt,
+			SessionTitle:      formatSubagentSessionTitle(description, subagentType),
+			SubagentType:      subagentType,
+			DelegationMailbox: params.ToolCallID,
+			AgentMemory:       agentCfg.Memory,
+			AgentIsolation:    agentCfg.Isolation,
+			AgentBackground:   agentCfg.Background,
+			SkipHandoffReview: true,
+			IrcAgentID:        agentID,
+		}
+	}
+
+	// Build the executor and run all prepared tasks in parallel.
+	runtimeCfg := c.cfg.Config().EffectiveSubagentRuntime()
+	runner := func(ctx context.Context, p subAgentParams) (fantasy.ToolResponse, error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.Error("Subagent task panicked", "tool_call_id", p.ToolCallID, "panic", recovered)
+			}
+		}()
+		if c.hookManager != nil {
+			c.hookManager.RunSubagentStart(ctx, p.ToolCallID, p.SubagentType, p.SessionID)
+			defer c.hookManager.RunSubagentStop(context.Background(), p.ToolCallID, p.SubagentType, p.SessionID)
+		}
+		return c.runSubAgent(ctx, p)
+	}
+	executor := newSubagentExecutor(runtimeCfg.MaxConcurrency, false, runner)
+
+	runIndices := make([]int, 0, len(prepared))
+	runParams := make([]subAgentParams, 0, len(prepared))
+	for i, p := range prepared {
+		if p.SkipResult != nil {
+			orderedResults[i] = *p.SkipResult
+			continue
+		}
+		runIndices = append(runIndices, i)
+		runParams = append(runParams, p.Params)
+	}
+
+	execResults := executor.execute(ctx, runParams)
+
+	// Map executor results back into subagentResult and finalize each task.
+	for k, idx := range runIndices {
+		t := prepared[idx].Task
+		er := execResults[k]
+		var result subagentResult
+		if er.Err != nil {
+			_ = toolruntime.ReportFailure(ctx, "subagent_run", er.Err)
+			status := message.ToolResultSubtaskStatusFailed
+			if errors.Is(er.Err, context.Canceled) || errors.Is(er.Err, context.DeadlineExceeded) {
+				status = message.ToolResultSubtaskStatusCanceled
+			}
+			result = subagentResult{
+				Task:     t,
+				TaskRef:  taskRefs[t.Name],
+				Status:   status,
+				Content:  strings.TrimSpace(er.Err.Error()),
+				Attempts: 1,
+			}
+		} else {
+			result = subagentResultFromResponse(t, er.Response)
+			result.TaskRef = taskRefs[t.Name]
+			result.Attempts = 1
+			if parentSession, sessErr := c.sessions.Get(ctx, params.SessionID); sessErr == nil && parentSession.PermissionMode == session.PermissionModeAuto {
+				if result.Finish.IsEmpty() && result.Status != message.ToolResultSubtaskStatusFailed {
+					result.Content = message.SanitizedToolResultStub
+				}
+			}
+			if result.ChildSessionID != "" && result.Finish.IsEmpty() {
+				artifacts, filesTouched, patchPlan, testResults, followups := c.collectSubagentArtifacts(ctx, result.ChildSessionID)
+				result.Artifacts = mergeUniqueStrings(result.Artifacts, artifacts)
+				result.FilesTouched = mergeUniqueStrings(result.FilesTouched, filesTouched)
+				result.PatchPlan = mergeUniqueStrings(result.PatchPlan, patchPlan)
+				result.TestResults = mergeUniqueStrings(result.TestResults, testResults)
+				result.Followups = mergeUniqueStrings(result.Followups, followups)
+			}
+			if result.Status == message.ToolResultSubtaskStatusFailed {
+				_ = toolruntime.ReportFailure(ctx, "subagent_result", errors.New(result.Content))
+			}
+		}
+		orderedResults[idx] = result
+	}
+
+	// Finalize: write metadata, mark bridge results, update registry status,
+	// and unregister each subagent.
+	for i := range orderedResults {
+		t := prepared[i].Task
+		result := orderedResults[i]
+		if result.Status == "" {
+			result = subagentResult{
+				Task:    t,
+				TaskRef: taskRefs[t.Name],
+				Status:  message.ToolResultSubtaskStatusFailed,
+				Content: "Task did not produce a result.",
+			}
+		}
+		result = withSubagentOutputMetadata(result)
+		orderedResults[i] = result
+		bridge.MarkResult(t.Name, result.Status, result.Content)
+
+		if prepared[i].AgentID != "" {
+			switch result.Status {
+			case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings:
+				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusCompleted)
+			case message.ToolResultSubtaskStatusCanceled,
+				message.ToolResultSubtaskStatusFailed,
+				message.ToolResultSubtaskStatusBlocked:
+				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusAborted)
+			}
+			c.agentRegistry.Unregister(prepared[i].AgentID)
+		}
 	}
 
 	reducerInput := make([]reducer.TaskResult, 0, len(params.Tasks))
@@ -2745,78 +2662,6 @@ func acquireSubagentSemaphore(ctx context.Context, semaphore chan struct{}) (fun
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-func subagentContextWithBudget(ctx context.Context, tasks []subagentTask, agents map[string]config.Agent) (context.Context, context.CancelFunc) {
-	var graphTimeout time.Duration
-	var runtimeBudget time.Duration
-	var failureBudget int
-	var failureDomain string
-	for _, task := range tasks {
-		agentCfg, ok := agents[config.ResolveSubagentID(agents, strings.TrimSpace(task.SubagentType))]
-		if !ok || agentCfg.TaskGovernance == nil {
-			continue
-		}
-		if timeout := agentCfg.TaskGovernance.GraphTimeout(); timeout > 0 && (graphTimeout == 0 || timeout < graphTimeout) {
-			graphTimeout = timeout
-		}
-		if budget := agentCfg.TaskGovernance.RuntimeBudget(); budget > 0 && (runtimeBudget == 0 || budget < runtimeBudget) {
-			runtimeBudget = budget
-		}
-		if budget := agentCfg.TaskGovernance.FailureBudgetLimit(); budget > 0 && (failureBudget == 0 || budget < failureBudget) {
-			failureBudget = budget
-		}
-		if failureDomain == "" {
-			failureDomain = agentCfg.TaskGovernance.FailureDomainName()
-		}
-	}
-	ctx, govCancel := toolruntime.WithGovernance(ctx, toolruntime.Governance{
-		RuntimeBudget: runtimeBudget,
-		FailureBudget: failureBudget,
-		FailureDomain: cmp.Or(strings.TrimSpace(failureDomain), "task_graph"),
-	})
-	if graphTimeout == 0 {
-		return ctx, govCancel
-	}
-	budgetCtx, cancel := context.WithTimeout(ctx, graphTimeout)
-	return budgetCtx, func() { cancel(); govCancel() }
-}
-
-func subagentAttemptContext(ctx context.Context, agentCfg config.Agent, taskID string) (context.Context, context.CancelFunc) {
-	attemptCtx := ctx
-	governance := toolruntime.Governance{FailureDomain: subagentFailureDomain(agentCfg, taskID)}
-	if agentCfg.TaskGovernance != nil {
-		governance.RuntimeBudget = agentCfg.TaskGovernance.RuntimeBudget()
-		if governance.RuntimeBudget == 0 {
-			governance.RuntimeBudget = 0
-		}
-		if governance.FailureDomain == "" {
-			governance.FailureDomain = cmp.Or(agentCfg.TaskGovernance.FailureDomainName(), taskID)
-		}
-	}
-	attemptCtx, cancel := toolruntime.WithGovernance(attemptCtx, governance)
-	return attemptCtx, cancel
-}
-
-func subagentFailureDomain(agentCfg config.Agent, taskID string) string {
-	if agentCfg.TaskGovernance == nil {
-		return strings.TrimSpace(taskID)
-	}
-	return cmp.Or(agentCfg.TaskGovernance.FailureDomainName(), strings.TrimSpace(taskID))
-}
-
-func subagentRuntimeBudgetError(ctx context.Context) error {
-	if err := context.Cause(ctx); err != nil && toolruntime.FailureDomainFromContext(ctx) != "" {
-		return err
-	}
-	return nil
-}
-
-func subagentRuntimeBudgetCause(ctx context.Context) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
-	return ctx.Err()
 }
 
 func subagentAttemptToolCallID(toolCallID string, attempt int) string {
@@ -4233,14 +4078,14 @@ func (c *coordinator) runBackgroundTaskNode(
 		}
 		defer releaseSemaphore()
 
-		attemptCtx, attemptCancel := subagentAttemptContext(ctx, agentCfg, task.Name)
+		attemptCtx := ctx
 		timeoutCancel := func() {}
 		if agentCfg.TaskGovernance != nil {
 			if timeout := agentCfg.TaskGovernance.Timeout(); timeout > 0 {
 				attemptCtx, timeoutCancel = context.WithTimeout(attemptCtx, timeout)
 			}
 		}
-		cancel := func() { timeoutCancel(); attemptCancel() }
+		cancel := timeoutCancel
 
 		if c.hookManager != nil {
 			c.hookManager.RunSubagentStart(attemptCtx, agentID, subagentType, params.SessionID)

@@ -15,6 +15,9 @@ import (
 func newTestServices(t *testing.T) (session.Service, message.Service) {
 	conn, err := db.Connect(t.Context(), t.TempDir())
 	require.NoError(t, err)
+	// Close the SQLite connection before TempDir cleanup so Windows can
+	// remove the database file without hitting a file-lock error.
+	t.Cleanup(func() { _ = conn.Close() })
 	q := db.New(conn)
 	sessions := session.NewService(q, nil)
 	messages := message.NewService(q)

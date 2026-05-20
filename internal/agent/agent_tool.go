@@ -26,6 +26,7 @@ type AgentTaskParams struct {
 	Description  string `json:"description,omitempty" description:"A short title for the delegated task"`
 	Assignment   string `json:"assignment" description:"The full task instructions for the subagent to perform"`
 	SubagentType string `json:"subagent_type,omitempty" description:"The subagent type to use: general, quick_task, explore, plan, review, designer, librarian, or a configured subagent name"`
+	OutputSchema any    `json:"output_schema,omitempty" description:"Expected structured output schema for this task"`
 }
 
 type AgentParams struct {
@@ -35,6 +36,7 @@ type AgentParams struct {
 	Tasks           []AgentTaskParams `json:"tasks,omitempty" description:"Optional list of independent tasks to execute in parallel"`
 	Context         string            `json:"context,omitempty" description:"Shared background information for all subagents"`
 	RunInBackground bool              `json:"run_in_background,omitempty" description:"Run the agent in the background and return immediately with an agent ID"`
+	ModelPriority   []string          `json:"model_priority,omitempty" description:"Override model priority for this invocation"`
 }
 
 const (

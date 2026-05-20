@@ -141,6 +141,8 @@ func (s SideEffectSummary) HasAny() bool {
 		s.ApprovalGranted
 }
 
+// Deprecated: ShouldRetrySubagent is DAG-era retry logic. In the simplified
+// execution model the parent LLM decides whether to retry failed tasks.
 func ShouldRetrySubagent(result subagentResult, runtime SubagentRuntimeContext, sideEffects SideEffectSummary) bool {
 	if result.Status == message.ToolResultSubtaskStatusCanceled ||
 		result.Status == message.ToolResultSubtaskStatusBlocked ||
@@ -230,6 +232,18 @@ type SubagentRuntimeContext struct {
 	Retry             SubagentRetryPolicy
 	Result            SubagentResultContract
 	Events            SubagentEventSink
+
+	// MaxTurns is the maximum number of LLM turns the subagent is allowed.
+	// Zero means no limit.
+	MaxTurns int
+
+	// OutputSchema is the JSON schema that the subagent's finish output
+	// must conform to. Nil means no schema validation.
+	OutputSchema any
+
+	// FinishRequired indicates whether the subagent must call subagent_finish
+	// to complete. When true, the agent loop enforces completion via the tool.
+	FinishRequired bool
 }
 
 type subagentRuntimeContextKey struct{}
@@ -272,9 +286,11 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 			Available: true,
 			Path:      strings.TrimSpace(workspaceRoot),
 		},
-		Retry:  subagentRetryPolicy(profile),
-		Result: subagentResultContract(profile),
-		Events: eventSink,
+		Retry:        subagentRetryPolicy(profile),
+		Result:       subagentResultContract(profile),
+		Events:       eventSink,
+		MaxTurns:     agentCfg.MaxTurns,
+		OutputSchema: agentCfg.OutputSchema,
 	}
 }
 
@@ -370,6 +386,7 @@ func applySubagentRuntimeConfig(runtime *SubagentRuntimeContext, runtimeCfg conf
 		return
 	}
 	runtime.Result.Required = runtimeCfg.StructuredCompletionRequired
+	runtime.FinishRequired = runtimeCfg.StructuredCompletionRequired || runtime.OutputSchema != nil
 
 	// CanSpawn is true if:
 	// 1. The agent has a non-empty Spawns list (from config or builtin), OR

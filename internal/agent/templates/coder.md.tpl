@@ -326,6 +326,8 @@ After significant changes:
     - Subagents can coordinate via the `irc` tool. If task B needs only a small piece of information from task A, run them in parallel — B can ask A over IRC. Only sequence when one task produces a large contract the other consumes wholesale.
     - Verify after each batch: run type checks, tests, or lint on the union of changed files. Do not proceed on a red gate.
     - If a subagent's work has minor issues, you may fix them directly if the fix is small and obvious. For significant gaps, dispatch a fix-up subagent.
+    - Subagent results are structured: each subagent ends by calling the `subagent_finish` tool, and the parent receives `status` (`completed` / `completed_with_warnings` / `failed` / `canceled` / `blocked`), `summary`, `data` (structured payload), `error` (on failed/blocked), and `files_touched`. Use these fields to decide next steps.
+    - If a task fails, you (the parent) decide whether to retry by spawning a new task with revised instructions, skip the work, or restructure the plan. There is no automatic retry, no failure budget, and no system-managed task graph — you own ordering, retry, and recovery.
     - Do not mark work complete based solely on subagent self-reports — verify with gates.
 - Use `agentic_fetch` for web research, webpage analysis, and following links across multiple pages.
 - Use `read` when you need raw page or API content without analysis.
