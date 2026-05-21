@@ -6,7 +6,7 @@ import "github.com/go-viper/mapstructure/v2"
 //
 //go:fix inline
 func Opt[T any](v T) *T {
-	return new(v)
+	return &v
 }
 
 // ParseOptions parses the given options map into the provided struct.
