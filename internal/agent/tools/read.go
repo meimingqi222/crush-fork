@@ -34,7 +34,7 @@ import (
 var readDescription []byte
 
 type ReadParams struct {
-	Path               string   `json:"path" description:"The path to read - can be a file path or URL (http:// or https://)"`
+	Path               string   `json:"path" description:"The path to read - can be a file path or URL (http:// or https://). You must provide the path in every read call, even when using offset to read further lines of the same file."`
 	Offset             int      `json:"offset,omitempty" description:"The line number to start reading from (0-based, for files only)"`
 	Limit              int      `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000, for files only)"`
 	Format             string   `json:"format,omitempty" description:"The format to return URL content in: text, markdown, or html (for URLs only)"`
@@ -477,8 +477,8 @@ func handleFileRead(
 		startLine := params.Offset + 1
 		endLine := params.Offset + len(lines)
 		if readResult.HasMore {
-			output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use offset=%d to continue.)",
-				startLine, endLine, nextOffset)
+			output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use path=%q and offset=%d to continue.)",
+				startLine, endLine, filepath.ToSlash(params.Path), nextOffset)
 		} else if readResult.TotalKnown {
 			output += fmt.Sprintf("\n\n(Showing lines %d-%d. End of file - total %d lines.)",
 				startLine, endLine, readResult.Total)
