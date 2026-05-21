@@ -189,7 +189,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	assert.Contains(t, reviewNames, "bash")
 	assert.Contains(t, reviewNames, "read")
 	assert.Contains(t, reviewNames, tools.ReferencesToolName)
-	assert.Contains(t, reviewNames, tools.SubagentFinishToolName)
+	assert.Contains(t, reviewNames, tools.YieldToolName)
 	assert.NotContains(t, reviewNames, "edit")
 	assert.NotContains(t, reviewNames, "write")
 	assert.NotContains(t, reviewNames, AgentToolName)
@@ -202,7 +202,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 		librarianNames = append(librarianNames, tool.Info().Name)
 	}
 	assert.Contains(t, librarianNames, tools.AgenticFetchToolName)
-	assert.Contains(t, librarianNames, tools.SubagentFinishToolName)
+	assert.Contains(t, librarianNames, tools.YieldToolName)
 	assert.NotContains(t, librarianNames, "edit")
 	assert.NotContains(t, librarianNames, "write")
 
@@ -215,7 +215,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	}
 	assert.Contains(t, quickTaskNames, "edit")
 	assert.Contains(t, quickTaskNames, "write")
-	assert.Contains(t, quickTaskNames, tools.SubagentFinishToolName)
+	assert.Contains(t, quickTaskNames, tools.YieldToolName)
 	assert.NotContains(t, quickTaskNames, AgentToolName)
 }
 
@@ -346,24 +346,24 @@ func TestBuildToolsWithSubagentRuntimeShapesFromParentPolicy(t *testing.T) {
 	for _, tool := range toolSet {
 		names = append(names, tool.Info().Name)
 	}
-	assert.Equal(t, []string{tools.ReadToolName, tools.SubagentFinishToolName, tools.ToolSearchToolName}, names)
+	assert.Equal(t, []string{tools.ReadToolName, tools.ToolSearchToolName, tools.YieldToolName}, names)
 }
 
 func TestDeriveSubagentPermissionsDenyWins(t *testing.T) {
 	profile := SubagentProfile{
 		Name:      config.AgentGeneral,
 		Kind:      SubagentProfileGeneral,
-		ToolNames: []string{"bash", "edit", "read", tools.SubagentFinishToolName},
+		ToolNames: []string{"bash", "edit", "read", tools.YieldToolName},
 	}
 
 	derived := DeriveSubagentPermissions(ParentPermissionContext{
-		AllowedTools: []string{"bash", "edit", "read", tools.SubagentFinishToolName},
+		AllowedTools: []string{"bash", "edit", "read", tools.YieldToolName},
 		DeniedTools:  []string{"edit"},
-	}, profile, []string{"bash", "edit", "read", tools.SubagentFinishToolName})
+	}, profile, []string{"bash", "edit", "read", tools.YieldToolName})
 
 	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "bash")
 	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), "read")
-	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), tools.SubagentFinishToolName)
+	assert.Contains(t, toolNamesFromSet(derived.AllowedTools), tools.YieldToolName)
 	assert.NotContains(t, toolNamesFromSet(derived.AllowedTools), "edit")
 	assert.Contains(t, toolNamesFromSet(derived.DeniedTools), "edit")
 }

@@ -52,7 +52,7 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "restart language-server clients", SearchTags: []string{"lsp", "lifecycle"}}
 	case tools.RequestUserInputToolName, tools.PlanExitToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan", "interaction"}, Direct: true}
-	case tools.YieldToolName, tools.SubagentFinishToolName:
+	case tools.YieldToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "metadata"}}
 	default:
 		return tools.ToolMetadata{RiskHint: "execute"}

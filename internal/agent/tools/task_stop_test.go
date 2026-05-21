@@ -42,6 +42,6 @@ func TestTaskStopToolValidatesMailboxID(t *testing.T) {
 		Input: `{"reason":"x"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "mailbox_id is required")
 }

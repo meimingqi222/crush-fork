@@ -2289,7 +2289,7 @@ type subagentResult struct {
 	Preview        string
 	HasFullOutput  bool
 	OutputChars    int
-	Finish         message.ToolResultSubagentFinish
+	Yield          message.ToolResultYield
 	Warnings       []string
 	Error          string
 	Attempts       int
@@ -2495,11 +2495,11 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			result.TaskRef = taskRefs[t.Name]
 			result.Attempts = 1
 			if parentSession, sessErr := c.sessions.Get(ctx, params.SessionID); sessErr == nil && parentSession.PermissionMode == session.PermissionModeAuto {
-				if result.Finish.IsEmpty() && result.Status != message.ToolResultSubtaskStatusFailed {
+				if result.Yield.IsEmpty() && result.Status != message.ToolResultSubtaskStatusFailed {
 					result.Content = message.SanitizedToolResultStub
 				}
 			}
-			if result.ChildSessionID != "" && result.Finish.IsEmpty() {
+			if result.ChildSessionID != "" && result.Yield.IsEmpty() {
 				artifacts, filesTouched, patchPlan, testResults, followups := c.collectSubagentArtifacts(ctx, result.ChildSessionID)
 				result.Artifacts = mergeUniqueStrings(result.Artifacts, artifacts)
 				result.FilesTouched = mergeUniqueStrings(result.FilesTouched, filesTouched)
@@ -2615,8 +2615,8 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 	if len(orderedResults) == 1 {
 		only := orderedResults[0]
 		response = withSubtaskToolResponseTaskRefMetadata(response, params.ToolCallID, only.ChildSessionID, params.AgentMessageID, only.TaskRef, only.Status)
-		if !only.Finish.IsEmpty() {
-			response = withSubagentFinishToolResponseMetadata(response, only.Finish)
+		if !only.Yield.IsEmpty() {
+			response = withSubagentYieldToolResponseMetadata(response, only.Yield)
 		}
 	}
 
@@ -2692,7 +2692,6 @@ func mergeUniqueStrings(values ...[]string) []string {
 
 func (c *coordinator) sideEffectSummary(ctx context.Context, result subagentResult) SideEffectSummary {
 	filesTouched := slices.Clone(result.FilesTouched)
-	filesTouched = append(filesTouched, result.Finish.FilesTouched...)
 	if len(filesTouched) > 1 {
 		slices.Sort(filesTouched)
 		filesTouched = slices.Compact(filesTouched)
@@ -2760,7 +2759,7 @@ func reduceResultToChildSession(result subagentResult) message.ToolResultReducer
 func withSubagentOutputMetadata(result subagentResult) subagentResult {
 	content := strings.TrimSpace(result.Content)
 	if content == "" {
-		content = strings.TrimSpace(result.Finish.Summary)
+		content = strings.TrimSpace(result.Yield.Data)
 	}
 	result.OutputChars = len([]rune(content))
 	if content == "" {
@@ -2832,23 +2831,18 @@ func subagentResultFromResponse(task subagentTask, response fantasy.ToolResponse
 		result.Status = subtask.Status
 		result.ChildSessionID = subtask.ChildSessionID
 	}
-	if finish, ok := message.ParseToolResultSubagentFinish(response.Metadata); ok {
-		result.Finish = finish
-		if finish.Status != "" {
-			result.Status = finish.Status
+	if yield, ok := message.ParseToolResultYield(response.Metadata); ok {
+		result.Yield = yield
+		if yield.Status != "" {
+			result.Status = message.ToolResultSubtaskStatus(yield.Status)
 		}
-		result.Artifacts = append([]string(nil), finish.Artifacts...)
-		result.FilesTouched = append([]string(nil), finish.FilesTouched...)
-		result.PatchPlan = append([]string(nil), finish.PatchPlan...)
-		result.TestResults = append([]string(nil), finish.TestResults...)
-		result.Followups = append([]string(nil), finish.Followups...)
-		if strings.TrimSpace(finish.Error) != "" {
-			result.Error = strings.TrimSpace(finish.Error)
+		if strings.TrimSpace(yield.Error) != "" {
+			result.Error = strings.TrimSpace(yield.Error)
 		}
-		if finish.Status == message.ToolResultSubtaskStatusCompletedWithWarnings {
-			warnings := append([]string(nil), finish.Risks...)
-			if strings.TrimSpace(finish.Error) != "" {
-				warnings = append(warnings, strings.TrimSpace(finish.Error))
+		if result.Status == message.ToolResultSubtaskStatusCompletedWithWarnings {
+			var warnings []string
+			if strings.TrimSpace(yield.Error) != "" {
+				warnings = append(warnings, strings.TrimSpace(yield.Error))
 			}
 			result.Warnings = warnings
 		}
@@ -2943,23 +2937,6 @@ func (c *coordinator) collectSubagentArtifacts(ctx context.Context, childSession
 			continue
 		}
 		for _, toolResult := range msg.ToolResults() {
-			if finishMeta, ok := toolResult.SubagentFinish(); ok {
-				for _, artifact := range finishMeta.Artifacts {
-					addArtifact(artifact)
-				}
-				for _, filePath := range finishMeta.FilesTouched {
-					addFile(filePath)
-				}
-				for _, step := range finishMeta.PatchPlan {
-					addPatchStep(step)
-				}
-				for _, testResult := range finishMeta.TestResults {
-					addTestResult(testResult)
-				}
-				for _, question := range finishMeta.Followups {
-					addFollowup(question)
-				}
-			}
 			if reducerMeta, ok := toolResult.Reducer(); ok {
 				for _, artifact := range reducerMeta.Artifacts {
 					addArtifact(artifact)
@@ -3036,13 +3013,13 @@ func subagentToolResultArtifacts(toolResult message.ToolResult) []string {
 	}
 }
 
-func (c *coordinator) latestSubagentFinish(ctx context.Context, childSessionID string) (message.ToolResultSubagentFinish, bool) {
+func (c *coordinator) latestSubagentYield(ctx context.Context, childSessionID string) (message.ToolResultYield, bool) {
 	if c.messages == nil || strings.TrimSpace(childSessionID) == "" {
-		return message.ToolResultSubagentFinish{}, false
+		return message.ToolResultYield{}, false
 	}
 	msgs, err := c.messages.List(ctx, childSessionID)
 	if err != nil {
-		return message.ToolResultSubagentFinish{}, false
+		return message.ToolResultYield{}, false
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != message.Tool {
@@ -3050,20 +3027,20 @@ func (c *coordinator) latestSubagentFinish(ctx context.Context, childSessionID s
 		}
 		toolResults := msgs[i].ToolResults()
 		for j := len(toolResults) - 1; j >= 0; j-- {
-			if finish, ok := toolResults[j].SubagentFinish(); ok {
-				return finish, true
+			if yield, ok := toolResults[j].Yield(); ok {
+				return yield, true
 			}
 		}
 	}
-	return message.ToolResultSubagentFinish{}, false
+	return message.ToolResultYield{}, false
 }
 
-func (c *coordinator) ensureSubagentFinish(ctx context.Context, params subAgentParams, childSessionID string, runtime SubagentRuntimeContext, result *fantasy.AgentResult, maxOutputTokens int64, providerOptions fantasy.ProviderOptions, temperature, topP *float64, topK *int64, frequencyPenalty, presencePenalty *float64) (message.ToolResultSubagentFinish, bool) {
-	if finish, ok := c.latestSubagentFinish(ctx, childSessionID); ok {
-		return finish, true
+func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentParams, childSessionID string, runtime SubagentRuntimeContext, result *fantasy.AgentResult, maxOutputTokens int64, providerOptions fantasy.ProviderOptions, temperature, topP *float64, topK *int64, frequencyPenalty, presencePenalty *float64) (message.ToolResultYield, bool) {
+	if yield, ok := c.latestSubagentYield(ctx, childSessionID); ok {
+		return yield, true
 	}
 	if !runtime.Result.Required {
-		return message.ToolResultSubagentFinish{}, false
+		return message.ToolResultYield{}, false
 	}
 	policy := runtime.Result.MissingFinishPolicy
 	if policy == "" {
@@ -3074,7 +3051,7 @@ func (c *coordinator) ensureSubagentFinish(ctx context.Context, params subAgentP
 		for range 2 {
 			_, runErr := params.Agent.Run(ctx, SessionAgentCall{
 				SessionID:        childSessionID,
-				Prompt:           "Call subagent_finish exactly once now. Summarize only the work already completed. Do not start new work unless needed to determine final status.",
+				Prompt:           "Call yield exactly once now. Summarize only the work already completed. Do not start new work unless needed to determine final status.",
 				MaxOutputTokens:  maxOutputTokens,
 				ProviderOptions:  providerOptions,
 				Temperature:      temperature,
@@ -3087,8 +3064,8 @@ func (c *coordinator) ensureSubagentFinish(ctx context.Context, params subAgentP
 			if runErr != nil {
 				break
 			}
-			if finish, ok := c.latestSubagentFinish(ctx, childSessionID); ok {
-				return finish, true
+			if yield, ok := c.latestSubagentYield(ctx, childSessionID); ok {
+				return yield, true
 			}
 		}
 	}
@@ -3098,18 +3075,16 @@ func (c *coordinator) ensureSubagentFinish(ctx context.Context, params subAgentP
 	}
 	switch policy {
 	case MissingFinishFail, MissingFinishRetryThenFail:
-		return message.ToolResultSubagentFinish{
-			Status:  message.ToolResultSubtaskStatusFailed,
-			Summary: content,
-			Error:   "subagent_finish was not called",
-			Risks:   []string{"Missing required subagent_finish metadata."},
+		return message.ToolResultYield{
+			Status: string(message.ToolResultSubtaskStatusFailed),
+			Data:   content,
+			Error:  "yield was not called",
 		}, true
 	default:
-		return message.ToolResultSubagentFinish{
-			Status:  message.ToolResultSubtaskStatusCompletedWithWarnings,
-			Summary: content,
-			Error:   "subagent_finish was not called",
-			Risks:   []string{"Missing required subagent_finish metadata."},
+		return message.ToolResultYield{
+			Status: string(message.ToolResultSubtaskStatusCompletedWithWarnings),
+			Data:   content,
+			Error:  "yield was not called",
 		}, true
 	}
 }
@@ -3318,23 +3293,17 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	}
 
 	var (
-		finishResult message.ToolResultSubagentFinish
-		hasFinish    bool
+		yieldResult message.ToolResultYield
+		hasYield    bool
 	)
 	if !params.SkipStructuredFinishCheck {
-		finishResult, hasFinish = c.ensureSubagentFinish(ctx, params, subSession.ID, runtime, result, maxTokens, providerOptions, temperature, topP, topK, frequencyPenalty, presencePenalty)
+		yieldResult, hasYield = c.ensureSubagentYield(ctx, params, subSession.ID, runtime, result, maxTokens, providerOptions, temperature, topP, topK, frequencyPenalty, presencePenalty)
+	} else {
+		yieldResult, hasYield = c.latestSubagentYield(ctx, subSession.ID)
 	}
 	content := c.subAgentResponseText(ctx, subSession.ID, result)
-	var yieldData string
-	var hasYield bool
-	if yd, ok := c.extractYieldFromSession(ctx, subSession.ID); ok {
-		yieldData = yd
-		hasYield = true
-	}
-	if hasYield {
-		content = yieldData
-	} else if content == "" && hasFinish && strings.TrimSpace(finishResult.Summary) != "" {
-		content = strings.TrimSpace(finishResult.Summary)
+	if hasYield && strings.TrimSpace(yieldResult.Data) != "" {
+		content = yieldResult.Data
 	}
 	if content == "" {
 		slog.Warn("Sub-agent returned empty response", "session", subSession.ID, "prompt", params.Prompt)
@@ -3366,8 +3335,8 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		}
 	}
 	status := message.ToolResultSubtaskStatusCompleted
-	if hasFinish && finishResult.Status != "" {
-		status = finishResult.Status
+	if hasYield && yieldResult.Status != "" {
+		status = message.ToolResultSubtaskStatus(yieldResult.Status)
 	}
 	eventStatus := "completed"
 	if status == message.ToolResultSubtaskStatusCompletedWithWarnings {
@@ -3393,10 +3362,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		status,
 	)
 	if hasYield {
-		response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithYield(message.ToolResultYield{Data: yieldData, Status: string(status)}).Metadata
-	}
-	if hasFinish {
-		response = withSubagentFinishToolResponseMetadata(response, finishResult)
+		response = withSubagentYieldToolResponseMetadata(response, yieldResult)
 	}
 	return response, nil
 }
@@ -3673,8 +3639,8 @@ func withSubtaskToolResponseTaskRefMetadata(response fantasy.ToolResponse, paren
 	return response
 }
 
-func withSubagentFinishToolResponseMetadata(response fantasy.ToolResponse, finish message.ToolResultSubagentFinish) fantasy.ToolResponse {
-	response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithSubagentFinish(finish).Metadata
+func withSubagentYieldToolResponseMetadata(response fantasy.ToolResponse, yield message.ToolResultYield) fantasy.ToolResponse {
+	response.Metadata = message.ToolResult{Metadata: response.Metadata}.WithYield(yield).Metadata
 	return response
 }
 
@@ -3736,7 +3702,7 @@ func subagentOutputDetailsForModel(results []subagentResult) string {
 	for i, result := range results {
 		content := strings.TrimSpace(result.Content)
 		if content == "" {
-			content = strings.TrimSpace(result.Finish.Summary)
+			content = strings.TrimSpace(result.Yield.Data)
 		}
 		if content == "" {
 			content = strings.TrimSpace(result.Preview)
@@ -3763,7 +3729,7 @@ func subagentOutputDetailsForModel(results []subagentResult) string {
 	for _, result := range results {
 		content := strings.TrimSpace(result.Content)
 		if content == "" {
-			content = strings.TrimSpace(result.Finish.Summary)
+			content = strings.TrimSpace(result.Yield.Data)
 		}
 		if content == "" {
 			content = strings.TrimSpace(result.Preview)
@@ -3936,36 +3902,6 @@ func (c *coordinator) buildSubagentContextPrefix(ctx context.Context, parentSess
 	return sb.String()
 }
 
-// extractYieldFromSession scans a child session's messages for the most
-// recent yield tool result and returns its data. This lets the parent
-// agent receive the full subagent output without truncation.
-func (c *coordinator) extractYieldFromSession(ctx context.Context, sessionID string) (string, bool) {
-	if c.messages == nil || strings.TrimSpace(sessionID) == "" {
-		return "", false
-	}
-	msgs, err := c.messages.List(ctx, sessionID)
-	if err != nil {
-		return "", false
-	}
-	// Scan in reverse to find the most recent yield result.
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role != message.Tool {
-			continue
-		}
-		for _, tr := range msgs[i].ToolResults() {
-			if tr.Name != tools.YieldToolName {
-				continue
-			}
-			yield, ok := tr.Yield()
-			if !ok {
-				continue
-			}
-			return strings.TrimSpace(yield.Data), true
-		}
-	}
-	return "", false
-}
-
 func (c *coordinator) subAgentResponseText(ctx context.Context, sessionID string, result *fantasy.AgentResult) string {
 	if result != nil && result.Response.Content != nil {
 		if text := strings.TrimSpace(result.Response.Content.Text()); text != "" {
@@ -4128,10 +4064,10 @@ func (c *coordinator) runBackgroundTaskNode(
 			if sub, ok := message.ParseToolResultSubtaskResult(response.Metadata); ok && sub.ChildSessionID != "" {
 				childSessionID = sub.ChildSessionID
 			}
-			if finish, ok := message.ParseToolResultSubagentFinish(response.Metadata); ok {
-				c.backgroundAgents.UpdateArtifacts(agentID, finish.Summary, finish.FilesTouched, finish.Artifacts)
-				if strings.TrimSpace(content) == "" && strings.TrimSpace(finish.Summary) != "" {
-					content = strings.TrimSpace(finish.Summary)
+			if yield, ok := message.ParseToolResultYield(response.Metadata); ok {
+				c.backgroundAgents.UpdateArtifacts(agentID, yield.Data, nil, nil)
+				if strings.TrimSpace(content) == "" && strings.TrimSpace(yield.Data) != "" {
+					content = strings.TrimSpace(yield.Data)
 				}
 			}
 		}

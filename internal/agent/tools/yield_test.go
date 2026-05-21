@@ -54,7 +54,7 @@ func TestYieldToolRejectsEmptyData(t *testing.T) {
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{ID: "call-1", Name: YieldToolName, Input: string(input)})
 	require.NoError(t, err)
 	require.True(t, resp.IsError)
-	require.Contains(t, resp.Content, "data is required")
+	require.Contains(t, resp.Content, "data or payload is required")
 }
 
 func TestYieldToolRejectsInvalidStatus(t *testing.T) {

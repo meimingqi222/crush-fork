@@ -8,6 +8,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/mailbox"
+	"github.com/charmbracelet/crush/internal/toolruntime"
 )
 
 //go:embed task_stop.md
@@ -25,17 +26,20 @@ func NewTaskStopTool(service mailbox.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		TaskStopToolName,
 		string(taskStopDescription),
-		func(_ context.Context, params TaskStopParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		func(ctx context.Context, params TaskStopParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			mailboxID := strings.TrimSpace(params.MailboxID)
 			if mailboxID == "" {
-				return fantasy.NewTextErrorResponse("mailbox_id is required"), nil
+				mailboxID = toolruntime.DelegationMailboxFromContext(ctx)
+			}
+			if mailboxID == "" {
+				return fantasy.NewTextResponse("Failed: mailbox_id is required. If no mailbox is configured in this session, you cannot use task_stop. If you intended to stop or finish your work, please output your response directly in the chat text body instead of calling this tool."), nil
 			}
 			if service == nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("mailbox service is not configured")
+				return fantasy.NewTextResponse("Failed: Mailbox service is not configured. If you intended to stop or finish your work, please output your response directly in the chat text body instead of calling this tool."), nil
 			}
 			envelope, err := service.Stop(mailboxID, strings.TrimSpace(params.TaskID), strings.TrimSpace(params.Reason))
 			if err != nil {
-				return fantasy.NewTextErrorResponse(strings.TrimSpace(err.Error())), nil
+				return fantasy.NewTextResponse(fmt.Sprintf("Failed: %s. If you intended to stop or finish your work, please output your response directly in the chat text body instead of calling this tool.", strings.TrimSpace(err.Error()))), nil
 			}
 			if envelope.TargetAgentID == "" {
 				return fantasy.NewTextResponse(fmt.Sprintf("Stop requested for mailbox %s.", envelope.MailboxID)), nil

@@ -1,25 +1,24 @@
-Submits the complete result of the current task to the parent agent.
+Submits the complete result of the current task to the parent agent and terminates execution.
 
 <usage>
-- Call exactly once at the end of the task, after all work is done
-- Include the full result text in `data` — do not truncate or summarize
-- Set `status` to reflect the task outcome
+- Call exactly once at the end of the task, after all work is done.
+- Specify the `status` to reflect the task outcome.
+- Provide either the full result text in `data`, or detailed error in `error`, or structured payload in `payload`.
 </usage>
 
 <when_to_use>
-- Use this instead of producing a long free-text response
-- The parent agent will receive the full `data` without truncation
-- Call `subagent_finish` after `yield` if you also need to report structured metadata (files touched, risks, etc.)
+- Use this as the sole method to complete your task and submit findings back to the parent agent.
+- Calling this tool will automatically terminate the subagent run loop.
 </when_to_use>
 
 <parameters>
-- `data` (required): The complete result text. Include all findings, analysis, and conclusions. Do not abbreviate.
-- `status` (required): One of `completed`, `completed_with_warnings`, `failed`, `canceled`, `blocked`
+- `status` (required): One of `completed`, `completed_with_warnings`, `failed`, `canceled`, `blocked`.
+- `data` (optional): The complete result text. Include all findings, analysis, and conclusions. Required unless status is failed or blocked.
+- `error` (optional): The error details. Required if status is failed or blocked.
+- `payload` (optional): Optional structured JSON payload conforming to the expected schema if OutputSchema is defined.
 </parameters>
 
 <important>
-- Do NOT call this tool multiple times for the same task
-- Do NOT put a summary here — put the complete, unabridged result
-- If the result is extremely long, focus on completeness over brevity
-- After calling yield, call `subagent_finish` if you need to report structured metadata (files touched, risks, etc.). If no metadata is needed, you are done.
+- Do NOT call this tool multiple times for the same task.
+- Once called, the agent execution terminates immediately. Make sure all your changes and analyses are fully completed first.
 </important>

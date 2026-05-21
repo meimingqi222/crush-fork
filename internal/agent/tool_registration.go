@@ -116,17 +116,22 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewReflectTool(c.memoryEngineRetriever()),
 		agenttools.NewMemoryStatusTool(c.memoryEngine),
 		agenttools.NewTodosTool(c.sessions),
-		agenttools.NewSendMessageTool(c.mailbox),
-		agenttools.NewTaskStopTool(c.mailbox),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
-	if config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent {
-		var finishOpts []agenttools.SubagentFinishOption
+	isSubagent := config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent
+	if isSubagent || allowAgentTool {
+		builtin = append(builtin,
+			agenttools.NewSendMessageTool(c.mailbox),
+			agenttools.NewTaskStopTool(c.mailbox),
+		)
+	}
+	if isSubagent {
+		var yieldOpts []agenttools.YieldOption
 		if agent.OutputSchema != nil {
-			finishOpts = append(finishOpts, agenttools.WithOutputSchema(agent.OutputSchema))
+			yieldOpts = append(yieldOpts, agenttools.WithOutputSchema(agent.OutputSchema))
 		}
-		builtin = append(builtin, agenttools.NewYieldTool(c.messages), agenttools.NewSubagentFinishTool(c.messages, finishOpts...))
+		builtin = append(builtin, agenttools.NewYieldTool(c.messages, yieldOpts...))
 	}
 	for _, tool := range builtin {
 		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))

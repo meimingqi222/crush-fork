@@ -144,9 +144,9 @@ func TestRunSubAgent(t *testing.T) {
 			_, createErr := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
 				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
-						Status:  message.ToolResultSubtaskStatusCompleted,
-						Summary: "done",
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Status: string(message.ToolResultSubtaskStatusCompleted),
+						Data:   "done",
 					}),
 				},
 			})
@@ -174,9 +174,9 @@ func TestRunSubAgent(t *testing.T) {
 			ParentMessageID:  "msg-1",
 			Status:           message.ToolResultSubtaskStatusCompleted,
 		}, parsed)
-		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		yield, ok := message.ParseToolResultYield(resp.Metadata)
 		require.True(t, ok)
-		assert.Equal(t, message.ToolResultSubtaskStatusCompleted, finish.Status)
+		assert.Equal(t, string(message.ToolResultSubtaskStatusCompleted), yield.Status)
 	})
 
 	t.Run("auto mode blocks delegation when handoff review cannot run", func(t *testing.T) {
@@ -406,14 +406,10 @@ func TestRunSubAgent(t *testing.T) {
 			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
 				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
-						Status:      message.ToolResultSubtaskStatusCompletedWithWarnings,
-						Summary:     "structured summary",
-						Artifacts:   []string{"artifact.txt"},
-						PatchPlan:   []string{"apply patch"},
-						TestResults: []string{"go test ./..."},
-						Followups:   []string{"review"},
-						Error:       "minor warning",
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Status: string(message.ToolResultSubtaskStatusCompletedWithWarnings),
+						Data:   "structured summary",
+						Error:  "minor warning",
 					}),
 				},
 			})
@@ -437,12 +433,12 @@ func TestRunSubAgent(t *testing.T) {
 		subtask, ok := message.ParseToolResultSubtaskResult(resp.Metadata)
 		require.True(t, ok)
 		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, subtask.Status)
-		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		yield, ok := message.ParseToolResultYield(resp.Metadata)
 		require.True(t, ok)
-		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, finish.Status)
+		assert.Equal(t, string(message.ToolResultSubtaskStatusCompletedWithWarnings), yield.Status)
 	})
 
-	t.Run("does not replace assistant content with subagent_finish summary", func(t *testing.T) {
+	t.Run("uses yield data over assistant content when both are present", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -461,9 +457,9 @@ func TestRunSubAgent(t *testing.T) {
 			_, err = env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
 				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
-						Status:  message.ToolResultSubtaskStatusCompleted,
-						Summary: "short structured summary",
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Status: string(message.ToolResultSubtaskStatusCompleted),
+						Data:   "short structured summary",
 					}),
 				},
 			})
@@ -483,10 +479,10 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.False(t, resp.IsError)
-		assert.Equal(t, "full final answer with details", resp.Content)
-		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		assert.Equal(t, "short structured summary", resp.Content)
+		yield, ok := message.ParseToolResultYield(resp.Metadata)
 		require.True(t, ok)
-		assert.Equal(t, "short structured summary", finish.Summary)
+		assert.Equal(t, "short structured summary", yield.Data)
 	})
 
 	t.Run("uses yield data when subagent calls yield", func(t *testing.T) {
@@ -515,16 +511,6 @@ func TestRunSubAgent(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			_, err = env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-				Role: message.Tool,
-				Parts: []message.ContentPart{
-					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
-						Status:  message.ToolResultSubtaskStatusCompleted,
-						Summary: "short structured summary",
-					}),
-				},
-			})
-			require.NoError(t, err)
 			return agentResultWithText("The task is complete."), nil
 		})
 
@@ -541,7 +527,6 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, resp.IsError)
 		assert.Equal(t, "detailed subagent report via yield", resp.Content)
-		assert.NotEqual(t, "short structured summary", resp.Content)
 	})
 
 	t.Run("missing finish policy warns when finish is absent", func(t *testing.T) {
@@ -553,7 +538,7 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 
 		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
-			if strings.Contains(call.Prompt, "Call subagent_finish exactly once now") {
+			if strings.Contains(call.Prompt, "Call yield exactly once now") {
 				return agentResultWithText("reminder ignored"), nil
 			}
 			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
@@ -566,10 +551,10 @@ func TestRunSubAgent(t *testing.T) {
 
 		resp, err := coord.runSubAgent(t.Context(), subAgentParams{Agent: agent, SessionID: parentSession.ID, AgentMessageID: "msg-1", ParentMessageID: "msg-1", ToolCallID: "call-1", Prompt: "test", SessionTitle: "Test", SubagentType: config.AgentGeneral})
 		require.NoError(t, err)
-		finish, ok := message.ParseToolResultSubagentFinish(resp.Metadata)
+		yield, ok := message.ParseToolResultYield(resp.Metadata)
 		require.True(t, ok)
-		assert.Equal(t, message.ToolResultSubtaskStatusCompletedWithWarnings, finish.Status)
-		assert.Equal(t, "fallback text", finish.Summary)
+		assert.Equal(t, string(message.ToolResultSubtaskStatusCompletedWithWarnings), yield.Status)
+		assert.Equal(t, "fallback text", yield.Data)
 	})
 
 	t.Run("returns guidance text when neither result nor child session has content", func(t *testing.T) {
@@ -995,15 +980,13 @@ func TestBackgroundAgentMessengerRequiresStructuredFinish(t *testing.T) {
 	runCount := 0
 	agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
 		runCount++
-		if strings.Contains(call.Prompt, "Call subagent_finish exactly once now") {
+		if strings.Contains(call.Prompt, "Call yield exactly once now") {
 			_, createErr := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
 				Role: message.Tool,
 				Parts: []message.ContentPart{
-					message.ToolResult{Name: agenttools.SubagentFinishToolName}.WithSubagentFinish(message.ToolResultSubagentFinish{
-						Status:       message.ToolResultSubtaskStatusBlocked,
-						Summary:      "structured done",
-						FilesTouched: []string{"internal/agent/coordinator.go"},
-						Artifacts:    []string{"file:internal/agent/coordinator.go"},
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Status: string(message.ToolResultSubtaskStatusBlocked),
+						Data:   "structured done",
 					}),
 				},
 			})
@@ -1032,8 +1015,8 @@ func TestBackgroundAgentMessengerRequiresStructuredFinish(t *testing.T) {
 	entry, ok := coord.backgroundAgents.Get(agentID)
 	require.True(t, ok)
 	require.Equal(t, "structured done", entry.Summary)
-	require.Equal(t, []string{"internal/agent/coordinator.go"}, entry.FilesTouched)
-	require.Equal(t, []string{"file:internal/agent/coordinator.go"}, entry.Artifacts)
+	require.Empty(t, entry.FilesTouched)
+	require.Empty(t, entry.Artifacts)
 }
 
 func TestBackgroundAgentMessengerResolvesAgentName(t *testing.T) {

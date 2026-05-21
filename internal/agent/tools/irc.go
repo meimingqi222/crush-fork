@@ -57,7 +57,7 @@ func NewIrcTool(registry IrcRegistry) fantasy.AgentTool {
 		func(ctx context.Context, params IrcParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			selfID := toolruntime.IrcAgentIDFromContext(ctx)
 			if selfID == "" {
-				return fantasy.NewTextErrorResponse("IRC is not available in this context"), nil
+				return fantasy.NewTextResponse("Failed: IRC is not available in the current context because you are running as a standalone primary agent. If you want to communicate with the user, please output your response directly in the chat text body instead of calling this tool."), nil
 			}
 			switch params.Op {
 			case IrcOpSend:
@@ -65,7 +65,7 @@ func NewIrcTool(registry IrcRegistry) fantasy.AgentTool {
 			case IrcOpList:
 				return executeIrcList(registry, selfID)
 			default:
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("unknown op %q; use send or list", params.Op)), nil
+				return fantasy.NewTextResponse(fmt.Sprintf("Failed: unknown op %q; use send or list", params.Op)), nil
 			}
 		},
 	)
@@ -74,12 +74,12 @@ func NewIrcTool(registry IrcRegistry) fantasy.AgentTool {
 func executeIrcSend(ctx context.Context, registry IrcRegistry, selfID string, params IrcParams) (fantasy.ToolResponse, error) {
 	message := strings.TrimSpace(params.Message)
 	if message == "" {
-		return fantasy.NewTextErrorResponse("message is required for send"), nil
+		return fantasy.NewTextResponse("Failed: message is required for send"), nil
 	}
 
 	to := strings.TrimSpace(params.To)
 	if to == "" {
-		return fantasy.NewTextErrorResponse("to is required for send; use an agent ID or 'all'"), nil
+		return fantasy.NewTextResponse("Failed: to is required for send; use an agent ID or 'all'"), nil
 	}
 
 	awaitReply := params.AwaitReply
@@ -95,13 +95,13 @@ func executeIrcSend(ctx context.Context, registry IrcRegistry, selfID string, pa
 	} else {
 		peer, ok := registry.Get(to)
 		if !ok {
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("agent %q not found", to)), nil
+			return fantasy.NewTextResponse(fmt.Sprintf("Failed: agent %q not found", to)), nil
 		}
 		if peer.Status != "running" && peer.Status != "idle" {
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("agent %q is %s, not reachable", to, peer.Status)), nil
+			return fantasy.NewTextResponse(fmt.Sprintf("Failed: agent %q is %s, not reachable", to, peer.Status)), nil
 		}
 		if peer.ID == selfID {
-			return fantasy.NewTextErrorResponse("cannot send a message to yourself"), nil
+			return fantasy.NewTextResponse("Failed: cannot send a message to yourself"), nil
 		}
 		targets = []IrcPeerInfo{peer}
 	}

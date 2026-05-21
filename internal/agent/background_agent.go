@@ -484,8 +484,8 @@ func (c *coordinator) runBackgroundTask(ctx context.Context, params subagentBatc
 				childSessionID = sub.ChildSessionID
 				c.backgroundAgents.SetChildSession(agentID, childSessionID)
 			}
-			if finish, ok := message.ParseToolResultSubagentFinish(result.Metadata); ok {
-				c.backgroundAgents.UpdateArtifacts(agentID, finish.Summary, finish.FilesTouched, finish.Artifacts)
+			if yield, ok := message.ParseToolResultYield(result.Metadata); ok {
+				c.backgroundAgents.UpdateArtifacts(agentID, yield.Data, nil, nil)
 			}
 		}
 

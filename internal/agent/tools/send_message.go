@@ -34,17 +34,26 @@ func NewSendMessageTool(service mailbox.Service) fantasy.AgentTool {
 			}
 
 			agentID := strings.TrimSpace(params.AgentID)
+			mailboxID := strings.TrimSpace(params.MailboxID)
+			if mailboxID == "" {
+				mailboxID = toolruntime.DelegationMailboxFromContext(ctx)
+			}
+
+			messenger := toolruntime.BackgroundAgentMessengerFromContext(ctx)
+			if messenger == nil && mailboxID == "" {
+				return fantasy.NewTextResponse("Failed: There are no active background subagents or mailboxes configured in the current session. You are running as a standalone primary agent. If you want to communicate with the user, please output your response directly in the chat text body instead of calling this tool."), nil
+			}
+
 			if agentID != "" {
-				messenger := toolruntime.BackgroundAgentMessengerFromContext(ctx)
 				if messenger == nil {
-					return fantasy.NewTextErrorResponse("Background agent messaging is not available"), nil
+					return fantasy.NewTextResponse("Failed: Background agent messaging is not available because no background subagents have been spawned. If you want to talk to the user, write your response directly in the text body instead of calling this tool."), nil
 				}
 				disposition, found, err := messenger(ctx, agentID, message)
 				if err != nil {
-					return fantasy.NewTextErrorResponse(strings.TrimSpace(err.Error())), nil
+					return fantasy.NewTextResponse(fmt.Sprintf("Failed: %s", strings.TrimSpace(err.Error()))), nil
 				}
 				if !found {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Background agent %q not found", agentID)), nil
+					return fantasy.NewTextResponse(fmt.Sprintf("Failed: Background agent %q not found. Please ensure that the agent ID or name is correct and currently active.", agentID)), nil
 				}
 				if disposition == "queued" {
 					return fantasy.NewTextResponse(fmt.Sprintf("Follow-up prompt queued for background agent %s.", agentID)), nil
@@ -52,12 +61,8 @@ func NewSendMessageTool(service mailbox.Service) fantasy.AgentTool {
 				return fantasy.NewTextResponse(fmt.Sprintf("Follow-up prompt sent to background agent %s.", agentID)), nil
 			}
 
-			mailboxID := strings.TrimSpace(params.MailboxID)
 			if mailboxID == "" {
-				mailboxID = toolruntime.DelegationMailboxFromContext(ctx)
-			}
-			if mailboxID == "" {
-				return fantasy.NewTextErrorResponse("mailbox_id is required (or configure it via delegation context)"), nil
+				return fantasy.NewTextResponse("Failed: mailbox_id is required. If no mailbox is configured in this session, you cannot use send_message. If you intended to talk to the user, write your response directly in the text body instead of calling this tool."), nil
 			}
 			if service == nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("mailbox service is not configured")

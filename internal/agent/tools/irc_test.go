@@ -137,7 +137,7 @@ func TestIrcTool_SendToSelfReturnsError(t *testing.T) {
 		Input: `{"op":"send","to":"0-Main::task1","message":"hello"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "cannot send a message to yourself")
 }
 
@@ -154,7 +154,7 @@ func TestIrcTool_SendToUnknownAgentReturnsError(t *testing.T) {
 		Input: `{"op":"send","to":"nonexistent","message":"hello"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "not found")
 }
 
@@ -171,7 +171,7 @@ func TestIrcTool_SendWithoutMessageReturnsError(t *testing.T) {
 		Input: `{"op":"send","to":"0-Main::task1"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "message is required")
 }
 
@@ -188,7 +188,7 @@ func TestIrcTool_SendWithoutToReturnsError(t *testing.T) {
 		Input: `{"op":"send","message":"hello"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "to is required")
 }
 
@@ -205,7 +205,7 @@ func TestIrcTool_InvalidOpReturnsError(t *testing.T) {
 		Input: `{"op":"invalid"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "unknown op")
 }
 
@@ -222,6 +222,6 @@ func TestIrcTool_NoAgentIDReturnsError(t *testing.T) {
 		Input: `{"op":"list"}`,
 	})
 	require.NoError(t, err)
-	require.True(t, resp.IsError)
+	require.False(t, resp.IsError)
 	require.Contains(t, resp.Content, "not available")
 }

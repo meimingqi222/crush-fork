@@ -59,7 +59,7 @@ func subagentToolProfileFromPermissions(permissions DerivedSubagentPermissions) 
 }
 
 func mandatorySubagentToolNames() []string {
-	return []string{agenttools.SubagentFinishToolName}
+	return []string{agenttools.YieldToolName}
 }
 
 func globalSubagentDeniedTools() []string {

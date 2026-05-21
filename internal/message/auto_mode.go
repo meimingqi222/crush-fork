@@ -119,12 +119,17 @@ func (f ToolResultSubagentFinish) IsEmpty() bool {
 }
 
 type ToolResultYield struct {
-	Data   string `json:"data,omitempty"`
-	Status string `json:"status,omitempty"`
+	Data    string          `json:"data,omitempty"`
+	Status  string          `json:"status,omitempty"`
+	Error   string          `json:"error,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 func (y ToolResultYield) IsEmpty() bool {
-	return strings.TrimSpace(y.Data) == ""
+	return strings.TrimSpace(y.Data) == "" &&
+		strings.TrimSpace(y.Status) == "" &&
+		strings.TrimSpace(y.Error) == "" &&
+		len(y.Payload) == 0
 }
 
 const (

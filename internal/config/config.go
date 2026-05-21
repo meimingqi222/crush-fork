@@ -986,8 +986,8 @@ func (p PluginConfig) Timeout() time.Duration {
 
 // Config holds the configuration for crush.
 type SubagentRuntimeConfig struct {
-	StructuredCompletionRequired bool   `json:"structured_completion_required,omitempty" jsonschema:"description=Require built-in subagents to call subagent_finish,default=true"`
-	MissingFinishPolicy          string `json:"missing_finish_policy,omitempty" jsonschema:"description=Policy when a subagent omits subagent_finish,enum=warn,enum=fail,enum=retry_then_warn,enum=retry_then_fail,default=retry_then_warn"`
+	StructuredCompletionRequired bool   `json:"structured_completion_required,omitempty" jsonschema:"description=Require built-in subagents to call yield,default=true"`
+	MissingFinishPolicy          string `json:"missing_finish_policy,omitempty" jsonschema:"description=Policy when a subagent omits yield,enum=warn,enum=fail,enum=retry_then_warn,enum=retry_then_fail,default=retry_then_warn"`
 	DefaultRetryPolicy           string `json:"default_retry_policy,omitempty" jsonschema:"description=Default child retry policy,enum=never,enum=read_only_only,enum=idempotent,enum=isolated,default=read_only_only"`
 	MaxConcurrency               int    `json:"max_concurrency,omitempty" jsonschema:"description=Maximum subagent concurrency,default=4"`                    // TODO: wire into task graph semaphore
 	AllowRecursiveAgents         bool   `json:"allow_recursive_agents,omitempty" jsonschema:"description=Allow child agents to spawn children,default=false"` // TODO: not yet consumed at runtime; recursive agents blocked at tool_registration.go
@@ -1239,7 +1239,7 @@ func allToolNames() []string {
 		"todos",
 		"send_message",
 		"task_stop",
-		"subagent_finish",
+		"yield",
 		"subtask_result",
 		"write",
 	}
@@ -1261,7 +1261,7 @@ func resolveResearchTools(tools []string) []string {
 		"lsp_type_definition",
 		"lsp_workspace_symbols",
 		"read",
-		"subagent_finish",
+		"yield",
 		"tool_search",
 	}
 	return filterSlice(tools, researchTools, true)
@@ -1295,7 +1295,7 @@ var readOnlyResearchToolNames = []string{
 	"lsp_type_definition",
 	"lsp_workspace_symbols",
 	"read",
-	"subagent_finish",
+	"yield",
 	"tool_search",
 }
 

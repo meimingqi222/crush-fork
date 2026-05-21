@@ -1,3 +1,6 @@
+[CRITICAL WARNING]
+Do NOT call this tool unless you have actually spawned background subagents using the `agent` tool first. This tool is ONLY for communicating with running background subagents. It CANNOT be used to communicate with the user, nor can it be used if no subagents are currently running in the background.
+
 Sends a control message to a running task graph, or queues a follow-up prompt
 for a background agent.
 
