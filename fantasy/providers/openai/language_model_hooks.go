@@ -3,7 +3,6 @@ package openai
 import (
 	"encoding/base64"
 	"fmt"
-	"os"
 	"strings"
 
 	"charm.land/fantasy"
@@ -287,26 +286,6 @@ func DefaultStreamProviderMetadataFunc(choice openai.ChatCompletionChoice, metad
 
 // DefaultToPrompt converts a fantasy prompt to OpenAI format with default handling.
 func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletionMessageParamUnion, []fantasy.CallWarning) {
-	if f, err := os.OpenFile("/Users/yuqiang/work/code/copilot-refs/crush/debug_reasoning.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "\n=== openai.DefaultToPrompt Called ===\n")
-		for i, msg := range prompt {
-			fmt.Fprintf(f, "  Message %d (Role: %s):\n", i, msg.Role)
-			for j, c := range msg.Content {
-				fmt.Fprintf(f, "    ContentPart %d: Type=%s\n", j, c.GetType())
-				if c.GetType() == fantasy.ContentTypeText {
-					if text, ok := fantasy.AsContentType[fantasy.TextPart](c); ok {
-						fmt.Fprintf(f, "      Text: %q\n", text.Text)
-					}
-				} else if c.GetType() == fantasy.ContentTypeReasoning {
-					if reasoning, ok := fantasy.AsContentType[fantasy.ReasoningPart](c); ok {
-						fmt.Fprintf(f, "      Reasoning: %q\n", reasoning.Text)
-					}
-				}
-			}
-		}
-	}
-
 	var messages []openai.ChatCompletionMessageParamUnion
 	var warnings []fantasy.CallWarning
 	hasReasoning := false
@@ -656,21 +635,6 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 						Message: fmt.Sprintf("tool result output type %q not supported", toolResultPart.Output.GetType()),
 					})
 				}
-			}
-		}
-	}
-	if f, err := os.OpenFile("/Users/yuqiang/work/code/copilot-refs/crush/debug_reasoning.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "  === openai.DefaultToPrompt Output Messages ===\n")
-		for i, m := range messages {
-			if m.OfAssistant != nil {
-				extra := m.OfAssistant.ExtraFields()
-				reasoningContent, _ := extra["reasoning_content"]
-				fmt.Fprintf(f, "    Message %d (Assistant): content=%q, reasoning_content=%q\n", i, m.OfAssistant.Content.OfString.Value, reasoningContent)
-			} else if m.OfUser != nil {
-				fmt.Fprintf(f, "    Message %d (User): content=%q\n", i, m.OfUser.Content.OfString.Value)
-			} else {
-				fmt.Fprintf(f, "    Message %d (Other)\n", i)
 			}
 		}
 	}

@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"charm.land/fantasy"
@@ -56,11 +55,6 @@ func PrepareCallFunc(model fantasy.LanguageModel, params *openaisdk.ChatCompleti
 
 // ExtraContentFunc adds extra content to the response.
 func ExtraContentFunc(choice openaisdk.ChatCompletionChoice) []fantasy.Content {
-	if f, err := os.OpenFile("/Users/yuqiang/work/code/copilot-refs/crush/debug_reasoning.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "\n=== openaicompat.ExtraContentFunc Called ===\n")
-		fmt.Fprintf(f, "  Message RawJSON: %s\n", choice.Message.RawJSON())
-	}
 	var content []fantasy.Content
 	reasoningData := ReasoningData{}
 	err := json.Unmarshal([]byte(choice.Message.RawJSON()), &reasoningData)
@@ -89,13 +83,6 @@ func extractReasoningContext(ctx map[string]any) bool {
 
 // StreamExtraFunc handles extra functionality for streaming responses.
 func StreamExtraFunc(chunk openaisdk.ChatCompletionChunk, yield func(fantasy.StreamPart) bool, ctx map[string]any) (map[string]any, bool) {
-	if f, err := os.OpenFile("/Users/yuqiang/work/code/copilot-refs/crush/debug_reasoning.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "\n=== openaicompat.StreamExtraFunc Called ===\n")
-		for _, choice := range chunk.Choices {
-			fmt.Fprintf(f, "  Delta RawJSON: %s\n", choice.Delta.RawJSON())
-		}
-	}
 	if len(chunk.Choices) == 0 {
 		return ctx, true
 	}
@@ -151,26 +138,6 @@ func StreamExtraFunc(chunk openaisdk.ChatCompletionChunk, yield func(fantasy.Str
 // It handles fantasy.ContentTypeReasoning in assistant messages by adding the
 // reasoning_content field to the message JSON.
 func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletionMessageParamUnion, []fantasy.CallWarning) {
-	if f, err := os.OpenFile("/Users/yuqiang/work/code/copilot-refs/crush/debug_reasoning.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "\n=== openaicompat.ToPromptFunc Called ===\n")
-		for i, msg := range prompt {
-			fmt.Fprintf(f, "  Message %d (Role: %s):\n", i, msg.Role)
-			for j, c := range msg.Content {
-				fmt.Fprintf(f, "    ContentPart %d: Type=%s\n", j, c.GetType())
-				if c.GetType() == fantasy.ContentTypeText {
-					if text, ok := fantasy.AsContentType[fantasy.TextPart](c); ok {
-						fmt.Fprintf(f, "      Text: %q\n", text.Text)
-					}
-				} else if c.GetType() == fantasy.ContentTypeReasoning {
-					if reasoning, ok := fantasy.AsContentType[fantasy.ReasoningPart](c); ok {
-						fmt.Fprintf(f, "      Reasoning: %q\n", reasoning.Text)
-					}
-				}
-			}
-		}
-	}
-
 	var messages []openaisdk.ChatCompletionMessageParamUnion
 	var warnings []fantasy.CallWarning
 	hasReasoning := false
@@ -484,21 +451,6 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 					}
 					messages = append(messages, openaisdk.ToolMessage(output.Error.Error(), toolResultPart.ToolCallID))
 				}
-			}
-		}
-	}
-	if f, err := os.OpenFile("/Users/yuqiang/work/code/copilot-refs/crush/debug_reasoning.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666); err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "  === openaicompat.ToPromptFunc Output Messages ===\n")
-		for i, m := range messages {
-			if m.OfAssistant != nil {
-				extra := m.OfAssistant.ExtraFields()
-				reasoningContent, _ := extra["reasoning_content"]
-				fmt.Fprintf(f, "    Message %d (Assistant): content=%q, reasoning_content=%q\n", i, m.OfAssistant.Content.OfString.Value, reasoningContent)
-			} else if m.OfUser != nil {
-				fmt.Fprintf(f, "    Message %d (User): content=%q\n", i, m.OfUser.Content.OfString.Value)
-			} else {
-				fmt.Fprintf(f, "    Message %d (Other)\n", i)
 			}
 		}
 	}
