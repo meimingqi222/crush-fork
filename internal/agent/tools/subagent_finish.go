@@ -144,27 +144,6 @@ func NewSubagentFinishTool(messages message.Service, opts ...SubagentFinishOptio
 	)
 }
 
-// toolAlreadyCalled checks whether a prior successful tool invocation exists
-// in this session. The checker should inspect the ToolResult metadata to
-// confirm the call actually succeeded (e.g., via SubagentFinish() or Yield()).
-func toolAlreadyCalled(ctx context.Context, messages message.Service, sessionID string, checker func(message.ToolResult) bool) bool {
-	msgs, err := messages.List(ctx, sessionID)
-	if err != nil {
-		return false
-	}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role != message.Tool {
-			continue
-		}
-		for _, toolResult := range msgs[i].ToolResults() {
-			if checker(toolResult) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func validateSubagentFinishParams(params SubagentFinishParams) (message.ToolResultSubagentFinish, error) {
 	finish := message.ToolResultSubagentFinish{
 		Status:       message.ToolResultSubtaskStatus(strings.TrimSpace(params.Status)),
@@ -198,26 +177,6 @@ func validateSubagentFinishParams(params SubagentFinishParams) (message.ToolResu
 		return message.ToolResultSubagentFinish{}, fmt.Errorf("data must be valid JSON")
 	}
 	return finish, nil
-}
-
-func dedupeTrimmed(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	return result
 }
 
 func terminalStatusSummary(finish message.ToolResultSubagentFinish) string {

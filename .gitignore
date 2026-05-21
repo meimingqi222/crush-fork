@@ -64,3 +64,4 @@ completions/crush.*sh
 .factory
 .workbuddy
 ignore_docs
+.claude
