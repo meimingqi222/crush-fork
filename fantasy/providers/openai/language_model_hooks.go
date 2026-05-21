@@ -492,6 +492,8 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 				Role: "assistant",
 			}
 			var reasoningText string
+			var textText string
+			var hasText bool
 			for _, c := range msg.Content {
 				switch c.GetType() {
 				case fantasy.ContentTypeText:
@@ -503,6 +505,8 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 						})
 						continue
 					}
+					textText = textPart.Text
+					hasText = true
 					assistantMsg.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
 						OfString: param.NewOpt(textPart.Text),
 					}
@@ -536,6 +540,11 @@ func DefaultToPrompt(prompt fantasy.Prompt, _, _ string) ([]openai.ChatCompletio
 								},
 							},
 						})
+				}
+			}
+			if hasText && reasoningText != "" && textText == reasoningText {
+				assistantMsg.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
+					OfString: param.NewOpt(""),
 				}
 			}
 			if reasoningText != "" || hasReasoning {

@@ -341,6 +341,8 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 				Role: "assistant",
 			}
 			var reasoningText string
+			var textText string
+			var hasText bool
 			for _, c := range msg.Content {
 				switch c.GetType() {
 				case fantasy.ContentTypeText:
@@ -352,6 +354,8 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 						})
 						continue
 					}
+					textText = textPart.Text
+					hasText = true
 					assistantMsg.Content = openaisdk.ChatCompletionAssistantMessageParamContentUnion{
 						OfString: param.NewOpt(textPart.Text),
 					}
@@ -386,6 +390,11 @@ func ToPromptFunc(prompt fantasy.Prompt, _, _ string) ([]openaisdk.ChatCompletio
 								},
 							},
 						})
+				}
+			}
+			if hasText && reasoningText != "" && textText == reasoningText {
+				assistantMsg.Content = openaisdk.ChatCompletionAssistantMessageParamContentUnion{
+					OfString: param.NewOpt(""),
 				}
 			}
 			// Add reasoning_content field if present, or if thinking is enabled

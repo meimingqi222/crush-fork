@@ -648,6 +648,34 @@ func TestToOpenAiPrompt_AssistantMessages(t *testing.T) {
 		require.True(t, has2)
 		require.Equal(t, "", reasoning2)
 	})
+
+	t.Run("should restore assistant content to empty string when it is duplicated from reasoning content fallback", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{
+					fantasy.ReasoningPart{Text: "thinking content"},
+					fantasy.TextPart{Text: "thinking content"},
+				},
+			},
+		}
+
+		messages, warnings := DefaultToPrompt(prompt, "openai", "gpt-5")
+
+		require.Empty(t, warnings)
+		require.Len(t, messages, 1)
+
+		assistantMsg := messages[0].OfAssistant
+		require.NotNil(t, assistantMsg)
+		require.Equal(t, "", assistantMsg.Content.OfString.Value)
+
+		extra := assistantMsg.ExtraFields()
+		reasoning, has := extra["reasoning_content"]
+		require.True(t, has)
+		require.Equal(t, "thinking content", reasoning)
+	})
 }
 
 var testPrompt = fantasy.Prompt{

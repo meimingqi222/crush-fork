@@ -664,6 +664,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				// with DeepSeek's Anthropic-compatible proxy, which can return
 				// reasoning blocks without signatures and no separate text block).
 				text = thinking
+				parts = append(parts, reasoningPart)
 			} else {
 				// No provider-specific metadata (not Anthropic signed/redacted,
 				// Google, or OpenAI Responses) but there is text content alongside

@@ -106,9 +106,13 @@ func TestToAIMessage_ReasoningWithoutSignatureNoText(t *testing.T) {
 
 	aiMsgs := msg.ToAIMessage()
 	require.Len(t, aiMsgs, 1)
-	require.Len(t, aiMsgs[0].Content, 1)
+	require.Len(t, aiMsgs[0].Content, 2)
 
-	textPart, ok := fantasy.AsContentType[fantasy.TextPart](aiMsgs[0].Content[0])
+	reasoningPart, ok := fantasy.AsContentType[fantasy.ReasoningPart](aiMsgs[0].Content[0])
+	require.True(t, ok, "expected reasoning part to be retained as ReasoningPart")
+	require.Equal(t, "the actual answer lives here", reasoningPart.Text)
+
+	textPart, ok := fantasy.AsContentType[fantasy.TextPart](aiMsgs[0].Content[1])
 	require.True(t, ok, "expected reasoning to be promoted to TextPart when no signature and no text")
 	require.Equal(t, "the actual answer lives here", textPart.Text)
 }

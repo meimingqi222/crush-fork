@@ -198,6 +198,34 @@ func TestToPromptFunc_ReasoningContent(t *testing.T) {
 		require.Equal(t, "Third part.", assistantMsg.Content.OfString.Value)
 	})
 
+	t.Run("should restore assistant content to empty string when it is duplicated from reasoning content fallback", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{
+					fantasy.ReasoningPart{Text: "thinking content"},
+					fantasy.TextPart{Text: "thinking content"},
+				},
+			},
+		}
+
+		messages, warnings := ToPromptFunc(prompt, "", "")
+
+		require.Empty(t, warnings)
+		require.Len(t, messages, 1)
+
+		assistantMsg := messages[0].OfAssistant
+		require.NotNil(t, assistantMsg)
+		require.Equal(t, "", assistantMsg.Content.OfString.Value)
+
+		extra := assistantMsg.ExtraFields()
+		reasoning, has := extra["reasoning_content"]
+		require.True(t, has)
+		require.Equal(t, "thinking content", reasoning)
+	})
+
 	t.Run("should include user messages with only unsupported attachments", func(t *testing.T) {
 		t.Parallel()
 
