@@ -1,0 +1,43 @@
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 220
+        host: ""
+        body: '{"max_completion_tokens":4000,"messages":[{"content":"You are a helpful assistant","role":"system"},{"content":"Say hi in Portuguese","role":"user"}],"model":"gpt-5","stream":true,"stream_options":{"include_usage":true}}'
+        headers:
+            Accept:
+                - application/json
+            Content-Type:
+                - application/json
+            User-Agent:
+                - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
+        url: https://api.openai.com/v1/chat/completions
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |+
+            data: {"id":"chatcmpl-DIgOzIUUPhRUFtD2eaXPrsJ8sQjqP","object":"chat.completion.chunk","created":1773345269,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"finish_reason":null}],"usage":null,"obfuscation":"RqvT6Oh3Gy"}
+
+            data: {"id":"chatcmpl-DIgOzIUUPhRUFtD2eaXPrsJ8sQjqP","object":"chat.completion.chunk","created":1773345269,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"content":"Olá"},"finish_reason":null}],"usage":null,"obfuscation":"6TRZKgChI"}
+
+            data: {"id":"chatcmpl-DIgOzIUUPhRUFtD2eaXPrsJ8sQjqP","object":"chat.completion.chunk","created":1773345269,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}],"usage":null,"obfuscation":"arqZWqvZkKB"}
+
+            data: {"id":"chatcmpl-DIgOzIUUPhRUFtD2eaXPrsJ8sQjqP","object":"chat.completion.chunk","created":1773345269,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null,"obfuscation":"7H6gf4"}
+
+            data: {"id":"chatcmpl-DIgOzIUUPhRUFtD2eaXPrsJ8sQjqP","object":"chat.completion.chunk","created":1773345269,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[],"usage":{"prompt_tokens":19,"completion_tokens":139,"total_tokens":158,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":128,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}},"obfuscation":"JD3JtPw"}
+
+            data: [DONE]
+
+        headers:
+            Content-Type:
+                - text/event-stream; charset=utf-8
+        status: 200 OK
+        code: 200
+        duration: 2.667532458s

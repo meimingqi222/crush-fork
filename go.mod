@@ -205,4 +205,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace charm.land/fantasy => github.com/meimingqi222/fantasy v0.23.3
+replace charm.land/fantasy => ./fantasy

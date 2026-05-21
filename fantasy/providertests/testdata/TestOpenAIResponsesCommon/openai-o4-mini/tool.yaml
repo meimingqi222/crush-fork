@@ -1,0 +1,239 @@
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 488
+        host: ""
+        body: '{"input":[{"content":"You are a helpful assistant","role":"developer"},{"content":[{"text":"What''s the weather in Florence,Italy?","type":"input_text"}],"role":"user"}],"max_output_tokens":4000,"model":"o4-mini","store":false,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
+        headers:
+            Accept:
+                - application/json
+            Content-Type:
+                - application/json
+            User-Agent:
+                - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
+        url: https://api.openai.com/v1/responses
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |-
+            {
+              "id": "resp_0794220d1334844a0169b31966df7481a18fc500bd6187bc22",
+              "object": "response",
+              "created_at": 1773345126,
+              "status": "completed",
+              "background": false,
+              "billing": {
+                "payer": "developer"
+              },
+              "completed_at": 1773345130,
+              "error": null,
+              "frequency_penalty": 0.0,
+              "incomplete_details": null,
+              "instructions": null,
+              "max_output_tokens": 4000,
+              "max_tool_calls": null,
+              "model": "o4-mini-2025-04-16",
+              "output": [
+                {
+                  "id": "rs_0794220d1334844a0169b31967906c81a18bc636b6a18e2e41",
+                  "type": "reasoning",
+                  "summary": []
+                },
+                {
+                  "id": "fc_0794220d1334844a0169b3196a066481a19ffe57c11e74273a",
+                  "type": "function_call",
+                  "status": "completed",
+                  "arguments": "{\"location\":\"Florence, Italy\"}",
+                  "call_id": "call_zS1DVzqYRCYZ6Ug86teTMYiq",
+                  "name": "weather"
+                }
+              ],
+              "parallel_tool_calls": true,
+              "presence_penalty": 0.0,
+              "previous_response_id": null,
+              "prompt_cache_key": null,
+              "prompt_cache_retention": null,
+              "reasoning": {
+                "effort": "medium",
+                "summary": null
+              },
+              "safety_identifier": null,
+              "service_tier": "default",
+              "store": false,
+              "temperature": 1.0,
+              "text": {
+                "format": {
+                  "type": "text"
+                },
+                "verbosity": "medium"
+              },
+              "tool_choice": "auto",
+              "tools": [
+                {
+                  "type": "function",
+                  "description": "Get weather information for a location",
+                  "name": "weather",
+                  "parameters": {
+                    "properties": {
+                      "location": {
+                        "description": "the city",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "location"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false
+                }
+              ],
+              "top_logprobs": 0,
+              "top_p": 1.0,
+              "truncation": "disabled",
+              "usage": {
+                "input_tokens": 60,
+                "input_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "output_tokens": 267,
+                "output_tokens_details": {
+                  "reasoning_tokens": 192
+                },
+                "total_tokens": 327
+              },
+              "user": null,
+              "metadata": {}
+            }
+        headers:
+            Content-Type:
+                - application/json
+        status: 200 OK
+        code: 200
+        duration: 3.570247709s
+    - id: 1
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 711
+        host: ""
+        body: '{"input":[{"content":"You are a helpful assistant","role":"developer"},{"content":[{"text":"What''s the weather in Florence,Italy?","type":"input_text"}],"role":"user"},{"arguments":"{\"location\":\"Florence, Italy\"}","call_id":"call_zS1DVzqYRCYZ6Ug86teTMYiq","name":"weather","type":"function_call"},{"call_id":"call_zS1DVzqYRCYZ6Ug86teTMYiq","output":"40 C","type":"function_call_output"}],"max_output_tokens":4000,"model":"o4-mini","store":false,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
+        headers:
+            Accept:
+                - application/json
+            Content-Type:
+                - application/json
+            User-Agent:
+                - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
+        url: https://api.openai.com/v1/responses
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |-
+            {
+              "id": "resp_0d60a405fb29f78a0169b3196a732c81958630d18af0ec04d6",
+              "object": "response",
+              "created_at": 1773345130,
+              "status": "completed",
+              "background": false,
+              "billing": {
+                "payer": "developer"
+              },
+              "completed_at": 1773345131,
+              "error": null,
+              "frequency_penalty": 0.0,
+              "incomplete_details": null,
+              "instructions": null,
+              "max_output_tokens": 4000,
+              "max_tool_calls": null,
+              "model": "o4-mini-2025-04-16",
+              "output": [
+                {
+                  "id": "msg_0d60a405fb29f78a0169b3196b31ac8195b1efa41424289039",
+                  "type": "message",
+                  "status": "completed",
+                  "content": [
+                    {
+                      "type": "output_text",
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "The current temperature in Florence, Italy is 40\u00b0C."
+                    }
+                  ],
+                  "role": "assistant"
+                }
+              ],
+              "parallel_tool_calls": true,
+              "presence_penalty": 0.0,
+              "previous_response_id": null,
+              "prompt_cache_key": null,
+              "prompt_cache_retention": null,
+              "reasoning": {
+                "effort": "medium",
+                "summary": null
+              },
+              "safety_identifier": null,
+              "service_tier": "default",
+              "store": false,
+              "temperature": 1.0,
+              "text": {
+                "format": {
+                  "type": "text"
+                },
+                "verbosity": "medium"
+              },
+              "tool_choice": "auto",
+              "tools": [
+                {
+                  "type": "function",
+                  "description": "Get weather information for a location",
+                  "name": "weather",
+                  "parameters": {
+                    "properties": {
+                      "location": {
+                        "description": "the city",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "location"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false
+                }
+              ],
+              "top_logprobs": 0,
+              "top_p": 1.0,
+              "truncation": "disabled",
+              "usage": {
+                "input_tokens": 91,
+                "input_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "output_tokens": 16,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 107
+              },
+              "user": null,
+              "metadata": {}
+            }
+        headers:
+            Content-Type:
+                - application/json
+        status: 200 OK
+        code: 200
+        duration: 1.310034417s

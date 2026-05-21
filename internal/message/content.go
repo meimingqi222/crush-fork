@@ -625,6 +625,9 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 	case Assistant:
 		var parts []fantasy.MessagePart
 		text := strings.TrimSpace(m.Content().Text)
+		if strings.HasPrefix(text, "Service temporarily unavailable. Retrying") {
+			return nil
+		}
 		reasoning := m.ReasoningContent()
 		text, _ = StripTextualToolCallProtocol(text)
 		thinking, _ := StripTextualToolCallProtocol(reasoning.Thinking)

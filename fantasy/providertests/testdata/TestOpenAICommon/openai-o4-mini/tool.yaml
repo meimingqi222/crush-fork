@@ -1,0 +1,140 @@
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 460
+        host: ""
+        body: '{"max_completion_tokens":4000,"messages":[{"content":"You are a helpful assistant","role":"system"},{"content":"What''s the weather in Florence,Italy?","role":"user"}],"model":"o4-mini","tool_choice":"auto","tools":[{"function":{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false},"type":"function"}]}'
+        headers:
+            Accept:
+                - application/json
+            Content-Type:
+                - application/json
+            User-Agent:
+                - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
+        url: https://api.openai.com/v1/chat/completions
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |
+            {
+              "id": "chatcmpl-DIgPjH4PSJNZtaCUtWht6f93kVI2o",
+              "object": "chat.completion",
+              "created": 1773345315,
+              "model": "o4-mini-2025-04-16",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                      {
+                        "id": "call_Uto0Xgr2iYWOHzkWGoNNoYTb",
+                        "type": "function",
+                        "function": {
+                          "name": "weather",
+                          "arguments": "{\"location\":\"Florence, Italy\"}"
+                        }
+                      }
+                    ],
+                    "refusal": null,
+                    "annotations": []
+                  },
+                  "finish_reason": "tool_calls"
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 64,
+                "completion_tokens": 89,
+                "total_tokens": 153,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0,
+                  "audio_tokens": 0
+                },
+                "completion_tokens_details": {
+                  "reasoning_tokens": 64,
+                  "audio_tokens": 0,
+                  "accepted_prediction_tokens": 0,
+                  "rejected_prediction_tokens": 0
+                }
+              },
+              "service_tier": "default",
+              "system_fingerprint": null
+            }
+        headers:
+            Content-Type:
+                - application/json
+        status: 200 OK
+        code: 200
+        duration: 1.500324417s
+    - id: 1
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 712
+        host: ""
+        body: '{"max_completion_tokens":4000,"messages":[{"content":"You are a helpful assistant","role":"system"},{"content":"What''s the weather in Florence,Italy?","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"location\":\"Florence, Italy\"}","name":"weather"},"id":"call_Uto0Xgr2iYWOHzkWGoNNoYTb","type":"function"}]},{"content":"40 C","role":"tool","tool_call_id":"call_Uto0Xgr2iYWOHzkWGoNNoYTb"}],"model":"o4-mini","tool_choice":"auto","tools":[{"function":{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false},"type":"function"}]}'
+        headers:
+            Accept:
+                - application/json
+            Content-Type:
+                - application/json
+            User-Agent:
+                - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
+        url: https://api.openai.com/v1/chat/completions
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |
+            {
+              "id": "chatcmpl-DIgPkGqw5A5Sl65TfoTZrI4dgSUHd",
+              "object": "chat.completion",
+              "created": 1773345316,
+              "model": "o4-mini-2025-04-16",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {
+                    "role": "assistant",
+                    "content": "The current temperature in Florence, Italy is 40 °C.",
+                    "refusal": null,
+                    "annotations": []
+                  },
+                  "finish_reason": "stop"
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 95,
+                "completion_tokens": 25,
+                "total_tokens": 120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 0,
+                  "audio_tokens": 0
+                },
+                "completion_tokens_details": {
+                  "reasoning_tokens": 0,
+                  "audio_tokens": 0,
+                  "accepted_prediction_tokens": 0,
+                  "rejected_prediction_tokens": 0
+                }
+              },
+              "service_tier": "default",
+              "system_fingerprint": null
+            }
+        headers:
+            Content-Type:
+                - application/json
+        status: 200 OK
+        code: 200
+        duration: 872.285291ms
