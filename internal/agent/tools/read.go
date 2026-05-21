@@ -439,9 +439,9 @@ func handleFileRead(
 	readResult, err := readTextFileLines(filePath, params.Offset, params.Limit)
 	if err != nil {
 		if errors.Is(err, errReadOffsetBeyondEOF) {
-			suggestion := fmt.Sprintf("Use offset=0 to read from the start")
+			suggestion := fmt.Sprintf("Use path=%q and offset=0 to read from the start", filepath.ToSlash(params.Path))
 			if readResult.Total > 0 {
-				suggestion = fmt.Sprintf("Use offset=0 to read from the start, or offset=%d to read the last line", readResult.Total-1)
+				suggestion = fmt.Sprintf("Use path=%q and offset=0 to read from the start, or offset=%d to read the last line", filepath.ToSlash(params.Path), readResult.Total-1)
 			}
 			msg := fmt.Sprintf("Offset %d is beyond end of file (%d lines total). %s.", params.Offset, readResult.Total, suggestion)
 			meta := ReadResponseMetadata{
