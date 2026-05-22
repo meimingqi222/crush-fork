@@ -241,8 +241,8 @@ type SubagentRuntimeContext struct {
 	// must conform to. Nil means no schema validation.
 	OutputSchema any
 
-	// FinishRequired indicates whether the subagent must call subagent_finish
-	// to complete. When true, the agent loop enforces completion via the tool.
+	// FinishRequired indicates whether the subagent must call yield to complete.
+	// When true, the agent loop enforces completion via the tool.
 	FinishRequired bool
 }
 

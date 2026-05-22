@@ -62,12 +62,11 @@ Tasks are executed in parallel with a concurrency limit. All tasks in a batch st
 
 ## Completion contract
 
-Every subagent MUST complete by calling the `subagent_finish` tool exactly once. The structured result returned to the parent has these fields:
+Every subagent MUST complete by calling the `yield` tool exactly once. Calling yield terminates the subagent immediately. The result returned to the parent has these fields:
 - `status`: terminal status — one of `completed`, `completed_with_warnings`, `failed`, `canceled`, or `blocked`.
-- `summary`: short human-readable summary of what was done.
-- `data`: structured payload (conforms to the agent type's configured output schema when one is defined).
+- `data`: the complete, unabridged result text (required for successful statuses).
 - `error`: error details when `status` is `failed` or `blocked`.
-- `files_touched`: list of files the subagent created or modified.
+- `payload`: optional structured JSON payload conforming to the agent type's configured output schema.
 
 If a task fails or is blocked, inspect the `error` and `summary`, then decide whether to retry by spawning a fresh task with revised instructions, skip the work, or restructure the plan. There is no automatic retry, no failure budget, and no graph timeout — the orchestrator owns those decisions.
 

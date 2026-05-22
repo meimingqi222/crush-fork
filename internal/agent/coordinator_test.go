@@ -395,7 +395,7 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, "persisted final answer", resp.Content)
 	})
 
-	t.Run("uses persisted subagent_finish metadata when available", func(t *testing.T) {
+	t.Run("uses persisted yield metadata when available", func(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
