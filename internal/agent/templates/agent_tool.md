@@ -68,7 +68,7 @@ Every subagent MUST complete by calling the `yield` tool exactly once. Calling y
 - `error`: error details when `status` is `failed` or `blocked`.
 - `payload`: optional structured JSON payload conforming to the agent type's configured output schema.
 
-If a task fails or is blocked, inspect the `error` and `summary`, then decide whether to retry by spawning a fresh task with revised instructions, skip the work, or restructure the plan. There is no automatic retry, no failure budget, and no graph timeout — the orchestrator owns those decisions.
+If a task fails or is blocked, inspect the `error` and `data`, then decide whether to retry by spawning a fresh task with revised instructions, skip the work, or restructure the plan. There is no automatic retry, no failure budget, and no graph timeout — the orchestrator owns those decisions.
 
 ## IRC coordination between subagents
 
