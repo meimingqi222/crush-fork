@@ -215,7 +215,7 @@ func parseToolOutputGuard(raw string) (toolOutputGuardResponse, error) {
 	return payload, nil
 }
 
-func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Session, title, content string) (permission.AutoClassification, error) {
+func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Session, title, content, taskPrompt string) (permission.AutoClassification, error) {
 	model, providerCfg, err := c.selectedAutoClassifierModel(ctx, true)
 	if err != nil {
 		return permission.AutoClassification{}, err
@@ -224,6 +224,7 @@ func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Sessio
 	title = truncateForAutoGuard(strings.TrimSpace(title), maxAutoHandoffTitleRunes)
 	content = truncateForAutoGuard(strings.TrimSpace(content), maxAutoHandoffContentRunes)
 	recentUserRequest := truncateForAutoGuard(c.latestUserRequestForHandoff(ctx, sess.ID), maxAutoHandoffUserRequestRunes)
+	taskPrompt = truncateForAutoGuard(strings.TrimSpace(taskPrompt), maxAutoHandoffUserRequestRunes)
 
 	var sb strings.Builder
 	sb.WriteString("Session title:\n")
@@ -235,6 +236,10 @@ func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Sessio
 	if recentUserRequest != "" {
 		sb.WriteString("\n\nLatest user request in session:\n")
 		sb.WriteString(recentUserRequest)
+	}
+	if taskPrompt != "" {
+		sb.WriteString("\n\nSubagent task assignment:\n")
+		sb.WriteString(taskPrompt)
 	}
 	sb.WriteString("\n\nCandidate handoff title:\n")
 	sb.WriteString(title)

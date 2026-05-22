@@ -127,7 +127,7 @@ func (c *coordinator) GenerateHandoff(ctx context.Context, sourceSessionID, goal
 		return HandoffDraft{}, err
 	}
 	if currentSession.PermissionMode == session.PermissionModeAuto {
-		review, reviewErr := c.reviewHandoffText(ctx, currentSession, draft.Title, draft.Prompt)
+		review, reviewErr := c.reviewHandoffText(ctx, currentSession, draft.Title, draft.Prompt, "")
 		if reviewErr != nil {
 			return HandoffDraft{}, fmt.Errorf("failed to review handoff draft: %w", reviewErr)
 		}
