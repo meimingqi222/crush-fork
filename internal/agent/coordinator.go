@@ -841,13 +841,21 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 
 	// Reasoning effort: use agent config if set, then user selection,
 	// then fall back to model's default.
-	reasoningEffort := model.CatwalkCfg.DefaultReasoningEffort
+	reasoningEffort := ""
 	for _, a := range agentCfg {
 		if strings.TrimSpace(a.ReasoningEffort) != "" {
 			reasoningEffort = a.ReasoningEffort
 			break
 		}
 	}
+	if reasoningEffort == "" {
+		reasoningEffort = model.ModelCfg.ReasoningEffort
+	}
+	if reasoningEffort == "" {
+		reasoningEffort = model.CatwalkCfg.DefaultReasoningEffort
+	}
+	shouldSetEffort := reasoningEffort != "" && model.CatwalkCfg.CanReason &&
+		(len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, reasoningEffort))
 
 	switch providerType {
 	case openai.Name, azure.Name:
@@ -858,11 +866,13 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 		} else {
 			_, hasReasoningEffort := mergedOptions["reasoning_effort"]
 			if !hasReasoningEffort && model.CatwalkCfg.CanReason {
-				// Default: enable reasoning for models that support it.
-				if reasoningEffort != "" {
+				if shouldSetEffort {
 					mergedOptions["reasoning_effort"] = reasoningEffort
 				} else {
-					mergedOptions["reasoning_effort"] = "high"
+					defaultEffort := "high"
+					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
+						mergedOptions["reasoning_effort"] = defaultEffort
+					}
 				}
 			}
 		}
@@ -891,7 +901,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 				options[openai.Name] = parsed
 			}
 		}
-	case anthropic.Name:
+	case anthropic.Name, bedrock.Name:
 		// Map reasoning effort to Anthropic parameters.
 		//
 		// Claude 4.6+ (claude-sonnet-4.6, claude-opus-4.6, claude-opus-4-7, etc.)
@@ -913,7 +923,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 			if !hasEffort && !hasThinking && model.CatwalkCfg.CanReason {
 				isClaude46 := requiresAdaptiveThinking(model.CatwalkCfg.ID)
 				switch {
-				case reasoningEffort != "":
+				case shouldSetEffort:
 					if isClaude46 {
 						// Claude 4.6+: use effort parameter (adaptive thinking)
 						mergedOptions["effort"] = reasoningEffort
@@ -927,12 +937,15 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 					}
 				default:
 					// Default: model supports reasoning, enable thinking with high effort.
+					defaultEffort := "high"
 					if isClaude46 {
-						mergedOptions["effort"] = "high"
+						if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
+							mergedOptions["effort"] = defaultEffort
+						}
 					} else {
 						mergedOptions["thinking"] = map[string]any{
 							"type":          "enabled",
-							"budget_tokens": effortToBudgetTokens("high"),
+							"budget_tokens": effortToBudgetTokens(defaultEffort),
 						}
 					}
 				}
@@ -950,16 +963,18 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 		} else {
 			_, hasReasoning := mergedOptions["reasoning"]
 			if !hasReasoning && model.CatwalkCfg.CanReason {
-				// Default: enable reasoning for models that support it.
-				if reasoningEffort != "" {
+				if shouldSetEffort {
 					mergedOptions["reasoning"] = map[string]any{
 						"enabled": true,
 						"effort":  reasoningEffort,
 					}
 				} else {
-					mergedOptions["reasoning"] = map[string]any{
-						"enabled": true,
-						"effort":  "high",
+					defaultEffort := "high"
+					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
+						mergedOptions["reasoning"] = map[string]any{
+							"enabled": true,
+							"effort":  defaultEffort,
+						}
 					}
 				}
 			}
@@ -975,16 +990,18 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 		} else {
 			_, hasReasoning := mergedOptions["reasoning"]
 			if !hasReasoning && model.CatwalkCfg.CanReason {
-				// Default: enable reasoning for models that support it.
-				if reasoningEffort != "" {
+				if shouldSetEffort {
 					mergedOptions["reasoning"] = map[string]any{
 						"enabled": true,
 						"effort":  reasoningEffort,
 					}
 				} else {
-					mergedOptions["reasoning"] = map[string]any{
-						"enabled": true,
-						"effort":  "high",
+					defaultEffort := "high"
+					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
+						mergedOptions["reasoning"] = map[string]any{
+							"enabled": true,
+							"effort":  defaultEffort,
+						}
 					}
 				}
 			}
@@ -1000,16 +1017,18 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 		} else {
 			_, hasThinkingConfig := mergedOptions["thinking_config"]
 			if !hasThinkingConfig && model.CatwalkCfg.CanReason {
-				// Default: enable thinking for models that support it.
-				if reasoningEffort != "" {
+				if shouldSetEffort {
 					mergedOptions["thinking_config"] = map[string]any{
 						"thinking_level":   reasoningEffort,
 						"include_thoughts": true,
 					}
 				} else {
-					mergedOptions["thinking_config"] = map[string]any{
-						"thinking_level":   "high",
-						"include_thoughts": true,
+					defaultLevel := "high"
+					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultLevel) {
+						mergedOptions["thinking_config"] = map[string]any{
+							"thinking_level":   defaultLevel,
+							"include_thoughts": true,
+						}
 					}
 				}
 			}
@@ -1021,46 +1040,76 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 	case openaicompat.Name, hyper.Name:
 		extraBody := make(map[string]any)
 
-		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
-		if !hasReasoningEffort && model.ModelCfg.ReasoningEffort != "" {
+		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
+		if thinkingDisabled {
+			delete(mergedOptions, "reasoning_effort")
 			switch providerCfg.ID {
 			case string(catwalk.InferenceProviderIoNet):
-				extraBody["reasoning"] = map[string]string{"effort": model.ModelCfg.ReasoningEffort}
-			default:
-				mergedOptions["reasoning_effort"] = model.ModelCfg.ReasoningEffort
-			}
-		}
-
-		thinkEnabled := model.ModelCfg.Think != nil && *model.ModelCfg.Think
-
-		// "reasoning effort" is a standard OpenAI field, but "thinking" is not.
-		// Setting it in the right way for each provider.
-		// TODO: Abstract this in Fantasy somehow?
-		// TODO: Allow custom providers to specify how to set this?
-		switch providerCfg.ID {
-		case hyper.Name:
-			extraBody["thinking"] = thinkEnabled
-		case string(catwalk.InferenceProviderIoNet):
-			if _, ok := extraBody["reasoning"]; !ok && model.CatwalkCfg.CanReason {
-				if thinkEnabled {
-					extraBody["reasoning"] = map[string]string{"effort": "medium"}
-				} else {
-					extraBody["reasoning"] = map[string]string{"effort": "none"}
-				}
-			}
-		case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
-			if thinkEnabled {
-				extraBody["thinking"] = map[string]any{
-					"type": "enabled",
-				}
-			} else {
+				extraBody["reasoning"] = map[string]string{"effort": "none"}
+			case hyper.Name:
+				extraBody["thinking"] = false
+			case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
 				extraBody["thinking"] = map[string]any{
 					"type": "disabled",
+				}
+			}
+		} else {
+			_, hasReasoningEffort := mergedOptions["reasoning_effort"]
+			if !hasReasoningEffort && model.CatwalkCfg.CanReason {
+				if shouldSetEffort {
+					switch providerCfg.ID {
+					case string(catwalk.InferenceProviderIoNet):
+						extraBody["reasoning"] = map[string]string{"effort": reasoningEffort}
+					default:
+						mergedOptions["reasoning_effort"] = reasoningEffort
+					}
+				} else {
+					defaultEffort := "high"
+					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
+						switch providerCfg.ID {
+						case string(catwalk.InferenceProviderIoNet):
+							extraBody["reasoning"] = map[string]string{"effort": defaultEffort}
+						default:
+							mergedOptions["reasoning_effort"] = defaultEffort
+						}
+					}
+				}
+			}
+
+			thinkEnabled := model.ModelCfg.Think != nil && *model.ModelCfg.Think
+
+			// "reasoning effort" is a standard OpenAI field, but "thinking" is not.
+			// Setting it in the right way for each provider.
+			// TODO: Abstract this in Fantasy somehow?
+			// TODO: Allow custom providers to specify how to set this?
+			switch providerCfg.ID {
+			case hyper.Name:
+				extraBody["thinking"] = thinkEnabled
+			case string(catwalk.InferenceProviderIoNet):
+				if _, ok := extraBody["reasoning"]; !ok && model.CatwalkCfg.CanReason {
+					if thinkEnabled {
+						extraBody["reasoning"] = map[string]string{"effort": "medium"}
+					} else {
+						extraBody["reasoning"] = map[string]string{"effort": "none"}
+					}
+				}
+			case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
+				if thinkEnabled {
+					extraBody["thinking"] = map[string]any{
+						"type": "enabled",
+					}
+				} else {
+					extraBody["thinking"] = map[string]any{
+						"type": "disabled",
+					}
 				}
 			}
 		}
 		parsed, err := openaicompat.ParseOptions(mergedOptions)
 		if err == nil {
+			if len(extraBody) > 0 {
+				parsed.ExtraBody = extraBody
+			}
 			options[openaicompat.Name] = parsed
 		}
 	}

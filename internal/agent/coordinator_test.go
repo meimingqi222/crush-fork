@@ -17,6 +17,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/bedrock"
 	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
@@ -1531,6 +1532,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 				ID:                     "claude-sonnet-4.6",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
+				ReasoningLevels:        []string{"high"},
 			},
 		}
 		cfg := config.ProviderConfig{
@@ -1552,6 +1554,7 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 				ID:                     "claude-opus-4-7",
 				CanReason:              true,
 				DefaultReasoningEffort: "high",
+				ReasoningLevels:        []string{"high"},
 			},
 		}
 		cfg := config.ProviderConfig{
@@ -1569,8 +1572,9 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 	t.Run("claude opus 4.7 canReason enables effort by default", func(t *testing.T) {
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-opus-4.7",
-				CanReason: true,
+				ID:              "claude-opus-4.7",
+				CanReason:       true,
+				ReasoningLevels: []string{"high"},
 			},
 		}
 		cfg := config.ProviderConfig{
@@ -1589,8 +1593,9 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := true
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-opus-4-6",
-				CanReason: true,
+				ID:              "claude-opus-4-6",
+				CanReason:       true,
+				ReasoningLevels: []string{"high"},
 			},
 			ModelCfg: config.SelectedModel{
 				Think: &think,
@@ -1676,8 +1681,9 @@ func TestMergeCallOptions_AnthropicThinkingCompatibility(t *testing.T) {
 		think := false
 		model := Model{
 			CatwalkCfg: catwalk.Model{
-				ID:        "claude-sonnet-4.6",
-				CanReason: true,
+				ID:              "claude-sonnet-4.6",
+				CanReason:       true,
+				ReasoningLevels: []string{"high"},
 			},
 			ModelCfg: config.SelectedModel{
 				Think: &think,
@@ -1968,6 +1974,43 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 			// 使用 sessionMemoryEnabled 而非 enableSessionMemory()，
 			// 后者还受 backgroundModel 是否存在的影响，不应在此测试中耦合。
 			assert.Equal(t, tt.wantEnabled, sa.sessionMemoryEnabled)
+		})
+	}
+}
+
+func TestGetProviderOptionsReasoningEffort(t *testing.T) {
+	// Bedrock is Fantasy's Anthropic under a different provider name; options
+	// must land under anthropic.Name so the Anthropic language model picks them up.
+	tests := []struct {
+		name         string
+		providerType catwalk.Type
+	}{
+		{"anthropic honors reasoning_effort", catwalk.Type(anthropic.Name)},
+		{"bedrock honors reasoning_effort", catwalk.Type(bedrock.Name)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := Model{
+				CatwalkCfg: catwalk.Model{
+					ID:              "claude-opus-4-7",
+					CanReason:       true,
+					ReasoningLevels: []string{"max"},
+				},
+				ModelCfg: config.SelectedModel{
+					Provider:        "test",
+					ReasoningEffort: "max",
+				},
+			}
+			providerCfg := config.ProviderConfig{ID: "test", Type: tc.providerType}
+
+			opts := getProviderOptions(model, providerCfg)
+
+			raw, ok := opts[anthropic.Name]
+			require.True(t, ok, "options should be keyed under anthropic.Name for type %q", tc.providerType)
+			parsed, ok := raw.(*anthropic.ProviderOptions)
+			require.True(t, ok)
+			require.NotNil(t, parsed.Effort)
+			assert.Equal(t, anthropic.Effort("max"), *parsed.Effort)
 		})
 	}
 }
