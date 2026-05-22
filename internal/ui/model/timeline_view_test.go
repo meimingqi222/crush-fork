@@ -82,3 +82,23 @@ func TestGetDynamicHeightLimitsIncludesTimeline(t *testing.T) {
 	require.GreaterOrEqual(t, maxMCPs, 2)
 	require.GreaterOrEqual(t, maxTimeline, 2)
 }
+
+func TestTimelineInfoSubagentTasksDisplay(t *testing.T) {
+	ui := testExecutionModeUI(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
+	ui.timelineEvents = []timeline.Event{
+		{Type: timeline.EventToolFinished, ToolName: "bash", Status: "completed", Content: "run build", Timestamp: 100},
+		{Type: timeline.EventChildSessionStarted, ChildSessionID: "child-1", Title: "Explore subagent", Status: "running", Timestamp: 110},
+		{Type: timeline.EventChildSessionFinished, ChildSessionID: "child-2", Title: "General subagent", Status: "completed", Timestamp: 120},
+	}
+
+	rendered := ansi.Strip(ui.timelineInfo(80, 6, false))
+
+	require.Contains(t, rendered, "⏵  Explore subagent")
+	require.Contains(t, rendered, "✔  General subagent")
+	require.Contains(t, rendered, "┈")
+	require.Contains(t, rendered, "Bash")
+	require.Contains(t, rendered, "Completed • run build")
+
+	occurrences := strings.Count(rendered, "Explore subagent")
+	require.Equal(t, 1, occurrences)
+}

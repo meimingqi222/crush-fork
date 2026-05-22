@@ -23,7 +23,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/mailbox"
-	"github.com/charmbracelet/crush/internal/agent/notify"
+	agentNotify "github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/reducer"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -123,7 +123,7 @@ type coordinator struct {
 	history       history.Service
 	filetracker   filetracker.Service
 	lspManager    *lsp.Manager
-	notify        pubsub.Publisher[notify.Notification]
+	notify        pubsub.Publisher[agentNotify.Notification]
 	toolRuntime   toolruntime.Service
 	timeline      timeline.Service
 	hookManager   *hooks.Manager
@@ -179,7 +179,7 @@ func NewCoordinator(
 	filetracker filetracker.Service,
 	checkpointSvc checkpoint.Service,
 	lspManager *lsp.Manager,
-	notify pubsub.Publisher[notify.Notification],
+	notify pubsub.Publisher[agentNotify.Notification],
 	toolRuntime toolruntime.Service,
 	timeline timeline.Service,
 	pluginRuntime *plugin.Runtime,
@@ -249,6 +249,39 @@ func NewCoordinator(
 		Status:      AgentStatusIdle,
 		Agent:       agent,
 	})
+
+	// Subscribe to background agent lifecycle events and publish notifications.
+	go func() {
+		subChan := c.backgroundAgents.broker.Subscribe(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-subChan:
+				if !ok {
+					return
+				}
+				if event.Type == pubsub.UpdatedEvent {
+					entry := event.Payload
+					if entry.Status == backgroundAgentStatusCompleted ||
+						entry.Status == backgroundAgentStatusFailed ||
+						entry.Status == backgroundAgentStatusCanceled {
+						if entry.ParentSessionID != "" {
+							xmlSummary := formatBackgroundAgentNotification(&entry)
+							c.notify.Publish(pubsub.UpdatedEvent, agentNotify.Notification{
+								Type:         agentNotify.TypeSubagentFinished,
+								SessionID:    entry.ParentSessionID,
+								SubagentID:   entry.AgentID,
+								SubagentType: entry.AgentType,
+								Status:       string(entry.Status),
+								Summary:      xmlSummary,
+							})
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	tools.SetIrcResponder(func(ctx context.Context, targetID, message string) (string, error) {
 		ref, ok := c.agentRegistry.Get(targetID)
@@ -3098,7 +3131,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		return fantasy.ToolResponse{}, fmt.Errorf("get parent session: %w", err)
 	}
 	if parentSession.PermissionMode == session.PermissionModeAuto && !params.SkipHandoffReview {
-		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, params.Prompt, params.Prompt)
+		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, "", params.Prompt)
 		if reviewErr != nil {
 			return withSubtaskToolResponseMetadata(
 				fantasy.NewTextErrorResponse("Auto Mode blocked subagent delegation because the handoff review failed."),

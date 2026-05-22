@@ -298,6 +298,9 @@ type UI struct {
 	// forceCompactMode tracks whether compact mode is forced by user toggle
 	forceCompactMode bool
 
+	// pendingSubagentNotifications stores completed subagent XML notifications when user is typing, isolated by session ID.
+	pendingSubagentNotifications map[string][]string
+
 	// isCompact tracks whether we're currently in compact layout mode (either
 	// by user toggle or auto-switch based on window size)
 	isCompact bool
@@ -4366,6 +4369,18 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	trimmedContent := strings.TrimSpace(content)
 
+	if m.hasSession() && m.session != nil && len(m.pendingSubagentNotifications[m.session.ID]) > 0 {
+		var sb strings.Builder
+		for _, pending := range m.pendingSubagentNotifications[m.session.ID] {
+			sb.WriteString(pending)
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(content)
+		content = sb.String()
+		delete(m.pendingSubagentNotifications, m.session.ID)
+		trimmedContent = strings.TrimSpace(content)
+	}
+
 	if !m.hasSession() {
 		newSession, err := m.com.App.Sessions.Create(context.Background(), "New Session")
 		if err != nil {
@@ -4895,10 +4910,67 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	switch n.Type {
 	case notify.TypeAgentFinished:
-		return m.sendNotification(notification.Notification{
+		cmd := m.sendNotification(notification.Notification{
 			Title:   "Crush finished turn",
 			Message: fmt.Sprintf("Agent's turn completed in \"%s\"", n.SessionTitle),
 		})
+
+		// Check if there are queued subagent notifications for this session that can now be sent.
+		if m.hasSession() && m.session != nil &&
+			len(m.pendingSubagentNotifications[m.session.ID]) > 0 &&
+			!m.dialog.HasDialogs() &&
+			m.state == uiChat &&
+			(m.focus != uiFocusEditor || strings.TrimSpace(m.textarea.Value()) == "") {
+			var sb strings.Builder
+			for _, pending := range m.pendingSubagentNotifications[m.session.ID] {
+				sb.WriteString(pending)
+				sb.WriteString("\n\n")
+			}
+			delete(m.pendingSubagentNotifications, m.session.ID)
+			return tea.Batch(
+				cmd,
+				m.sendNotification(notification.Notification{
+					Title:   "Crush background task finished",
+					Message: "Background task completed. Resuming session.",
+				}),
+				m.sendMessage(sb.String()),
+			)
+		}
+		return cmd
+
+	case notify.TypeSubagentFinished:
+		if n.SessionID == "" {
+			return nil
+		}
+
+		isCurrentSession := m.hasSession() && m.session != nil && n.SessionID == m.session.ID
+
+		canAutoWakeup := isCurrentSession &&
+			!m.isAgentBusy() &&
+			!m.hasQueuedPrompts() &&
+			m.state == uiChat &&
+			!m.dialog.HasDialogs() &&
+			(m.focus != uiFocusEditor || strings.TrimSpace(m.textarea.Value()) == "")
+
+		if canAutoWakeup {
+			return tea.Batch(
+				m.sendNotification(notification.Notification{
+					Title:   "Crush background task finished",
+					Message: fmt.Sprintf("Subagent task %s completed.", n.SubagentID),
+				}),
+				m.sendMessage(n.Summary),
+			)
+		} else {
+			if m.pendingSubagentNotifications == nil {
+				m.pendingSubagentNotifications = make(map[string][]string)
+			}
+			m.pendingSubagentNotifications[n.SessionID] = append(m.pendingSubagentNotifications[n.SessionID], n.Summary)
+			return m.sendNotification(notification.Notification{
+				Title:   "Crush background task finished (queued)",
+				Message: fmt.Sprintf("Subagent task %s completed. Notification has been queued.", n.SubagentID),
+			})
+		}
+
 	default:
 		return nil
 	}

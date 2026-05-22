@@ -37,8 +37,6 @@ func ircCtx(selfID string) context.Context {
 }
 
 func TestIrcTool_ListPeers(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{
 		peers: map[string]IrcPeerInfo{
 			"0-Main":        {ID: "0-Main", DisplayName: "Main", Kind: "main", Status: "running"},
@@ -64,8 +62,6 @@ func TestIrcTool_ListPeers(t *testing.T) {
 }
 
 func TestIrcTool_SendDM(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{
 		peers: map[string]IrcPeerInfo{
 			"0-Main::task1": {ID: "0-Main::task1", DisplayName: "Explore", Kind: "sub", Status: "running"},
@@ -96,8 +92,6 @@ func TestIrcTool_SendDM(t *testing.T) {
 }
 
 func TestIrcTool_SendBroadcast(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{
 		peers: map[string]IrcPeerInfo{
 			"0-Main::task1": {ID: "0-Main::task1", DisplayName: "Explore", Kind: "sub", Status: "running"},
@@ -121,8 +115,6 @@ func TestIrcTool_SendBroadcast(t *testing.T) {
 }
 
 func TestIrcTool_SendToSelfReturnsError(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{
 		peers: map[string]IrcPeerInfo{
 			"0-Main::task1": {ID: "0-Main::task1", DisplayName: "Explore", Kind: "sub", Status: "running"},
@@ -142,8 +134,6 @@ func TestIrcTool_SendToSelfReturnsError(t *testing.T) {
 }
 
 func TestIrcTool_SendToUnknownAgentReturnsError(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{peers: map[string]IrcPeerInfo{}}
 
 	tool := NewIrcTool(registry)
@@ -159,8 +149,6 @@ func TestIrcTool_SendToUnknownAgentReturnsError(t *testing.T) {
 }
 
 func TestIrcTool_SendWithoutMessageReturnsError(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{peers: map[string]IrcPeerInfo{}}
 
 	tool := NewIrcTool(registry)
@@ -176,8 +164,6 @@ func TestIrcTool_SendWithoutMessageReturnsError(t *testing.T) {
 }
 
 func TestIrcTool_SendWithoutToReturnsError(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{peers: map[string]IrcPeerInfo{}}
 
 	tool := NewIrcTool(registry)
@@ -193,8 +179,6 @@ func TestIrcTool_SendWithoutToReturnsError(t *testing.T) {
 }
 
 func TestIrcTool_InvalidOpReturnsError(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{peers: map[string]IrcPeerInfo{}}
 
 	tool := NewIrcTool(registry)
@@ -210,8 +194,6 @@ func TestIrcTool_InvalidOpReturnsError(t *testing.T) {
 }
 
 func TestIrcTool_NoAgentIDReturnsError(t *testing.T) {
-	t.Parallel()
-
 	registry := &mockIrcRegistry{peers: map[string]IrcPeerInfo{}}
 
 	tool := NewIrcTool(registry)
