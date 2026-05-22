@@ -341,7 +341,7 @@ func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessi
 			String: parentSession.WorkspaceCWD,
 			Valid:  parentSession.WorkspaceCWD != "",
 		},
-		CollaborationMode:    string(parentSession.CollaborationMode),
+		CollaborationMode:    string(CollaborationModeDefault),
 		PermissionMode:       string(parentSession.PermissionMode),
 		Kind:                 string(KindNormal),
 		HandoffGoal:          "",

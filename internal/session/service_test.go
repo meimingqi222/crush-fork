@@ -253,7 +253,7 @@ func TestCreateTaskSessionInheritsParentModes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, parent.ID, child.ParentSessionID)
 	require.Equal(t, parent.WorkspaceCWD, child.WorkspaceCWD)
-	require.Equal(t, CollaborationModePlan, child.CollaborationMode)
+	require.Equal(t, CollaborationModeDefault, child.CollaborationMode)
 	require.Equal(t, PermissionModeYolo, child.PermissionMode)
 }
 
