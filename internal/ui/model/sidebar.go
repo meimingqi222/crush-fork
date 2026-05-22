@@ -122,36 +122,37 @@ func (m *UI) modeInfo(width int) string {
 	return m.com.Styles.Subtle.PaddingLeft(2).Width(width).Render(text)
 }
 
-// getDynamicHeightLimits will give us the num of items to show in each section based on the hight
+// getDynamicHeightLimits will give us the num of items to show in each section based on the height
 // some items are more important than others.
-func getDynamicHeightLimits(availableHeight int) (maxFiles, maxLSPs, maxMCPs, maxTimeline int) {
+func getDynamicHeightLimits(availableHeight int) (maxFiles, maxLSPs, maxMCPs, maxSkills, maxTimeline int) {
 	const (
 		minItemsPerSection      = 2
 		defaultMaxFilesShown    = 10
 		defaultMaxLSPsShown     = 8
 		defaultMaxMCPsShown     = 8
+		defaultMaxSkillsShown   = 6
 		defaultMaxTimelineShown = 6
-		minAvailableHeightLimit = 12
+		minAvailableHeightLimit = 15
 	)
 
 	// If we have very little space, use minimum values.
 	if availableHeight < minAvailableHeightLimit {
-		return minItemsPerSection, minItemsPerSection, minItemsPerSection, minItemsPerSection
+		return minItemsPerSection, minItemsPerSection, minItemsPerSection, minItemsPerSection, minItemsPerSection
 	}
 
-	// Distribute available height among the four sections.
-	// Give priority to files, then LSPs, MCPs, and timeline.
-	totalSections := 4
+	// Distribute available height among the five sections.
+	totalSections := 5
 	heightPerSection := availableHeight / totalSections
 
 	// Calculate limits for each section, ensuring minimums.
 	maxFiles = max(minItemsPerSection, min(defaultMaxFilesShown, heightPerSection))
 	maxLSPs = max(minItemsPerSection, min(defaultMaxLSPsShown, heightPerSection))
 	maxMCPs = max(minItemsPerSection, min(defaultMaxMCPsShown, heightPerSection))
+	maxSkills = max(minItemsPerSection, min(defaultMaxSkillsShown, heightPerSection))
 	maxTimeline = max(minItemsPerSection, min(defaultMaxTimelineShown, heightPerSection))
 
 	// If we have extra space, give it to files first.
-	remainingHeight := availableHeight - (maxFiles + maxLSPs + maxMCPs + maxTimeline)
+	remainingHeight := availableHeight - (maxFiles + maxLSPs + maxMCPs + maxSkills + maxTimeline)
 	if remainingHeight > 0 {
 		extraForFiles := min(remainingHeight, defaultMaxFilesShown-maxFiles)
 		maxFiles += extraForFiles
@@ -168,17 +169,23 @@ func getDynamicHeightLimits(availableHeight int) (maxFiles, maxLSPs, maxMCPs, ma
 				remainingHeight -= extraForMCPs
 
 				if remainingHeight > 0 {
-					maxTimeline += min(remainingHeight, defaultMaxTimelineShown-maxTimeline)
+					extraForSkills := min(remainingHeight, defaultMaxSkillsShown-maxSkills)
+					maxSkills += extraForSkills
+					remainingHeight -= extraForSkills
+
+					if remainingHeight > 0 {
+						maxTimeline += min(remainingHeight, defaultMaxTimelineShown-maxTimeline)
+					}
 				}
 			}
 		}
 	}
 
-	return maxFiles, maxLSPs, maxMCPs, maxTimeline
+	return maxFiles, maxLSPs, maxMCPs, maxSkills, maxTimeline
 }
 
 // sidebar renders the chat sidebar containing session title, working
-// directory, model info, file list, LSP status, and MCP status.
+// directory, model info, file list, LSP status, MCP status, and Skills status.
 func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	if m.session == nil {
 		return
@@ -212,11 +219,12 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	)
 
 	_, remainingHeightArea := layout.SplitVertical(m.layout.sidebar, layout.Fixed(lipgloss.Height(sidebarHeader)))
-	remainingHeight := remainingHeightArea.Dy() - 12
-	maxFiles, maxLSPs, maxMCPs, maxTimeline := getDynamicHeightLimits(remainingHeight)
+	remainingHeight := remainingHeightArea.Dy() - 14
+	maxFiles, maxLSPs, maxMCPs, maxSkills, maxTimeline := getDynamicHeightLimits(remainingHeight)
 
 	lspSection := m.lspInfo(width, maxLSPs, true)
 	mcpSection := m.mcpInfo(width, maxMCPs, true)
+	skillsSection := m.skillsInfo(width, maxSkills, true)
 	filesSection := m.filesInfo(m.com.Store().WorkingDir(), width, maxFiles, true)
 	timelineSection := m.timelineInfo(width, maxTimeline, true)
 
@@ -233,6 +241,8 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 					lspSection,
 					"",
 					mcpSection,
+					"",
+					skillsSection,
 					"",
 					timelineSection,
 				),

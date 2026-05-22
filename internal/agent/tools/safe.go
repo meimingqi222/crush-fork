@@ -68,3 +68,47 @@ func init() {
 		)
 	}
 }
+
+func containsCommandChaining(s string) bool {
+	inSingleQuote := false
+	inDoubleQuote := false
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if ch == '"' && !inSingleQuote {
+			inDoubleQuote = !inDoubleQuote
+			continue
+		}
+		if inSingleQuote || inDoubleQuote {
+			continue
+		}
+
+		// 在引号之外，检查元字符
+		if ch == ';' || ch == '\n' || ch == '`' {
+			return true
+		}
+		if ch == '|' {
+			return true // 管道 | 或 ||
+		}
+		if ch == '&' {
+			return true // 后台 & 或 &&
+		}
+		if ch == '$' && i+1 < len(s) && s[i+1] == '(' {
+			return true // $(command)
+		}
+	}
+	return false
+}

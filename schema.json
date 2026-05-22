@@ -1,4 +1,4 @@
-{
+﻿{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/charmbracelet/crush/internal/config/config",
   "$ref": "#/$defs/Config",
@@ -619,6 +619,16 @@
           },
           "type": "array",
           "description": "List of tools from this MCP server to disable"
+        },
+        "enabled_tools": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "use-library-doc"
+            ]
+          },
+          "type": "array",
+          "description": "List of tools from this MCP server to enable exclusively (whitelist). If empty"
         },
         "timeout": {
           "type": "integer",
@@ -1304,7 +1314,7 @@
       "properties": {
         "structured_completion_required": {
           "type": "boolean",
-          "description": "Require built-in subagents to call subagent_finish",
+          "description": "Require built-in subagents to call yield",
           "default": true
         },
         "missing_finish_policy": {
@@ -1315,7 +1325,7 @@
             "retry_then_warn",
             "retry_then_fail"
           ],
-          "description": "Policy when a subagent omits subagent_finish",
+          "description": "Policy when a subagent omits yield",
           "default": "retry_then_warn"
         },
         "default_retry_policy": {

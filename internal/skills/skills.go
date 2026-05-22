@@ -1,8 +1,7 @@
-// Package skills implements the Agent Skills open standard.
-// See https://agentskills.io for the specification.
 package skills
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/charlievieth/fastwalk"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,6 +34,32 @@ const (
 	SkillContextInline SkillContext = "inline" // Default: skill content expands into current conversation
 	SkillContextFork   SkillContext = "fork"   // Skill runs as a sub-agent with separate context
 )
+
+type SkillState string
+
+const (
+	SkillStateAvailable SkillState = "available"
+	SkillStateError     SkillState = "error"
+)
+
+type DiscoveryState struct {
+	Loaded []*Skill
+	Errors map[string]error
+}
+
+var (
+	broker = pubsub.NewBroker[DiscoveryState]()
+)
+
+// SubscribeEvents allows UI components to subscribe to skill discovery events.
+func SubscribeEvents(ctx context.Context) <-chan pubsub.Event[DiscoveryState] {
+	return broker.Subscribe(ctx)
+}
+
+// PublishState publishes the current discovery state.
+func PublishState(state DiscoveryState) {
+	broker.Publish(pubsub.UpdatedEvent, state)
+}
 
 // Skill represents a parsed SKILL.md file.
 type Skill struct {
@@ -148,6 +174,7 @@ func Discover(paths []string) []*Skill {
 	var skills []*Skill
 	var mu sync.Mutex
 	seen := make(map[string]bool)
+	errorsMap := make(map[string]error)
 
 	for _, base := range paths {
 		// We use fastwalk with Follow: true instead of filepath.WalkDir because
@@ -175,10 +202,16 @@ func Discover(paths []string) []*Skill {
 			skill, err := Parse(path)
 			if err != nil {
 				slog.Warn("Failed to parse skill file", "path", path, "error", err)
+				mu.Lock()
+				errorsMap[path] = err
+				mu.Unlock()
 				return nil
 			}
 			if err := skill.Validate(); err != nil {
 				slog.Warn("Skill validation failed", "path", path, "error", err)
+				mu.Lock()
+				errorsMap[path] = err
+				mu.Unlock()
 				return nil
 			}
 			slog.Debug("Successfully loaded skill", "name", skill.Name, "path", path)
@@ -188,6 +221,11 @@ func Discover(paths []string) []*Skill {
 			return nil
 		})
 	}
+
+	PublishState(DiscoveryState{
+		Loaded: skills,
+		Errors: errorsMap,
+	})
 
 	return skills
 }

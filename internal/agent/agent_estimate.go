@@ -297,19 +297,23 @@ func estimatePromptTokens(messages []fantasy.Message, tools []fantasy.AgentTool)
 	return totalTokens
 }
 
-func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimatedPromptTokens int64) {
+func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimatedPromptTokens int64, estimated bool) {
 	modelConfig := model.CatwalkCfg
 	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
 		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
 		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
 		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
 
-	a.eventTokensUsed(session.ID, model, usage, cost)
+	if !estimated {
+		a.eventTokensUsed(session.ID, model, usage, cost)
 
-	if overrideCost != nil {
-		session.Cost += *overrideCost
+		if overrideCost != nil {
+			session.Cost += *overrideCost
+		} else {
+			session.Cost += cost
+		}
 	} else {
-		session.Cost += cost
+		session.EstimatedUsage = true
 	}
 
 	normalizedUsage := normalizedMessageUsage(usage, usageProvider(model), estimatedPromptTokens)

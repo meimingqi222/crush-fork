@@ -145,7 +145,7 @@ func getTools(ctx context.Context, session *ClientSession) ([]*Tool, error) {
 }
 
 func updateTools(cfg *config.ConfigStore, name string, tools []*Tool) int {
-	tools = filterDisabledTools(cfg, name, tools)
+	tools = filterTools(cfg, name, tools)
 	if len(tools) == 0 {
 		allTools.Del(name)
 		return 0
@@ -154,18 +154,28 @@ func updateTools(cfg *config.ConfigStore, name string, tools []*Tool) int {
 	return len(tools)
 }
 
-// filterDisabledTools removes tools that are disabled via config.
-func filterDisabledTools(cfg *config.ConfigStore, mcpName string, tools []*Tool) []*Tool {
+// filterTools removes tools that are disabled or not enabled (whitelisted) via config.
+func filterTools(cfg *config.ConfigStore, mcpName string, tools []*Tool) []*Tool {
 	mcpCfg, ok := cfg.Config().MCP[mcpName]
-	if !ok || len(mcpCfg.DisabledTools) == 0 {
+	if !ok {
+		return tools
+	}
+
+	hasEnabled := len(mcpCfg.EnabledTools) > 0
+	hasDisabled := len(mcpCfg.DisabledTools) > 0
+	if !hasEnabled && !hasDisabled {
 		return tools
 	}
 
 	filtered := make([]*Tool, 0, len(tools))
 	for _, tool := range tools {
-		if !slices.Contains(mcpCfg.DisabledTools, tool.Name) {
-			filtered = append(filtered, tool)
+		if hasEnabled && !slices.Contains(mcpCfg.EnabledTools, tool.Name) {
+			continue
 		}
+		if hasDisabled && slices.Contains(mcpCfg.DisabledTools, tool.Name) {
+			continue
+		}
+		filtered = append(filtered, tool)
 	}
 	return filtered
 }

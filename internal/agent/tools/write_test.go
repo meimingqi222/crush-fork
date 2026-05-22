@@ -203,3 +203,26 @@ func TestWriteTool_WritesFileWhenHistoryDoesNotExist(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Equal(t, "hello", string(data))
 }
+
+func TestWriteTool_WritesEmptyFileContent(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	permissions := &mockWritePermissionService{
+		Broker:  pubsub.NewBroker[permission.PermissionRequest](),
+		granted: true,
+	}
+	tool := newWriteToolForTest(permissions, nil, workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp, err := runWriteTool(t, tool, ctx, WriteParams{
+		FilePath: "empty.txt",
+		Content:  "",
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+
+	data, readErr := os.ReadFile(filepath.Join(workingDir, "empty.txt"))
+	require.NoError(t, readErr)
+	require.Equal(t, "", string(data))
+}
