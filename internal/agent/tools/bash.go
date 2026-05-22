@@ -239,6 +239,9 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 			}
 
 			isSafeReadOnly := toolOpts.RestrictedToGitReadOnly
+			if isSafeReadOnly && containsCommandChaining(params.Command) {
+				isSafeReadOnly = false
+			}
 
 			if sessionID == "" {
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for executing shell command")

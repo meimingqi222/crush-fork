@@ -725,6 +725,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			}
 		}
 
+		var stepMessages []fantasy.Message
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 			Files:            requestState.Files,
@@ -1117,6 +1118,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					"prompt_for_estimate_chars", len([]rune(promptForEstimate)),
 					"attachments_for_estimate", len(attachmentsForEstimate),
 				)
+				stepMessages = cloneFantasyMessages(prepared.Messages)
 				if estimatedPromptTokens > 0 {
 					currentAssistant.SetUsage(message.Usage{InputTokens: estimatedPromptTokens})
 					if updateUsageErr := a.messages.Update(callContext, *currentAssistant); updateUsageErr != nil {
@@ -1295,7 +1297,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if getSessionErr != nil {
 					return getSessionErr
 				}
-				a.updateSessionUsage(largeModel, &updatedSession, stepResult.Usage, a.openrouterCost(stepResult.ProviderMetadata), estimatedPromptTokens)
+				usage := stepResult.Usage
+				estimated := false
+				if usageIsZero(usage) {
+					if fallbackUsage, ok := fallbackStepUsage(stepMessages, stepResult); ok {
+						usage = fallbackUsage
+						estimated = true
+					}
+				}
+				a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimatedPromptTokens, estimated)
 				_, sessionErr := a.sessions.Save(ctx, updatedSession)
 				if sessionErr != nil {
 					return sessionErr
@@ -2759,7 +2769,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
-	a.updateSessionUsage(summaryModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens)
+	a.updateSessionUsage(summaryModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens, false)
 
 	currentSession.SummaryMessageID = summaryMessage.ID
 	_, err = a.sessions.Save(genCtx, currentSession)

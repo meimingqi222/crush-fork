@@ -76,10 +76,11 @@ func TestTimelineListRendersNewestFirst(t *testing.T) {
 func TestGetDynamicHeightLimitsIncludesTimeline(t *testing.T) {
 	t.Parallel()
 
-	maxFiles, maxLSPs, maxMCPs, maxTimeline := getDynamicHeightLimits(24)
+	maxFiles, maxLSPs, maxMCPs, maxSkills, maxTimeline := getDynamicHeightLimits(24)
 	require.GreaterOrEqual(t, maxFiles, 2)
 	require.GreaterOrEqual(t, maxLSPs, 2)
 	require.GreaterOrEqual(t, maxMCPs, 2)
+	require.GreaterOrEqual(t, maxSkills, 2)
 	require.GreaterOrEqual(t, maxTimeline, 2)
 }
 

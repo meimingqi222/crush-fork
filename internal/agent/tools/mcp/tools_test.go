@@ -2,8 +2,12 @@ package mcp
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/config"
+	crushlog "github.com/charmbracelet/crush/internal/log"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 )
@@ -178,4 +182,91 @@ func TestResultFromMCPContent(t *testing.T) {
 		require.Equal(t, ToolMedia{Type: "image", MediaType: "image/jpeg", Data: []byte(base64.StdEncoding.EncodeToString([]byte{0xFF, 0xD8, 0xFF}))}, result.AdditionalMedia[0])
 		require.Equal(t, ToolMedia{Type: "media", MediaType: "audio/wav", Data: []byte("BAUG")}, result.AdditionalMedia[1])
 	})
+}
+
+func loadTestStore(t *testing.T) *config.ConfigStore {
+	t.Helper()
+	workingDir := t.TempDir()
+	globalConfigRoot := filepath.Join(t.TempDir(), "mcp-global")
+	globalDataRoot := filepath.Join(t.TempDir(), "mcp-data")
+	require.NoError(t, os.MkdirAll(globalConfigRoot, 0o755))
+	require.NoError(t, os.MkdirAll(globalDataRoot, 0o755))
+
+	t.Setenv("CRUSH_GLOBAL_CONFIG", globalConfigRoot)
+	t.Setenv("CRUSH_GLOBAL_DATA", globalDataRoot)
+	t.Setenv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+	t.Cleanup(func() {
+		require.NoError(t, crushlog.ResetForTesting())
+	})
+
+	payload := []byte("{}")
+	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "crush.json"), payload, 0o600))
+
+	store, err := config.Load(workingDir, "", false)
+	require.NoError(t, err)
+	return store
+}
+
+func TestFilterTools(t *testing.T) {
+	rawTools := []*Tool{
+		{Name: "tool1"},
+		{Name: "tool2"},
+		{Name: "tool3"},
+	}
+
+	tests := []struct {
+		name     string
+		mcpName  string
+		mcpCfg   config.MCPConfig
+		expected []string
+	}{
+		{
+			name:    "no filters specified",
+			mcpName: "test-mcp",
+			mcpCfg:  config.MCPConfig{},
+			expected: []string{"tool1", "tool2", "tool3"},
+		},
+		{
+			name:    "only disabled tools specified",
+			mcpName: "test-mcp",
+			mcpCfg: config.MCPConfig{
+				DisabledTools: []string{"tool2"},
+			},
+			expected: []string{"tool1", "tool3"},
+		},
+		{
+			name:    "only enabled tools specified",
+			mcpName: "test-mcp",
+			mcpCfg: config.MCPConfig{
+				EnabledTools: []string{"tool1", "tool3"},
+			},
+			expected: []string{"tool1", "tool3"},
+		},
+		{
+			name:    "both enabled and disabled tools specified",
+			mcpName: "test-mcp",
+			mcpCfg: config.MCPConfig{
+				EnabledTools:  []string{"tool1", "tool2"},
+				DisabledTools: []string{"tool2"},
+			},
+			expected: []string{"tool1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := loadTestStore(t)
+			cfg := store.Config()
+			cfg.MCP = map[string]config.MCPConfig{
+				tt.mcpName: tt.mcpCfg,
+			}
+
+			filtered := filterTools(store, tt.mcpName, rawTools)
+			var names []string
+			for _, tool := range filtered {
+				names = append(names, tool.Name)
+			}
+			require.Equal(t, tt.expected, names)
+		})
+	}
 }

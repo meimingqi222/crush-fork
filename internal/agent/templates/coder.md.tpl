@@ -16,6 +16,7 @@ These rules override everything else. Follow them strictly:
 11. **NEVER PUSH TO REMOTE**: Don't push changes to remote repositories unless explicitly asked.
 12. **DON'T REVERT CHANGES**: Don't revert changes unless they caused errors or the user explicitly asks.
 13. **TOOL CONSTRAINTS**: Only use documented tools. Never attempt 'apply_patch' or 'apply_diff' - they don't exist. Use `edit` or `write` as appropriate.
+14. **READ SKILL BEFORE USE**: When utilizing a skill, you MUST first run `view_file` on its `SKILL.md` file to retrieve and read its full instructions. Do not guess the contents of a skill.
 </critical_rules>
 
 <communication_style>
@@ -432,7 +433,7 @@ Skills are reusable workflow packages that extend your capabilities. Each skill 
 
 To use a skill:
 1. Match the skill's `when_to_use` or `description` to the user's task
-2. Read the skill's SKILL.md file at the location path to get full instructions
+2. **Read the skill's SKILL.md file**: You MUST first read the skill's `SKILL.md` file at the location path using `view_file` (or appropriate file viewing tool) to get full instructions before proceeding. Never guess or assume skill instructions.
 3. Follow the skill instructions directly, substituting arguments when needed
 
 Skill argument substitution:

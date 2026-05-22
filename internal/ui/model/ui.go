@@ -45,6 +45,7 @@ import (
 	"github.com/charmbracelet/crush/internal/planmode"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/charmbracelet/crush/internal/ui/anim"
@@ -284,6 +285,9 @@ type UI struct {
 	// mcp
 	mcpStates map[string]mcp.ClientInfo
 
+	// skills
+	skillsState skills.DiscoveryState
+
 	// sidebarLogo keeps a cached version of the sidebar sidebarLogo.
 	sidebarLogo string
 
@@ -411,6 +415,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		todoSpinner:         todoSpinner,
 		lspStates:           make(map[string]app.LSPClientInfo),
 		mcpStates:           make(map[string]mcp.ClientInfo),
+		skillsState:         skills.DiscoveryState{Errors: make(map[string]error)},
 		notifyBackend:       notification.NoopBackend{},
 		notifyWindowFocused: true,
 		initialSessionID:    initialSessionID,
@@ -808,6 +813,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case mcp.EventResourcesListChanged:
 			return m, handleMCPResourcesEvent(msg.Payload.Name)
 		}
+	case pubsub.Event[skills.DiscoveryState]:
+		m.skillsState = msg.Payload
+		m.updateLayoutAndSize()
 	case pubsub.Event[permission.PermissionRequest]:
 		if cmd := m.openPermissionsDialog(msg.Payload); cmd != nil {
 			cmds = append(cmds, cmd)

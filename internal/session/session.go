@@ -248,6 +248,7 @@ type Session struct {
 	SummaryMessageID       string
 	Cost                   float64
 	Todos                  []Todo
+	EstimatedUsage         bool
 	CreatedAt              int64
 	UpdatedAt              int64
 }
@@ -459,6 +460,7 @@ func (s *service) GetLast(ctx context.Context) (Session, error) {
 }
 
 func (s *service) Save(ctx context.Context, session Session) (Session, error) {
+	estimated := session.EstimatedUsage
 	todosJSON, err := marshalTodos(session.Todos)
 	if err != nil {
 		return Session{}, err
@@ -500,6 +502,7 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 		return Session{}, err
 	}
 	session = s.fromDBItem(dbSession)
+	session.EstimatedUsage = estimated
 	s.Publish(pubsub.UpdatedEvent, session)
 	return session, nil
 }
@@ -522,6 +525,7 @@ func (s *service) UpdateCollaborationMode(ctx context.Context, sessionID string,
 		return Session{}, err
 	}
 	updated := s.fromDBItem(dbSession)
+	updated.EstimatedUsage = current.EstimatedUsage
 	s.Publish(pubsub.UpdatedEvent, updated)
 	return updated, nil
 }
@@ -544,6 +548,7 @@ func (s *service) UpdatePermissionMode(ctx context.Context, sessionID string, mo
 		return Session{}, err
 	}
 	updated := s.fromDBItem(dbSession)
+	updated.EstimatedUsage = current.EstimatedUsage
 	s.Publish(pubsub.UpdatedEvent, updated)
 	return updated, nil
 }
@@ -555,6 +560,8 @@ func (s *service) SetDefaultPermissionMode(mode PermissionMode) {
 // UpdateTitleAndUsage updates only the title and usage fields atomically.
 // This is safer than fetching, modifying, and saving the entire session.
 func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error {
+	current, _ := s.Get(ctx, sessionID)
+
 	dbSession, err := s.q.UpdateSessionTitleAndUsage(ctx, db.UpdateSessionTitleAndUsageParams{
 		ID:               sessionID,
 		Title:            title,
@@ -566,6 +573,7 @@ func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title stri
 		return err
 	}
 	session := s.fromDBItem(dbSession)
+	session.EstimatedUsage = current.EstimatedUsage
 	s.Publish(pubsub.UpdatedEvent, session)
 	return nil
 }
