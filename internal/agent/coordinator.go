@@ -3098,7 +3098,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		return fantasy.ToolResponse{}, fmt.Errorf("get parent session: %w", err)
 	}
 	if parentSession.PermissionMode == session.PermissionModeAuto && !params.SkipHandoffReview {
-		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, params.Prompt, "")
+		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, params.Prompt, params.Prompt)
 		if reviewErr != nil {
 			return withSubtaskToolResponseMetadata(
 				fantasy.NewTextErrorResponse("Auto Mode blocked subagent delegation because the handoff review failed."),
