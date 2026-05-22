@@ -145,7 +145,7 @@ func (a *AssistantMessageItem) Render(width int) string {
 
 	// Apply focus/blur prefix, using cache when possible.
 	var prefixedContent string
-	if a.prefixedCache.width == width && a.prefixedCache.focused == a.focused {
+	if a.prefixedCache.width == cappedWidth && a.prefixedCache.focused == a.focused {
 		prefixedContent = a.prefixedCache.rendered
 	} else {
 		prefix := a.sty.Chat.Message.AssistantBlurred.Render()
@@ -154,7 +154,7 @@ func (a *AssistantMessageItem) Render(width int) string {
 		}
 		prefixedContent = applyLinePrefix(content, prefix)
 		a.prefixedCache.rendered = prefixedContent
-		a.prefixedCache.width = width
+		a.prefixedCache.width = cappedWidth
 		a.prefixedCache.focused = a.focused
 	}
 
