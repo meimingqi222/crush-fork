@@ -467,6 +467,9 @@ func readResponse(t *testing.T, scanner *bufio.Scanner) acp.Response {
 			return resp
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		require.FailNow(t, fmt.Sprintf("scanner error: %v", err))
+	}
 	require.FailNow(t, "expected a response line")
 	return acp.Response{}
 }
@@ -491,6 +494,8 @@ func runSingleRequest(t *testing.T, app *fakeApp, reqLine string) acp.Response {
 	require.NoError(t, inWriter.Close())
 
 	scanner := bufio.NewScanner(outReader)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 4*1024*1024)
 	return readResponse(t, scanner)
 }
 
