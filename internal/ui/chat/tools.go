@@ -368,11 +368,7 @@ func (t *baseToolMessageItem) Render(width int) string {
 	} else {
 		prefix = t.sty.Chat.Message.ToolCallBlurred.Render()
 	}
-	lines := strings.Split(t.RawRender(width), "\n")
-	for i, ln := range lines {
-		lines[i] = prefix + ln
-	}
-	return strings.Join(lines, "\n")
+	return applyLinePrefix(t.RawRender(width), prefix)
 }
 
 // ToolCall returns the tool call associated with this message item.

@@ -898,12 +898,7 @@ func (t *TaskNodeItem) Render(width int) string {
 	} else {
 		prefix = t.sty.Chat.Message.ToolCallBlurred.Render()
 	}
-	raw := t.RawRender(width)
-	lines := strings.Split(raw, "\n")
-	for i, ln := range lines {
-		lines[i] = prefix + ln
-	}
-	return strings.Join(lines, "\n")
+	return applyLinePrefix(t.RawRender(width), prefix)
 }
 
 func (t *TaskNodeItem) renderContent(width int) string {

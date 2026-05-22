@@ -128,6 +128,38 @@ func defaultHighlighter(sty *styles.Styles) *highlightableMessageItem {
 	}
 }
 
+// applyLinePrefix efficiently applies a prefix to each line of the rendered
+// content using a single-pass strings.Builder instead of strings.Split and
+// strings.Join. This avoids allocating a large intermediate string slice for
+// long messages.
+func applyLinePrefix(rendered, prefix string) string {
+	if prefix == "" {
+		return rendered
+	}
+
+	var b strings.Builder
+	// Pre-allocate: original length + prefix for each line.
+	lineCount := strings.Count(rendered, "\n") + 1
+	b.Grow(len(rendered) + len(prefix)*lineCount)
+
+	start := 0
+	for i := 0; i < len(rendered); i++ {
+		if rendered[i] == '\n' {
+			b.WriteString(prefix)
+			b.WriteString(rendered[start:i])
+			b.WriteByte('\n')
+			start = i + 1
+		}
+	}
+	// Always write prefix for the last line, even if rendered is empty
+	// or ends with a newline.
+	b.WriteString(prefix)
+	if start < len(rendered) {
+		b.WriteString(rendered[start:])
+	}
+	return b.String()
+}
+
 // cachedMessageItem caches rendered message content to avoid re-rendering.
 //
 // This should be used by any message that can store a cached version of its render. e.x user,assistant... and so on
@@ -222,11 +254,7 @@ func (a *AssistantInfoItem) RawRender(width int) string {
 // Render implements MessageItem.
 func (a *AssistantInfoItem) Render(width int) string {
 	prefix := a.sty.Chat.Message.SectionHeader.Render()
-	lines := strings.Split(a.RawRender(width), "\n")
-	for i, line := range lines {
-		lines[i] = prefix + line
-	}
-	return strings.Join(lines, "\n")
+	return applyLinePrefix(a.RawRender(width), prefix)
 }
 
 func (a *AssistantInfoItem) renderContent(width int) string {

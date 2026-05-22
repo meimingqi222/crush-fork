@@ -44,6 +44,19 @@ type AssistantMessageItem struct {
 	summaryExpanded   bool
 	summaryBoxHeight  int // Tracks the rendered summary box height for click detection.
 	summaryBoxStart   int // Y offset where the summary box begins.
+
+	// currentAnimLabel tracks the current animation label to avoid redundant
+	// SetLabel calls on every animation frame.
+	currentAnimLabel string
+
+	// prefixedCache stores the content with focus/blur prefixes already
+	// applied. This avoids re-splitting and re-joining the entire message on
+	// every animation frame when only the spinner changes.
+	prefixedCache struct {
+		rendered string
+		width    int
+		focused  bool
+	}
 }
 
 // NewAssistantMessageItem creates a new AssistantMessageItem.
@@ -119,23 +132,45 @@ func (a *AssistantMessageItem) RawRender(width int) string {
 
 // Render implements MessageItem.
 func (a *AssistantMessageItem) Render(width int) string {
-	// XXX: Here, we're manually applying the focused/blurred styles because
-	// using lipgloss.Render can degrade performance for long messages due to
-	// it's wrapping logic.
-	// We already know that the content is wrapped to the correct width in
-	// RawRender, so we can just apply the styles directly to each line.
-	focused := a.sty.Chat.Message.AssistantFocused.Render()
-	blurred := a.sty.Chat.Message.AssistantBlurred.Render()
-	rendered := a.RawRender(width)
-	lines := strings.Split(rendered, "\n")
-	for i, line := range lines {
-		if a.focused {
-			lines[i] = focused + line
-		} else {
-			lines[i] = blurred + line
-		}
+	cappedWidth := cappedMessageWidth(width)
+
+	// Build the content (thinking + main content + finish reason).
+	content, contentHeight, ok := a.getCachedRender(cappedWidth)
+	if !ok {
+		content = a.renderMessageContent(cappedWidth)
+		contentHeight = lipgloss.Height(content)
+		a.setCachedRender(content, cappedWidth, contentHeight)
 	}
-	return strings.Join(lines, "\n")
+	content = a.renderHighlighted(content, cappedWidth, contentHeight)
+
+	// Apply focus/blur prefix, using cache when possible.
+	var prefixedContent string
+	if a.prefixedCache.width == width && a.prefixedCache.focused == a.focused {
+		prefixedContent = a.prefixedCache.rendered
+	} else {
+		prefix := a.sty.Chat.Message.AssistantBlurred.Render()
+		if a.focused {
+			prefix = a.sty.Chat.Message.AssistantFocused.Render()
+		}
+		prefixedContent = applyLinePrefix(content, prefix)
+		a.prefixedCache.rendered = prefixedContent
+		a.prefixedCache.width = width
+		a.prefixedCache.focused = a.focused
+	}
+
+	// Append spinner if the message is still loading.
+	var spinner string
+	if a.isSpinning() {
+		spinner = a.renderSpinning()
+	}
+	if spinner != "" {
+		if prefixedContent != "" {
+			return prefixedContent + "\n\n" + spinner
+		}
+		return spinner
+	}
+
+	return prefixedContent
 }
 
 // SetLoadingStateVisible controls whether loading UI should be rendered for
@@ -145,7 +180,7 @@ func (a *AssistantMessageItem) SetLoadingStateVisible(visible bool) {
 		return
 	}
 	a.showLoadingState = visible
-	a.clearCache()
+	a.invalidateCache()
 }
 
 // renderMessageContent renders the message content including thinking, main content, and finish reason.
@@ -314,12 +349,28 @@ func (a *AssistantMessageItem) hasToolCall(toolName string) bool {
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {
+	var label string
 	if a.message.IsThinking() {
-		a.anim.SetLabel("Thinking")
+		label = "Thinking"
 	} else if a.message.IsSummaryMessage {
-		a.anim.SetLabel("Summarizing")
+		label = "Summarizing"
+	}
+	// Only update the animation label when it actually changes to avoid
+	// re-rendering overhead on every animation frame.
+	if label != "" && label != a.currentAnimLabel {
+		a.currentAnimLabel = label
+		a.anim.SetLabel(label)
 	}
 	return a.anim.Render()
+}
+
+// invalidateCache clears both the base content cache and the prefixed render
+// cache. Call this whenever the message content or visual state changes.
+func (a *AssistantMessageItem) invalidateCache() {
+	a.clearCache()
+	a.prefixedCache.width = 0
+	a.prefixedCache.rendered = ""
+	a.prefixedCache.focused = false
 }
 
 // renderError renders an error message.
@@ -348,7 +399,7 @@ func (a *AssistantMessageItem) isSpinning() bool {
 func (a *AssistantMessageItem) SetMessage(message *message.Message) tea.Cmd {
 	wasSpinning := a.isSpinning()
 	a.message = message
-	a.clearCache()
+	a.invalidateCache()
 	if !wasSpinning && a.isSpinning() {
 		return a.StartAnimation()
 	}
@@ -358,7 +409,7 @@ func (a *AssistantMessageItem) SetMessage(message *message.Message) tea.Cmd {
 // ToggleExpanded toggles the expanded state of the thinking box.
 func (a *AssistantMessageItem) ToggleExpanded() {
 	a.thinkingExpanded = !a.thinkingExpanded
-	a.clearCache()
+	a.invalidateCache()
 }
 
 // HandleMouseClick implements MouseClickable.
@@ -369,14 +420,14 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 	// Check if the click is within the thinking box.
 	if a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight {
 		a.thinkingExpanded = !a.thinkingExpanded
-		a.clearCache()
+		a.invalidateCache()
 		return true
 	}
 	// Check if the click is within the summary box.
 	summaryEnd := a.summaryBoxStart + a.summaryBoxHeight
 	if a.summaryBoxHeight > 0 && y >= a.summaryBoxStart && y < summaryEnd {
 		a.summaryExpanded = !a.summaryExpanded
-		a.clearCache()
+		a.invalidateCache()
 		return true
 	}
 	return false

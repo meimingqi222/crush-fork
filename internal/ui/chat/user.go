@@ -76,11 +76,7 @@ func (m *UserMessageItem) Render(width int) string {
 	} else {
 		prefix = m.sty.Chat.Message.UserBlurred.Render()
 	}
-	lines := strings.Split(m.RawRender(width), "\n")
-	for i, line := range lines {
-		lines[i] = prefix + line
-	}
-	return strings.Join(lines, "\n")
+	return applyLinePrefix(m.RawRender(width), prefix)
 }
 
 // ID implements MessageItem.
