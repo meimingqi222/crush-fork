@@ -3215,7 +3215,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		runtimeTask,
 		resolvedAgentCfg,
 		parentPermissions,
-		resolvedAgentCfg.AllowedTools,
+		parentPermissions.AllowedTools,
 		effectiveIsolation,
 		sessionWorkingDir,
 		eventSink,
