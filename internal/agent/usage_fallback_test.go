@@ -146,7 +146,8 @@ func TestFallbackStepUsageReturnsZeroWithoutContent(t *testing.T) {
 
 	usage, estimated := fallbackStepUsage(nil, fantasy.StepResult{}, message.Message{})
 	require.False(t, estimated)
-	require.True(t, usageIsZero(usage))
+	require.Zero(t, usage.InputTokens)
+	require.Zero(t, usage.OutputTokens)
 }
 
 func TestFallbackStepUsageEstimatesOutputFromCurrentAssistant(t *testing.T) {

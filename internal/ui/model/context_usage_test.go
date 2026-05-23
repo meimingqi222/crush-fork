@@ -115,6 +115,7 @@ func TestResolveContextUsageSnapshotReturnsProvisionalDirectly(t *testing.T) {
 	snapshot := resolveContextUsageSnapshot(&session.Session{
 		LastPromptTokens:     110_000,
 		LastCompletionTokens: 600,
+		CompletionTokens:     600,
 	}, []message.Message{
 		{
 			ID:       "finished",
@@ -147,7 +148,7 @@ func TestResolveContextUsageSnapshotReturnsProvisionalDirectly(t *testing.T) {
 	}, nil, selected)
 
 	require.Equal(t, int64(110_600), snapshot.TotalTokens)
-	require.Equal(t, int64(20), snapshot.OutputTokens)
+	require.Equal(t, int64(600), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 	require.True(t, snapshot.Provisional)
 	require.False(t, snapshot.Summary)
@@ -192,6 +193,7 @@ func TestResolveContextUsageSnapshotFloorsProvisionalToSessionHistory(t *testing
 	snapshot := resolveContextUsageSnapshot(&session.Session{
 		LastPromptTokens:     50_000,
 		LastCompletionTokens: 500,
+		CompletionTokens:     500,
 	}, []message.Message{
 		{
 			ID:       "current",

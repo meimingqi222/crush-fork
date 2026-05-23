@@ -34,11 +34,16 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 	}
 
 	if usage, ok := latestAssistantUsageSnapshot(messages, cfg, selected); ok {
-		// Provisional snapshots (streaming in progress) may have incomplete
-		// token counts from the provider. Floor to the session's last
-		// confirmed totals so the display never drops below known history.
-		if usage.Provisional && sess != nil {
+		// OutputTokens represents cumulative output tokens across all
+		// exchanges in this session. For finished messages, use the
+		// session's cumulative CompletionTokens. For provisional (streaming)
+		// messages, take the max of the streaming value and CompletionTokens
+		// so the display reflects live growth without dropping below known history.
+		if usage.Provisional {
+			usage.OutputTokens = max(usage.OutputTokens, sess.CompletionTokens)
 			usage.TotalTokens = max(usage.TotalTokens, sess.LastTotalTokens())
+		} else {
+			usage.OutputTokens = sess.CompletionTokens
 		}
 		return usage
 	}
@@ -53,7 +58,7 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 
 	return contextUsageSnapshot{
 		TotalTokens:   sess.LastTotalTokens(),
-		OutputTokens:  sess.LastOutputTokens(),
+		OutputTokens:  sess.CompletionTokens,
 		ContextWindow: contextWindow,
 	}
 }

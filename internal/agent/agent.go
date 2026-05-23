@@ -1299,15 +1299,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				usage := stepResult.Usage
 				estimated := false
-				if usageIsZero(usage) {
-					var currAssistant message.Message
-					if currentAssistant != nil {
-						currAssistant = *currentAssistant
-					}
-					if fallbackUsage, ok := fallbackStepUsage(stepMessages, stepResult, currAssistant); ok {
-						usage = fallbackUsage
-						estimated = true
-					}
+				var currAssistant message.Message
+				if currentAssistant != nil {
+					currAssistant = *currentAssistant
+				}
+				if fallbackUsage, ok := fallbackStepUsage(stepMessages, stepResult, currAssistant); ok {
+					usage = fallbackUsage
+					estimated = true
 				}
 				a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimatedPromptTokens, estimated)
 				_, sessionErr := a.sessions.Save(ctx, updatedSession)
@@ -1316,7 +1314,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				completedStepsThisRun++
 				currentSession = updatedSession
-				normalizedUsage := normalizedMessageUsage(stepResult.Usage, usageProvider(largeModel), estimatedPromptTokens)
+				normalizedUsage := normalizedMessageUsage(usage, usageProvider(largeModel), estimatedPromptTokens)
 				slog.Debug("Updated assistant usage from provider response",
 					"session_id", call.SessionID,
 					"message_id", currentAssistant.ID,

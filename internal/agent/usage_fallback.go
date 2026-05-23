@@ -7,34 +7,35 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 )
 
-func usageIsZero(usage fantasy.Usage) bool {
-	return usage.InputTokens == 0 &&
-		usage.OutputTokens == 0 &&
-		usage.TotalTokens == 0 &&
-		usage.ReasoningTokens == 0 &&
-		usage.CacheCreationTokens == 0 &&
-		usage.CacheReadTokens == 0
-}
-
 func fallbackStepUsage(messages []fantasy.Message, step fantasy.StepResult, currentAssistant message.Message) (fantasy.Usage, bool) {
-	if !usageIsZero(step.Usage) {
-		return step.Usage, false
+	usage := step.Usage
+	estimated := false
+
+	if usage.InputTokens == 0 {
+		inputTokens := estimateMessageTokens(messages)
+		if inputTokens > 0 {
+			usage.InputTokens = inputTokens
+			estimated = true
+		}
 	}
 
-	inputTokens := estimateMessageTokens(messages)
-	outputTokens := estimateStepCompletionTokens(step)
-	if outputTokens == 0 {
-		outputTokens = estimateMessageCompletionTokens(currentAssistant)
-	}
-	if inputTokens == 0 && outputTokens == 0 {
-		return fantasy.Usage{}, false
+	if usage.OutputTokens == 0 {
+		outputTokens := estimateStepCompletionTokens(step)
+		assistantTokens := estimateMessageCompletionTokens(currentAssistant)
+		if assistantTokens > outputTokens {
+			outputTokens = assistantTokens
+		}
+		if outputTokens > 0 {
+			usage.OutputTokens = outputTokens
+			estimated = true
+		}
 	}
 
-	return fantasy.Usage{
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		TotalTokens:  inputTokens + outputTokens,
-	}, true
+	if estimated {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+
+	return usage, estimated
 }
 
 func cloneFantasyMessages(messages []fantasy.Message) []fantasy.Message {
