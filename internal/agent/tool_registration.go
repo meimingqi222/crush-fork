@@ -76,6 +76,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		}
 	}
 
+	canonicalID := config.CanonicalSubagentID(agent.ID)
 	bashOpts := agenttools.BashToolOptions{}
 	if mode == session.CollaborationModePlan {
 		// Plan mode: restrict bash to read-only git commands only.
@@ -86,7 +87,17 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 			DisableBackground:       true,
 			DescriptionOverride:     agenttools.RestrictedGitBashDescription(),
 		}
-	} else if subagentIDIsReadOnly(config.CanonicalSubagentID(agent.ID)) {
+	} else if canonicalID == config.AgentExplore || canonicalID == config.AgentLibrarian {
+		// Explore and Librarian agents: no git-only restriction — they already cannot edit/write
+		// files (those tools are absent from their AllowedTools list). The system
+		// prompt guides them to use read-only operations. Mirroring opencode's
+		// approach: rely on tool-level constraints (no edit/write) rather than
+		// bash-level constraints, so useful git plumbing commands (cat-file,
+		// ls-tree, …) and command chains (cd && git diff) work without errors.
+		bashOpts = agenttools.BashToolOptions{
+			DisableBackground: true,
+		}
+	} else if subagentIDIsReadOnly(canonicalID) {
 		bashOpts = agenttools.BashToolOptions{
 			RestrictedToGitReadOnly: true,
 			DisableBackground:       true,
