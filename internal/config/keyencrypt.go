@@ -47,6 +47,7 @@ func deriveEncryptionKey() ([]byte, error) {
 		if len(keyData) > 0 {
 			password = string(keyData)
 		} else {
+			slog.Warn("Encryption key fallback to hostname+USER is insecure; machine ID and random key file both unavailable")
 			hostname, _ := os.Hostname()
 			password = hostname + os.Getenv("USER")
 		}

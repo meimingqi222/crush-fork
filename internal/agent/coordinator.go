@@ -1638,6 +1638,7 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	var opts []anthropic.Option
 
 	anthropicEnvMu.Lock()
+	defer anthropicEnvMu.Unlock()
 	oldKey, hasOldKey := os.LookupEnv("ANTHROPIC_API_KEY")
 
 	switch {
@@ -1685,8 +1686,6 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	} else {
 		os.Unsetenv("ANTHROPIC_API_KEY")
 	}
-	anthropicEnvMu.Unlock()
-
 	return provider, err
 }
 
