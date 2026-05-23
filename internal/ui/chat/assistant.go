@@ -53,9 +53,13 @@ type AssistantMessageItem struct {
 	// applied. This avoids re-splitting and re-joining the entire message on
 	// every animation frame when only the spinner changes.
 	prefixedCache struct {
-		rendered string
-		width    int
-		focused  bool
+		rendered  string
+		width     int
+		focused   bool
+		startLine int
+		startCol  int
+		endLine   int
+		endCol    int
 	}
 }
 
@@ -145,7 +149,13 @@ func (a *AssistantMessageItem) Render(width int) string {
 
 	// Apply focus/blur prefix, using cache when possible.
 	var prefixedContent string
-	if a.prefixedCache.width == cappedWidth && a.prefixedCache.focused == a.focused {
+	startLine, startCol, endLine, endCol := a.Highlight()
+	if a.prefixedCache.width == cappedWidth &&
+		a.prefixedCache.focused == a.focused &&
+		a.prefixedCache.startLine == startLine &&
+		a.prefixedCache.startCol == startCol &&
+		a.prefixedCache.endLine == endLine &&
+		a.prefixedCache.endCol == endCol {
 		prefixedContent = a.prefixedCache.rendered
 	} else {
 		prefix := a.sty.Chat.Message.AssistantBlurred.Render()
@@ -156,6 +166,10 @@ func (a *AssistantMessageItem) Render(width int) string {
 		a.prefixedCache.rendered = prefixedContent
 		a.prefixedCache.width = cappedWidth
 		a.prefixedCache.focused = a.focused
+		a.prefixedCache.startLine = startLine
+		a.prefixedCache.startCol = startCol
+		a.prefixedCache.endLine = endLine
+		a.prefixedCache.endCol = endCol
 	}
 
 	// Append spinner if the message is still loading.
@@ -371,6 +385,10 @@ func (a *AssistantMessageItem) invalidateCache() {
 	a.prefixedCache.width = 0
 	a.prefixedCache.rendered = ""
 	a.prefixedCache.focused = false
+	a.prefixedCache.startLine = -1
+	a.prefixedCache.startCol = -1
+	a.prefixedCache.endLine = -1
+	a.prefixedCache.endCol = -1
 }
 
 // renderError renders an error message.
