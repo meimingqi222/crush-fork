@@ -1300,7 +1300,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				usage := stepResult.Usage
 				estimated := false
 				if usageIsZero(usage) {
-					if fallbackUsage, ok := fallbackStepUsage(stepMessages, stepResult); ok {
+					var currAssistant message.Message
+					if currentAssistant != nil {
+						currAssistant = *currentAssistant
+					}
+					if fallbackUsage, ok := fallbackStepUsage(stepMessages, stepResult, currAssistant); ok {
 						usage = fallbackUsage
 						estimated = true
 					}

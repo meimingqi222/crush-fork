@@ -47,9 +47,7 @@ type DiscoveryState struct {
 	Errors map[string]error
 }
 
-var (
-	broker = pubsub.NewBroker[DiscoveryState]()
-)
+var broker = pubsub.NewBroker[DiscoveryState]()
 
 // SubscribeEvents allows UI components to subscribe to skill discovery events.
 func SubscribeEvents(ctx context.Context) <-chan pubsub.Event[DiscoveryState] {

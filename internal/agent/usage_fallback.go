@@ -16,13 +16,16 @@ func usageIsZero(usage fantasy.Usage) bool {
 		usage.CacheReadTokens == 0
 }
 
-func fallbackStepUsage(messages []fantasy.Message, step fantasy.StepResult) (fantasy.Usage, bool) {
+func fallbackStepUsage(messages []fantasy.Message, step fantasy.StepResult, currentAssistant message.Message) (fantasy.Usage, bool) {
 	if !usageIsZero(step.Usage) {
 		return step.Usage, false
 	}
 
 	inputTokens := estimateMessageTokens(messages)
 	outputTokens := estimateStepCompletionTokens(step)
+	if outputTokens == 0 {
+		outputTokens = estimateMessageCompletionTokens(currentAssistant)
+	}
 	if inputTokens == 0 && outputTokens == 0 {
 		return fantasy.Usage{}, false
 	}
@@ -176,10 +179,7 @@ func approxTokenCount(s string) int64 {
 	return int64((len(s) + 3) / 4)
 }
 
-func summaryCompletionTokens(usage fantasy.Usage, msg message.Message) int64 {
-	if usage.OutputTokens > 0 {
-		return usage.OutputTokens
-	}
+func estimateMessageCompletionTokens(msg message.Message) int64 {
 	var tokens int64
 	for _, part := range msg.Parts {
 		switch p := part.(type) {
@@ -194,4 +194,11 @@ func summaryCompletionTokens(usage fantasy.Usage, msg message.Message) int64 {
 		}
 	}
 	return tokens
+}
+
+func summaryCompletionTokens(usage fantasy.Usage, msg message.Message) int64 {
+	if usage.OutputTokens > 0 {
+		return usage.OutputTokens
+	}
+	return estimateMessageCompletionTokens(msg)
 }

@@ -125,7 +125,7 @@ func (a *AssistantMessageItem) RawRender(width int) string {
 
 	highlightedContent := a.renderHighlighted(content, cappedWidth, height)
 	if spinner != "" {
-		if highlightedContent != "" {
+		if content != "" {
 			highlightedContent += "\n\n"
 		}
 		return highlightedContent + spinner
@@ -147,6 +147,11 @@ func (a *AssistantMessageItem) Render(width int) string {
 	}
 	content = a.renderHighlighted(content, cappedWidth, contentHeight)
 
+	prefix := a.sty.Chat.Message.AssistantBlurred.Render()
+	if a.focused {
+		prefix = a.sty.Chat.Message.AssistantFocused.Render()
+	}
+
 	// Apply focus/blur prefix, using cache when possible.
 	var prefixedContent string
 	startLine, startCol, endLine, endCol := a.Highlight()
@@ -158,10 +163,6 @@ func (a *AssistantMessageItem) Render(width int) string {
 		a.prefixedCache.endCol == endCol {
 		prefixedContent = a.prefixedCache.rendered
 	} else {
-		prefix := a.sty.Chat.Message.AssistantBlurred.Render()
-		if a.focused {
-			prefix = a.sty.Chat.Message.AssistantFocused.Render()
-		}
 		prefixedContent = applyLinePrefix(content, prefix)
 		a.prefixedCache.rendered = prefixedContent
 		a.prefixedCache.width = cappedWidth
@@ -178,10 +179,10 @@ func (a *AssistantMessageItem) Render(width int) string {
 		spinner = a.renderSpinning()
 	}
 	if spinner != "" {
-		if prefixedContent != "" {
-			return prefixedContent + "\n\n" + spinner
+		if content != "" {
+			return prefixedContent + "\n\n" + applyLinePrefix(spinner, prefix)
 		}
-		return spinner
+		return applyLinePrefix(spinner, prefix)
 	}
 
 	return prefixedContent

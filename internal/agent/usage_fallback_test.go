@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"charm.land/fantasy"
 	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
@@ -30,7 +30,7 @@ func TestFallbackStepUsageEstimatesReasoningContent(t *testing.T) {
 		},
 	}
 
-	usage, estimated := fallbackStepUsage(messages, step)
+	usage, estimated := fallbackStepUsage(messages, step, message.Message{})
 	require.True(t, estimated)
 	require.Positive(t, usage.InputTokens)
 	require.Positive(t, usage.OutputTokens)
@@ -51,7 +51,7 @@ func TestFallbackStepUsageEstimatesToolCalls(t *testing.T) {
 		},
 	}
 
-	usage, estimated := fallbackStepUsage(nil, step)
+	usage, estimated := fallbackStepUsage(nil, step, message.Message{})
 	require.True(t, estimated)
 	require.Zero(t, usage.InputTokens)
 	require.Positive(t, usage.OutputTokens)
@@ -89,7 +89,7 @@ func TestFallbackStepUsageEstimatesToolResults(t *testing.T) {
 		},
 	}
 
-	usage, estimated := fallbackStepUsage(messages, fantasy.StepResult{})
+	usage, estimated := fallbackStepUsage(messages, fantasy.StepResult{}, message.Message{})
 	require.True(t, estimated)
 	require.Positive(t, usage.InputTokens)
 	require.Zero(t, usage.OutputTokens)
@@ -113,7 +113,7 @@ func TestFallbackStepUsageSkipsClientToolResultsAsOutput(t *testing.T) {
 		},
 	}
 
-	usage, estimated := fallbackStepUsage(nil, step)
+	usage, estimated := fallbackStepUsage(nil, step, message.Message{})
 	require.False(t, estimated)
 	require.Zero(t, usage.OutputTokens)
 }
@@ -135,7 +135,7 @@ func TestFallbackStepUsageCountsProviderToolResultsAsOutput(t *testing.T) {
 		},
 	}
 
-	usage, estimated := fallbackStepUsage(nil, step)
+	usage, estimated := fallbackStepUsage(nil, step, message.Message{})
 	require.True(t, estimated)
 	require.Positive(t, usage.OutputTokens)
 	require.Equal(t, usage.OutputTokens, usage.TotalTokens)
@@ -144,12 +144,28 @@ func TestFallbackStepUsageCountsProviderToolResultsAsOutput(t *testing.T) {
 func TestFallbackStepUsageReturnsZeroWithoutContent(t *testing.T) {
 	t.Parallel()
 
-	usage, estimated := fallbackStepUsage(nil, fantasy.StepResult{})
+	usage, estimated := fallbackStepUsage(nil, fantasy.StepResult{}, message.Message{})
 	require.False(t, estimated)
 	require.True(t, usageIsZero(usage))
 }
 
-func TestUpdateSessionUsageSkipsEstimatedCost(t *testing.T) {
+func TestFallbackStepUsageEstimatesOutputFromCurrentAssistant(t *testing.T) {
+	t.Parallel()
+
+	assistantMessage := message.Message{
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "output tokens from assistant"},
+		},
+	}
+
+	usage, estimated := fallbackStepUsage(nil, fantasy.StepResult{}, assistantMessage)
+	require.True(t, estimated)
+	require.Zero(t, usage.InputTokens)
+	require.Positive(t, usage.OutputTokens)
+	require.Equal(t, usage.OutputTokens, usage.TotalTokens)
+}
+
+func TestUpdateSessionUsageIncludesEstimatedCost(t *testing.T) {
 	t.Parallel()
 
 	agent := &sessionAgent{}
@@ -159,7 +175,7 @@ func TestUpdateSessionUsageSkipsEstimatedCost(t *testing.T) {
 
 	agent.updateSessionUsage(model, currentSession, usage, nil, 0, true)
 
-	require.Equal(t, 1.25, currentSession.Cost)
+	require.Equal(t, 1.30, currentSession.Cost)
 	require.Equal(t, int64(1000), currentSession.PromptTokens)
 	require.Equal(t, int64(2000), currentSession.CompletionTokens)
 	require.True(t, currentSession.EstimatedUsage)

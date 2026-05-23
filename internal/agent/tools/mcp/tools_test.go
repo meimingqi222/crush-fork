@@ -221,9 +221,9 @@ func TestFilterTools(t *testing.T) {
 		expected []string
 	}{
 		{
-			name:    "no filters specified",
-			mcpName: "test-mcp",
-			mcpCfg:  config.MCPConfig{},
+			name:     "no filters specified",
+			mcpName:  "test-mcp",
+			mcpCfg:   config.MCPConfig{},
 			expected: []string{"tool1", "tool2", "tool3"},
 		},
 		{

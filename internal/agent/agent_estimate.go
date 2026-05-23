@@ -306,14 +306,14 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 
 	if !estimated {
 		a.eventTokensUsed(session.ID, model, usage, cost)
-
-		if overrideCost != nil {
-			session.Cost += *overrideCost
-		} else {
-			session.Cost += cost
-		}
 	} else {
 		session.EstimatedUsage = true
+	}
+
+	if overrideCost != nil {
+		session.Cost += *overrideCost
+	} else {
+		session.Cost += cost
 	}
 
 	normalizedUsage := normalizedMessageUsage(usage, usageProvider(model), estimatedPromptTokens)
