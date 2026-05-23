@@ -91,7 +91,7 @@ func (m *UI) modeInfo(width int) string {
 		return ""
 	}
 
-	modes := make([]string, 0, 2)
+	modes := make([]string, 0, 3)
 	roleLabel := strings.ToUpper(m.sessionRoleLabel(m.session))
 	if m.isSubagentSession() {
 		if roleLabel != "" {
@@ -102,9 +102,17 @@ func (m *UI) modeInfo(width int) string {
 	} else {
 		modes = append(modes, "SESSION "+roleLabel)
 	}
-	if m.session.CollaborationMode == sessionpkg.CollaborationModePlan {
+
+	switch m.session.CollaborationMode {
+	case sessionpkg.CollaborationModePlan:
 		modes = append(modes, "PLAN")
-	} else {
+	case sessionpkg.CollaborationModeOrchestrate:
+		modes = append(modes, "ORCHESTRATE")
+	default:
+		modes = append(modes, "STANDARD")
+	}
+
+	if m.session.CollaborationMode != sessionpkg.CollaborationModePlan {
 		switch m.currentExecutionMode() {
 		case executionModeAuto:
 			modes = append(modes, "AUTO")
@@ -114,6 +122,7 @@ func (m *UI) modeInfo(width int) string {
 			modes = append(modes, "ASK")
 		}
 	}
+
 	if len(modes) == 0 {
 		return ""
 	}
