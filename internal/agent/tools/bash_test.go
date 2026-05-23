@@ -334,6 +334,10 @@ func TestRestrictedGitBashTool_BlocksUnsafeCommands(t *testing.T) {
 		`git log | tail -f`,
 		`git log | sed -i "s/a/b/g" file`,
 		`git log | awk "{print $1 > \"/tmp/out\"}"`,
+		"git status && git checkout main",
+		"git status; git checkout main",
+		"git checkout main || git status",
+		"git status && rm -rf /",
 	}
 
 	for _, command := range cases {
@@ -364,6 +368,13 @@ func TestRestrictedGitBashTool_AllowsPipeAndStderrRedirect(t *testing.T) {
 		`git log --oneline | cut -d " " -f 1`,
 		`git log --oneline | tr a-z A-Z`,
 		`git -C . --no-pager log --oneline | grep "init"`,
+		`git status --short && git diff`,
+		`git rev-parse HEAD && git log -n 1`,
+		`git status; git diff`,
+		`cd . && git status`,
+		`git log 2>&1`,
+		`git log 2>&1 | head -10`,
+		`git -C D:/code/copilot-refs/copilot-api show HEAD~1:src/routes/chat-completions/handler.ts 2>&1 | head -340`,
 	}
 
 	for _, command := range allowed {

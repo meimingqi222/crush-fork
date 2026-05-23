@@ -163,13 +163,9 @@ func restrictedGitBlockFunc() shell.BlockFunc {
 	}
 }
 
-// isStderrToDevNull returns true for a redirect that is exactly "2>/dev/null",
-// i.e. stderr suppression. This is the only redirect allowed in the
-// restricted-git-bash mode.
-func isStderrToDevNull(r *syntax.Redirect) bool {
-	if r.Op != syntax.RdrOut {
-		return false
-	}
+// isAllowedRedirect returns true for a redirect that is exactly "2>/dev/null"
+// or "2>&1", which are safe redirections of stderr in restricted-git-bash mode.
+func isAllowedRedirect(r *syntax.Redirect) bool {
 	if r.N == nil || r.N.Value != "2" {
 		return false
 	}
@@ -177,7 +173,13 @@ func isStderrToDevNull(r *syntax.Redirect) bool {
 	if !ok {
 		return false
 	}
-	return target == "/dev/null"
+	if r.Op == syntax.RdrOut && target == "/dev/null" {
+		return true
+	}
+	if r.Op == syntax.DplOut && target == "1" {
+		return true
+	}
+	return false
 }
 
 // validateRestrictedGitCommand validates that command is a single git
@@ -204,11 +206,20 @@ func validateRestrictedGitCommand(command string) error {
 		return validateRestrictedGitArgs(args)
 	}
 
-	if len(file.Stmts) != 1 {
-		return fmt.Errorf("restricted git bash only allows one git command per call")
+	if len(file.Stmts) == 0 {
+		return fmt.Errorf("restricted git bash requires a git command")
 	}
 
-	stmt := file.Stmts[0]
+	for _, stmt := range file.Stmts {
+		if err := validateStmt(stmt); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateStmt(stmt *syntax.Stmt) error {
 	if stmt == nil {
 		return fmt.Errorf("restricted git bash requires a git command")
 	}
@@ -216,37 +227,51 @@ func validateRestrictedGitCommand(command string) error {
 		return fmt.Errorf("restricted git bash does not allow shell control operators")
 	}
 
-	// Only allow 2>/dev/null on the top-level statement; all other
-	// redirections are still forbidden.
 	for _, r := range stmt.Redirs {
-		if !isStderrToDevNull(r) {
+		if !isAllowedRedirect(r) {
 			return fmt.Errorf("restricted git bash does not allow redirection")
 		}
 	}
 
-	// The command may be either a plain git invocation (CallExpr) or a
-	// pipeline starting with git and continuing through safe filter commands
-	// (BinaryCmd with Op==Pipe).
-	switch cmd := stmt.Cmd.(type) {
+	if stmt.Cmd == nil {
+		return fmt.Errorf("restricted git bash requires a git command")
+	}
+	return validateCmd(stmt.Cmd)
+}
+
+func validateCmd(cmd syntax.Command) error {
+	switch c := cmd.(type) {
 	case *syntax.CallExpr:
-		if len(cmd.Assigns) > 0 {
+		if len(c.Assigns) > 0 {
 			return fmt.Errorf("restricted git bash does not allow shell assignments")
 		}
-		args := make([]string, 0, len(cmd.Args))
-		for _, word := range cmd.Args {
+		args := make([]string, 0, len(c.Args))
+		for _, word := range c.Args {
 			arg, ok := literalWord(word)
 			if !ok {
 				return fmt.Errorf("restricted git bash does not allow shell expansions or substitutions")
 			}
 			args = append(args, arg)
 		}
+		if len(args) > 0 && args[0] == "cd" {
+			if len(args) > 2 {
+				return fmt.Errorf("restricted git bash does not allow cd with more than one argument")
+			}
+			return nil
+		}
 		return validateRestrictedGitArgs(args)
 
 	case *syntax.BinaryCmd:
-		if cmd.Op != syntax.Pipe {
-			return fmt.Errorf("restricted git bash does not allow shell control operators")
+		if c.Op == syntax.Pipe {
+			return validateRestrictedGitPipeline(c)
 		}
-		return validateRestrictedGitPipeline(cmd)
+		if c.Op == syntax.AndStmt || c.Op == syntax.OrStmt {
+			if err := validateStmt(c.X); err != nil {
+				return err
+			}
+			return validateStmt(c.Y)
+		}
+		return fmt.Errorf("restricted git bash does not allow shell control operators")
 
 	default:
 		return fmt.Errorf("restricted git bash only allows a direct git command")
@@ -508,9 +533,9 @@ func callExprArgs(s *syntax.Stmt) ([]string, error) {
 	if s.Negated || s.Background || s.Coprocess || s.Disown {
 		return nil, fmt.Errorf("shell control operators not allowed")
 	}
-	// Allow 2>/dev/null inside pipeline stages too.
+	// Allow safe stderr redirections inside pipeline stages too.
 	for _, r := range s.Redirs {
-		if !isStderrToDevNull(r) {
+		if !isAllowedRedirect(r) {
 			return nil, fmt.Errorf("redirection not allowed in pipeline stage")
 		}
 	}
