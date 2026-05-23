@@ -167,7 +167,14 @@ func parseExtractedEvents(content string) ([]engine.ExtractedEvent, error) {
 			continue
 		}
 		if e.Scope == "" {
-			e.Scope = engine.MemoryScopeSession
+			switch e.Kind {
+			case engine.MemoryKindDecision, engine.MemoryKindProcedure, engine.MemoryKindPitfall, engine.MemoryKindReference:
+				e.Scope = engine.MemoryScopeProject
+			case engine.MemoryKindPreference:
+				e.Scope = engine.MemoryScopeUser
+			default:
+				e.Scope = engine.MemoryScopeSession
+			}
 		}
 		if e.Confidence <= 0 {
 			e.Confidence = 0.5

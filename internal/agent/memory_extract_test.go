@@ -75,12 +75,39 @@ func TestExtractEvents_SanitizesEmptyContent(t *testing.T) {
 func TestExtractEvents_DefaultsScope(t *testing.T) {
 	t.Parallel()
 
-	input := `[{"kind":"decision","content":"some decision","confidence":0.8,"importance":0.6}]`
+	input := `[{"kind":"task_state","content":"some task state","confidence":0.8,"importance":0.6}]`
 
 	events, err := parseExtractedEvents(input)
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	require.Equal(t, engine.MemoryScopeSession, events[0].Scope, "should default to session scope")
+}
+
+func TestExtractEvents_HeuristicScoping(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		kind          string
+		expectedScope engine.MemoryScope
+	}{
+		{"decision", engine.MemoryScopeProject},
+		{"procedure", engine.MemoryScopeProject},
+		{"pitfall", engine.MemoryScopeProject},
+		{"reference", engine.MemoryScopeProject},
+		{"preference", engine.MemoryScopeUser},
+		{"task_state", engine.MemoryScopeSession},
+		{"unknown_kind", engine.MemoryScopeSession},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.kind, func(t *testing.T) {
+			input := `[{"kind":"` + tc.kind + `","content":"some content","confidence":0.8,"importance":0.6}]`
+			events, err := parseExtractedEvents(input)
+			require.NoError(t, err)
+			require.Len(t, events, 1)
+			require.Equal(t, tc.expectedScope, events[0].Scope)
+		})
+	}
 }
 
 func TestExtractEvents_DefaultsConfidenceImportance(t *testing.T) {
