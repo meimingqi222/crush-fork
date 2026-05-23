@@ -161,7 +161,7 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 
 	if client, ok := s.clients.Get(name); ok {
 		switch client.GetServerState() {
-		case StateReady, StateStarting, StateDisabled:
+		case StateReady, StateStarting, StateDisabled, StateIndexing:
 			s.callback(name, client)
 			// already done, return
 			return
@@ -187,7 +187,7 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 	// Check again in case another goroutine started it in the meantime.
 	if client, ok := s.clients.Get(name); ok {
 		switch client.GetServerState() {
-		case StateReady, StateStarting, StateDisabled:
+		case StateReady, StateStarting, StateDisabled, StateIndexing:
 			s.callback(name, client)
 			return
 		}
@@ -205,11 +205,14 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 		slog.Error("Failed to create LSP client", "name", name, "error", err)
 		return
 	}
+	client.onUpdate = func() {
+		s.callback(name, client)
+	}
 	// Only store non-nil clients. If another goroutine raced us,
 	// prefer the already-stored client.
 	if existing, ok := s.clients.Get(name); ok {
 		switch existing.GetServerState() {
-		case StateReady, StateStarting, StateDisabled:
+		case StateReady, StateStarting, StateDisabled, StateIndexing:
 			_ = client.Close(ctx)
 			s.callback(name, existing)
 			return
@@ -221,7 +224,7 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 	}()
 
 	switch client.GetServerState() {
-	case StateReady, StateStarting, StateDisabled:
+	case StateReady, StateStarting, StateDisabled, StateIndexing:
 		// already done, return
 		return
 	}
@@ -363,4 +366,25 @@ func (s *Manager) StopAll(ctx context.Context) {
 		})
 	}
 	wg.Wait()
+}
+
+// StartHealthCheck starts a background goroutine to periodically monitor LSP client process liveness.
+func (s *Manager) StartHealthCheck(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, client := range s.clients.Seq2() {
+					state := client.GetServerState()
+					if (state == StateReady || state == StateIndexing) && !client.IsRunning() {
+						client.SetServerState(StateError)
+					}
+				}
+			}
+		}
+	}()
 }

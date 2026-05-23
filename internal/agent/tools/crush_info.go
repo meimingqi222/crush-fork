@@ -523,6 +523,8 @@ func lspStateString(state lsp.ServerState) string {
 		return "stopped"
 	case lsp.StateDisabled:
 		return "disabled"
+	case lsp.StateIndexing:
+		return "indexing"
 	default:
 		return "unknown"
 	}

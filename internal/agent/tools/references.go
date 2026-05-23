@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -45,7 +46,15 @@ func NewReferencesTool(lspManager *lsp.Manager) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("no LSP clients available"), nil
 			}
 
-			workingDir := cmp.Or(params.Path, ".")
+			effectiveWorkingDir := GetWorkingDirFromContext(ctx)
+			if effectiveWorkingDir == "" {
+				if wd, err := os.Getwd(); err == nil {
+					effectiveWorkingDir = wd
+				} else {
+					effectiveWorkingDir = "."
+				}
+			}
+			workingDir := cmp.Or(params.Path, effectiveWorkingDir)
 
 			result, err := runGrepSearch(ctx, GrepParams{Pattern: params.Symbol, LiteralText: true}, workingDir, 100)
 			if err != nil {

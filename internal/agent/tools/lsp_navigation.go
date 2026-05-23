@@ -290,10 +290,23 @@ func formatHover(hover *protocol.Hover) string {
 	if hover == nil {
 		return ""
 	}
-	if strings.TrimSpace(hover.Contents.Value) != "" {
-		return strings.TrimSpace(hover.Contents.Value)
+	// Hover contents may be a string, MarkupContent, MarkedString, or []MarkedString.
+	switch v := hover.Contents.Value.(type) {
+	case string:
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	case protocol.MarkupContent:
+		if strings.TrimSpace(v.Value) != "" {
+			return strings.TrimSpace(v.Value)
+		}
+	case protocol.MarkedString:
+		// MarkedString can be a plain string or a {language, value} pair.
+		if str, ok := v.Value.(string); ok && strings.TrimSpace(str) != "" {
+			return strings.TrimSpace(str)
+		}
 	}
-	if raw, err := json.Marshal(hover.Contents); err == nil {
+	if raw, err := json.Marshal(hover.Contents.Value); err == nil {
 		return strings.TrimSpace(string(raw))
 	}
 	return ""
@@ -436,6 +449,20 @@ func locationResults(value any) []protocol.Location {
 		return []protocol.Location{v}
 	case []protocol.Location:
 		return append([]protocol.Location(nil), v...)
+	case protocol.LocationLink:
+		return []protocol.Location{{
+			URI:   v.TargetURI,
+			Range: v.TargetSelectionRange,
+		}}
+	case []protocol.LocationLink:
+		locs := make([]protocol.Location, 0, len(v))
+		for _, link := range v {
+			locs = append(locs, protocol.Location{
+				URI:   link.TargetURI,
+				Range: link.TargetSelectionRange,
+			})
+		}
+		return locs
 	case protocol.Or_Definition:
 		return locationResults(v.Value)
 	case protocol.Or_Declaration:

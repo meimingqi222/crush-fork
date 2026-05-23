@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,6 +80,16 @@ type Client struct {
 
 	// Server state
 	serverState atomic.Value
+
+	// Active work progress tracking
+	progressMu sync.Mutex
+	progresses map[string]*ProgressInfo
+
+	// Callback triggered when server state or progress changes
+	onUpdate func()
+
+	// Protects client field from concurrent read/write during Restart
+	clientMu sync.RWMutex
 }
 
 // New creates a new LSP client using the powernap implementation.
@@ -99,6 +111,7 @@ func New(
 		debug:       debug,
 		resolver:    resolver,
 		cwd:         cwd,
+		progresses:  make(map[string]*ProgressInfo),
 	}
 	client.serverState.Store(StateStopped)
 
@@ -111,12 +124,19 @@ func New(
 
 // Initialize initializes the LSP client and returns the server capabilities.
 func (c *Client) Initialize(ctx context.Context, workspaceDir string) (*protocol.InitializeResult, error) {
-	if err := c.client.Initialize(ctx, false); err != nil {
+	c.registerHandlers()
+
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if err := client.Initialize(ctx, false); err != nil {
 		return nil, fmt.Errorf("failed to initialize the lsp client: %w", err)
 	}
 
 	// Convert powernap capabilities to protocol capabilities
-	caps := c.client.GetCapabilities()
+	caps := client.GetCapabilities()
 	protocolCaps := protocol.ServerCapabilities{
 		TextDocumentSync: caps.TextDocumentSync,
 		CompletionProvider: func() *protocol.CompletionOptions {
@@ -146,8 +166,6 @@ func (c *Client) Initialize(ctx context.Context, workspaceDir string) (*protocol
 		Capabilities: protocolCaps,
 	}
 
-	c.registerHandlers()
-
 	return result, nil
 }
 
@@ -155,12 +173,21 @@ func (c *Client) Initialize(ctx context.Context, workspaceDir string) (*protocol
 const closeTimeout = 5 * time.Second
 
 // Kill kills the client without doing anything else.
-func (c *Client) Kill() { c.client.Kill() }
+func (c *Client) Kill() {
+	if client := c.getClient(); client != nil {
+		client.Kill()
+	}
+}
 
 // Close closes all open files in the client, then shuts down gracefully.
 // If shutdown takes longer than closeTimeout, it falls back to Kill().
 func (c *Client) Close(ctx context.Context) error {
 	c.CloseAllFiles(ctx)
+
+	client := c.getClient()
+	if client == nil {
+		return nil
+	}
 
 	// Use a timeout to prevent hanging on unresponsive LSP servers.
 	// jsonrpc2's send lock doesn't respect context cancellation, so we
@@ -170,17 +197,17 @@ func (c *Client) Close(ctx context.Context) error {
 
 	done := make(chan error, 1)
 	go func() {
-		if err := c.client.Shutdown(closeCtx); err != nil {
+		if err := client.Shutdown(closeCtx); err != nil {
 			slog.Warn("Failed to shutdown LSP client", "error", err)
 		}
-		done <- c.client.Exit()
+		done <- client.Exit()
 	}()
 
 	select {
 	case err := <-done:
 		return err
 	case <-closeCtx.Done():
-		c.client.Kill()
+		client.Kill()
 		return closeCtx.Err()
 	}
 }
@@ -214,15 +241,27 @@ func (c *Client) createPowernapClient() error {
 		return fmt.Errorf("failed to create lsp client: %w", err)
 	}
 
+	c.clientMu.Lock()
 	c.client = powernapClient
+	c.clientMu.Unlock()
 	return nil
 }
 
 // registerHandlers registers the standard LSP notification and request handlers.
 func (c *Client) registerHandlers() {
-	c.RegisterServerRequestHandler("workspace/applyEdit", HandleApplyEdit(c.client.GetOffsetEncoding()))
+	client := c.getClient()
+	if client == nil {
+		return
+	}
+	c.RegisterServerRequestHandler("workspace/applyEdit", HandleApplyEdit(client.GetOffsetEncoding()))
 	c.RegisterServerRequestHandler("workspace/configuration", HandleWorkspaceConfiguration)
 	c.RegisterServerRequestHandler("client/registerCapability", HandleRegisterCapability)
+	c.RegisterServerRequestHandler("window/workDoneProgress/create", func(ctx context.Context, method string, params json.RawMessage) (any, error) {
+		return HandleWorkDoneProgressCreate(c, ctx, method, params)
+	})
+	c.RegisterNotificationHandler("$/progress", func(_ context.Context, _ string, params json.RawMessage) {
+		HandleProgressNotification(c, params)
+	})
 	c.RegisterNotificationHandler("window/showMessage", func(ctx context.Context, method string, params json.RawMessage) {
 		if c.debug {
 			HandleServerMessage(ctx, method, params)
@@ -259,6 +298,10 @@ func (c *Client) Restart(ctx context.Context) error {
 	c.diagCountsCache = DiagnosticCounts{}
 	c.diagCountsVersion = 0
 
+	c.progressMu.Lock()
+	c.progresses = make(map[string]*ProgressInfo)
+	c.progressMu.Unlock()
+
 	if err := c.createPowernapClient(); err != nil {
 		return err
 	}
@@ -268,12 +311,18 @@ func (c *Client) Restart(ctx context.Context) error {
 
 	c.SetServerState(StateStarting)
 
-	if err := c.client.Initialize(initCtx, false); err != nil {
+	c.registerHandlers()
+
+	powernapClient := c.getClient()
+	if powernapClient == nil {
+		c.SetServerState(StateError)
+		return fmt.Errorf("LSP client is unavailable after restart")
+	}
+
+	if err := powernapClient.Initialize(initCtx, false); err != nil {
 		c.SetServerState(StateError)
 		return fmt.Errorf("failed to initialize lsp client: %w", err)
 	}
-
-	c.registerHandlers()
 
 	if err := c.WaitForServerReady(initCtx); err != nil {
 		slog.Error("Server failed to become ready after restart", "name", c.name, "error", err)
@@ -299,7 +348,31 @@ const (
 	StateError
 	StateStopped
 	StateDisabled
+	StateIndexing
 )
+
+// ProgressInfo represents details of a work progress reported by LSP.
+type ProgressInfo struct {
+	Title      string
+	Message    string
+	Percentage float64
+}
+
+// getClient returns the powernap client under RLock.
+func (c *Client) getClient() *powernap.Client {
+	if c == nil {
+		return nil
+	}
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	return c.client
+}
+
+// IsRunning returns whether the underlying LSP client is running.
+func (c *Client) IsRunning() bool {
+	client := c.getClient()
+	return client != nil && client.IsRunning()
+}
 
 // GetServerState returns the current state of the LSP server
 func (c *Client) GetServerState() ServerState {
@@ -309,9 +382,77 @@ func (c *Client) GetServerState() ServerState {
 	return StateStarting
 }
 
-// SetServerState sets the current state of the LSP server
+// ProgressDescription returns a formatted status description of the active work progresses.
+func (c *Client) ProgressDescription() string {
+	c.progressMu.Lock()
+	defer c.progressMu.Unlock()
+
+	if len(c.progresses) == 0 {
+		return ""
+	}
+
+	var keys []string
+	for k := range c.progresses {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	var parts []string
+	for _, k := range keys {
+		info := c.progresses[k]
+		desc := ""
+		if info.Title != "" {
+			desc += info.Title
+		}
+		if info.Percentage > 0 {
+			if desc != "" {
+				desc += fmt.Sprintf(": %.0f%%", info.Percentage)
+			} else {
+				desc += fmt.Sprintf("%.0f%%", info.Percentage)
+			}
+		}
+		if info.Message != "" {
+			if desc != "" {
+				desc += fmt.Sprintf(" (%s)", info.Message)
+			} else {
+				desc += info.Message
+			}
+		}
+		if desc != "" {
+			parts = append(parts, desc)
+		}
+	}
+
+	if len(parts) == 0 {
+		return "indexing..."
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+// SetServerState sets the current state of the LSP server.
+// When setting StateReady, if there are active progress tokens the state is
+// promoted to StateIndexing. When setting StateIndexing, if there are no
+// active progress tokens the state is demoted back to StateReady.
 func (c *Client) SetServerState(state ServerState) {
+	c.progressMu.Lock()
+	switch state {
+	case StateReady:
+		if len(c.progresses) > 0 {
+			state = StateIndexing
+		}
+	case StateIndexing:
+		if len(c.progresses) == 0 {
+			state = StateReady
+		}
+	}
+	c.progressMu.Unlock()
+
+	prevState := c.GetServerState()
 	c.serverState.Store(state)
+	if prevState != state && c.onUpdate != nil {
+		c.onUpdate()
+	}
 }
 
 // GetName returns the name of the LSP client
@@ -326,9 +467,6 @@ func (c *Client) SetDiagnosticsCallback(callback func(name string, count int)) {
 
 // WaitForServerReady waits for the server to be ready
 func (c *Client) WaitForServerReady(ctx context.Context) error {
-	// Set initial state
-	c.SetServerState(StateStarting)
-
 	// Try to ping the server with a simple request
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -346,7 +484,7 @@ func (c *Client) WaitForServerReady(ctx context.Context) error {
 			return fmt.Errorf("timeout waiting for LSP server to be ready")
 		case <-ticker.C:
 			// Check if client is running
-			if !c.client.IsRunning() {
+			if !c.IsRunning() {
 				if c.debug {
 					slog.Debug("LSP server not ready yet", "server", c.name)
 				}
@@ -400,8 +538,13 @@ func (c *Client) OpenFile(ctx context.Context, filepath string) error {
 		return fmt.Errorf("error reading file: %w", err)
 	}
 
+	client := c.getClient()
+	if client == nil {
+		return fmt.Errorf("LSP client is unavailable")
+	}
+
 	// Notify the server about the opened document
-	if err = c.client.NotifyDidOpenTextDocument(ctx, uri, string(powernap.DetectLanguage(filepath)), 1, string(content)); err != nil {
+	if err = client.NotifyDidOpenTextDocument(ctx, uri, string(powernap.DetectLanguage(filepath)), 1, string(content)); err != nil {
 		return err
 	}
 
@@ -442,7 +585,12 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		},
 	}
 
-	return c.client.NotifyDidChangeTextDocument(ctx, uri, int(newVersion), changes)
+	client := c.getClient()
+	if client == nil {
+		return fmt.Errorf("LSP client is unavailable")
+	}
+
+	return client.NotifyDidChangeTextDocument(ctx, uri, int(newVersion), changes)
 }
 
 // IsFileOpen checks if a file is currently open.
@@ -454,11 +602,16 @@ func (c *Client) IsFileOpen(filepath string) bool {
 
 // CloseAllFiles closes all currently open files.
 func (c *Client) CloseAllFiles(ctx context.Context) {
+	client := c.getClient()
+	if client == nil {
+		return
+	}
+
 	for uri := range c.openFiles.Seq2() {
 		if c.debug {
 			slog.Debug("Closing file", "file", uri)
 		}
-		if err := c.client.NotifyDidCloseTextDocument(ctx, uri); err != nil {
+		if err := client.NotifyDidCloseTextDocument(ctx, uri); err != nil {
 			slog.Warn("Error closing file", "uri", uri, "error", err)
 			continue
 		}
@@ -533,12 +686,16 @@ func (c *Client) OpenFileOnDemand(ctx context.Context, filepath string) error {
 
 // RegisterNotificationHandler registers a notification handler.
 func (c *Client) RegisterNotificationHandler(method string, handler transport.NotificationHandler) {
-	c.client.RegisterNotificationHandler(method, handler)
+	if client := c.getClient(); client != nil {
+		client.RegisterNotificationHandler(method, handler)
+	}
 }
 
 // RegisterServerRequestHandler handles server requests.
 func (c *Client) RegisterServerRequestHandler(method string, handler transport.Handler) {
-	c.client.RegisterHandler(method, handler)
+	if client := c.getClient(); client != nil {
+		client.RegisterHandler(method, handler)
+	}
 }
 
 // openKeyConfigFiles opens important configuration files that help initialize the server.
@@ -590,9 +747,14 @@ func (c *Client) FindReferences(ctx context.Context, filepath string, line, char
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
 	// NOTE: line and character should be 0-based.
 	// See: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#position
-	return c.client.FindReferences(
+	return client.FindReferences(
 		ctx,
 		filepath,
 		line-1,
@@ -609,8 +771,13 @@ func (c *Client) Hover(ctx context.Context, filepath string, line, character int
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
 	uri := string(protocol.URIFromPath(filepath))
-	return c.client.RequestHover(ctx, uri, protocol.Position{
+	return client.RequestHover(ctx, uri, protocol.Position{
 		Line:      uint32(line - 1),
 		Character: uint32(character - 1),
 	})
@@ -634,7 +801,12 @@ func (c *Client) FindDefinition(ctx context.Context, filepath string, line, char
 		},
 	}
 
-	if caps := c.client.GetCapabilities(); caps.DefinitionProvider == nil {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if caps := client.GetCapabilities(); caps.DefinitionProvider == nil {
 		return nil, fmt.Errorf("definition requests are not supported by this LSP server")
 	}
 
@@ -663,7 +835,12 @@ func (c *Client) FindDeclaration(ctx context.Context, filepath string, line, cha
 		},
 	}
 
-	if caps := c.client.GetCapabilities(); caps.DeclarationProvider == nil {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if caps := client.GetCapabilities(); caps.DeclarationProvider == nil {
 		return nil, fmt.Errorf("declaration requests are not supported by this LSP server")
 	}
 
@@ -692,7 +869,12 @@ func (c *Client) FindImplementation(ctx context.Context, filepath string, line, 
 		},
 	}
 
-	if caps := c.client.GetCapabilities(); caps.ImplementationProvider == nil {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if caps := client.GetCapabilities(); caps.ImplementationProvider == nil {
 		return nil, fmt.Errorf("implementation requests are not supported by this LSP server")
 	}
 
@@ -721,7 +903,12 @@ func (c *Client) FindTypeDefinition(ctx context.Context, filepath string, line, 
 		},
 	}
 
-	if caps := c.client.GetCapabilities(); caps.TypeDefinitionProvider == nil {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if caps := client.GetCapabilities(); caps.TypeDefinitionProvider == nil {
 		return nil, fmt.Errorf("type definition requests are not supported by this LSP server")
 	}
 
@@ -744,7 +931,12 @@ func (c *Client) DocumentSymbols(ctx context.Context, filepath string) ([]protoc
 		TextDocument: protocol.TextDocumentIdentifier{URI: protocol.URIFromPath(filepath)},
 	}
 
-	if caps := c.client.GetCapabilities(); caps.DocumentSymbolProvider == nil {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if caps := client.GetCapabilities(); caps.DocumentSymbolProvider == nil {
 		return nil, fmt.Errorf("document symbol requests are not supported by this LSP server")
 	}
 
@@ -759,7 +951,12 @@ func (c *Client) WorkspaceSymbols(ctx context.Context, query string) ([]protocol
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if caps := c.client.GetCapabilities(); caps.WorkspaceSymbolProvider == nil {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if caps := client.GetCapabilities(); caps.WorkspaceSymbolProvider == nil {
 		return nil, fmt.Errorf("workspace symbol requests are not supported by this LSP server")
 	}
 
@@ -778,7 +975,12 @@ func (c *Client) CodeActions(ctx context.Context, filepath string, line, charact
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if !capabilityEnabled(c.client.GetCapabilities().CodeActionProvider) {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if !capabilityEnabled(client.GetCapabilities().CodeActionProvider) {
 		return nil, fmt.Errorf("code action requests are not supported by this LSP server")
 	}
 
@@ -807,7 +1009,12 @@ func (c *Client) Rename(ctx context.Context, filepath string, line, character in
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if !capabilityEnabled(c.client.GetCapabilities().RenameProvider) {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if !capabilityEnabled(client.GetCapabilities().RenameProvider) {
 		return nil, fmt.Errorf("rename requests are not supported by this LSP server")
 	}
 
@@ -835,7 +1042,12 @@ func (c *Client) FormatDocument(ctx context.Context, filepath string, options pr
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if !capabilityEnabled(c.client.GetCapabilities().DocumentFormattingProvider) {
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+
+	if !capabilityEnabled(client.GetCapabilities().DocumentFormattingProvider) {
 		return nil, fmt.Errorf("document formatting requests are not supported by this LSP server")
 	}
 
@@ -852,18 +1064,27 @@ func (c *Client) FormatDocument(ctx context.Context, filepath string, options pr
 }
 
 func (c *Client) ApplyWorkspaceEdit(edit protocol.WorkspaceEdit) error {
-	if c == nil || c.client == nil {
+	client := c.getClient()
+	if c == nil || client == nil {
 		return fmt.Errorf("LSP client is unavailable")
 	}
-	return util.ApplyWorkspaceEdit(edit, c.client.GetOffsetEncoding())
+	return util.ApplyWorkspaceEdit(edit, client.GetOffsetEncoding())
 }
 
 func (c *Client) call(ctx context.Context, method string, params any, result any) error {
 	conn := c.connection()
 	if conn == nil {
+		c.SetServerState(StateError)
 		return fmt.Errorf("LSP connection is unavailable")
 	}
-	return conn.Call(ctx, method, params, result)
+	err := conn.Call(ctx, method, params, result)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "closed") || strings.Contains(errStr, "EOF") || strings.Contains(errStr, "broken pipe") {
+			c.SetServerState(StateError)
+		}
+	}
+	return err
 }
 
 func (c *Client) connection() *transport.Connection {
@@ -898,6 +1119,20 @@ func locationResults(value any) []protocol.Location {
 		return []protocol.Location{v}
 	case []protocol.Location:
 		return append([]protocol.Location(nil), v...)
+	case protocol.LocationLink:
+		return []protocol.Location{{
+			URI:   v.TargetURI,
+			Range: v.TargetSelectionRange,
+		}}
+	case []protocol.LocationLink:
+		locs := make([]protocol.Location, 0, len(v))
+		for _, link := range v {
+			locs = append(locs, protocol.Location{
+				URI:   link.TargetURI,
+				Range: link.TargetSelectionRange,
+			})
+		}
+		return locs
 	case protocol.Or_Definition:
 		return locationResults(v.Value)
 	case protocol.Or_Declaration:

@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -98,4 +99,64 @@ func TestCodeActionResults(t *testing.T) {
 	require.Equal(t, "Run fix", actions[1].Title)
 	require.NotNil(t, actions[1].Command)
 	require.Equal(t, "fix.command", actions[1].Command.Command)
+}
+
+func TestProgressTracking(t *testing.T) {
+	t.Parallel()
+	client := &Client{
+		progresses: make(map[string]*ProgressInfo),
+	}
+
+	// 1. Check empty state
+	require.Equal(t, "", client.ProgressDescription())
+
+	// 2. Check default indexing text for empty info
+	client.progresses["token-1"] = &ProgressInfo{}
+	require.Equal(t, "indexing...", client.ProgressDescription())
+
+	// 3. Check formatted progress details
+	client.progresses["token-1"] = &ProgressInfo{
+		Title:      "Indexing",
+		Message:    "scanning files",
+		Percentage: 45.0,
+	}
+	require.Equal(t, "Indexing: 45% (scanning files)", client.ProgressDescription())
+
+	// 4. Check multiple active progresses
+	client.progresses["token-2"] = &ProgressInfo{
+		Title: "Loading",
+	}
+	desc := client.ProgressDescription()
+	require.Contains(t, desc, "Indexing: 45% (scanning files)")
+	require.Contains(t, desc, "Loading")
+}
+
+func TestSetServerStateFiresOnUpdate(t *testing.T) {
+	t.Parallel()
+	client := &Client{
+		progresses: make(map[string]*ProgressInfo),
+	}
+	updateCalled := false
+	client.onUpdate = func() {
+		updateCalled = true
+	}
+	client.SetServerState(StateReady)
+	require.Equal(t, StateReady, client.GetServerState())
+	require.True(t, updateCalled)
+}
+
+func TestParseToken(t *testing.T) {
+	t.Parallel()
+
+	// 1. String token inside raw json (e.g. "gopls-indexing")
+	token1 := json.RawMessage(`"gopls-indexing"`)
+	require.Equal(t, "gopls-indexing", parseToken(token1))
+
+	// 2. Number token inside raw json (e.g. 1)
+	token2 := json.RawMessage(`1`)
+	require.Equal(t, "1", parseToken(token2))
+
+	// 3. String token without quotes
+	token3 := json.RawMessage(`gopls-indexing`)
+	require.Equal(t, "gopls-indexing", parseToken(token3))
 }

@@ -1,9 +1,12 @@
 package lsp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/charmbracelet/crush/internal/lsp/util"
 	powernap "github.com/charmbracelet/x/powernap/pkg/lsp"
@@ -119,5 +122,129 @@ func HandleDiagnostics(client *Client, params json.RawMessage) {
 	// Trigger callback if set
 	if client.onDiagnosticsChanged != nil {
 		client.onDiagnosticsChanged(client.name, totalCount)
+	}
+}
+
+// parseToken converts the raw JSON message token to its formatted string representation safely.
+func parseToken(token json.RawMessage) string {
+	var tokenVal any
+	dec := json.NewDecoder(bytes.NewReader(token))
+	dec.UseNumber()
+	if err := dec.Decode(&tokenVal); err == nil {
+		switch v := tokenVal.(type) {
+		case json.Number:
+			return v.String()
+		default:
+			return fmt.Sprintf("%v", v)
+		}
+	}
+	return strings.Trim(string(token), `"`)
+}
+
+// HandleWorkDoneProgressCreate handles window/workDoneProgress/create
+// requests from the LSP server.
+func HandleWorkDoneProgressCreate(client *Client, _ context.Context, _ string, params json.RawMessage) (any, error) {
+	var p struct {
+		Token json.RawMessage `json:"token"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+
+	tokenStr := parseToken(p.Token)
+
+	client.progressMu.Lock()
+	if _, exists := client.progresses[tokenStr]; !exists {
+		client.progresses[tokenStr] = &ProgressInfo{}
+	}
+	client.progressMu.Unlock()
+
+	if client.onUpdate != nil {
+		client.onUpdate()
+	}
+
+	return nil, nil
+}
+
+type progressValue struct {
+	Kind       string  `json:"kind"` // "begin" | "report" | "end"
+	Title      string  `json:"title,omitempty"`
+	Message    string  `json:"message,omitempty"`
+	Percentage float64 `json:"percentage,omitempty"`
+}
+
+// HandleProgressNotification handles $/progress notifications from the LSP server.
+func HandleProgressNotification(client *Client, params json.RawMessage) {
+	var p struct {
+		Token json.RawMessage `json:"token"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return
+	}
+
+	var val progressValue
+	if err := json.Unmarshal(p.Value, &val); err != nil {
+		return
+	}
+
+	tokenStr := parseToken(p.Token)
+
+	client.progressMu.Lock()
+	progressUpdated := false
+
+	switch val.Kind {
+	case "begin":
+		if info, ok := client.progresses[tokenStr]; ok {
+			info.Title = val.Title
+			info.Message = val.Message
+			info.Percentage = val.Percentage
+		} else {
+			client.progresses[tokenStr] = &ProgressInfo{
+				Title:      val.Title,
+				Message:    val.Message,
+				Percentage: val.Percentage,
+			}
+		}
+		progressUpdated = true
+	case "report":
+		if info, ok := client.progresses[tokenStr]; ok {
+			if val.Title != "" && info.Title != val.Title {
+				info.Title = val.Title
+				progressUpdated = true
+			}
+			if val.Message != "" && info.Message != val.Message {
+				info.Message = val.Message
+				progressUpdated = true
+			}
+			if val.Percentage > 0 && info.Percentage != val.Percentage {
+				info.Percentage = val.Percentage
+				progressUpdated = true
+			}
+		}
+	case "end":
+		delete(client.progresses, tokenStr)
+		progressUpdated = true
+	}
+	client.progressMu.Unlock()
+
+	// Drive state transitions after releasing the lock. SetServerState
+	// re-checks progresses under its own lock, eliminating any TOCTOU gap
+	// between the decision and the actual state update.
+	currentState := client.GetServerState()
+	stateChanged := false
+	switch currentState {
+	case StateReady:
+		// Promote to StateIndexing if new progress tokens have appeared.
+		client.SetServerState(StateIndexing)
+		stateChanged = client.GetServerState() == StateIndexing
+	case StateIndexing:
+		// Demote to StateReady if all progress tokens have been removed.
+		client.SetServerState(StateReady)
+		stateChanged = client.GetServerState() == StateReady
+	}
+
+	if progressUpdated && !stateChanged && client.onUpdate != nil {
+		client.onUpdate()
 	}
 }

@@ -205,3 +205,5 @@ require (
 )
 
 replace charm.land/fantasy => ./fantasy
+
+replace github.com/charmbracelet/x/powernap => github.com/meimingqi222/x/powernap v0.0.0-20260523151954-1520a5cc376c

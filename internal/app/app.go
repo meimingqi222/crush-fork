@@ -341,6 +341,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		client.SetDiagnosticsCallback(updateLSPDiagnostics)
 		updateLSPState(name, client.GetServerState(), nil, client, 0)
 	})
+	app.LSPManager.StartHealthCheck(ctx)
 	go app.LSPManager.TrackConfigured()
 
 	cleanupPluginRuntimeOnError = false

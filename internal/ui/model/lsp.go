@@ -17,7 +17,8 @@ import (
 // LSPInfo wraps LSP client information with diagnostic counts by severity.
 type LSPInfo struct {
 	app.LSPClientInfo
-	Diagnostics map[protocol.DiagnosticSeverity]int
+	Diagnostics  map[protocol.DiagnosticSeverity]int
+	ProgressDesc string
 }
 
 // lspInfo renders the LSP status section showing active LSP clients and their
@@ -32,15 +33,22 @@ func (m *UI) lspInfo(width, maxItems int, isSection bool) string {
 	var lsps []LSPInfo
 	for _, state := range states {
 		lspErrs := map[protocol.DiagnosticSeverity]int{}
+		var progressDesc string
 		if client, ok := m.com.App.LSPManager.Clients().Get(state.Name); ok {
 			counts := client.GetDiagnosticCounts()
 			lspErrs[protocol.SeverityError] = counts.Error
 			lspErrs[protocol.SeverityWarning] = counts.Warning
 			lspErrs[protocol.SeverityHint] = counts.Hint
 			lspErrs[protocol.SeverityInformation] = counts.Information
+			progressDesc = client.ProgressDescription()
+			state.State = client.GetServerState()
 		}
 
-		lsps = append(lsps, LSPInfo{LSPClientInfo: state, Diagnostics: lspErrs})
+		lsps = append(lsps, LSPInfo{
+			LSPClientInfo: state,
+			Diagnostics:   lspErrs,
+			ProgressDesc:  progressDesc,
+		})
 	}
 
 	title := t.ResourceGroupTitle.Render("LSPs")
@@ -95,6 +103,12 @@ func lspList(t *styles.Styles, lsps []LSPInfo, width, maxItems int) string {
 		case lsp.StateStarting:
 			icon = t.ResourceBusyIcon.String()
 			description = t.ResourceStatus.Render("starting...")
+		case lsp.StateIndexing:
+			icon = t.ResourceBusyIcon.String()
+			description = t.ResourceStatus.Render("indexing...")
+			if l.ProgressDesc != "" {
+				description = t.ResourceStatus.Render(l.ProgressDesc)
+			}
 		case lsp.StateReady:
 			icon = t.ResourceOnlineIcon.String()
 			diagnostics = lspDiagnostics(t, l.Diagnostics)
