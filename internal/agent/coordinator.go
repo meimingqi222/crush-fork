@@ -60,6 +60,8 @@ import (
 )
 
 // Coordinator errors.
+var anthropicEnvMu sync.Mutex
+
 var (
 	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
 	errModelProviderNotConfigured      = errors.New("model provider not configured")
@@ -1540,23 +1542,26 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		return Model{}, Model{}, errSmallModelProviderNotConfigured
 	}
 
-	var largeCatwalkModel *catwalk.Model
-	var smallCatwalkModel *catwalk.Model
-
+	var largeCatwalkModel catwalk.Model
+	var largeFound bool
 	for i := range largeProviderCfg.Models {
 		if largeProviderCfg.Models[i].ID == largeModelCfg.Model {
-			largeCatwalkModel = &largeProviderCfg.Models[i]
+			largeCatwalkModel = largeProviderCfg.Models[i]
+			largeFound = true
 			break
 		}
 	}
+	var smallCatwalkModel catwalk.Model
+	var smallFound bool
 	for i := range smallProviderCfg.Models {
 		if smallProviderCfg.Models[i].ID == smallModelCfg.Model {
-			smallCatwalkModel = &smallProviderCfg.Models[i]
+			smallCatwalkModel = smallProviderCfg.Models[i]
+			smallFound = true
 			break
 		}
 	}
 
-	if largeCatwalkModel == nil {
+	if !largeFound {
 		return Model{}, Model{}, errLargeModelNotFound
 	}
 
@@ -1564,13 +1569,14 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		largeCatwalkModel.ContextWindow = largeModelCfg.ContextWindow
 	}
 	if largeModelCfg.MaxPromptTokens > 0 {
+		largeCatwalkModel.Options.ProviderOptions = maps.Clone(largeCatwalkModel.Options.ProviderOptions)
 		if largeCatwalkModel.Options.ProviderOptions == nil {
 			largeCatwalkModel.Options.ProviderOptions = map[string]any{}
 		}
 		largeCatwalkModel.Options.ProviderOptions["max_prompt_tokens"] = largeModelCfg.MaxPromptTokens
 	}
 
-	if smallCatwalkModel == nil {
+	if !smallFound {
 		return Model{}, Model{}, errSmallModelNotFound
 	}
 
@@ -1578,6 +1584,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		smallCatwalkModel.ContextWindow = smallModelCfg.ContextWindow
 	}
 	if smallModelCfg.MaxPromptTokens > 0 {
+		smallCatwalkModel.Options.ProviderOptions = maps.Clone(smallCatwalkModel.Options.ProviderOptions)
 		if smallCatwalkModel.Options.ProviderOptions == nil {
 			smallCatwalkModel.Options.ProviderOptions = map[string]any{}
 		}
@@ -1585,13 +1592,13 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	}
 
 	largeThinkingDisabled := largeModelCfg.Think != nil && !*largeModelCfg.Think
-	largeProvider, err := c.buildProvider(largeProviderCfg, *largeCatwalkModel, isSubAgent, largeThinkingDisabled)
+	largeProvider, err := c.buildProvider(largeProviderCfg, largeCatwalkModel, isSubAgent, largeThinkingDisabled)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
 
 	smallThinkingDisabled := smallModelCfg.Think != nil && !*smallModelCfg.Think
-	smallProvider, err := c.buildProvider(smallProviderCfg, *smallCatwalkModel, true, smallThinkingDisabled)
+	smallProvider, err := c.buildProvider(smallProviderCfg, smallCatwalkModel, true, smallThinkingDisabled)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
@@ -1618,17 +1625,20 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 
 	return Model{
 			Model:      largeModel,
-			CatwalkCfg: *largeCatwalkModel,
+			CatwalkCfg: largeCatwalkModel,
 			ModelCfg:   largeModelCfg,
 		}, Model{
 			Model:      smallModel,
-			CatwalkCfg: *smallCatwalkModel,
+			CatwalkCfg: smallCatwalkModel,
 			ModelCfg:   smallModelCfg,
 		}, nil
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, useCopilotClient, isSubAgent bool) (fantasy.Provider, error) {
 	var opts []anthropic.Option
+
+	anthropicEnvMu.Lock()
+	oldKey, hasOldKey := os.LookupEnv("ANTHROPIC_API_KEY")
 
 	switch {
 	case strings.HasPrefix(apiKey, "Bearer "):
@@ -1669,7 +1679,15 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	wrapped := httpext.WrapAnthropicDisableThinkingHTTPClient(httpClient)
 	opts = append(opts, anthropic.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(wrapped)))
 
-	return anthropic.New(opts...)
+	provider, err := anthropic.New(opts...)
+	if hasOldKey {
+		os.Setenv("ANTHROPIC_API_KEY", oldKey)
+	} else {
+		os.Unsetenv("ANTHROPIC_API_KEY")
+	}
+	anthropicEnvMu.Unlock()
+
+	return provider, err
 }
 
 func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, copilotService, useCopilotClient, isSubAgent, responsesWebSocket bool) (fantasy.Provider, error) {
@@ -1913,9 +1931,15 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 		}
 	}
 
-	apiKey, _ := c.cfg.Resolve(providerCfg.APIKey)
+	apiKey, err := c.cfg.Resolve(providerCfg.APIKey)
+	if err != nil {
+		slog.Warn("Failed to resolve API key template", "provider", providerCfg.ID, "error", err)
+	}
 	apiKey = config.DecryptAPIKeyIfNeeded(apiKey)
-	baseURL, _ := c.cfg.Resolve(providerCfg.BaseURL)
+	baseURL, err := c.cfg.Resolve(providerCfg.BaseURL)
+	if err != nil {
+		slog.Warn("Failed to resolve Base URL template", "provider", providerCfg.ID, "error", err)
+	}
 
 	switch providerCfg.Type {
 	case openai.Name:

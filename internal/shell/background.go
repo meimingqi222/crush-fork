@@ -103,7 +103,8 @@ func (m *BackgroundShellManager) StartWithMetadata(ctx context.Context, workingD
 		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
 	}
 
-	id := fmt.Sprintf("%03X", idCounter.Add(1))
+	val := idCounter.Add(1) % 4096
+	id := fmt.Sprintf("%03X", val)
 
 	shell := NewShell(&Options{
 		WorkingDir: workingDir,

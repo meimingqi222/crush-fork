@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -172,4 +174,109 @@ func FormatJSON(content string) (string, error) {
 	}
 
 	return buf.String(), nil
+}
+
+// isPrivateIP checks if an IP address is a private, loopback, or link-local address.
+func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	// Check IPv4
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10.0.0.0/8
+		if ip4[0] == 10 {
+			return true
+		}
+		// 172.16.0.0/12
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		// 192.168.0.0/16
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+		// 127.0.0.0/8 (Loopback)
+		if ip4[0] == 127 {
+			return true
+		}
+		// 169.254.0.0/16 (Link-local / Cloud metadata)
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+		// 0.0.0.0/8
+		if ip4[0] == 0 {
+			return true
+		}
+		return false
+	}
+	// Check IPv6
+	if ip16 := ip.To16(); ip16 != nil {
+		// ::1/128 (Loopback)
+		if ip.IsLoopback() {
+			return true
+		}
+		// fc00::/7 (Unique Local)
+		if (ip16[0] & 0xfe) == 0xfc {
+			return true
+		}
+		// fe80::/10 (Link-local)
+		if ip16[0] == 0xfe && (ip16[1]&0xc0) == 0x80 {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+// NewSafeDialContext returns a dial function that blocks private and loopback IP addresses to prevent SSRF.
+func NewSafeDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   15 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			if isPrivateIP(ip) {
+				return nil, fmt.Errorf("SSRF prevention: connection to private/loopback IP address %s is blocked", ip)
+			}
+		}
+		// Dial the IP directly to avoid DNS rebinding between check and connect
+		var firstErr error
+		for _, ip := range ips {
+			targetAddr := net.JoinHostPort(ip.String(), port)
+			conn, err := dialer.DialContext(ctx, network, targetAddr)
+			if err == nil {
+				return conn, nil
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("failed to connect to %s", addr)
+	}
+}
+
+// NewSafeHTTPClient returns an http.Client equipped with SSRF prevention dialer.
+func NewSafeHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 10
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.DialContext = NewSafeDialContext()
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
 }

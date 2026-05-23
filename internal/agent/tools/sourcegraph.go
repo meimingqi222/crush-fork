@@ -118,9 +118,13 @@ func NewSourcegraphTool(client *http.Client) fantasy.AgentTool {
 
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Request failed with status code: %d", resp.StatusCode)), nil
 			}
-			body, err := io.ReadAll(resp.Body)
+			maxSize := int64(10 * 1024 * 1024) // 10MB limit
+			body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize))
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to read response body: %w", err)
+			}
+			if int64(len(body)) >= maxSize {
+				return fantasy.NewTextErrorResponse("Sourcegraph API response exceeded size limit of 10MB"), nil
 			}
 
 			var result map[string]any

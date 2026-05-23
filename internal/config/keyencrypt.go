@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/denisbrodbeck/machineid"
@@ -26,13 +27,29 @@ var (
 )
 
 // deriveEncryptionKey derives a 32-byte AES-256 key using PBKDF2 with the
-// machine ID as the password. Falls back to hostname+USER if machineid fails.
+// machine ID as the password. Falls back to a persistent random key file if machineid fails.
 func deriveEncryptionKey() ([]byte, error) {
 	password, err := machineid.ID()
 	salt := encryptSalt
 	if err != nil || password == "" {
-		hostname, _ := os.Hostname()
-		password = hostname + os.Getenv("USER")
+		configDir := filepath.Dir(GlobalConfig())
+		keyFilePath := filepath.Join(configDir, ".key")
+		var keyData []byte
+		keyData, err = os.ReadFile(keyFilePath)
+		if err != nil {
+			_ = os.MkdirAll(configDir, 0o700)
+			randomBytes := make([]byte, 32)
+			if _, randErr := rand.Read(randomBytes); randErr == nil {
+				keyData = []byte(base64.URLEncoding.EncodeToString(randomBytes))
+				_ = os.WriteFile(keyFilePath, keyData, 0o600)
+			}
+		}
+		if len(keyData) > 0 {
+			password = string(keyData)
+		} else {
+			hostname, _ := os.Hostname()
+			password = hostname + os.Getenv("USER")
+		}
 		salt = encryptSaltFallback
 	}
 	key := pbkdf2.Key([]byte(password), salt, 100000, 32, sha256.New)

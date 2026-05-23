@@ -561,5 +561,9 @@ func countLines(s string) int {
 	if s == "" {
 		return 0
 	}
-	return len(strings.Split(s, "\n"))
+	count := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		count++
+	}
+	return count
 }

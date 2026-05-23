@@ -116,15 +116,7 @@ func NewReadTool(
 	skillsPaths ...string,
 ) fantasy.AgentTool {
 	if httpClient == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.MaxIdleConns = 100
-		transport.MaxIdleConnsPerHost = 10
-		transport.IdleConnTimeout = 90 * time.Second
-
-		httpClient = &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-		}
+		httpClient = NewSafeHTTPClient(30 * time.Second)
 	}
 
 	return fantasy.NewParallelAgentTool(
@@ -246,7 +238,7 @@ func handleURLRead(
 			content = markdown
 		}
 
-		content = "```\n" + content + "\n```"
+		content = wrapInMarkdownCodeBlock(content)
 
 	case "html":
 		// return only the body of the HTML document
@@ -267,7 +259,11 @@ func handleURLRead(
 	}
 	// Truncate content if it exceeds max URL read size.
 	if int64(len(content)) > MaxURLReadSize {
-		content = content[:MaxURLReadSize]
+		i := MaxURLReadSize
+		for i > 0 && (content[i]&0xC0) == 0x80 {
+			i--
+		}
+		content = content[:i]
 		content += fmt.Sprintf("\n\n[Content truncated to %d bytes]", MaxURLReadSize)
 	}
 
@@ -955,12 +951,16 @@ func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolL
 	}
 	tree := createFileTree(files, searchPath)
 
-	var output string
+	var outputParts []string
 	if truncated {
-		output = fmt.Sprintf("There are more than %d files in the directory. Use a more specific path or use the Glob tool to find specific files. The first %[1]d files and directories are included below.\n", maxFiles)
+		outputParts = append(outputParts, fmt.Sprintf("There are more than %d files in the directory. Use a more specific path or use the Glob tool to find specific files. The first %[1]d files and directories are included below.", maxFiles))
 	}
 	if depth > 0 {
-		output = fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.\n", cmp.Or(params.Depth, depth))
+		outputParts = append(outputParts, fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.", cmp.Or(params.Depth, depth)))
+	}
+	var output string
+	if len(outputParts) > 0 {
+		output = strings.Join(outputParts, "\n") + "\n"
 	}
 	return output + "\n" + printTree(tree, searchPath), metadata, nil
 }
@@ -1034,7 +1034,7 @@ func printTree(tree []*TreeNode, rootPath string) string {
 
 	result.WriteString("- ")
 	result.WriteString(filepath.ToSlash(rootPath))
-	if rootPath[len(rootPath)-1] != '/' {
+	if rootPath != "" && rootPath[len(rootPath)-1] != '/' {
 		result.WriteByte('/')
 	}
 	result.WriteByte('\n')
@@ -1061,4 +1061,22 @@ func printNode(builder *strings.Builder, node *TreeNode, level int) {
 			printNode(builder, child, level+1)
 		}
 	}
+}
+
+func wrapInMarkdownCodeBlock(content string) string {
+	maxTicks := 0
+	currentTicks := 0
+	for _, r := range content {
+		if r == '`' {
+			currentTicks++
+			if currentTicks > maxTicks {
+				maxTicks = currentTicks
+			}
+		} else {
+			currentTicks = 0
+		}
+	}
+	numTicks := max(3, maxTicks+1)
+	ticks := strings.Repeat("`", numTicks)
+	return ticks + "\n" + content + "\n" + ticks
 }
