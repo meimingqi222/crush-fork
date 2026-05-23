@@ -228,23 +228,12 @@ func HandleProgressNotification(client *Client, params json.RawMessage) {
 	}
 	client.progressMu.Unlock()
 
-	// Drive state transitions after releasing the lock. SetServerState
-	// re-checks progresses under its own lock, eliminating any TOCTOU gap
-	// between the decision and the actual state update.
-	currentState := client.GetServerState()
-	stateChanged := false
-	switch currentState {
-	case StateReady:
-		// Promote to StateIndexing if new progress tokens have appeared.
-		client.SetServerState(StateIndexing)
-		stateChanged = client.GetServerState() == StateIndexing
-	case StateIndexing:
-		// Demote to StateReady if all progress tokens have been removed.
-		client.SetServerState(StateReady)
-		stateChanged = client.GetServerState() == StateReady
-	}
-
-	if progressUpdated && !stateChanged && client.onUpdate != nil {
-		client.onUpdate()
+	// Re-evaluate state after releasing the lock. SetServerState checks the
+	// current progress token count under its own lock and auto-adjusts between
+	// StateReady and StateIndexing, so a single call is sufficient regardless
+	// of the notification kind.
+	if progressUpdated {
+		prevState := client.GetServerState()
+		client.SetServerState(prevState)
 	}
 }
