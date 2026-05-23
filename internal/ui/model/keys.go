@@ -4,16 +4,17 @@ import "charm.land/bubbles/v2/key"
 
 type KeyMap struct {
 	Editor struct {
-		AddFile            key.Binding
-		SendMessage        key.Binding
-		OpenEditor         key.Binding
-		Newline            key.Binding
-		CycleExecutionMode key.Binding
-		AddImage           key.Binding
-		PasteImage         key.Binding
-		MentionFile        key.Binding
-		Commands           key.Binding
-		PromptEnhance      key.Binding
+		AddFile                key.Binding
+		SendMessage            key.Binding
+		OpenEditor             key.Binding
+		Newline                key.Binding
+		CycleExecutionMode     key.Binding
+		CycleCollaborationMode key.Binding
+		AddImage               key.Binding
+		PasteImage             key.Binding
+		MentionFile            key.Binding
+		Commands               key.Binding
+		PromptEnhance          key.Binding
 
 		// Attachments key maps
 		AttachmentDeleteMode key.Binding
@@ -143,6 +144,10 @@ func DefaultKeyMap() KeyMap {
 	km.Editor.CycleExecutionMode = key.NewBinding(
 		key.WithKeys("shift+tab"),
 		key.WithHelp("shift+tab", "cycle ask/auto/yolo"),
+	)
+	km.Editor.CycleCollaborationMode = key.NewBinding(
+		key.WithKeys("alt+o"),
+		key.WithHelp("alt+o", "cycle standard/plan/orchestrate"),
 	)
 	km.Editor.AddImage = key.NewBinding(
 		key.WithKeys("ctrl+f"),

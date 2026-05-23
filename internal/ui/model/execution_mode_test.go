@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/stretchr/testify/require"
 )
@@ -80,6 +81,45 @@ func TestSetExecutionModeAutoExitCreatesReminder(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, exitCount)
+}
+
+func TestCycleCollaborationModeCyclesStandardPlanOrchestrate(t *testing.T) {
+	ui := testExecutionModeUI(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
+
+	sess, err := ui.com.App.Sessions.Create(context.Background(), "collaboration-cycle")
+	require.NoError(t, err)
+	ui.session = &sess
+	require.Equal(t, session.CollaborationModeDefault, ui.session.CollaborationMode)
+
+	cmd := ui.cycleCollaborationMode()
+	require.NotNil(t, cmd)
+	result := cmd()
+	msg, ok := result.(planModeChangedMsg)
+	require.True(t, ok)
+	require.Equal(t, "Plan Mode enabled", msg.Status)
+	require.Equal(t, session.CollaborationModePlan, msg.Mode)
+	ui.Update(msg)
+	require.Equal(t, session.CollaborationModePlan, ui.session.CollaborationMode)
+
+	cmd = ui.cycleCollaborationMode()
+	require.NotNil(t, cmd)
+	result = cmd()
+	msg, ok = result.(planModeChangedMsg)
+	require.True(t, ok)
+	require.Equal(t, "Orchestrate Mode enabled", msg.Status)
+	require.Equal(t, session.CollaborationModeOrchestrate, msg.Mode)
+	ui.Update(msg)
+	require.Equal(t, session.CollaborationModeOrchestrate, ui.session.CollaborationMode)
+
+	cmd = ui.cycleCollaborationMode()
+	require.NotNil(t, cmd)
+	result = cmd()
+	msg, ok = result.(planModeChangedMsg)
+	require.True(t, ok)
+	require.Equal(t, "Orchestrate Mode disabled", msg.Status)
+	require.Equal(t, session.CollaborationModeDefault, msg.Mode)
+	ui.Update(msg)
+	require.Equal(t, session.CollaborationModeDefault, ui.session.CollaborationMode)
 }
 
 func testExecutionModeUI(t *testing.T, configContent string) *UI {

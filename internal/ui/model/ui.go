@@ -157,6 +157,7 @@ type (
 	planModeChangedMsg struct {
 		SessionID string
 		Status    string
+		Mode      session.CollaborationMode
 	}
 
 	// closeDialogMsg is sent to close the current dialog.
@@ -670,7 +671,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case planModeChangedMsg:
 		cmds = append(cmds, util.ReportInfo(msg.Status))
-		if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
+		if m.session != nil && m.session.ID == msg.SessionID && msg.Mode != "" {
+			m.session.CollaborationMode = msg.Mode
+			m.refreshEditorPlaceholder()
+		} else if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
 			cmds = append(cmds, m.loadSession(msg.SessionID))
 		}
 
@@ -2116,7 +2120,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			if msg.NextMode == session.CollaborationModePlan {
 				status = "Plan Mode enabled"
 			}
-			return planModeChangedMsg{SessionID: sessionID, Status: status}
+			return planModeChangedMsg{SessionID: sessionID, Status: status, Mode: msg.NextMode}
 		})
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleOrchestrateMode:
@@ -2145,7 +2149,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			if msg.NextMode == session.CollaborationModeOrchestrate {
 				status = "Orchestrate Mode enabled"
 			}
-			return planModeChangedMsg{SessionID: sessionID, Status: status}
+			return planModeChangedMsg{SessionID: sessionID, Status: status, Mode: msg.NextMode}
 		})
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleAutoMode:
@@ -2794,6 +2798,11 @@ func (m *UI) refreshEditorPlaceholder() {
 		m.textarea.Placeholder = "Plan Mode: explore, clarify, and propose a plan"
 		return
 	}
+	if m.session != nil && m.session.CollaborationMode == session.CollaborationModeOrchestrate {
+		m.textarea.Placeholder = "Orchestrate Mode: coordinating multi-agent tasks"
+		return
+	}
+
 	switch m.currentExecutionMode() {
 	case executionModeAuto:
 		m.textarea.Placeholder = "Auto Mode: work autonomously with guarded approvals"
@@ -2812,6 +2821,53 @@ func (m *UI) cycleExecutionMode() tea.Cmd {
 		return util.ReportWarn("Exit Plan Mode before cycling Ask/Auto/Yolo.")
 	}
 	return m.setExecutionMode(nextExecutionMode(m.currentExecutionMode()))
+}
+
+func (m *UI) cycleCollaborationMode() tea.Cmd {
+	if m.isAgentBusy() {
+		return util.ReportWarn("Agent is busy, please wait before changing collaboration mode...")
+	}
+	if m.com == nil || m.com.App == nil {
+		return nil
+	}
+
+	currentMode := session.CollaborationModeDefault
+	if m.session != nil {
+		currentMode = m.session.CollaborationMode
+	}
+
+	nextMode := session.CollaborationModePlan
+	status := "Plan Mode enabled"
+	switch currentMode {
+	case session.CollaborationModePlan:
+		nextMode = session.CollaborationModeOrchestrate
+		status = "Orchestrate Mode enabled"
+	case session.CollaborationModeOrchestrate:
+		nextMode = session.CollaborationModeDefault
+		status = "Orchestrate Mode disabled"
+	}
+
+	return func() tea.Msg {
+		ctx := context.Background()
+		sessionID := ""
+		if m.session != nil {
+			sessionID = m.session.ID
+		}
+		if sessionID == "" {
+			if nextMode == session.CollaborationModeDefault {
+				return util.ReportError(errors.New("cannot exit collaboration mode without an active session"))()
+			}
+			newSession, err := m.com.App.Sessions.Create(ctx, "New Session")
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			sessionID = newSession.ID
+		}
+		if _, err := m.com.App.Sessions.UpdateCollaborationMode(ctx, sessionID, nextMode); err != nil {
+			return util.ReportError(err)()
+		}
+		return planModeChangedMsg{SessionID: sessionID, Status: status, Mode: nextMode}
+	}
 }
 
 func (m *UI) setExecutionMode(mode executionMode) tea.Cmd {
@@ -3112,6 +3168,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, m.openEditor(m.textarea.Value()))
 			case key.Matches(msg, m.keyMap.Editor.CycleExecutionMode):
 				if cmd := m.cycleExecutionMode(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			case key.Matches(msg, m.keyMap.Editor.CycleCollaborationMode):
+				if cmd := m.cycleCollaborationMode(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Editor.PromptEnhance):
@@ -3544,6 +3604,7 @@ func (m *UI) ShortHelp() []key.Binding {
 		case uiFocusEditor:
 			binds = append(binds,
 				k.Editor.CycleExecutionMode,
+				k.Editor.CycleCollaborationMode,
 				k.Editor.PromptEnhance,
 			)
 		case uiFocusMain:
@@ -3624,6 +3685,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			binds = append(binds,
 				[]key.Binding{
 					k.Editor.CycleExecutionMode,
+					k.Editor.CycleCollaborationMode,
 					k.Editor.PromptEnhance,
 					k.Editor.Newline,
 					k.Editor.AddImage,
@@ -4432,7 +4494,7 @@ func (m *UI) executeApprovedPlan(sessionID, plan string) tea.Cmd {
 			if m.session != nil && m.session.ID == sessionID {
 				m.session.CollaborationMode = session.CollaborationModeDefault
 			}
-			return planModeChangedMsg{SessionID: sessionID, Status: "Plan approved. Starting implementation."}
+			return planModeChangedMsg{SessionID: sessionID, Status: "Plan approved. Starting implementation.", Mode: session.CollaborationModeDefault}
 		},
 		m.runAgentMessage(planmode.BuildExecutionPrompt(plan)),
 	)

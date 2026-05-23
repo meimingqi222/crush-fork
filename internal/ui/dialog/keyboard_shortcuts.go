@@ -141,6 +141,7 @@ func (k *KeyboardShortcuts) getShortcutCategories() []ShortcutCategory {
 				{"enter", "发送消息"},
 				{"ctrl+j / shift+enter", "换行"},
 				{"ctrl+o", "打开外部编辑器"},
+				{"alt+o", "切换 standard/plan/orchestrate"},
 				{"@", "提及文件"},
 				{"/", "搜索命令"},
 				{"ctrl+f", "添加图片"},

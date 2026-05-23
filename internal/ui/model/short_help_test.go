@@ -26,6 +26,7 @@ func TestShortHelpEditorShowsOnlyPrimaryBindings(t *testing.T) {
 	require.Contains(t, got, "tab focus chat")
 	require.Contains(t, got, "ctrl+/ commands")
 	require.Contains(t, got, "shift+tab cycle ask/auto/yolo")
+	require.Contains(t, got, "alt+o cycle standard/plan/orchestrate")
 	require.Contains(t, got, "ctrl+p enhance prompt")
 	require.Contains(t, got, "ctrl+c quit")
 	require.Contains(t, got, "ctrl+g more shortcuts")
