@@ -400,22 +400,31 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, nil
 	}
 
+	// Add the session to the context and mark as busy immediately to prevent concurrent re-entry.
+	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
+	ctx = context.WithValue(ctx, tools.SessionServiceContextKey, a.sessions)
+
+	genCtx, cancel := context.WithCancel(ctx)
+	a.activeRequests.Set(call.SessionID, cancel)
+	defer a.activeRequests.Del(call.SessionID)
+	defer cancel()
+
 	if a.hookManager != nil {
-		a.hookManager.RunSessionStart(ctx, call.SessionID)
-		defer a.hookManager.RunSessionEnd(ctx, call.SessionID)
+		a.hookManager.RunSessionStart(genCtx, call.SessionID)
+		defer a.hookManager.RunSessionEnd(genCtx, call.SessionID)
 	}
 
 	if a.hookManager != nil && call.Prompt != "" {
-		a.hookManager.RunUserPromptSubmit(ctx, call.SessionID, call.Prompt)
+		a.hookManager.RunUserPromptSubmit(genCtx, call.SessionID, call.Prompt)
 	}
 
 	if a.checkpoint != nil && !a.isSubAgent {
-		if _, cpErr := a.checkpoint.CreateCheckpoint(ctx, call.SessionID, ""); cpErr != nil {
+		if _, cpErr := a.checkpoint.CreateCheckpoint(genCtx, call.SessionID, ""); cpErr != nil {
 			slog.Warn("Failed to create checkpoint", "error", cpErr, "session_id", call.SessionID)
 		}
 	}
 
-	runtimeConfig, err := a.refreshCallConfigIfNeeded(ctx, &call)
+	runtimeConfig, err := a.refreshCallConfigIfNeeded(genCtx, &call)
 	if err != nil {
 		return nil, err
 	}
@@ -484,12 +493,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	var preflightSummarized bool
 	sessionLock := sync.Mutex{}
-	currentSession, err := a.sessions.Get(ctx, call.SessionID)
+	currentSession, err := a.sessions.Get(genCtx, call.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	msgs, err := a.getSessionMessages(ctx, currentSession)
+	msgs, err := a.getSessionMessages(genCtx, currentSession)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
@@ -505,7 +514,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 	slog.Debug("[PERF] sessionAgent: restored session context", "duration", time.Since(start), "session_id", call.SessionID)
 
-	preflightState, err := a.buildChatRequestState(ctx, chatRequestStateInput{
+	preflightState, err := a.buildChatRequestState(genCtx, chatRequestStateInput{
 		SessionID:      call.SessionID,
 		Agent:          "session",
 		Model:          largeModel,
@@ -549,18 +558,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			"trigger", trigger,
 		)
 		if trigger != sessionCompactionTriggerNone {
-			if truncErr := a.truncateOversizedToolResults(ctx, call.SessionID); truncErr != nil {
+			if truncErr := a.truncateOversizedToolResults(genCtx, call.SessionID); truncErr != nil {
 				slog.Warn("Failed to truncate oversized tool results before preflight summarization", "error", truncErr, "session_id", call.SessionID)
 			}
-			if summarizeErr := a.Summarize(withSessionCompactingPurpose(copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent), trigger.Purpose()), call.SessionID, call.ProviderOptions); summarizeErr != nil {
+			summarizeCtx := context.WithValue(genCtx, internalCompactionKey{}, true)
+			summarizeErr := a.Summarize(withSessionCompactingPurpose(copilot.ContextWithInitiatorType(summarizeCtx, copilot.InitiatorAgent), trigger.Purpose()), call.SessionID, call.ProviderOptions)
+			if summarizeErr != nil {
 				return nil, summarizeErr
 			}
 			preflightSummarized = true
-			currentSession, err = a.sessions.Get(ctx, call.SessionID)
+			currentSession, err = a.sessions.Get(genCtx, call.SessionID)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload session after summarization: %w", err)
 			}
-			msgs, err = a.getSessionMessages(ctx, currentSession)
+			msgs, err = a.getSessionMessages(genCtx, currentSession)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload session messages after summarization: %w", err)
 			}
@@ -573,7 +584,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if !call.NonInteractive && shouldGenerateSessionTitle(currentSession.Title) {
 		titlePrompt := titlePromptFromCallOrHistory(call.Prompt, msgs)
 		if titlePrompt != "" {
-			titleCtx := copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent)
+			titleCtx := copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent)
 			wg.Go(func() {
 				a.generateTitle(titleCtx, call.SessionID, titlePrompt, &sessionLock)
 			})
@@ -587,22 +598,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		userMessage = *call.UserMessage
 	} else {
 		var err error
-		userMessage, err = a.createUserMessage(ctx, call)
+		userMessage, err = a.createUserMessage(genCtx, call)
 		if err != nil {
 			return nil, err
 		}
 	}
 	slog.Debug("[PERF] sessionAgent: user message created (animation starts here)", "duration", time.Since(start), "session_id", call.SessionID)
-
-	// Add the session to the context.
-	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
-	ctx = context.WithValue(ctx, tools.SessionServiceContextKey, a.sessions)
-
-	genCtx, cancel := context.WithCancel(ctx)
-	a.activeRequests.Set(call.SessionID, cancel)
-
-	defer cancel()
-	defer a.activeRequests.Del(call.SessionID)
 
 	requestState, err := a.buildChatRequestState(genCtx, chatRequestStateInput{
 		SessionID:      call.SessionID,
@@ -2389,8 +2390,15 @@ func estimateSingleMessageTokens(msg fantasy.Message) int64 {
 	return estimateMessageContentTokens(msg.Content)
 }
 
+type internalCompactionKey struct{}
+
+func isInternalCompaction(ctx context.Context) bool {
+	v, _ := ctx.Value(internalCompactionKey{}).(bool)
+	return v
+}
+
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions) error {
-	if a.IsSessionBusy(sessionID) {
+	if !isInternalCompaction(ctx) && a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
 	if a.refreshCallConfig != nil {
@@ -2530,8 +2538,10 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	genCtx, cancel := context.WithCancel(ctx)
 	genCtx = copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent)
-	a.activeRequests.Set(sessionID, cancel)
-	defer a.activeRequests.Del(sessionID)
+	if !isInternalCompaction(ctx) {
+		a.activeRequests.Set(sessionID, cancel)
+		defer a.activeRequests.Del(sessionID)
+	}
 	defer cancel()
 
 	agent := a.agentFactory(retryableStreamModel{summaryModel.Model},

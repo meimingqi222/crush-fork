@@ -260,11 +260,6 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		}
 	}
 
-	// Show animation if still running.
-	if opts.IsSpinning && !opts.HasResult() && !opts.IsCanceled() {
-		parts = append(parts, "", opts.Anim.Render())
-	}
-
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	// Add body content when completed.
@@ -461,11 +456,6 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 		if status := renderChildSessionStatus(sty, remainingWidth, r.fetch.childStatusText, r.fetch.childStatusIsError); status != "" {
 			parts = append(parts, "", status)
 		}
-	}
-
-	// Show animation if still running.
-	if opts.IsSpinning && !opts.HasResult() && !opts.IsCanceled() {
-		parts = append(parts, "", opts.Anim.Render())
 	}
 
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
