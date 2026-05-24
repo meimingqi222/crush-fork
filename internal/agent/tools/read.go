@@ -34,7 +34,7 @@ import (
 var readDescription []byte
 
 type ReadParams struct {
-	Path               string   `json:"path" description:"The path to read - can be a file path or URL (http:// or https://). You must provide the path in every read call, even when using offset to read further lines of the same file."`
+	Path               string   `json:"path" description:"REQUIRED. The path to the file or URL to read. You must specify this parameter in every single read call, even when paginating with offset."`
 	Offset             int      `json:"offset,omitempty" description:"The line number to start reading from (0-based, for files only)"`
 	Limit              int      `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000, for files only)"`
 	Format             string   `json:"format,omitempty" description:"The format to return URL content in: text, markdown, or html (for URLs only)"`
