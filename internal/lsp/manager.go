@@ -168,6 +168,13 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 		}
 	}
 
+	// Filter out servers that don't handle this file type first to avoid
+	// executing LookPath for unrelated servers on every file start.
+	if !handles(server, filepath, s.cfg.WorkingDir()) {
+		// nothing to do
+		return
+	}
+
 	if !isUserConfigured {
 		if _, err := exec.LookPath(server.Command); err != nil {
 			unavailable.Set(name, struct{}{})
@@ -176,12 +183,6 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 		if skipAutoStartCommands[server.Command] {
 			return
 		}
-	}
-
-	// this is the slowest bit, so we do it last.
-	if !handles(server, filepath, s.cfg.WorkingDir()) {
-		// nothing to do
-		return
 	}
 
 	// Check again in case another goroutine started it in the meantime.
