@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -33,6 +34,10 @@ func (m *UI) loadPromptHistory() tea.Cmd {
 
 		texts := make([]string, 0, len(messages))
 		for _, msg := range messages {
+			// Skip automated subagent messages (whose session IDs contain "$$").
+			if strings.Contains(msg.SessionID, "$$") {
+				continue
+			}
 			if text := msg.Content().Text; text != "" {
 				texts = append(texts, text)
 			}
