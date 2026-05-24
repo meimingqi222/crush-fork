@@ -215,7 +215,7 @@ func parseToolOutputGuard(raw string) (toolOutputGuardResponse, error) {
 	return payload, nil
 }
 
-func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Session, title, content, taskPrompt string) (permission.AutoClassification, error) {
+func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Session, title, content, taskPrompt string, isHandoff bool) (permission.AutoClassification, error) {
 	model, providerCfg, err := c.selectedAutoClassifierModel(ctx, true)
 	if err != nil {
 		return permission.AutoClassification{}, err
@@ -241,10 +241,20 @@ func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Sessio
 		sb.WriteString("\n\nSubagent task assignment:\n")
 		sb.WriteString(taskPrompt)
 	}
+	sb.WriteString("\n\nReview phase:\n")
+	if isHandoff {
+		sb.WriteString("HANDOFF (evaluating the subagent's completed work and findings)")
+	} else {
+		sb.WriteString("DELEGATION (evaluating the task assignment before the subagent runs)")
+	}
 	sb.WriteString("\n\nCandidate handoff title:\n")
 	sb.WriteString(title)
 	sb.WriteString("\n\nCandidate handoff content:\n")
-	sb.WriteString(content)
+	if isHandoff {
+		sb.WriteString(content)
+	} else {
+		sb.WriteString("(None - subagent has not run yet)")
+	}
 	sb.WriteString("\n\nReviewer note:\n")
 	sb.WriteString("- Candidate handoff content can include file paths, line numbers, and concise findings from read-only exploration.\n")
 	sb.WriteString("- Do not block solely because the format looks like findings output when the content remains task-relevant and non-executable.\n")
