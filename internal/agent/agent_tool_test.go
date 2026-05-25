@@ -390,6 +390,28 @@ func TestDeriveSubagentPermissionsPreservesMCPAndPlugins(t *testing.T) {
 	assert.Contains(t, allowed, customTool)
 }
 
+func TestDeriveSubagentPermissionsFiltersUnallowedMCPAndPlugins(t *testing.T) {
+	profile := SubagentProfile{
+		Name:      config.AgentGeneral,
+		Kind:      SubagentProfileGeneral,
+		ToolNames: []string{"bash", "edit", "read", tools.YieldToolName},
+	}
+
+	mcpTool := "mcp:acemcp-go/search_context"
+	customTool := "custom_compact"
+
+	// parent's AllowedTools only allows basic tools, while availableTools has non-builtins.
+	// The subagent should NOT be granted mcpTool or customTool.
+	derived := DeriveSubagentPermissions(ParentPermissionContext{
+		AllowedTools: []string{"bash", "edit", "read", tools.YieldToolName},
+	}, profile, []string{"bash", "edit", "read", tools.YieldToolName, mcpTool, customTool})
+
+	allowed := toolNamesFromSet(derived.AllowedTools)
+	assert.Contains(t, allowed, "bash")
+	assert.NotContains(t, allowed, mcpTool)
+	assert.NotContains(t, allowed, customTool)
+}
+
 func TestShapeToolsForSubagentFiltersToolList(t *testing.T) {
 	shaped := ShapeToolsForSubagent([]fantasy.AgentTool{
 		tools.NewGlobTool("/tmp"),

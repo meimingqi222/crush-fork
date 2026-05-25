@@ -121,3 +121,36 @@ func TestYieldToolRejectsDuplicateCalls(t *testing.T) {
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "yield has already been called")
 }
+
+func TestYieldToolAllowsParentYieldAfterSubagentYield(t *testing.T) {
+	t.Parallel()
+
+	sessions, messages := newTestServices(t)
+	tool := NewYieldTool(messages)
+
+	sess, err := sessions.Create(t.Context(), "Test")
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, sess.ID)
+
+	// Simulate a subagent yielding by storing a ToolResult with Name = "agent", 
+	// containing Yield metadata in the parent session messages.
+	_, err = messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{Name: "agent"}.WithYield(message.ToolResultYield{
+				Data:   "subagent output",
+				Status: "completed",
+			}),
+		},
+	})
+	require.NoError(t, err)
+
+	// The parent agent calling yield now should NOT be blocked by the subagent's yield.
+	input, err := json.Marshal(YieldParams{Data: "parent output", Status: "completed"})
+	require.NoError(t, err)
+
+	resp, err := tool.Run(ctx, fantasy.ToolCall{ID: "call-parent", Name: YieldToolName, Input: string(input)})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+}

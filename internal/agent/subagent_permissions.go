@@ -31,8 +31,14 @@ func DeriveSubagentPermissions(parent ParentPermissionContext, profile SubagentP
 	// These tools are not listed in the static profile.ToolNames by default, but should be allowed
 	// for the subagent if they are available in parent.AllowedTools.
 	var nonBuiltinTools []string
+	parentAllowedSet := toToolSet(parent.AllowedTools)
 	for _, toolName := range availableTools {
 		if !config.IsBuiltinTool(toolName) {
+			if len(parentAllowedSet) > 0 {
+				if _, ok := parentAllowedSet[toolName]; !ok {
+					continue
+				}
+			}
 			nonBuiltinTools = append(nonBuiltinTools, toolName)
 		}
 	}

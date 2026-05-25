@@ -79,6 +79,9 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 			sessionID := strings.TrimSpace(GetSessionFromContext(ctx))
 			if sessionID != "" && messages != nil {
 				if toolAlreadyCalled(ctx, messages, sessionID, func(tr message.ToolResult) bool {
+					if tr.Name != YieldToolName {
+						return false
+					}
 					_, ok := tr.Yield()
 					return ok
 				}) {
