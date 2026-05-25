@@ -47,7 +47,7 @@ type HashlineEditResponseMetadata struct {
 	NewContent string `json:"new_content,omitempty"`
 }
 
-var hashlineReferencePattern = regexp.MustCompile(`^\s*[>+\-]*\s*(\d+)\s*#\s*([ZPMQVRWSNKTXJBYH]{2})`)
+var hashlineReferencePattern = regexp.MustCompile(fmt.Sprintf(`^\s*[>+\-]*\s*(\d+)\s*#\s*([%s]{2,4})`, hashlineNibbleAlphabet))
 
 type hashlineRef struct {
 	Line int
@@ -62,10 +62,12 @@ func computeHashlineID(lineNumber int, line string) string {
 	}
 
 	hashValue := xxhash.Sum64String(input)
-	byteValue := byte(hashValue & 0xff)
+	val := uint16(hashValue & 0xffff)
 	return string([]byte{
-		hashlineNibbleAlphabet[byteValue>>4],
-		hashlineNibbleAlphabet[byteValue&0x0f],
+		hashlineNibbleAlphabet[val>>12],
+		hashlineNibbleAlphabet[(val>>8)&0x0f],
+		hashlineNibbleAlphabet[(val>>4)&0x0f],
+		hashlineNibbleAlphabet[val&0x0f],
 	})
 }
 

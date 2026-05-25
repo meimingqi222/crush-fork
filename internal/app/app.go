@@ -21,6 +21,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/autopermission"
 	"github.com/charmbracelet/crush/internal/checkpoint"
@@ -101,6 +102,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	var memoryEngine *engine.Engine
 	var app *App
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
+		tools.GlobalFileCache.Clear(sessionID)
 		runtimeService.DeleteSession(sessionID)
 		if app != nil && app.AgentCoordinator != nil {
 			if coord, ok := app.AgentCoordinator.(interface {

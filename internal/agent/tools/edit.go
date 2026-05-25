@@ -4,11 +4,14 @@ import (
 	"cmp"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/diff"
@@ -16,9 +19,11 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/message"
 
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
 // EditEntry is a single edit operation used when making multiple edits.
@@ -29,12 +34,13 @@ type EditEntry struct {
 }
 
 type EditParams struct {
-	FilePath   string                  `json:"file_path" description:"The absolute path to the file to modify"`
+	FilePath   string                  `json:"file_path,omitempty" description:"The absolute path to the file to modify"`
 	OldString  string                  `json:"old_string,omitempty" description:"The text to replace"`
 	NewString  string                  `json:"new_string,omitempty" description:"The text to replace it with"`
 	ReplaceAll bool                    `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)"`
 	Edits      []EditEntry             `json:"edits,omitempty" description:"Array of edit operations to perform sequentially on the file. When provided, old_string/new_string/replace_all are ignored."`
 	Operations []HashlineEditOperation `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from read(hashline=true). When provided, all other parameters except file_path are ignored."`
+	Patch      string                  `json:"patch,omitempty" description:"Unified diff format patch containing changes to apply to files"`
 }
 
 type EditPermissionsParams struct {
@@ -103,7 +109,9 @@ func NewEditTool(
 
 			editCtx := editContext{ctx, permissions, files, filetracker, effectiveWorkingDir}
 
-			if len(params.Operations) > 0 {
+			if params.Patch != "" {
+				response, opErr = applyUnifiedPatch(editCtx, params.FilePath, params.Patch, call)
+			} else if len(params.Operations) > 0 {
 				response, opErr = applyHashlineEdit(editCtx, params.FilePath, params.Operations, call)
 			} else if len(params.Edits) > 0 {
 				response, opErr = applyEditEntries(editCtx, params.FilePath, params.Edits, call)
@@ -124,11 +132,115 @@ func NewEditTool(
 				return response, nil
 			}
 
-			notifyLSPs(ctx, lspManager, params.FilePath)
+			modifiedFiles := []string{params.FilePath}
+			if params.Patch != "" && response.Metadata != "" {
+				var meta []EditResponseMetadata
+				if err := json.Unmarshal([]byte(response.Metadata), &meta); err == nil {
+					modifiedFiles = nil
+					for _, m := range meta {
+						modifiedFiles = append(modifiedFiles, m.FilePath)
+					}
+				}
+			}
+
+			sessionID := GetSessionFromContext(ctx)
+			for _, file := range modifiedFiles {
+				applyFormattingAndSyncHistory(ctx, lspManager, files, file, sessionID)
+			}
+
+			for _, file := range modifiedFiles {
+				if client, _, _, ok := lspClientForFile(ctx, lspManager, file); ok {
+					_ = client.OpenFileOnDemand(ctx, file)
+					_ = client.NotifyChange(ctx, file)
+				}
+			}
 
 			text := fmt.Sprintf("<result>\n%s\n</result>\n", response.Content)
-			text += getDiagnostics(params.FilePath, lspManager)
 			response.Content = text
+
+			messageSvc := GetMessageServiceFromContext(ctx)
+			toolCallID := call.ID
+
+			go func() {
+				if lspManager == nil {
+					return
+				}
+				bgCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+				defer cancel()
+
+				var wg sync.WaitGroup
+				for _, file := range modifiedFiles {
+					for client := range lspManager.Clients().Seq() {
+						if !client.HandlesFile(file) {
+							continue
+						}
+						wg.Add(1)
+						go func(c *lsp.Client, f string) {
+							defer wg.Done()
+							c.WaitForDiagnostics(bgCtx, 25*time.Second)
+						}(client, file)
+					}
+				}
+				wg.Wait()
+
+				diags := getDiagnostics(params.FilePath, lspManager)
+				if diags == "" {
+					return
+				}
+
+				if messageSvc == nil || sessionID == "" || toolCallID == "" {
+					return
+				}
+
+				var toolMsg message.Message
+				var found bool
+				for i := 0; i < 20; i++ {
+					msgs, err := messageSvc.List(bgCtx, sessionID)
+					if err == nil {
+						for _, m := range msgs {
+							if m.Role == message.Tool {
+								for _, part := range m.Parts {
+									if tr, ok := part.(message.ToolResult); ok && tr.ToolCallID == toolCallID {
+										toolMsg = m
+										found = true
+										break
+									}
+								}
+							}
+							if found {
+								break
+							}
+						}
+					}
+					if found {
+						break
+					}
+					select {
+					case <-bgCtx.Done():
+						return
+					case <-time.After(200 * time.Millisecond):
+					}
+				}
+
+				if !found {
+					slog.Warn("Async diagnostics: tool result message not found", "toolCallID", toolCallID)
+					return
+				}
+
+				for idx, part := range toolMsg.Parts {
+					if tr, ok := part.(message.ToolResult); ok && tr.ToolCallID == toolCallID {
+						tr.Content = tr.Content + diags
+						toolMsg.Parts[idx] = tr
+						break
+					}
+				}
+
+				err := messageSvc.Update(bgCtx, toolMsg)
+				if err != nil {
+					slog.Error("Async diagnostics: failed to update message", "error", err)
+				}
+			}()
+
 			return response, nil
 		})
 }
@@ -173,6 +285,17 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 			continue
 		}
 		currentContent = newContent
+	}
+
+	if len(failedEdits) > 0 {
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextErrorResponse(fmt.Sprintf("Preflight validation failed: %d edit(s) failed to apply. File was not created.", len(failedEdits))),
+			EditResponseMetadata{
+				FilePath:     filePath,
+				EditsApplied: 0,
+				EditsFailed:  failedEdits,
+			},
+		), nil
 	}
 
 	sessionID := GetSessionFromContext(edit.ctx)
@@ -247,6 +370,10 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 }
 
 func applyEditEntriesExistingFile(edit editContext, filePath string, entries []EditEntry, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	if err := checkPreflightLimits([]string{filePath}); err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -286,17 +413,18 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 		currentContent = newContent
 	}
 
+	if len(failedEdits) > 0 {
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextErrorResponse(fmt.Sprintf("Preflight validation failed: %d edit(s) failed to apply. No changes were written.", len(failedEdits))),
+			EditResponseMetadata{
+				FilePath:     filePath,
+				EditsApplied: 0,
+				EditsFailed:  failedEdits,
+			},
+		), nil
+	}
+
 	if oldContent == currentContent {
-		if len(failedEdits) > 0 {
-			return fantasy.WithResponseMetadata(
-				fantasy.NewTextErrorResponse(fmt.Sprintf("no changes made - all %d edit(s) failed", len(failedEdits))),
-				EditResponseMetadata{
-					FilePath:     filePath,
-					EditsApplied: 0,
-					EditsFailed:  failedEdits,
-				},
-			), nil
-		}
 		return fantasy.NewTextErrorResponse("no changes made - all edits resulted in identical content"), nil
 	}
 
@@ -813,6 +941,28 @@ func adjustIndentation(oldStr, actualMatch, newStr string) string {
 	return strings.Join(result, "\n")
 }
 
+func checkPreflightLimits(filePaths []string) error {
+	var totalSize int64
+	for _, fp := range filePaths {
+		fi, err := os.Stat(fp)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		sz := fi.Size()
+		if sz > 1*1024*1024 {
+			return fmt.Errorf("file %s size exceeds the 1MB preflight limit (%d bytes)", fp, sz)
+		}
+		totalSize += sz
+	}
+	if totalSize > 5*1024*1024 {
+		return fmt.Errorf("total file size exceeds the 5MB preflight limit (%d bytes)", totalSize)
+	}
+	return nil
+}
+
 // findBlockMatch searches contentLines for a consecutive block matching searchLines
 // using the given line comparison function. Returns matched blocks or nil if not
 // found or ambiguous (multiple matches for non-replaceAll).
@@ -907,13 +1057,26 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 	oldLines, hadTrailingNewline := splitHashlineFileLines(oldContent)
 
 	parsedOps, err := parseHashlineOperations(operations, oldLines)
+	var newLines []string
+	var recovered bool
 	if err != nil {
-		return fantasy.NewTextErrorResponse(err.Error()), nil
-	}
-
-	newLines, err := applyHashlineOperations(oldLines, parsedOps)
-	if err != nil {
-		return fantasy.NewTextErrorResponse(err.Error()), nil
+		var recoverErr error
+		newLines, recoverErr = tryRecoverHashline(sessionID, filePath, oldLines, operations)
+		if recoverErr != nil {
+			return fantasy.NewTextErrorResponse(err.Error()), nil
+		}
+		recovered = true
+	} else {
+		var applyErr error
+		newLines, applyErr = applyHashlineOperations(oldLines, parsedOps)
+		if applyErr != nil {
+			var recoverErr error
+			newLines, recoverErr = tryRecoverHashline(sessionID, filePath, oldLines, operations)
+			if recoverErr != nil {
+				return fantasy.NewTextErrorResponse(applyErr.Error()), nil
+			}
+			recovered = true
+		}
 	}
 
 	newContent := joinHashlineFileLines(newLines, hadTrailingNewline)
@@ -978,8 +1141,13 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 
 	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
 
+	msgText := fmt.Sprintf("Applied %d hashline operation(s) to file: %s", len(operations), filePath)
+	if recovered {
+		msgText += "\n[Warning: Hashline anchor mismatch occurred due to concurrent changes. Successfully recovered and merged edits using 3-Way Merge.]"
+	}
+
 	return fantasy.WithResponseMetadata(
-		fantasy.NewTextResponse(fmt.Sprintf("Applied %d hashline operation(s) to file: %s", len(operations), filePath)),
+		fantasy.NewTextResponse(msgText),
 		EditResponseMetadata{
 			FilePath:   filePath,
 			OldContent: oldContent,
@@ -1047,4 +1215,216 @@ func fuzzyReplace(content, oldString, newString string, replaceAll bool) (string
 	}
 
 	return "", false
+}
+
+func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	sessionID := GetSessionFromContext(edit.ctx)
+	if sessionID == "" {
+		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for applying patch")
+	}
+
+	patches, err := ParseUnifiedPatch(patchText)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to parse unified patch: %v", err)), nil
+	}
+	if len(patches) == 0 {
+		return fantasy.NewTextErrorResponse("No file patches found in unified patch content."), nil
+	}
+
+	var absPaths []string
+	pathToPatch := make(map[string]*FilePatch)
+	for _, p := range patches {
+		pPath := p.NewPath
+		if pPath == "" {
+			pPath = p.OldPath
+		}
+		if pPath == "" || pPath == "/dev/null" {
+			pPath = fallbackPath
+		}
+		if pPath == "" {
+			return fantasy.NewTextErrorResponse("missing file path in patch header"), nil
+		}
+
+		absPath := filepathext.SmartJoin(edit.workingDir, pPath)
+		absPaths = append(absPaths, absPath)
+		pathToPatch[absPath] = p
+	}
+
+	if err := checkPreflightLimits(absPaths); err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
+	memoryFiles := make(map[string][]string)
+	originalContents := make(map[string]string)
+	originalCrlf := make(map[string]bool)
+	originalHadTrailingNewline := make(map[string]bool)
+
+	for _, absPath := range absPaths {
+		fileInfo, statErr := os.Stat(absPath)
+		var fileLines []string
+		var crlf bool
+		var origContent string
+		hadTrailingNewline := true
+
+		if statErr == nil && !fileInfo.IsDir() {
+			content, readErr := os.ReadFile(absPath)
+			if readErr != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("failed to read file %s: %w", absPath, readErr)
+			}
+			origContent, crlf = fsext.ToUnixLineEndings(string(content))
+			fileLines, hadTrailingNewline = splitHashlineFileLines(origContent)
+		} else {
+			origContent = ""
+		}
+
+		originalContents[absPath] = origContent
+		originalCrlf[absPath] = crlf
+		originalHadTrailingNewline[absPath] = hadTrailingNewline
+
+		patch := pathToPatch[absPath]
+		newLines, applyErr := ApplyPatchToLines(fileLines, patch.Hunks)
+		if applyErr != nil {
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("Preflight validation failed for %s: %v. No changes were written.", absPath, applyErr)), nil
+		}
+		memoryFiles[absPath] = newLines
+	}
+
+	var fileMetadata []EditResponseMetadata
+	var successMessage strings.Builder
+	successMessage.WriteString("Patch applied successfully:\n")
+
+	for _, absPath := range absPaths {
+		newLines := memoryFiles[absPath]
+		crlf := originalCrlf[absPath]
+		oldContent := originalContents[absPath]
+		hadTrailingNewline := originalHadTrailingNewline[absPath]
+		newContent := joinHashlineFileLines(newLines, hadTrailingNewline)
+
+		_, additions, removals := diff.GenerateDiff(
+			oldContent,
+			newContent,
+			strings.TrimPrefix(absPath, edit.workingDir),
+		)
+
+		p, permErr := edit.permissions.Request(edit.ctx, permission.CreatePermissionRequest{
+			SessionID:          sessionID,
+			AuthoritySessionID: ResolveAuthoritySessionID(edit.ctx, sessionID),
+			Path:               fsext.PathOrPrefix(absPath, edit.workingDir),
+			ToolCallID:         call.ID,
+			ToolName:           EditToolName,
+			Action:             "write",
+			Description:        fmt.Sprintf("Apply patch hunks to %s", absPath),
+			Params: EditPermissionsParams{
+				FilePath:   absPath,
+				OldContent: oldContent,
+				NewContent: newContent,
+			},
+		})
+		if permErr != nil {
+			return fantasy.ToolResponse{}, permErr
+		}
+		if !p {
+			return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
+		}
+
+		dir := filepath.Dir(absPath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories for %s: %w", absPath, err)
+		}
+
+		fileContent := newContent
+		if crlf {
+			fileContent, _ = fsext.ToWindowsLineEndings(newContent)
+		}
+
+		if err := os.WriteFile(absPath, []byte(fileContent), 0o644); err != nil {
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to write file %s: %w", absPath, err)
+		}
+
+		fileHist, err := edit.files.GetByPathAndSession(edit.ctx, absPath, sessionID)
+		if err != nil {
+			_, err = edit.files.Create(edit.ctx, sessionID, absPath, oldContent)
+			if err != nil {
+				slog.Error("Failed to create file history", "error", err, "path", absPath)
+			}
+		} else if fileHist.Content != oldContent {
+			_, err = edit.files.CreateVersion(edit.ctx, sessionID, absPath, oldContent)
+			if err != nil {
+				slog.Error("Failed to create version in history", "error", err, "path", absPath)
+			}
+		}
+		_, err = edit.files.CreateVersion(edit.ctx, sessionID, absPath, newContent)
+		if err != nil {
+			slog.Error("Failed to create version in history", "error", err, "path", absPath)
+		}
+
+		edit.filetracker.RecordRead(edit.ctx, sessionID, absPath)
+
+		fileMetadata = append(fileMetadata, EditResponseMetadata{
+			FilePath:   absPath,
+			OldContent: oldContent,
+			NewContent: newContent,
+			Additions:  additions,
+			Removals:   removals,
+		})
+
+		fmt.Fprintf(&successMessage, "- %s (+%d, -%d)\n", filepath.Base(absPath), additions, removals)
+	}
+
+	return fantasy.WithResponseMetadata(
+		fantasy.NewTextResponse(successMessage.String()),
+		fileMetadata,
+	), nil
+}
+
+// applyFormattingAndSyncHistory checks if formatting is possible, formats the file using LSP,
+// and if changes were made, updates the history version.
+func applyFormattingAndSyncHistory(ctx context.Context, lspManager *lsp.Manager, files history.Service, filePath, sessionID string) {
+	if lspManager == nil || files == nil || sessionID == "" {
+		return
+	}
+
+	beforeContentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return
+	}
+	beforeContent := string(beforeContentBytes)
+
+	client, absPath, _, ok := lspClientForFile(ctx, lspManager, filePath)
+	if !ok {
+		return
+	}
+
+	edits, err := client.FormatDocument(ctx, absPath, protocol.FormattingOptions{
+		TabSize:      4,
+		InsertSpaces: true,
+	})
+	if err != nil || len(edits) == 0 {
+		return
+	}
+
+	workspaceEdit := protocol.WorkspaceEdit{
+		Changes: map[protocol.DocumentURI][]protocol.TextEdit{
+			protocol.URIFromPath(absPath): edits,
+		},
+	}
+
+	if err := client.ApplyWorkspaceEdit(workspaceEdit); err != nil {
+		slog.Error("Failed to apply formatting workspace edit", "error", err, "path", absPath)
+		return
+	}
+
+	afterContentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return
+	}
+	afterContent := string(afterContentBytes)
+
+	if afterContent != beforeContent {
+		_, err = files.CreateVersion(ctx, sessionID, filePath, afterContent)
+		if err != nil {
+			slog.Error("Failed to create history version after formatting", "error", err, "path", filePath)
+		}
+		_ = client.NotifyChange(ctx, absPath)
+	}
 }

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,4 +134,195 @@ func TestEditAllEditsFail(t *testing.T) {
 
 	require.Len(t, failedEdits, 2)
 	require.Equal(t, content, currentContent, "Content should be unchanged")
+}
+
+func TestMemoryFileReadCache(t *testing.T) {
+	t.Parallel()
+
+	cache := &FileCache{cache: make(map[string]map[string][]string)}
+	sessionID := "session-1"
+	filePath := "/path/to/file.txt"
+	lines := []string{"line1", "line2"}
+
+	cache.Put(sessionID, filePath, lines)
+
+	cachedLines, ok := cache.Get(sessionID, filePath)
+	require.True(t, ok)
+	require.Equal(t, lines, cachedLines)
+
+	// test concurrency
+	done := make(chan bool)
+	for i := 0; i < 10; i++ {
+		go func(val int) {
+			cache.Put(sessionID, filePath, []string{string(rune(val))})
+			_, _ = cache.Get(sessionID, filePath)
+			done <- true
+		}(i)
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+func TestAlignLinesLCS(t *testing.T) {
+	t.Parallel()
+
+	base := []string{"A", "B", "C", "D", "E"}
+	ours := []string{"A", "X", "B", "C", "Y", "E"}
+
+	alignment := alignLinesLCS(base, ours)
+
+	require.Equal(t, 1, alignment[1])
+	require.Equal(t, 3, alignment[2])
+	require.Equal(t, 4, alignment[3])
+	require.Equal(t, 0, alignment[4])
+	require.Equal(t, 6, alignment[5])
+}
+
+func TestTryRecoverHashline(t *testing.T) {
+	t.Parallel()
+
+	sessionID := "session-test"
+	filePath := "/path/to/recover.txt"
+
+	baseLines := []string{
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+	}
+
+	GlobalFileCache.Put(sessionID, filePath, baseLines)
+	defer GlobalFileCache.Delete(sessionID, filePath)
+
+	oursLines := []string{
+		"unrelated inserted line",
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"another unrelated line",
+		"line 5",
+	}
+
+	// 动态计算 line 3 的 hash
+	hash := computeHashlineID(3, "line 3")
+
+	ops := []HashlineEditOperation{
+		{
+			Operation: "replace_line",
+			Line:      fmt.Sprintf("3#%s", hash),
+			Content:   "LINE 3 MODIFIED",
+		},
+	}
+
+	result, err := tryRecoverHashline(sessionID, filePath, oursLines, ops)
+	require.NoError(t, err)
+
+	expected := []string{
+		"unrelated inserted line",
+		"line 1",
+		"line 2",
+		"LINE 3 MODIFIED",
+		"line 4",
+		"another unrelated line",
+		"line 5",
+	}
+	require.Equal(t, expected, result)
+}
+
+func TestFileCacheFIFO(t *testing.T) {
+	t.Parallel()
+
+	cache := &FileCache{}
+	sessionID := "session-fifo"
+
+	// Add 35 items
+	for i := 0; i < 35; i++ {
+		filePath := fmt.Sprintf("/path/to/file%d.txt", i)
+		cache.Put(sessionID, filePath, []string{fmt.Sprintf("content %d", i)})
+	}
+
+	// The first 5 should be evicted, leaving only 5 to 34
+	for i := 0; i < 5; i++ {
+		filePath := fmt.Sprintf("/path/to/file%d.txt", i)
+		_, ok := cache.Get(sessionID, filePath)
+		require.False(t, ok, "File %d should have been evicted", i)
+	}
+
+	for i := 5; i < 35; i++ {
+		filePath := fmt.Sprintf("/path/to/file%d.txt", i)
+		_, ok := cache.Get(sessionID, filePath)
+		require.True(t, ok, "File %d should still be in cache", i)
+	}
+}
+
+func TestPatchEmptyLineMatch(t *testing.T) {
+	t.Parallel()
+
+	original := []string{
+		"line 1",
+		"",
+		"line 3",
+	}
+
+	patchText := `--- a/test.txt
++++ b/test.txt
+@@ -1,3 +1,3 @@
+ line 1
+-
++line 2
+ line 3
+`
+
+	patches, err := ParseUnifiedPatch(patchText)
+	require.NoError(t, err)
+	require.Len(t, patches, 1)
+
+	updated, err := ApplyPatchToLines(original, patches[0].Hunks)
+	require.NoError(t, err)
+	require.Equal(t, []string{"line 1", "line 2", "line 3"}, updated)
+}
+
+func TestPatchOffsetShiftAssignment(t *testing.T) {
+	t.Parallel()
+
+	original := []string{
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+	}
+
+	// hunk 1: replace line 2 with newline (offset shift)
+	// hunk 2: replace line 4
+	patchText := `--- a/test.txt
++++ b/test.txt
+@@ -2,1 +2,2 @@
+-line 2
++line 2a
++line 2b
+@@ -4,1 +5,1 @@
+-line 4
++line 4a
+`
+
+	patches, err := ParseUnifiedPatch(patchText)
+	require.NoError(t, err)
+	require.Len(t, patches, 1)
+
+	updated, err := ApplyPatchToLines(original, patches[0].Hunks)
+	require.NoError(t, err)
+	require.Equal(t, []string{"line 1", "line 2a", "line 2b", "line 3", "line 4a", "line 5"}, updated)
+}
+
+func TestNegativeLimitDefense(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{"1", "2", "3"}
+	res, err := extractReadResultFromLines(lines, 0, -5)
+	require.NoError(t, err)
+	require.Len(t, res.Lines, 0)
 }

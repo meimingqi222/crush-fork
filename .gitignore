@@ -66,3 +66,4 @@ completions/crush.*sh
 ignore_docs
 .claude
 .qoder
+.commandcode

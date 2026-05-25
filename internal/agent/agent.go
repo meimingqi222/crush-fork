@@ -403,6 +403,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Add the session to the context and mark as busy immediately to prevent concurrent re-entry.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
 	ctx = context.WithValue(ctx, tools.SessionServiceContextKey, a.sessions)
+	ctx = context.WithValue(ctx, tools.MessageServiceContextKey, a.messages)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(call.SessionID, cancel)
@@ -1069,6 +1070,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.SupportsImages)
 				callContext = context.WithValue(callContext, tools.ModelNameContextKey, largeModel.CatwalkCfg.Name)
 				callContext = context.WithValue(callContext, tools.SessionServiceContextKey, a.sessions)
+				callContext = context.WithValue(callContext, tools.MessageServiceContextKey, a.messages)
 				currentAssistant = &assistantMsg
 				currentStepToolMessageIDs = nil
 				currentStepToolResultChars = 0

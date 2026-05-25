@@ -1685,6 +1685,19 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	var cmds []tea.Cmd
 	m.updateCurrentSessionMessage(msg)
+
+	if msg.Role == message.Tool {
+		for _, tr := range msg.ToolResults() {
+			toolItem := m.chat.MessageItem(tr.ToolCallID)
+			if toolItem != nil {
+				if toolMsgItem, ok := toolItem.(chat.ToolMessageItem); ok {
+					toolMsgItem.SetResult(&tr)
+				}
+			}
+		}
+		return nil
+	}
+
 	existingItem := m.chat.MessageItem(msg.ID)
 	shouldRenderAssistant := chat.ShouldRenderAssistantMessage(&msg)
 	toolCallIDs := make(map[string]struct{}, len(msg.ToolCalls()))

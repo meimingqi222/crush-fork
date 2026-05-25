@@ -3,12 +3,14 @@ package tools
 import (
 	"context"
 
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
 type (
 	sessionIDContextKey       string
 	messageIDContextKey       string
+	messageServiceContextKey  string
 	supportsImagesKey         string
 	modelNameKey              string
 	workingDirContextKey      string
@@ -28,6 +30,8 @@ const (
 	SessionIDContextKey sessionIDContextKey = "session_id"
 	// MessageIDContextKey is the key for the message ID in the context.
 	MessageIDContextKey messageIDContextKey = "message_id"
+	// MessageServiceContextKey is the key for the message service in the context.
+	MessageServiceContextKey messageServiceContextKey = "message_service"
 	// SupportsImagesContextKey is the key for the model's image support capability.
 	SupportsImagesContextKey supportsImagesKey = "supports_images"
 	// ModelNameContextKey is the key for the model name in the context.
@@ -54,6 +58,7 @@ func getContextValue[T any](ctx context.Context, key any, defaultValue T) T {
 	return defaultValue
 }
 
+// GetSessionFromContext retrieves the session ID from the context.
 // GetSessionFromContext retrieves the session ID from the context.
 func GetSessionFromContext(ctx context.Context) string {
 	return getContextValue(ctx, SessionIDContextKey, "")
@@ -82,6 +87,10 @@ func GetWorkingDirFromContext(ctx context.Context) string {
 
 func GetSessionServiceFromContext(ctx context.Context) sessionLookupService {
 	return getContextValue(ctx, SessionServiceContextKey, sessionLookupService(nil))
+}
+
+func GetMessageServiceFromContext(ctx context.Context) message.Service {
+	return getContextValue(ctx, MessageServiceContextKey, message.Service(nil))
 }
 
 func GetToolCallIDFromContext(ctx context.Context) string {

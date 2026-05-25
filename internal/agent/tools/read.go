@@ -432,7 +432,17 @@ func handleFileRead(
 	}
 
 	// Read the file content.
-	readResult, err := readTextFileLines(filePath, params.Offset, params.Limit)
+	var readResult textReadResult
+	if sessionID != "" {
+		allLines, rErr := readAllFileLines(filePath)
+		if rErr != nil {
+			return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", rErr)
+		}
+		GlobalFileCache.Put(sessionID, filePath, allLines)
+		readResult, err = extractReadResultFromLines(allLines, params.Offset, params.Limit)
+	} else {
+		readResult, err = readTextFileLines(filePath, params.Offset, params.Limit)
+	}
 	if err != nil {
 		if errors.Is(err, errReadOffsetBeyondEOF) {
 			suggestion := fmt.Sprintf("Use path=%q and offset=0 to read from the start", filepath.ToSlash(params.Path))
@@ -739,6 +749,9 @@ func joinDisplayLines(lines []textReadLine) string {
 }
 
 func readTextFileLines(filePath string, offset, limit int) (textReadResult, error) {
+	if limit < 0 {
+		limit = 0
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		return textReadResult{}, err
@@ -1079,4 +1092,59 @@ func wrapInMarkdownCodeBlock(content string) string {
 	numTicks := max(3, maxTicks+1)
 	ticks := strings.Repeat("`", numTicks)
 	return ticks + "\n" + content + "\n" + ticks
+}
+
+func readAllFileLines(filePath string) ([]string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := NewLineScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines, scanner.Err()
+}
+
+func extractReadResultFromLines(allLines []string, offset, limit int) (textReadResult, error) {
+	if limit < 0 {
+		limit = 0
+	}
+	total := len(allLines)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		return textReadResult{Total: total, TotalKnown: true}, errReadOffsetBeyondEOF
+	}
+
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+
+	lines := make([]textReadLine, 0, end-offset)
+	for i := offset; i < end; i++ {
+		rawLine := allLines[i]
+		displayLine := rawLine
+		if len(displayLine) > MaxLineLength {
+			displayLine = displayLine[:MaxLineLength] + "..."
+		}
+		lines = append(lines, textReadLine{
+			Raw:     rawLine,
+			Display: displayLine,
+		})
+	}
+
+	hasMore := end < total
+	result := textReadResult{
+		Lines:      lines,
+		HasMore:    hasMore,
+		TotalKnown: true,
+		Total:      total,
+	}
+	return result, nil
 }

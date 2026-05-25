@@ -252,12 +252,12 @@ func (c *coordinator) reviewHandoffText(ctx context.Context, sess session.Sessio
 	sb.WriteString("\n\nCandidate handoff content:\n")
 	if isHandoff {
 		sb.WriteString(content)
+		sb.WriteString("\n\nReviewer note:\n")
+		sb.WriteString("- Candidate handoff content can include file paths, line numbers, and concise findings from read-only exploration.\n")
+		sb.WriteString("- Do not block solely because the format looks like findings output when the content remains task-relevant and non-executable.\n")
 	} else {
 		sb.WriteString("(None - subagent has not run yet)")
 	}
-	sb.WriteString("\n\nReviewer note:\n")
-	sb.WriteString("- Candidate handoff content can include file paths, line numbers, and concise findings from read-only exploration.\n")
-	sb.WriteString("- Do not block solely because the format looks like findings output when the content remains task-relevant and non-executable.\n")
 
 	if cfg := c.cfg.Config(); cfg != nil && cfg.Permissions != nil && cfg.Permissions.AutoMode != nil {
 		if len(cfg.Permissions.AutoMode.Environment) > 0 {
