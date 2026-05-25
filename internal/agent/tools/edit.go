@@ -183,7 +183,7 @@ func NewEditTool(
 				}
 				wg.Wait()
 
-				diags := getDiagnostics(params.FilePath, lspManager)
+				diags := getDiagnosticsForFiles(modifiedFiles, lspManager)
 				if diags == "" {
 					return
 				}

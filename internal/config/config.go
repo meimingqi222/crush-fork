@@ -1246,6 +1246,11 @@ func allToolNames() []string {
 	}
 }
 
+// IsBuiltinTool returns true if the tool name belongs to a built-in or LSP tool.
+func IsBuiltinTool(name string) bool {
+	return slices.Contains(allToolNames(), name)
+}
+
 func resolveResearchTools(tools []string) []string {
 	researchTools := []string{
 		"agentic_fetch",

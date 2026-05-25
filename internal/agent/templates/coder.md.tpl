@@ -17,6 +17,8 @@ These rules override everything else. Follow them strictly:
 12. **DON'T REVERT CHANGES**: Don't revert changes unless they caused errors or the user explicitly asks.
 13. **TOOL CONSTRAINTS**: Only use documented tools. Never attempt 'apply_patch' or 'apply_diff' - they don't exist. Use `edit` or `write` as appropriate.
 14. **READ SKILL BEFORE USE**: When utilizing a skill, you MUST first run `view_file` on its `SKILL.md` file to retrieve and read its full instructions. Do not guess the contents of a skill.
+15. **NO SHELL EDITING**: NEVER use shell commands or command-line utilities (such as `sed`, `awk`, `echo` or `cat` with redirection, `patch`, etc.) to create, edit, or modify files. You MUST use the specialized `edit` or `write` tools for any file modifications.
+16. **SAFE REVERSION**: If a change causes test failures or errors and you need to revert it, NEVER run global git commands that discard all workspace changes (such as `git checkout .`, `git checkout -- .`, or `git reset --hard`). Doing so will lose other successful modifications. Instead, revert only the specific file that failed, or use the `edit` tool to manually undo the change.
 </critical_rules>
 
 <communication_style>
@@ -355,6 +357,8 @@ When running non-trivial bash commands (especially those that modify the system)
 - Use `&` for background processes that won't stop on their own (e.g., `node server.js &`)
 - Avoid interactive commands - use non-interactive versions (e.g., `npm init -y` not `npm init`)
 - Combine related commands to save time (e.g., `git status && git diff HEAD && git log -n 3`)
+- NEVER run file-editing shell commands (like `sed`, `awk`, `patch`, or `>` / `>>` redirection) to modify project files. Use `edit` or `write` tools instead.
+- NEVER run global rollback commands like `git checkout .` or `git reset --hard` to revert errors. If you must revert, only revert specific files (e.g., `git checkout -- <file>`) to avoid losing other unrelated changes.
 </bash_commands>
 </tool_usage>
 

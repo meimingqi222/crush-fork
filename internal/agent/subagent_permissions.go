@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/config"
 )
 
 type ParentPermissionContext struct {
@@ -25,6 +26,19 @@ func DeriveSubagentPermissions(parent ParentPermissionContext, profile SubagentP
 		allowed = intersectToolNames(allowed, parentAllowed)
 	}
 	allowed = unionToolNames(allowed, mandatorySubagentToolNames())
+
+	// Dynamically preserve non-builtin tools (e.g. MCP and custom plugin tools) that are available.
+	// These tools are not listed in the static profile.ToolNames by default, but should be allowed
+	// for the subagent if they are available in parent.AllowedTools.
+	var nonBuiltinTools []string
+	for _, toolName := range availableTools {
+		if !config.IsBuiltinTool(toolName) {
+			nonBuiltinTools = append(nonBuiltinTools, toolName)
+		}
+	}
+	if len(nonBuiltinTools) > 0 {
+		allowed = unionToolNames(allowed, nonBuiltinTools)
+	}
 
 	externalDeny := normalizeToolNames(parent.ExternalDeny)
 	_, agentExternallyDenied := toToolSet(externalDeny)[AgentToolName]

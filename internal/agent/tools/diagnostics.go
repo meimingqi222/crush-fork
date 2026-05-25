@@ -109,8 +109,19 @@ func notifyLSPs(
 }
 
 func getDiagnostics(filePath string, manager *lsp.Manager) string {
+	return getDiagnosticsForFiles([]string{filePath}, manager)
+}
+
+func getDiagnosticsForFiles(filePaths []string, manager *lsp.Manager) string {
 	if manager == nil {
 		return ""
+	}
+
+	fileSet := make(map[string]bool, len(filePaths))
+	for _, p := range filePaths {
+		if p != "" {
+			fileSet[p] = true
+		}
 	}
 
 	var fileDiagnostics []string
@@ -123,7 +134,7 @@ func getDiagnostics(filePath string, manager *lsp.Manager) string {
 				slog.Error("Failed to convert diagnostic location URI to path", "uri", location, "error", err)
 				continue
 			}
-			isCurrentFile := path == filePath
+			isCurrentFile := fileSet[path]
 			for _, diag := range diags {
 				formattedDiag := formatDiagnostic(path, diag, lspName)
 				if isCurrentFile {
