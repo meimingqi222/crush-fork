@@ -326,3 +326,79 @@ func TestNegativeLimitDefense(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, res.Lines, 0)
 }
+
+func TestFuzzyReplaceCommentStrip(t *testing.T) {
+	t.Parallel()
+
+	content := "func main() {\n    // this is a comment\n    doSomething()\n}"
+	// LLM 忽略了注释，或者用了不同的注释前缀
+	oldStr := "func main() {\n    # this is a comment\n    doSomething()\n}"
+	newStr := "func main() {\n    doSomething()\n}"
+
+	res, ok := fuzzyReplace(content, oldStr, newStr, false)
+	require.True(t, ok)
+	require.NotContains(t, res, "comment")
+}
+
+func TestFuzzyReplaceLevenshteinSimilarity(t *testing.T) {
+	t.Parallel()
+
+	content := "func processData(data string) {\n    validate(data)\n    save(data)\n}"
+	// LLM 输入的 validate 稍微拼错，例如 valdate，应该仍能基于相似度匹配
+	oldStr := "func processData(data string) {\n    valdate(data)\n    save(data)\n}"
+	newStr := "func processData(data string) {\n    validate(data)\n    // saved!\n    save(data)\n}"
+
+	res, ok := fuzzyReplace(content, oldStr, newStr, false)
+	require.True(t, ok)
+	require.Contains(t, res, "saved!")
+}
+
+func TestDetailedMatchErrorFormat(t *testing.T) {
+	t.Parallel()
+
+	content := "line 1\nline 2\nline 3\n"
+	oldStr := "line 1\nline 2a\nline 3\n"
+
+	errText := buildDetailedMatchError(content, oldStr)
+	require.Contains(t, errText, "Closest match (95% similar) found at line 1")
+	require.Contains(t, errText, "Expected (LLM):")
+	require.Contains(t, errText, "Actual (File):")
+}
+
+func TestFuzzyReplaceCommentStripGuard(t *testing.T) {
+	t.Parallel()
+
+	// Content has one commented line and one uncommented line.
+	// If Strategy 4 is NOT guarded, searching for "return x + y" (without comment)
+	// would mistakenly match the commented line as well, leading to 2 matches (ambiguous).
+	// With the guard, the commented line is ignored under Strategy 4,
+	// allowing the exact match on the second line to succeed.
+	content := "func main() {\n    // return x + y\n    return x + y\n}"
+	oldStr := "return x + y"
+	newStr := "return a + b"
+
+	res, ok := fuzzyReplace(content, oldStr, newStr, false)
+	require.True(t, ok)
+	require.Contains(t, res, "return a + b")
+	require.Contains(t, res, "// return x + y") // the comment line should remain untouched
+
+	// Verify the helper isCommentLine
+	require.True(t, isCommentLine("// return x + y"))
+	require.False(t, isCommentLine("return x + y"))
+}
+
+func TestLevenshteinRuneAware(t *testing.T) {
+	t.Parallel()
+
+	s := "你好世界"
+	t1 := "你好"
+
+	// Rune-based Levenshtein distance: "你好" to "你好世界" is 2 runes insertion.
+	// Byte-based distance would be 6 bytes (Chinese characters are 3 bytes each in UTF-8).
+	dist := levenshteinDistance(s, t1)
+	require.Equal(t, 2, dist)
+
+	sim := lineSimilarity(s, t1)
+	// Similarity = 1 - 2/4 = 0.5 (50% similarity)
+	require.InDelta(t, 0.5, sim, 0.01)
+}

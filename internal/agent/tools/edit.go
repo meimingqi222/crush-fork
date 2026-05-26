@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/diff"
@@ -524,7 +525,7 @@ func applyEntryToContent(content string, entry EditEntry) (string, error) {
 		}
 		result, ok := fuzzyReplace(content, entry.OldString, entry.NewString, true)
 		if !ok {
-			return "", fmt.Errorf("old_string not found in content. Make sure it matches exactly, including whitespace and line breaks")
+			return "", fmt.Errorf("%s", buildDetailedMatchError(content, entry.OldString))
 		}
 		return result, nil
 	}
@@ -533,7 +534,7 @@ func applyEntryToContent(content string, entry EditEntry) (string, error) {
 	if index == -1 {
 		result, ok := fuzzyReplace(content, entry.OldString, entry.NewString, false)
 		if !ok {
-			return "", fmt.Errorf("old_string not found in content. Make sure it matches exactly, including whitespace and line breaks")
+			return "", fmt.Errorf("%s", buildDetailedMatchError(content, entry.OldString))
 		}
 		return result, nil
 	}
@@ -662,7 +663,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 			var ok bool
 			newContent, ok = fuzzyReplace(oldContent, oldString, "", true)
 			if !ok {
-				return oldStringNotFoundErr, nil
+				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
 		}
 	} else {
@@ -671,7 +672,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 			var ok bool
 			newContent, ok = fuzzyReplace(oldContent, oldString, "", false)
 			if !ok {
-				return oldStringNotFoundErr, nil
+				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
 		} else {
 			lastIndex := strings.LastIndex(oldContent, oldString)
@@ -790,7 +791,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 			var ok bool
 			newContent, ok = fuzzyReplace(oldContent, oldString, newString, true)
 			if !ok {
-				return oldStringNotFoundErr, nil
+				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
 		}
 	} else {
@@ -799,7 +800,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 			var ok bool
 			newContent, ok = fuzzyReplace(oldContent, oldString, newString, false)
 			if !ok {
-				return oldStringNotFoundErr, nil
+				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
 		} else {
 			lastIndex := strings.LastIndex(oldContent, oldString)
@@ -1163,6 +1164,8 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 // 1. Trim trailing whitespace on each line
 // 2. Trim all whitespace on each line
 // 3. Indentation-flexible (strip common indent prefix from both sides).
+// 4. Comment-prefix strip matching.
+// 5. Levenshtein similarity matching (average similarity >= 0.92).
 func fuzzyReplace(content, oldString, newString string, replaceAll bool) (string, bool) {
 	contentLines := strings.Split(content, "\n")
 	oldLines := splitIntoLines(oldString)
@@ -1212,6 +1215,21 @@ func fuzzyReplace(content, oldString, newString string, replaceAll bool) (string
 		if ok {
 			return applyMatches(content, oldString, newString, matches, replaceAll), true
 		}
+	}
+
+	// Strategy 4: Comment-prefix strip matching.
+	matches, ok = findBlockMatch(contentLines, oldLines,
+		func(a, b string) bool {
+			return isCommentLine(a) == isCommentLine(b) && stripCommentPrefix(a) == stripCommentPrefix(b)
+		}, replaceAll)
+	if ok {
+		return applyMatches(content, oldString, newString, matches, replaceAll), true
+	}
+
+	// Strategy 5: Levenshtein similarity matching (average similarity >= 0.92).
+	matches, ok = fuzzySimilarityMatch(contentLines, oldLines, 0.92, replaceAll)
+	if ok {
+		return applyMatches(content, oldString, newString, matches, replaceAll), true
 	}
 
 	return "", false
@@ -1427,4 +1445,175 @@ func applyFormattingAndSyncHistory(ctx context.Context, lspManager *lsp.Manager,
 		}
 		_ = client.NotifyChange(ctx, absPath)
 	}
+}
+
+func levenshteinDistance(s, t string) int {
+	sRunes := []rune(s)
+	tRunes := []rune(t)
+	const maxLineLen = 200
+	if len(sRunes) > maxLineLen {
+		sRunes = sRunes[:maxLineLen]
+	}
+	if len(tRunes) > maxLineLen {
+		tRunes = tRunes[:maxLineLen]
+	}
+	sLen := len(sRunes)
+	tLen := len(tRunes)
+	if sLen == 0 {
+		return tLen
+	}
+	if tLen == 0 {
+		return sLen
+	}
+	d := make([][]int, sLen+1)
+	for i := range d {
+		d[i] = make([]int, tLen+1)
+		d[i][0] = i
+	}
+	for j := 0; j <= tLen; j++ {
+		d[0][j] = j
+	}
+	for i := 1; i <= sLen; i++ {
+		for j := 1; j <= tLen; j++ {
+			cost := 1
+			if sRunes[i-1] == tRunes[j-1] {
+				cost = 0
+			}
+			d[i][j] = min(d[i-1][j]+1, min(d[i][j-1]+1, d[i-1][j-1]+cost))
+		}
+	}
+	return d[sLen][tLen]
+}
+
+func lineSimilarity(s, t string) float64 {
+	s = strings.TrimSpace(s)
+	t = strings.TrimSpace(t)
+	if s == "" && t == "" {
+		return 1.0
+	}
+	sLen := utf8.RuneCountInString(s)
+	tLen := utf8.RuneCountInString(t)
+	maxLen := sLen
+	if tLen > maxLen {
+		maxLen = tLen
+	}
+	dist := levenshteinDistance(s, t)
+	return 1.0 - float64(dist)/float64(maxLen)
+}
+
+func isCommentLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	prefixes := []string{"//", "/*", "*/", "*", "#", ";"}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripCommentPrefix(line string) string {
+	trimmed := strings.TrimSpace(line)
+	prefixes := []string{"//", "/*", "*/", "*", "#", ";"}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			trimmed = strings.TrimSpace(trimmed[len(prefix):])
+			break
+		}
+	}
+	return trimmed
+}
+
+func fuzzySimilarityMatch(contentLines, searchLines []string, threshold float64, replaceAll bool) ([]string, bool) {
+	n := len(searchLines)
+	if n == 0 {
+		return nil, false
+	}
+	var matches []string
+	for i := 0; i <= len(contentLines)-n; i++ {
+		var sumSim float64
+		for j := 0; j < n; j++ {
+			sumSim += lineSimilarity(contentLines[i+j], searchLines[j])
+		}
+		avgSim := sumSim / float64(n)
+		if avgSim >= threshold {
+			matches = append(matches, strings.Join(contentLines[i:i+n], "\n"))
+		}
+	}
+	if len(matches) == 0 {
+		return nil, false
+	}
+	if !replaceAll && len(matches) > 1 {
+		return nil, false
+	}
+	return matches, true
+}
+
+type ClosestMatchInfo struct {
+	Lines      []string
+	StartLine  int
+	Similarity float64
+}
+
+func findClosestMatch(content string, oldString string) (*ClosestMatchInfo, int) {
+	contentLines := strings.Split(content, "\n")
+	oldLines := splitIntoLines(oldString)
+	n := len(oldLines)
+	if n == 0 || len(contentLines) < n {
+		return nil, 0
+	}
+
+	var best *ClosestMatchInfo
+	var matchesAboveThreshold int
+
+	for i := 0; i <= len(contentLines)-n; i++ {
+		var sumSim float64
+		for j := 0; j < n; j++ {
+			sumSim += lineSimilarity(contentLines[i+j], oldLines[j])
+		}
+		avgSim := sumSim / float64(n)
+
+		if best == nil || avgSim > best.Similarity {
+			linesCopy := make([]string, len(contentLines[i:i+n]))
+			copy(linesCopy, contentLines[i:i+n])
+			best = &ClosestMatchInfo{
+				Lines:      linesCopy,
+				StartLine:  i + 1,
+				Similarity: avgSim,
+			}
+		}
+		if avgSim >= 0.8 {
+			matchesAboveThreshold++
+		}
+	}
+
+	return best, matchesAboveThreshold
+}
+
+func buildDetailedMatchError(content, oldString string) string {
+	closest, countAbove := findClosestMatch(content, oldString)
+	if closest == nil || closest.Similarity < 0.4 {
+		return "old_string not found in file. Make sure it matches exactly, including whitespace and line breaks."
+	}
+
+	similarityPercent := int(closest.Similarity * 100)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("old_string not found in file. Make sure it matches exactly.\n\nClosest match (%d%% similar) found at line %d:\n", similarityPercent, closest.StartLine))
+
+	sb.WriteString("  Expected (LLM):\n")
+	expectedLines := splitIntoLines(oldString)
+	for _, l := range expectedLines {
+		sb.WriteString(fmt.Sprintf("    %s\n", l))
+	}
+	sb.WriteString("  Actual (File):\n")
+	for _, l := range closest.Lines {
+		sb.WriteString(fmt.Sprintf("    %s\n", l))
+	}
+
+	if countAbove > 1 && closest.Similarity >= 0.8 {
+		sb.WriteString(fmt.Sprintf("\nNote: Found %d high-similarity matches. Please provide more context to make it unique.", countAbove))
+	}
+
+	return sb.String()
 }
