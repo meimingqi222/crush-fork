@@ -158,3 +158,95 @@ func TestRetrieverReflectDoesNotFallbackToLocal(t *testing.T) {
 	require.Equal(t, []string{"project:crush-abc123"}, gotReq.Tags)
 	require.Equal(t, "any", gotReq.TagsMatch)
 }
+
+func TestRetrieverLoadMentalModels(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "detail=content", r.URL.RawQuery)
+
+		models := []map[string]any{
+			{
+				"id":      "mm-1",
+				"bank_id": "crush",
+				"name":    "Code Style Guidelines",
+				"content": "Use gofumpt and standard style.",
+			},
+			{
+				"id":      "mm-2",
+				"bank_id": "crush",
+				"name":    "Architecture Guidelines",
+				"content": "Modular monolith with service isolation.",
+			},
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"items": models,
+		}))
+	}))
+	defer server.Close()
+
+	retriever := NewRetriever(NewClient(server.URL, "", ""))
+
+	// Test synchronous load
+	err := retriever.LoadMentalModels(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "/v1/default/banks/crush/mental-models", gotPath)
+
+	snippet := retriever.MentalModelsSnippet()
+	require.Contains(t, snippet, "<mental_models>")
+	require.Contains(t, snippet, "Curated long-running summaries of this bank.")
+	require.Contains(t, snippet, "# Architecture Guidelines")
+	require.Contains(t, snippet, "Modular monolith with service isolation.")
+	require.Contains(t, snippet, "# Code Style Guidelines")
+	require.Contains(t, snippet, "Use gofumpt and standard style.")
+	require.False(t, retriever.MentalModelsLoadedAt().IsZero())
+}
+
+func TestRetrieverLoadMentalModelsConcurrencyInFlight(t *testing.T) {
+	t.Parallel()
+
+	blockCh := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blockCh // block the API request to simulate long load
+		models := []map[string]any{
+			{
+				"id":      "mm-1",
+				"name":    "Blocking Model",
+				"content": "Data is here.",
+			},
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"items": models,
+		}))
+	}))
+	defer server.Close()
+
+	retriever := NewRetriever(NewClient(server.URL, "", ""))
+
+	// Trigger first load in a goroutine
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		err := retriever.LoadMentalModels(context.Background())
+		require.NoError(t, err)
+	}()
+
+	// Wait briefly to let the first load acquire lock and start http call
+	time.Sleep(50 * time.Millisecond)
+
+	// Trigger second load - should return immediately due to in-flight lock
+	start := time.Now()
+	err := retriever.LoadMentalModels(context.Background())
+	require.NoError(t, err)
+	require.Less(t, time.Since(start), 20*time.Millisecond, "second load should be non-blocking")
+
+	// Release the HTTP server blocking and wait for the first load to finish
+	close(blockCh)
+	<-doneCh
+
+	// Confirm first load has successfully saved the data
+	require.Contains(t, retriever.MentalModelsSnippet(), "Blocking Model")
+}

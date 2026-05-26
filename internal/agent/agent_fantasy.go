@@ -189,18 +189,20 @@ func buildSummaryPrompt(todos []session.Todo) string {
 	return sb.String()
 }
 
-// hasAutoRecallInMessages checks if any user message contains system-reminder
-// with memory recall content. Memory is merged into existing user messages
-// (not prepended), matching Claude Code's attachment-merge approach to preserve
-// prompt cache.
 func hasAutoRecallInMessages(messages []fantasy.Message) bool {
 	for _, msg := range messages {
-		if msg.Role != fantasy.MessageRoleUser {
+		if msg.Role != fantasy.MessageRoleUser && msg.Role != fantasy.MessageRoleSystem {
 			continue
 		}
 		for _, part := range msg.Content {
+			var text string
 			if textPart, ok := part.(fantasy.TextPart); ok {
-				if strings.Contains(textPart.Text, "<system-reminder>") && strings.Contains(textPart.Text, "Relevant long-term memory:") {
+				text = textPart.Text
+			} else if textPartPtr, ok := part.(*fantasy.TextPart); ok && textPartPtr != nil {
+				text = textPartPtr.Text
+			}
+			if text != "" {
+				if strings.Contains(text, "<system-reminder>") {
 					return true
 				}
 			}

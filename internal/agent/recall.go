@@ -18,15 +18,41 @@ type backgroundModel struct {
 	provider config.ProviderConfig
 }
 
-func buildAutoRecallBlock(ctx context.Context, retriever engine.Retriever, sessionID string) string {
+func buildAutoRecallBlock(ctx context.Context, retriever engine.Retriever, query, sessionID, backend string) string {
 	if retriever == nil || !autoRecallMemoryEnabled(ctx) {
 		return ""
+	}
+	query = strings.TrimSpace(query)
+	if query != "" {
+		events, err := retriever.Retrieve(ctx, query, map[string]any{"session_id": sessionID, "limit": 8})
+		if err == nil && len(events) > 0 {
+			return formatEventsAsRecall(events)
+		}
+		// Hindsight backend has no fallback to static broad recall to avoid polluting context
+		if backend == "hindsight" {
+			return ""
+		}
 	}
 	recall, err := retriever.Recall(ctx, map[string]any{"session_id": sessionID})
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(recall)
+}
+
+func formatEventsAsRecall(events []engine.MemoryEvent) string {
+	if len(events) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<hindsight_memories>\n")
+	for _, e := range events {
+		b.WriteString("- ")
+		b.WriteString(e.Content)
+		b.WriteString("\n")
+	}
+	b.WriteString("</hindsight_memories>")
+	return b.String()
 }
 
 func autoRecallMemoryEnabled(ctx context.Context) bool {

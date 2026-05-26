@@ -135,6 +135,31 @@ func (c *Client) Reflect(ctx context.Context, req ReflectRequest) (string, error
 	return resp.Text, nil
 }
 
+// MentalModelSummary represents the metadata and content of a Hindsight mental model.
+type MentalModelSummary struct {
+	ID              string   `json:"id"`
+	BankID          string   `json:"bank_id"`
+	Name            string   `json:"name"`
+	Tags            []string `json:"tags,omitempty"`
+	LastRefreshedAt string   `json:"last_refreshed_at,omitempty"`
+	Content         string   `json:"content,omitempty"`
+}
+
+// MentalModelListResponse is the response body for listing mental models.
+type MentalModelListResponse struct {
+	Items []MentalModelSummary `json:"items"`
+}
+
+// ListMentalModels lists mental models in the remote bank, fetching their content.
+func (c *Client) ListMentalModels(ctx context.Context) ([]MentalModelSummary, error) {
+	var resp MentalModelListResponse
+	path := c.bankPath("mental-models") + "?detail=content"
+	if _, err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
 // EnsureBank creates or updates the bank with the given retain mission.
 // This is idempotent and safe to call on every startup.
 func (c *Client) EnsureBank(ctx context.Context, retainMission string) error {

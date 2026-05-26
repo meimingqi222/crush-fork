@@ -81,6 +81,10 @@ var (
 var ErrUnresolvedModel = errors.New("selected model is unavailable in provider config")
 
 const maxModelSwitchSummaries = 2
+const (
+	mentalModelTTL     = 5 * time.Minute
+	recallContextTurns = 2
+)
 
 type Coordinator interface {
 	// INFO: (kujtim) this is not used yet we will use this when we have multiple agents
@@ -410,6 +414,25 @@ func (c *coordinator) memoryEngineHooks() *MemoryEngineHooks {
 		OnBeforeCompaction: func(ctx context.Context, sessionID string) string {
 			if c.memoryEngine.Backend() == "hindsight" {
 				c.transcriptAfterTurn(ctx, sessionID)
+
+				// Hindsight compaction rescue: retrieve dynamic memories before history summary compaction
+				if retriever := c.memoryEngine.Retriever(); retriever != nil {
+					recent := buildRecentConversation(ctx, c.messages, sessionID, 3)
+					if recent != "" {
+						events, err := retriever.Retrieve(ctx, recent, map[string]any{"session_id": sessionID, "limit": 6})
+						if err == nil && len(events) > 0 {
+							var b strings.Builder
+							b.WriteString("<memory_rescue>\n")
+							b.WriteString("The following remote hindsight memories should be preserved through compaction. ")
+							b.WriteString("They are ordered by relevance; copy or paraphrase them into the new summary.\n\n")
+							for i, e := range events {
+								fmt.Fprintf(&b, "%d. %s\n", i+1, e.Content)
+							}
+							b.WriteString("</memory_rescue>")
+							return b.String()
+						}
+					}
+				}
 				return ""
 			}
 			if err := c.memoryEngine.OnBeforeCompaction(ctx, sessionID); err != nil {
@@ -580,10 +603,14 @@ func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, s
 	return surfaced, totalBytes
 }
 
-// buildRecentConversation extracts the last N user/assistant message turns
-// from the session history to provide context for short-query expansion.
-// This mirrors claude-code's approach of enriching terse prompts like
-// "continue" or "fix it" with surrounding conversation context.
+// buildRecentConversation extracts the last N user turns and their matching
+// assistant responses from the session history to provide context for short-query expansion.
+//
+// Note: msg.Content().Text only extracts plain text content (excluding ToolResult).
+// This is intentional, as tool outputs are too verbose to be useful for recall query expansion.
+//
+// Only User messages increment the turn counter, ensuring we capture full
+// conversational context without counting intermediate assistant steps as separate turns.
 func buildRecentConversation(ctx context.Context, messagesSvc message.Service, sessionID string, maxTurns int) string {
 	msgs, err := messagesSvc.List(ctx, sessionID)
 	if err != nil {
@@ -686,7 +713,20 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		if surfacedBytes < maxSessionRecallBytes {
 			if c.memoryEngine != nil && c.memoryEngine.Enabled() {
 				retriever := c.memoryEngine.Retriever()
-				recall = buildAutoRecallBlock(prefetchCtx, retriever, sessionID)
+
+				// Load Hindsight mental models with 500ms sync wait timeout if using Hindsight backend
+				if c.memoryEngine.Backend() == "hindsight" {
+					tryLoadMentalModels(prefetchCtx, retriever, mentalModelTTL, 500*time.Millisecond)
+				}
+
+				// Expand all user queries with conversation context to preserve semantic continuity in turns.
+				query := strings.TrimSpace(prompt)
+				recent := buildRecentConversation(prefetchCtx, c.messages, sessionID, recallContextTurns)
+				if recent != "" {
+					query = recent + "\n\nUser: " + query
+				}
+
+				recall = buildAutoRecallBlock(prefetchCtx, retriever, query, sessionID, c.memoryEngine.Backend())
 			}
 		}
 		memoryPrefetch.Settle(recall)
@@ -768,6 +808,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		if c.memoryEngine != nil && c.memoryEngine.Enabled() {
 			if c.memoryEngine.Backend() == "hindsight" {
 				c.transcriptAfterTurn(ctx, sessionID)
+
+				// Async refresh Hindsight Mental Models (TTL 5 minutes, non-blocking)
+				if retriever := c.memoryEngine.Retriever(); retriever != nil {
+					tryLoadMentalModels(context.Background(), retriever, mentalModelTTL, 0)
+				}
 			} else {
 				slog.Debug("Memory engine enabled, calling AfterTurnIdle")
 				if err := c.memoryEngine.AfterTurnIdle(context.Background(), sessionID, nil); err != nil {
@@ -1264,6 +1309,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		MemoryEngineEnabled:    c.memoryEngine != nil && c.memoryEngine.Enabled(),
 		MemoryEngineEventStore: c.memoryEngineEventStore(),
 		MemoryEngineHooks:      c.memoryEngineHooks(),
+		MemoryEngineRetriever:  c.memoryEngineRetriever(),
+		MemoryEngineBackend: func() string {
+			if c.memoryEngine != nil {
+				return c.memoryEngine.Backend()
+			}
+			return ""
+		}(),
 	})
 
 	// Only use async initialization for the primary agent (not subagents).
@@ -4236,4 +4288,33 @@ func (c *coordinator) runBackgroundTaskNode(
 		c.backgroundAgents.Fail(agentID, enqueueErr.Error())
 	}
 	return agentID
+}
+
+
+
+func tryLoadMentalModels(ctx context.Context, retriever engine.Retriever, ttl time.Duration, maxWait time.Duration) {
+	lr, ok := retriever.(engine.MentalModelsProvider)
+	if !ok {
+		return
+	}
+
+	if !lr.MentalModelsLoadedAt().IsZero() && time.Since(lr.MentalModelsLoadedAt()) < ttl {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := lr.LoadMentalModels(ctx); err != nil {
+			slog.Debug("Failed to load Hindsight mental models", "error", err)
+		}
+	}()
+
+	if maxWait > 0 {
+		select {
+		case <-done:
+		case <-time.After(maxWait):
+			slog.Debug("Mental models load exceeded wait timeout, continuing in background", "timeout", maxWait)
+		}
+	}
 }

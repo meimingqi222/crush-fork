@@ -225,7 +225,7 @@ func TestRunReinjectsMemoryPrefetchAfterAnthropicRetry(t *testing.T) {
 
 func hasAutoRecallBlock(messages []fantasy.Message, snippet string) bool {
 	for _, msg := range messages {
-		if msg.Role != fantasy.MessageRoleUser {
+		if msg.Role != fantasy.MessageRoleUser && msg.Role != fantasy.MessageRoleSystem {
 			continue
 		}
 		for _, part := range msg.Content {

@@ -1,6 +1,9 @@
 package engine
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // EventFilter defines query parameters for EventStore.Query.
 type EventFilter struct {
@@ -97,4 +100,12 @@ type Retriever interface {
 	// sessions and returns a synthesized response. It does NOT write to
 	// long-term memory.
 	Reflect(ctx context.Context, query string, opts map[string]any) (string, error)
+}
+
+// MentalModelsProvider defines optional behavior for memory retrievers that support
+// background mental model compilation, sync-refresh, and snippet retrieval.
+type MentalModelsProvider interface {
+	LoadMentalModels(ctx context.Context) error
+	MentalModelsLoadedAt() time.Time
+	MentalModelsSnippet() string
 }
