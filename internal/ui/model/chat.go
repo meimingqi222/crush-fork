@@ -495,6 +495,7 @@ func (m *Chat) SelectLastInView() {
 // ClearMessages removes all messages from the chat list.
 func (m *Chat) ClearMessages() {
 	m.idInxMap = make(map[string]int)
+	m.msgToolCallIDs = make(map[string]map[string]struct{})
 	m.pausedAnimations = make(map[string]struct{})
 	m.list.SetItems()
 	m.ClearMouse()
