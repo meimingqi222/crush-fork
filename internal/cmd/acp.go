@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/acp"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -32,16 +34,15 @@ crush acp --cwd /path/to/project
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 		defer cancel()
 
+		// Shorten network update timeout in ACP mode to ensure rapid startup
+		// even in restrictive network environments.
+		config.ProviderUpdateTimeout = 2 * time.Second
+
 		appInstance, err := setupApp(cmd)
 		if err != nil {
 			return err
 		}
 		defer appInstance.Shutdown()
-
-		if !appInstance.Config().IsConfigured() {
-			slog.Error("No providers configured. Run 'crush' to set up a provider interactively.")
-			return nil
-		}
 
 		// Do not block ACP handshake on MCP startup; editors may time out.
 		// Refresh models once MCP initialization finishes so MCP tools are picked up.

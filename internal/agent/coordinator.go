@@ -1283,6 +1283,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		SystemPromptPrefix: inferenceProviderCfg.SystemPromptPrefix,
 		SystemPrompt:       "",
 		WorkingDir:         c.cfg.WorkingDir(),
+		DataDirectory:      c.cfg.Config().Options.DataDirectory,
 		RefreshCallConfig: func(callCtx context.Context) (sessionAgentRuntimeConfig, error) {
 			return c.refreshSessionAgentRuntimeConfig(callCtx, result, prompt, agent, isSubAgent)
 		},

@@ -449,7 +449,7 @@ func buildRequest(t *testing.T, id int64, method string, params any) string {
 	require.NoError(t, err)
 	req := acp.Request{
 		JSONRPC: "2.0",
-		ID:      &id,
+		ID:      acp.NewIDFromInt(id),
 		Method:  method,
 		Params:  p,
 	}
@@ -637,7 +637,9 @@ func TestSessionLoadReplaysHistoryBeforeResponse(t *testing.T) {
 			var resp acp.Response
 			require.NoError(t, json.Unmarshal(line, &resp))
 			require.NotNil(t, resp.ID)
-			require.EqualValues(t, 1, *resp.ID)
+			num, ok := resp.ID.Int64()
+			require.True(t, ok)
+			require.EqualValues(t, 1, num)
 			require.Nil(t, resp.Error)
 			break
 		}
@@ -894,13 +896,15 @@ func TestSessionPrompt_ForwardsChildSessionToolUpdates(t *testing.T) {
 	for outScanner.Scan() {
 		line := outScanner.Bytes()
 		var envelope struct {
-			ID     *int64                        `json:"id"`
+			ID     *acp.ID                       `json:"id"`
 			Method string                        `json:"method"`
 			Params acp.SessionUpdateNotification `json:"params"`
 		}
 		require.NoError(t, json.Unmarshal(line, &envelope))
 		if envelope.ID != nil {
-			require.EqualValues(t, 1, *envelope.ID)
+			num, ok := envelope.ID.Int64()
+			require.True(t, ok)
+			require.EqualValues(t, 1, num)
 			break
 		}
 		if envelope.Method != "session/update" {
@@ -952,13 +956,15 @@ func TestSessionPrompt_ForwardsReducerFromToolResult(t *testing.T) {
 	for outScanner.Scan() {
 		line := outScanner.Bytes()
 		var envelope struct {
-			ID     *int64                        `json:"id"`
+			ID     *acp.ID                       `json:"id"`
 			Method string                        `json:"method"`
 			Params acp.SessionUpdateNotification `json:"params"`
 		}
 		require.NoError(t, json.Unmarshal(line, &envelope))
 		if envelope.ID != nil {
-			require.EqualValues(t, 1, *envelope.ID)
+			num, ok := envelope.ID.Int64()
+			require.True(t, ok)
+			require.EqualValues(t, 1, num)
 			break
 		}
 		if envelope.Method != "session/update" {
@@ -1011,13 +1017,15 @@ func TestSessionPrompt_ForwardsNonBashRuntimeCompletion(t *testing.T) {
 	for outScanner.Scan() {
 		line := outScanner.Bytes()
 		var envelope struct {
-			ID     *int64                        `json:"id"`
+			ID     *acp.ID                       `json:"id"`
 			Method string                        `json:"method"`
 			Params acp.SessionUpdateNotification `json:"params"`
 		}
 		require.NoError(t, json.Unmarshal(line, &envelope))
 		if envelope.ID != nil {
-			require.EqualValues(t, 1, *envelope.ID)
+			num, ok := envelope.ID.Int64()
+			require.True(t, ok)
+			require.EqualValues(t, 1, num)
 			break
 		}
 		if envelope.Method != "session/update" {
@@ -1068,13 +1076,15 @@ func TestSessionPrompt_ForwardsTimelineEvents(t *testing.T) {
 	for outScanner.Scan() {
 		line := outScanner.Bytes()
 		var envelope struct {
-			ID     *int64                        `json:"id"`
+			ID     *acp.ID                       `json:"id"`
 			Method string                        `json:"method"`
 			Params acp.SessionUpdateNotification `json:"params"`
 		}
 		require.NoError(t, json.Unmarshal(line, &envelope))
 		if envelope.ID != nil {
-			require.EqualValues(t, 1, *envelope.ID)
+			num, ok := envelope.ID.Int64()
+			require.True(t, ok)
+			require.EqualValues(t, 1, num)
 			seenResponse = true
 			if seenTimeline && seenMode && seenChildEvent {
 				break
@@ -1154,7 +1164,7 @@ func TestPermissionBridgeForwardsAuthoritySessionID(t *testing.T) {
 
 	var outbound struct {
 		JSONRPC string          `json:"jsonrpc"`
-		ID      *int64          `json:"id"`
+		ID      *acp.ID         `json:"id"`
 		Method  string          `json:"method"`
 		Params  json.RawMessage `json:"params"`
 	}

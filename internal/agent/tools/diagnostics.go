@@ -78,6 +78,7 @@ func waitForLSPDiagnostics(
 		if !client.HandlesFile(filepath) {
 			continue
 		}
+		client := client // capture loop variable
 		wg.Go(func() {
 			client.WaitForDiagnostics(ctx, timeout)
 		})

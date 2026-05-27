@@ -257,6 +257,7 @@ type sessionAgent struct {
 
 	memoryEngineRetriever engine.Retriever
 	memoryEngineBackend   string
+	dataDirectory         string
 }
 
 type SessionAgentOptions struct {
@@ -289,6 +290,7 @@ type SessionAgentOptions struct {
 	MemoryEngineRetriever  engine.Retriever
 	MemoryEngineBackend    string
 	RetryWaitFunc          func(context.Context, time.Duration) error
+	DataDirectory          string
 }
 
 type sessionAgentRuntimeConfig struct {
@@ -358,6 +360,7 @@ func NewSessionAgent(
 		memoryEngineHooks:      opts.MemoryEngineHooks,
 		memoryEngineRetriever:  opts.MemoryEngineRetriever,
 		memoryEngineBackend:    opts.MemoryEngineBackend,
+		dataDirectory:          opts.DataDirectory,
 	}
 }
 

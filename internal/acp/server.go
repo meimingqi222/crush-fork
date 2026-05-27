@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -170,7 +171,7 @@ func (s *Server) dispatch(ctx context.Context, raw json.RawMessage) {
 			// error response back to the client instead of silently
 			// dropping the request.
 			var peek struct {
-				ID *int64 `json:"id"`
+				ID *ID `json:"id"`
 			}
 			if json.Unmarshal(raw, &peek) == nil && peek.ID != nil {
 				s.writeResponse(ctx, &Response{
@@ -184,7 +185,7 @@ func (s *Server) dispatch(ctx context.Context, raw json.RawMessage) {
 
 	// Peek at the message to determine type.
 	var peek struct {
-		ID     *int64          `json:"id"`
+		ID     *ID             `json:"id"`
 		Method string          `json:"method"`
 		Result json.RawMessage `json:"result"`
 		Error  *RPCError       `json:"error"`
@@ -201,7 +202,17 @@ func (s *Server) dispatch(ctx context.Context, raw json.RawMessage) {
 			slog.Warn("ACP: failed to parse response", "err", err)
 			return
 		}
-		if ch, ok := s.pending.Load(*resp.ID); ok {
+		var pendingID int64
+		if resp.ID != nil {
+			if num, ok := resp.ID.Int64(); ok {
+				pendingID = num
+			} else if resp.ID.str != nil {
+				if num, err := strconv.ParseInt(*resp.ID.str, 10, 64); err == nil {
+					pendingID = num
+				}
+			}
+		}
+		if ch, ok := s.pending.Load(pendingID); ok {
 			ch.(chan *Response) <- &resp
 		}
 		return
@@ -306,7 +317,7 @@ func (s *Server) Call(ctx context.Context, method string, params any) (json.RawM
 	}
 	req := Request{
 		JSONRPC: "2.0",
-		ID:      &id,
+		ID:      NewIDFromInt(id),
 		Method:  method,
 		Params:  b,
 	}

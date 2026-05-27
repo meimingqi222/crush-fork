@@ -512,8 +512,6 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	assert.Contains(t, defaultNames, "write")
 }
 
-
-
 func runAgentToolForTest(t *testing.T, tool fantasy.AgentTool, params AgentParams) (fantasy.ToolResponse, error) {
 	t.Helper()
 	input, err := json.Marshal(params)
