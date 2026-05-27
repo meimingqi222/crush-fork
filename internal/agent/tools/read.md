@@ -3,7 +3,6 @@ Reads file contents, directories, or URL content.
 <usage>
 - Provide path (required): file path, directory path, or URL
 - For files: append selectors for line ranges or raw mode (see below)
-- For URLs: optional format parameter (text, markdown, html)
 - Line selectors auto-enable hashline anchors (LINE#HASH) for line-addressable editing
 </usage>
 
@@ -29,12 +28,10 @@ When a line selector is present, output includes LINE#HASH anchors for use with 
 - Suggests similar filenames when file not found
 - Renders image files directly in terminal
 - Automatically lists directory contents when given a directory path
-- URL content can be returned as text, markdown, or HTML
 </features>
 
 <url_reading>
 When path is a URL (http:// or https://):
-- Format: text (plain text), markdown (converted from HTML), or html (raw HTML body)
 - Auto-converts HTML to markdown by default
 - Max response size: 1MB
 </url_reading>
