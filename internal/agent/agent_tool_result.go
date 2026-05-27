@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/session"
 )
 
 // deferredToolStateFromToolSearchResult extracts deferred tool state from a tool_search result.
@@ -75,7 +77,7 @@ func deferredToolStateFromToolError(content string, metadata string) (message.To
 	return message.ToolResultDeferredToolState{}, false
 }
 
-func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) message.ToolResult {
+func (a *sessionAgent) convertToToolResult(ctx context.Context, result fantasy.ToolResultContent) message.ToolResult {
 	baseResult := message.ToolResult{
 		ToolCallID: result.ToolCallID,
 		Name:       result.ToolName,
@@ -94,6 +96,26 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 		if r, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](result.Result); ok {
 			baseResult.Content = r.Error.Error()
 			baseResult.IsError = true
+
+			// Smart semantic error interceptor for Orchestrate (coordinator) mode.
+			// Replaces tech jargon ("tool not found") with actionable high-agency role reminders.
+			if strings.Contains(baseResult.Content, "tool not found: edit") ||
+				strings.Contains(baseResult.Content, "tool not found: write") ||
+				strings.Contains(baseResult.Content, "tool not found: bash") {
+				sessionID := tools.GetSessionFromContext(ctx)
+				if sessionID != "" {
+					if sess, err := a.sessions.Get(ctx, sessionID); err == nil && sess.CollaborationMode == session.CollaborationModeOrchestrate {
+						baseResult.Content = fmt.Sprintf(
+							"Failed: The %q tool is not available in Orchestrate (coordinator) mode. "+
+								"You decompose, dispatch, verify, and iterate. You do NOT edit code or run mutating commands directly. "+
+								"Every file mutation and code implementation MUST go through a specialized subagent (e.g. by using the \"agent\" tool). "+
+								"Do not attempt to call %q directly in this session.",
+							baseResult.Name, baseResult.Name,
+						)
+					}
+				}
+			}
+
 			if state, ok := deferredToolStateFromToolError(baseResult.Content, baseResult.Metadata); ok {
 				baseResult = baseResult.WithDeferredToolState(state)
 			}

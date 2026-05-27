@@ -1208,7 +1208,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				return a.messages.Update(ctx, *currentAssistant)
 			},
 			OnToolResult: func(result fantasy.ToolResultContent) error {
-				toolResult := a.convertToToolResult(result)
+				toolResult := a.convertToToolResult(genCtx, result)
 				if toolResult.Name == tools.ToolSearchToolName {
 					if state, ok := deferredToolStateFromToolSearchResult(toolResult.Content); ok {
 						toolResult = toolResult.WithDeferredToolState(state)

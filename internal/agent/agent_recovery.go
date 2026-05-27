@@ -150,7 +150,7 @@ func toolResponseToToolResultContent(toolCall message.ToolCall, response fantasy
 }
 
 func (a *sessionAgent) persistRecoveredToolResult(ctx context.Context, genCtx context.Context, assistant *message.Message, result fantasy.ToolResultContent, runtimeConfig *sessionAgentRuntimeConfig, currentStepToolResultChars *int) (string, error) {
-	toolResult := a.convertToToolResult(result)
+	toolResult := a.convertToToolResult(genCtx, result)
 	if toolResult.Name == tools.ToolSearchToolName {
 		if state, ok := deferredToolStateFromToolSearchResult(toolResult.Content); ok {
 			toolResult = toolResult.WithDeferredToolState(state)

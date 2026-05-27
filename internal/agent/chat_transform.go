@@ -226,6 +226,23 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		return chatRequestState{}, err
 	}
 	slog.Debug("[PERF] buildChatRequestState: transformSessionMessages done", "duration", time.Since(start), "session_id", input.SessionID, "msg_count", len(transformedMessages))
+
+	// Inject dynamic, idempotent caveat warning ONLY to the LATEST (last) User message in memory
+	// when session is in Orchestrate (coordinator) mode. This avoids mutating historical user messages,
+	// ensuring that the established prompt cache (KV cache) on the LLM side remains 100% hit and intact.
+	if sess, err := a.sessions.Get(ctx, input.SessionID); err == nil && sess.CollaborationMode == session.CollaborationModeOrchestrate {
+		caveat := "<system_intent_gate_caveat>Notice: You are in Orchestrate (coordinator) mode. You decompose, dispatch, verify, and iterate. You do **not** edit code yourself. Every file mutation MUST go through a specialized subagent (e.g. by using the \"agent\" tool). Do not attempt to call \"edit\" or \"write\" directly in this session.</system_intent_gate_caveat>\n\n"
+		for i := len(transformedMessages) - 1; i >= 0; i-- {
+			if transformedMessages[i].Role == message.User {
+				text := transformedMessages[i].Content().Text
+				if text != "" && !strings.HasPrefix(text, caveat) {
+					transformedMessages[i].SetContent(caveat + text)
+				}
+				break
+			}
+		}
+	}
+
 	systemPrompt, promptPrefix, err := a.transformSystemPrompt(ctx, input)
 	if err != nil {
 		return chatRequestState{}, err

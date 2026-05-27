@@ -1393,7 +1393,7 @@ func TestConvertToToolResult_PreservesGenericRecoveryMetadata(t *testing.T) {
 	t.Parallel()
 
 	metadata := `{"recovered_by":"literal_text_fallback","recovery_action":"Pattern was not valid regex syntax. Treated it as literal text instead.","fallback_tool":"grep","fallback_tool_query":"[]fantasy.AgentTool","recovered_parameters":["literal_text"]}`
-	result := (&sessionAgent{}).convertToToolResult(fantasy.ToolResultContent{
+	result := (&sessionAgent{}).convertToToolResult(context.Background(), fantasy.ToolResultContent{
 		ToolCallID:     "call-1",
 		ToolName:       agenttools.GrepToolName,
 		ClientMetadata: metadata,
@@ -1413,7 +1413,7 @@ func TestConvertToToolResult_PreservesDeferredToolErrorRecoveryMetadata(t *testi
 	t.Parallel()
 
 	payload := `{"recovered_by":"deferred_tool_not_activated","tool":"sourcegraph","recovery_action":"Run tool_search with query \"select:sourcegraph\" before using this tool.","fallback_tool":"tool_search","fallback_tool_query":"select:sourcegraph","recovered_parameters":["query"]}`
-	result := (&sessionAgent{}).convertToToolResult(fantasy.ToolResultContent{
+	result := (&sessionAgent{}).convertToToolResult(context.Background(), fantasy.ToolResultContent{
 		ToolCallID:     "call-1",
 		ToolName:       "sourcegraph",
 		ClientMetadata: payload,
@@ -2037,4 +2037,94 @@ func TestPreparePromptKeepsRoundTrippedAssistantBeforeNextUser(t *testing.T) {
 		"prior assistant reply was incorrectly dropped after round-tripping through fantasy.Message")
 	require.NotContains(t, systemTexts, canceledPromptBranchSystemNote,
 		"canceled-prompt boundary note was injected for a completed prior turn")
+}
+
+func TestConvertToToolResult_OrchestrateModeSemanticInterceptor(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	// Create an orchestrate mode session
+	sess, err := env.sessions.Create(t.Context(), "Test Session")
+	require.NoError(t, err)
+	sess.CollaborationMode = session.CollaborationModeOrchestrate
+	_, err = env.sessions.Save(t.Context(), sess)
+	require.NoError(t, err)
+
+	a := NewSessionAgent(SessionAgentOptions{
+		LargeModel: Model{
+			CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 1000},
+			ModelCfg:   config.SelectedModel{Model: "test", Provider: "test"},
+		},
+		Sessions: env.sessions,
+		Messages: env.messages,
+	}).(*sessionAgent)
+
+	ctx := context.WithValue(context.Background(), agenttools.SessionIDContextKey, sess.ID)
+
+	// Simulate "tool not found: edit" error
+	result := a.convertToToolResult(ctx, fantasy.ToolResultContent{
+		ToolCallID: "call-1",
+		ToolName:   "edit",
+		Result:     fantasy.ToolResultOutputContentError{Error: errors.New("tool not found: edit")},
+	})
+
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "Failed: The \"edit\" tool is not available in Orchestrate (coordinator) mode.")
+	require.Contains(t, result.Content, "Every file mutation and code implementation MUST go through a specialized subagent")
+}
+
+func TestBuildChatRequestState_OrchestrateModeAttentionDefense(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	sess, err := env.sessions.Create(t.Context(), "Test Session")
+	require.NoError(t, err)
+	sess.CollaborationMode = session.CollaborationModeOrchestrate
+	_, err = env.sessions.Save(t.Context(), sess)
+	require.NoError(t, err)
+
+	a := NewSessionAgent(SessionAgentOptions{
+		LargeModel: Model{
+			CatwalkCfg: catwalk.Model{ContextWindow: 200000, DefaultMaxTokens: 1000},
+			ModelCfg:   config.SelectedModel{Model: "test", Provider: "test"},
+		},
+		Sessions: env.sessions,
+		Messages: env.messages,
+	}).(*sessionAgent)
+
+	// Build inputs with User messages
+	userMsg := message.Message{
+		SessionID: sess.ID,
+		Role:      message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "please edit code"},
+		},
+	}
+
+	state, err := a.buildChatRequestState(t.Context(), chatRequestStateInput{
+		SessionID:    sess.ID,
+		Agent:        "session",
+		Model:        a.largeModel.Get(),
+		Messages:     []message.Message{userMsg},
+		SystemPrompt: "system prompt",
+	})
+	require.NoError(t, err)
+
+	// Verify that the caveat has been prepended to user message in memory
+	require.Len(t, state.Messages, 1)
+	require.Contains(t, state.Messages[0].Content().Text, "<system_intent_gate_caveat>")
+	require.Contains(t, state.Messages[0].Content().Text, "please edit code")
+
+	// Verify idempotency: calling it again with already-prefixed message should not double prefix
+	state2, err := a.buildChatRequestState(t.Context(), chatRequestStateInput{
+		SessionID:    sess.ID,
+		Agent:        "session",
+		Model:        a.largeModel.Get(),
+		Messages:     state.Messages,
+		SystemPrompt: "system prompt",
+	})
+	require.NoError(t, err)
+	require.Len(t, state2.Messages, 1)
+	text := state2.Messages[0].Content().Text
+	require.Equal(t, 1, strings.Count(text, "<system_intent_gate_caveat>"))
 }
