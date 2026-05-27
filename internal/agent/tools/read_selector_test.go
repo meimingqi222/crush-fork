@@ -3,6 +3,7 @@ package tools
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -241,6 +242,10 @@ func TestParsePathSelectorInvalidTokens(t *testing.T) {
 func TestParsePathSelectorExistenceFallback(t *testing.T) {
 	t.Parallel()
 
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not support colons in filenames (except for drive letters)")
+	}
+
 	dir := t.TempDir()
 	// Create a file whose name contains a colon-like suffix.
 	weirdName := "data:50"
@@ -258,6 +263,10 @@ func TestParsePathSelectorExistenceFallback(t *testing.T) {
 
 func TestParsePathSelectorColonInFilenameWithRealSelector(t *testing.T) {
 	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not support colons in filenames (except for drive letters)")
+	}
 
 	dir := t.TempDir()
 	weirdName := "my:file.ts"
