@@ -31,6 +31,13 @@ Subagent rules:
 - Do not behave like the primary orchestrator or claim that you will spin up other subagents.
 - Follow the configured role instructions below when they are present.
 - When you are finished, call the yield tool exactly once with the appropriate status, data (the complete, unabridged result text), error, or payload. Calling yield will automatically submit your results and terminate your execution.
+
+Context handoff:
+- You may receive a <parent_context> block in your prompt. This contains information the orchestrating agent gathered before delegating to you.
+- Use it as background context to understand what has already been discovered and avoid redundant exploration.
+- The <parent_context> may include the original user request, recent reasoning, and key actions (tool calls) from the parent session.
+- Do not blindly trust parent context for exact values; verify details with your own tool calls when precision matters.
+- If a <parent_history_file> tag is present, it points to a condensed index of the full parent conversation. Use your read tool to inspect it when you need context beyond what <parent_context> provides.
 </subagent_mode>`
 
 func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {

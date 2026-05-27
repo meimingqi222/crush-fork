@@ -2440,6 +2440,10 @@ type subAgentParams struct {
 	SkipHandoffReview         bool
 	SkipStructuredFinishCheck bool
 	IrcAgentID                string
+	// PrecomputedContext, when non-empty, is used as the parent context
+	// prefix instead of calling buildSubagentHandoffSummary. This allows
+	// the batch path to compute context once and share it across tasks.
+	PrecomputedContext string
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
 	SessionSetup func(sessionID string)
@@ -2545,6 +2549,25 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 
 	baseContext := strings.TrimSpace(params.Context)
 
+	// Compute parent context once for the entire batch, rather than
+	// re-computing it inside each runSubAgentDirect call.
+	parentContext := c.buildSubagentHandoffSummary(ctx, params.SessionID)
+
+	// Export a condensed history index file for deep context inspection.
+	historyFile := c.writeParentHistoryFile(ctx, params.SessionID)
+	defer c.cleanupParentHistoryFile(historyFile)
+	if historyFile != "" {
+		parentContext += fmt.Sprintf(
+			"\n<parent_history_file>\nFull conversation index: %s\nRead this file if you need context beyond what is provided above.\n</parent_history_file>\n",
+			historyFile,
+		)
+	}
+
+	// Assemble a unified context prefix combining auto-extracted parent
+	// context and user-provided shared context. This is shared across all
+	// tasks in the batch via PrecomputedContext.
+	batchContextPrefix := assembleSubagentPrompt(parentContext, baseContext, "")
+
 	// Prepare each task synchronously: build the subagent, register it,
 	// drain mailbox messages, and assemble the runtime parameters.
 	for i, t := range params.Tasks {
@@ -2584,9 +2607,6 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		prepared[i].AgentID = agentID
 
 		prompt := strings.TrimSpace(t.Assignment)
-		if baseContext != "" {
-			prompt = fmt.Sprintf("Shared context:\n%s\n\n---\n\n%s", baseContext, prompt)
-		}
 
 		if effects, consumeErr := bridge.Consume(t.Name); consumeErr == nil {
 			if len(effects.Messages) > 0 {
@@ -2609,20 +2629,21 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 
 		taskToolCallID := fmt.Sprintf("%s::%s", params.ToolCallID, t.Name)
 		prepared[i].Params = subAgentParams{
-			Agent:             subAgent,
-			SessionID:         params.SessionID,
-			AgentMessageID:    params.AgentMessageID,
-			ParentMessageID:   params.AgentMessageID,
-			ToolCallID:        taskToolCallID,
-			Prompt:            prompt,
-			SessionTitle:      formatSubagentSessionTitle(description, subagentType),
-			SubagentType:      subagentType,
-			DelegationMailbox: params.ToolCallID,
-			AgentMemory:       agentCfg.Memory,
-			AgentIsolation:    agentCfg.Isolation,
-			AgentBackground:   agentCfg.Background,
-			SkipHandoffReview: true,
-			IrcAgentID:        agentID,
+			Agent:              subAgent,
+			SessionID:          params.SessionID,
+			AgentMessageID:     params.AgentMessageID,
+			ParentMessageID:    params.AgentMessageID,
+			ToolCallID:         taskToolCallID,
+			Prompt:             prompt,
+			SessionTitle:       formatSubagentSessionTitle(description, subagentType),
+			SubagentType:       subagentType,
+			DelegationMailbox:  params.ToolCallID,
+			AgentMemory:        agentCfg.Memory,
+			AgentIsolation:     agentCfg.Isolation,
+			AgentBackground:    agentCfg.Background,
+			SkipHandoffReview:  true,
+			IrcAgentID:         agentID,
+			PrecomputedContext: batchContextPrefix,
 		}
 	}
 
@@ -3361,16 +3382,20 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	if resolveErr != nil {
 		resolvedAgentCfg = config.Agent{ID: params.SubagentTypeOrDefault(), Description: params.SessionTitle, AllowedTools: nil}
 	}
-	parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, parentSession.CollaborationMode, params.SessionID)
+
+	// Clear any inherited runtime config from the parent agent before
+	// deriving parent permissions and running the subagent. Each subagent
+	// must refresh its own models, tools, and system prompt; otherwise
+	// concurrent child runs can observe the parent's runtime config and skip
+	// their own initialization. This also prevents subagent permissions from
+	// inheriting parent's temporary allowed tool restrictions in Plan/Review
+	// modes.
+	ctx = context.WithValue(ctx, sessionAgentRuntimeConfigContextKey{}, (*sessionAgentRuntimeConfig)(nil))
+
+	parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, session.CollaborationModeDefault, params.SessionID)
 	if parentPermissionsErr != nil {
 		return fantasy.ToolResponse{}, parentPermissionsErr
 	}
-
-	// Clear any inherited runtime config from the parent agent before running
-	// the subagent. Each subagent must refresh its own models, tools, and
-	// system prompt; otherwise concurrent child runs can observe the parent's
-	// runtime config and skip their own initialization.
-	ctx = context.WithValue(ctx, sessionAgentRuntimeConfigContextKey{}, (*sessionAgentRuntimeConfig)(nil))
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, subSession.ID)
 	ctx = context.WithValue(ctx, tools.ToolCallIDContextKey, params.ToolCallID)
 	ctx = context.WithValue(ctx, tools.WorkingDirContextKey, sessionWorkingDir)
@@ -3423,12 +3448,27 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		ctx = permission.WithEscalationBridge(ctx, c.escalationBridge)
 	}
 
-	// Prepend a brief summary of the coordinator's recent reasoning so the
+	// Prepend a structured handoff summary of the coordinator's session so the
 	// subagent has concrete context from the Research phase and does not need
 	// to rediscover details the coordinator already gathered.
+	// If PrecomputedContext was set by the batch path, use it directly to
+	// avoid redundant computation.
 	enrichedPrompt := params.Prompt
 	if strings.TrimSpace(params.ExistingSessionID) == "" {
-		enrichedPrompt = c.buildSubagentContextPrefix(ctx, params.SessionID) + params.Prompt
+		if params.PrecomputedContext != "" {
+			enrichedPrompt = params.PrecomputedContext + params.Prompt
+		} else {
+			handoff := c.buildSubagentHandoffSummary(ctx, params.SessionID)
+			historyFile := c.writeParentHistoryFile(ctx, params.SessionID)
+			defer c.cleanupParentHistoryFile(historyFile)
+			if historyFile != "" {
+				handoff += fmt.Sprintf(
+					"\n<parent_history_file>\nFull conversation index: %s\nRead this file if you need context beyond what is provided above.\n</parent_history_file>\n",
+					historyFile,
+				)
+			}
+			enrichedPrompt = handoff + params.Prompt
+		}
 	}
 
 	providerOptions := getProviderOptions(model, providerCfg, resolvedAgentCfg)
@@ -4028,20 +4068,28 @@ func (c *coordinator) updateParentSessionCostDelta(ctx context.Context, childSes
 }
 
 const (
-	// subagentContextInjectMaxMessages caps how many of the coordinator's recent
-	// text messages are prepended to a subagent's prompt as parent context.
-	subagentContextInjectMaxMessages = 3
-	// subagentContextInjectMaxCharsPerMsg caps each injected snippet so that the
-	// combined overhead stays well under a typical context window.
-	subagentContextInjectMaxCharsPerMsg = 500
+	// subagentHandoffMaxReasoningSteps caps how many recent assistant text
+	// snippets are included in the handoff summary.
+	subagentHandoffMaxReasoningSteps = 3
+	// subagentHandoffMaxCharsPerStep caps each reasoning snippet.
+	subagentHandoffMaxCharsPerStep = 500
+	// subagentHandoffMaxToolActions caps the number of distinct tool call
+	// summaries included in the handoff.
+	subagentHandoffMaxToolActions = 5
+	// subagentHandoffMaxUserChars caps the original user request snippet.
+	subagentHandoffMaxUserChars = 300
+	// subagentHandoffToolInputChars caps each tool call input summary.
+	subagentHandoffToolInputChars = 80
 )
 
-// buildSubagentContextPrefix collects the coordinator's most recent text
-// reasoning from the parent session and formats it as a <parent_context> block.
-// This gives subagents concrete information the coordinator gathered during the
-// Research phase without requiring them to rediscover it from scratch.
+// buildSubagentHandoffSummary builds a structured <parent_context> block from
+// the parent session's messages. It includes three optional sections:
+//   - <original_request>: the first user message (truncated)
+//   - <recent_reasoning>: the last N assistant text snippets (thinking stripped)
+//   - <key_actions>: summaries of recent tool calls (deduplicated by name)
+//
 // Returns "" when there is nothing meaningful to inject.
-func (c *coordinator) buildSubagentContextPrefix(ctx context.Context, parentSessionID string) string {
+func (c *coordinator) buildSubagentHandoffSummary(ctx context.Context, parentSessionID string) string {
 	if c.messages == nil {
 		return ""
 	}
@@ -4050,39 +4098,329 @@ func (c *coordinator) buildSubagentContextPrefix(ctx context.Context, parentSess
 		return ""
 	}
 
+	// 1. Original request: first user message.
+	originalRequest := extractOriginalRequest(msgs, subagentHandoffMaxUserChars)
+
+	// 2. Recent reasoning: last N assistant text snippets (thinking stripped).
+	snippets := extractRecentReasoning(msgs, subagentHandoffMaxReasoningSteps, subagentHandoffMaxCharsPerStep)
+
+	// 3. Key actions: recent tool call summaries (deduplicated by name).
+	actions := extractKeyActions(msgs, subagentHandoffMaxToolActions, subagentHandoffToolInputChars)
+
+	if originalRequest == "" && len(snippets) == 0 && len(actions) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<parent_context>\n")
+	sb.WriteString("Context from the orchestrating agent's session. Use this to understand\n")
+	sb.WriteString("what has already been discovered and done.\n")
+
+	if originalRequest != "" {
+		sb.WriteString("\n<original_request>\n")
+		sb.WriteString(originalRequest)
+		sb.WriteString("\n</original_request>\n")
+	}
+
+	if len(snippets) > 0 {
+		sb.WriteString("\n<recent_reasoning>\n")
+		for i, s := range snippets {
+			fmt.Fprintf(&sb, "%d. %s\n", i+1, s)
+		}
+		sb.WriteString("</recent_reasoning>\n")
+	}
+
+	if len(actions) > 0 {
+		sb.WriteString("\n<key_actions>\n")
+		for _, a := range actions {
+			fmt.Fprintf(&sb, "- %s\n", a)
+		}
+		sb.WriteString("</key_actions>\n")
+	}
+
+	sb.WriteString("</parent_context>\n\n")
+	return sb.String()
+}
+
+// extractOriginalRequest returns the first user message text, truncated to
+// maxChars. Returns "" if no user message is found.
+func extractOriginalRequest(msgs []message.Message, maxChars int) string {
+	for i := range msgs {
+		if msgs[i].Role != message.User || msgs[i].IsSummaryMessage {
+			continue
+		}
+		text := strings.TrimSpace(msgs[i].Content().Text)
+		if text == "" {
+			continue
+		}
+		runes := []rune(text)
+		if len(runes) > maxChars {
+			text = string(runes[:maxChars]) + "…"
+		}
+		return text
+	}
+	return ""
+}
+
+// extractRecentReasoning collects the last maxSteps assistant text snippets,
+// stripping extended-thinking blocks and truncating each to maxChars.
+// Results are returned in chronological order.
+func extractRecentReasoning(msgs []message.Message, maxSteps, maxChars int) []string {
 	var snippets []string
-	for i := len(msgs) - 1; i >= 0 && len(snippets) < subagentContextInjectMaxMessages; i-- {
+	for i := len(msgs) - 1; i >= 0 && len(snippets) < maxSteps; i-- {
 		msg := msgs[i]
 		if msg.Role != message.Assistant || msg.IsSummaryMessage {
 			continue
 		}
 		text := strings.TrimSpace(msg.Content().Text)
-		// Strip extended-thinking blocks — they contain internal reasoning that
-		// is not useful to share with a subagent.
 		text = thinkTagRegex.ReplaceAllString(text, "")
 		text = strings.TrimSpace(text)
 		if text == "" {
 			continue
 		}
 		runes := []rune(text)
-		if len(runes) > subagentContextInjectMaxCharsPerMsg {
-			text = string(runes[:subagentContextInjectMaxCharsPerMsg]) + "…"
+		if len(runes) > maxChars {
+			text = string(runes[:maxChars]) + "…"
 		}
 		snippets = append([]string{text}, snippets...) // maintain chronological order
 	}
+	return snippets
+}
 
-	if len(snippets) == 0 {
+// extractKeyActions collects recent tool call summaries, deduplicated by tool
+// name (keeping the most recent occurrence). Each summary is formatted as
+// "tool_name(input_summary)" where input_summary is the first maxInputChars
+// of the JSON input.
+func extractKeyActions(msgs []message.Message, maxActions, maxInputChars int) []string {
+	seen := make(map[string]int) // tool name → index in actions slice
+	var actions []string
+	// Iterate forward: later (newer) occurrences replace earlier ones via
+	// the seen map, ensuring the most recent call per tool name is kept.
+	for i := range msgs {
+		msg := msgs[i]
+		if msg.Role != message.Assistant || msg.IsSummaryMessage {
+			continue
+		}
+		for _, tc := range msg.ToolCalls() {
+			if tc.Name == "" {
+				continue
+			}
+			summary := formatToolCallSummary(tc.Name, tc.Input, maxInputChars)
+			if prevIdx, exists := seen[tc.Name]; exists {
+				// Replace older entry with this newer occurrence.
+				actions[prevIdx] = summary
+			} else {
+				seen[tc.Name] = len(actions)
+				actions = append(actions, summary)
+			}
+		}
+	}
+	// Keep only the last maxActions entries (most recent).
+	if len(actions) > maxActions {
+		actions = actions[len(actions)-maxActions:]
+	}
+	return actions
+}
+
+// formatToolCallSummary produces a one-line summary of a tool call:
+// "tool_name(input_summary)" where input is truncated to maxInputChars.
+func formatToolCallSummary(name, input string, maxInputChars int) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return name
+	}
+	// Compact JSON: remove newlines and excess whitespace.
+	input = strings.ReplaceAll(input, "\n", " ")
+	runes := []rune(input)
+	if len(runes) > maxInputChars {
+		input = string(runes[:maxInputChars]) + "…"
+	}
+	return fmt.Sprintf("%s(%s)", name, input)
+}
+
+// assembleSubagentPrompt combines auto-extracted parent context and
+// user-provided shared context into a single <parent_context> block, then
+// appends the task assignment. If both contexts are empty, it returns only
+// the assignment.
+func assembleSubagentPrompt(parentContext, sharedContext, assignment string) string {
+	parentContext = strings.TrimSpace(parentContext)
+	sharedContext = strings.TrimSpace(sharedContext)
+
+	if parentContext == "" && sharedContext == "" {
+		return assignment
+	}
+
+	var sb strings.Builder
+
+	// If parentContext already contains a <parent_context> block, strip the
+	// closing tag so we can merge shared context inside the same block.
+	if parentContext != "" && strings.HasPrefix(parentContext, "<parent_context>") {
+		trimmed := strings.TrimPrefix(parentContext, "<parent_context>")
+		trimmed = strings.TrimSuffix(trimmed, "</parent_context>")
+		sb.WriteString("<parent_context>")
+		sb.WriteString(trimmed)
+		if sharedContext != "" {
+			sb.WriteString("\n<shared_context>\n")
+			sb.WriteString(sharedContext)
+			sb.WriteString("\n</shared_context>\n")
+		}
+		sb.WriteString("</parent_context>\n\n")
+	} else if parentContext != "" {
+		// parentContext is raw (not yet wrapped).
+		sb.WriteString("<parent_context>\n")
+		sb.WriteString(parentContext)
+		if sharedContext != "" {
+			sb.WriteString("\n\n<shared_context>\n")
+			sb.WriteString(sharedContext)
+			sb.WriteString("\n</shared_context>\n")
+		}
+		sb.WriteString("</parent_context>\n\n")
+	} else {
+		// Only sharedContext is present.
+		sb.WriteString("<parent_context>\n<shared_context>\n")
+		sb.WriteString(sharedContext)
+		sb.WriteString("\n</shared_context>\n</parent_context>\n\n")
+	}
+
+	sb.WriteString(assignment)
+	return sb.String()
+}
+
+const (
+	// subagentHistoryMaxMessages caps messages included in the history index.
+	subagentHistoryMaxMessages = 30
+	// subagentHistoryMaxCharsPerMsg caps each message snippet in the index.
+	subagentHistoryMaxCharsPerMsg = 200
+	// subagentHistoryDirName is the subdirectory under ProjectDataDir for
+	// temporary parent session history files.
+	subagentHistoryDirName = "subagent-handoffs"
+)
+
+// writeParentHistoryFile exports a condensed index of the parent session's
+// conversation as a lightweight Markdown file that subagents can read for
+// deep context inspection. Returns "" on any error (graceful degradation).
+func (c *coordinator) writeParentHistoryFile(ctx context.Context, parentSessionID string) string {
+	if c.messages == nil {
+		return ""
+	}
+	msgs, err := c.messages.List(ctx, parentSessionID)
+	if err != nil || len(msgs) == 0 {
+		return ""
+	}
+
+	projectDataDir := ""
+	if c.cfg != nil {
+		projectDataDir = strings.TrimSpace(c.cfg.ProjectDataDir())
+	}
+	if projectDataDir == "" {
+		return ""
+	}
+
+	historyDir := filepath.Join(projectDataDir, subagentHistoryDirName)
+	if err := os.MkdirAll(historyDir, 0o755); err != nil {
+		slog.Warn("Failed to create subagent handoffs directory", "path", historyDir, "error", err)
 		return ""
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<parent_context>\n")
-	sb.WriteString("Context gathered by the orchestrating agent before this task was delegated:\n\n")
-	for i, s := range snippets {
-		fmt.Fprintf(&sb, "%d. %s\n\n", i+1, s)
+	fmt.Fprintf(&sb, "# Parent Session History\n")
+	fmt.Fprintf(&sb, "Session: %s\n\n", parentSessionID)
+
+	// Take the last N messages.
+	start := 0
+	if len(msgs) > subagentHistoryMaxMessages {
+		start = len(msgs) - subagentHistoryMaxMessages
 	}
-	sb.WriteString("</parent_context>\n\n")
-	return sb.String()
+	for i := start; i < len(msgs); i++ {
+		msg := msgs[i]
+		if msg.IsSummaryMessage {
+			continue
+		}
+		line := formatHistoryLine(msg, subagentHistoryMaxCharsPerMsg)
+		if line != "" {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+	}
+
+	historyPath := filepath.Join(historyDir, fmt.Sprintf("%s.md", parentSessionID))
+	if err := os.WriteFile(historyPath, []byte(sb.String()), 0o644); err != nil {
+		slog.Warn("Failed to write parent history file", "path", historyPath, "error", err)
+		return ""
+	}
+	return historyPath
+}
+
+// formatHistoryLine produces a single-line summary of a message for the
+// history index file.
+func formatHistoryLine(msg message.Message, maxChars int) string {
+	if msg.IsSummaryMessage {
+		return ""
+	}
+	switch msg.Role {
+	case message.User:
+		text := strings.TrimSpace(msg.Content().Text)
+		if text == "" {
+			return ""
+		}
+		return formatHistoryEntry("User", text, maxChars)
+	case message.Assistant:
+		// Include text reasoning (thinking stripped).
+		text := strings.TrimSpace(msg.Content().Text)
+		text = thinkTagRegex.ReplaceAllString(text, "")
+		text = strings.TrimSpace(text)
+		line := ""
+		if text != "" {
+			line = formatHistoryEntry("Assistant", text, maxChars)
+		}
+		// Append tool call summaries.
+		for _, tc := range msg.ToolCalls() {
+			if tc.Name == "" {
+				continue
+			}
+			summary := formatToolCallSummary(tc.Name, tc.Input, subagentHandoffToolInputChars)
+			entry := fmt.Sprintf("[ToolCall] %s", summary)
+			if line != "" {
+				line += "\n" + entry
+			} else {
+				line = entry
+			}
+		}
+		return line
+	case message.Tool:
+		for _, tr := range msg.ToolResults() {
+			if tr.Name == "" {
+				continue
+			}
+			content := strings.TrimSpace(tr.Content)
+			if content == "" {
+				return fmt.Sprintf("[ToolResult] %s: (empty)", tr.Name)
+			}
+			return formatHistoryEntry("ToolResult:"+tr.Name, content, maxChars)
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// formatHistoryEntry formats a labeled history line with truncation.
+func formatHistoryEntry(label, text string, maxChars int) string {
+	runes := []rune(text)
+	if len(runes) > maxChars {
+		text = string(runes[:maxChars]) + "…"
+	}
+	return fmt.Sprintf("[%s] %s", label, text)
+}
+
+// cleanupParentHistoryFile removes a temporary parent history file.
+func (c *coordinator) cleanupParentHistoryFile(filePath string) {
+	if filePath == "" {
+		return
+	}
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Failed to remove parent history file", "path", filePath, "error", err)
+	}
 }
 
 func (c *coordinator) subAgentResponseText(ctx context.Context, sessionID string, result *fantasy.AgentResult) string {

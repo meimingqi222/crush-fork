@@ -2014,3 +2014,318 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildSubagentHandoffSummary(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test", config.ProviderConfig{ID: "test"})
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "parent")
+	require.NoError(t, err)
+
+	// Create a user message (original request).
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "Please fix the authentication bug in the login handler."},
+		},
+	})
+	require.NoError(t, err)
+
+	// Create an assistant message with thinking and text.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "internal reasoning about auth"},
+			message.TextContent{Text: "I found the bug in auth.go line 42. The token validation is missing a nil check."},
+			message.ToolCall{Name: "read", Input: `{"path":"internal/auth.go","offset":40,"limit":10}`},
+		},
+	})
+	require.NoError(t, err)
+
+	// Create another assistant message.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "The fix requires adding a nil guard before calling ValidateToken."},
+			message.ToolCall{Name: "grep", Input: `{"pattern":"ValidateToken","output_mode":"content"}`},
+		},
+	})
+	require.NoError(t, err)
+
+	result := coord.buildSubagentHandoffSummary(ctx, sess.ID)
+
+	// Verify overall structure.
+	assert.Contains(t, result, "<parent_context>")
+	assert.Contains(t, result, "</parent_context>")
+
+	// Verify original request section.
+	assert.Contains(t, result, "<original_request>")
+	assert.Contains(t, result, "authentication bug")
+	assert.Contains(t, result, "</original_request>")
+
+	// Verify recent reasoning section.
+	assert.Contains(t, result, "<recent_reasoning>")
+	assert.Contains(t, result, "nil guard")
+	assert.Contains(t, result, "</recent_reasoning>")
+
+	// Verify thinking content is stripped.
+	assert.NotContains(t, result, "internal reasoning about auth")
+
+	// Verify key actions section.
+	assert.Contains(t, result, "<key_actions>")
+	assert.Contains(t, result, "read(")
+	assert.Contains(t, result, "grep(")
+	assert.Contains(t, result, "</key_actions>")
+}
+
+func TestBuildSubagentHandoffSummary_Empty(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test", config.ProviderConfig{ID: "test"})
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "empty-parent")
+	require.NoError(t, err)
+
+	// No messages → returns "".
+	result := coord.buildSubagentHandoffSummary(ctx, sess.ID)
+	assert.Equal(t, "", result)
+}
+
+func TestBuildSubagentHandoffSummary_ThinkingStripped(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test", config.ProviderConfig{ID: "test"})
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "thinking-parent")
+	require.NoError(t, err)
+
+	// Create an assistant message with only thinking content (no visible text).
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: "secret internal chain of thought"},
+			message.TextContent{Text: "<think>secret internal chain of thought</think>"},
+		},
+	})
+	require.NoError(t, err)
+
+	result := coord.buildSubagentHandoffSummary(ctx, sess.ID)
+
+	// Thinking content should not appear.
+	assert.NotContains(t, result, "secret internal chain")
+	// With no visible text and no user messages, result should be empty.
+	assert.Equal(t, "", result)
+}
+
+func TestAssembleSubagentPrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both contexts present", func(t *testing.T) {
+		t.Parallel()
+		parentCtx := "<parent_context>\nSome auto-summary\n</parent_context>"
+		sharedCtx := "Shared background from parent agent."
+		assignment := "Fix the bug."
+
+		result := assembleSubagentPrompt(parentCtx, sharedCtx, assignment)
+
+		assert.Contains(t, result, "<parent_context>")
+		assert.Contains(t, result, "Some auto-summary")
+		assert.Contains(t, result, "<shared_context>")
+		assert.Contains(t, result, "Shared background from parent agent.")
+		assert.Contains(t, result, "</shared_context>")
+		assert.Contains(t, result, "</parent_context>")
+		assert.Contains(t, result, "Fix the bug.")
+		// Verify assignment comes after the context block.
+		assert.Greater(t, strings.Index(result, "Fix the bug."), strings.Index(result, "</parent_context>"))
+	})
+
+	t.Run("only parent context", func(t *testing.T) {
+		t.Parallel()
+		result := assembleSubagentPrompt("auto-summary", "", "Do work.")
+		assert.Contains(t, result, "<parent_context>")
+		assert.Contains(t, result, "auto-summary")
+		assert.NotContains(t, result, "<shared_context>")
+		assert.Contains(t, result, "Do work.")
+	})
+
+	t.Run("only shared context", func(t *testing.T) {
+		t.Parallel()
+		result := assembleSubagentPrompt("", "shared info", "Do work.")
+		assert.Contains(t, result, "<parent_context>")
+		assert.Contains(t, result, "<shared_context>")
+		assert.Contains(t, result, "shared info")
+		assert.Contains(t, result, "Do work.")
+	})
+
+	t.Run("both empty", func(t *testing.T) {
+		t.Parallel()
+		result := assembleSubagentPrompt("", "", "Just the assignment.")
+		assert.Equal(t, "Just the assignment.", result)
+		assert.NotContains(t, result, "<parent_context>")
+	})
+}
+
+func TestWriteParentHistoryFile(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test", config.ProviderConfig{ID: "test"})
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "history-parent")
+	require.NoError(t, err)
+
+	// Create messages.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "Build a REST API."}},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "I'll create the API endpoints now."},
+			message.ToolCall{Name: "write", Input: `{"path":"api/handlers.go"}`},
+		},
+	})
+	require.NoError(t, err)
+
+	historyFile := coord.writeParentHistoryFile(ctx, sess.ID)
+
+	if historyFile == "" {
+		t.Skip("history file not created (project data dir unavailable)")
+	}
+	defer coord.cleanupParentHistoryFile(historyFile)
+
+	// Verify file exists and has content.
+	data, readErr := os.ReadFile(historyFile)
+	require.NoError(t, readErr)
+	content := string(data)
+
+	assert.Contains(t, content, "# Parent Session History")
+	assert.Contains(t, content, "[User]")
+	assert.Contains(t, content, "REST API")
+	assert.Contains(t, content, "[Assistant]")
+	assert.Contains(t, content, "API endpoints")
+	assert.Contains(t, content, "[ToolCall] write(")
+
+	// Verify cleanup works.
+	coord.cleanupParentHistoryFile(historyFile)
+	_, statErr := os.Stat(historyFile)
+	assert.True(t, os.IsNotExist(statErr), "history file should be removed after cleanup")
+}
+
+func TestFormatHistoryLine(t *testing.T) {
+	t.Parallel()
+
+	t.Run("user message", func(t *testing.T) {
+		t.Parallel()
+		msg := message.Message{
+			Role:  message.User,
+			Parts: []message.ContentPart{message.TextContent{Text: "Fix the bug."}},
+		}
+		line := formatHistoryLine(msg, 200)
+		assert.Contains(t, line, "[User]")
+		assert.Contains(t, line, "Fix the bug.")
+	})
+
+	t.Run("assistant with thinking stripped", func(t *testing.T) {
+		t.Parallel()
+		msg := message.Message{
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "<think>secret thoughts</think>Visible text here."},
+			},
+		}
+		line := formatHistoryLine(msg, 200)
+		assert.Contains(t, line, "[Assistant]")
+		assert.Contains(t, line, "Visible text here.")
+		assert.NotContains(t, line, "secret thoughts")
+	})
+
+	t.Run("summary message skipped", func(t *testing.T) {
+		t.Parallel()
+		msg := message.Message{
+			Role:             message.Assistant,
+			Parts:            []message.ContentPart{message.TextContent{Text: "summary"}},
+			IsSummaryMessage: true,
+		}
+		line := formatHistoryLine(msg, 200)
+		assert.Equal(t, "", line)
+	})
+}
+
+func TestExtractOriginalRequest(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		{Role: message.System, Parts: []message.ContentPart{message.TextContent{Text: "system"}}},
+		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "First user request."}}},
+		{Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: "response"}}},
+		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "Second user message."}}},
+	}
+
+	result := extractOriginalRequest(msgs, 300)
+	assert.Equal(t, "First user request.", result)
+}
+
+func TestExtractOriginalRequest_Truncation(t *testing.T) {
+	t.Parallel()
+
+	longText := strings.Repeat("a", 500)
+	msgs := []message.Message{
+		{Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: longText}}},
+	}
+
+	result := extractOriginalRequest(msgs, 300)
+	assert.True(t, len([]rune(result)) <= 302) // 300 + "…" + possible margin
+	assert.Contains(t, result, "…")
+}
+
+func TestExtractKeyActions(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		{
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ToolCall{Name: "read", Input: `{"path":"foo.go"}`},
+				message.ToolCall{Name: "grep", Input: `{"pattern":"bar"}`},
+			},
+		},
+		{
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ToolCall{Name: "bash", Input: `{"command":"go test"}`},
+				message.ToolCall{Name: "read", Input: `{"path":"bar.go"}`}, // duplicate name, this one is more recent
+			},
+		},
+	}
+
+	actions := extractKeyActions(msgs, 5, 80)
+	require.Len(t, actions, 3) // read, grep, bash (read deduplicated, keeping the more recent)
+	// The most recent read should reference bar.go (at index 0 since forward
+	// iteration replaced the older read(foo.go) entry in-place).
+	assert.Contains(t, actions[0], "bar.go")
+}
+
+func TestFormatToolCallSummary(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "read", formatToolCallSummary("read", "", 80))
+	assert.Contains(t, formatToolCallSummary("bash", `{"command":"go test ./..."}`, 80), "bash(")
+	assert.Contains(t, formatToolCallSummary("bash", `{"command":"go test ./..."}`, 80), "go test ./...")
+
+	longInput := `{"command":"` + strings.Repeat("x", 200) + `"}`
+	result := formatToolCallSummary("bash", longInput, 80)
+	assert.Contains(t, result, "…")
+	assert.True(t, len([]rune(result)) < 100)
+}

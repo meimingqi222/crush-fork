@@ -74,6 +74,8 @@ func TestBuildSubagentPromptTemplateIncludesRoleAndAdditionalPrompt(t *testing.T
 
 	assert.Contains(t, template, "Base prompt.")
 	assert.Contains(t, template, "You are running as a delegated subagent")
+	assert.Contains(t, template, "Context handoff")
+	assert.Contains(t, template, "<parent_context>")
 	assert.Contains(t, template, "Role: planner")
 	assert.Contains(t, template, "Return a concise plan.")
 }
