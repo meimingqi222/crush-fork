@@ -267,16 +267,30 @@ func looksLikeRegexSyntaxError(err error) bool {
 }
 
 func searchWithRipgrep(ctx context.Context, pattern, rootPath, include string) ([]grepMatch, error) {
-	cmd := getRgSearchCmd(ctx, pattern, rootPath, include)
+	// Convert rootPath to absolute so cmd.Dir and ripgrep's search
+	// target always resolve correctly, regardless of process CWD.
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve search path: %w", err)
+	}
+	rootPathIsAbs := filepath.IsAbs(rootPath)
+
+	cmd := getRgSearchCmd(ctx, pattern, absRoot, include)
 	if cmd == nil {
 		return nil, fmt.Errorf("ripgrep not found in $PATH")
 	}
 
-	// Only add ignore files if they exist
+	// Set working directory so ripgrep discovers .gitignore and
+	// .crushignore files correctly, matching the Glob tool's behavior.
+	cmd.Dir = absRoot
+
+	// Pass ignore files relative to cmd.Dir. Both .gitignore and
+	// .crushignore need explicit --ignore-file because ripgrep only
+	// auto-discovers VCS ignore files inside a git repository.
 	for _, ignoreFile := range []string{".gitignore", ".crushignore"} {
-		ignorePath := filepath.Join(rootPath, ignoreFile)
+		ignorePath := filepath.Join(absRoot, ignoreFile)
 		if _, err := os.Stat(ignorePath); err == nil {
-			cmd.Args = append(cmd.Args, "--ignore-file", ignorePath)
+			cmd.Args = append(cmd.Args, "--ignore-file", ignoreFile)
 		}
 	}
 
@@ -301,12 +315,26 @@ func searchWithRipgrep(ctx context.Context, pattern, rootPath, include string) (
 			continue
 		}
 		for _, m := range match.Data.Submatches {
-			fi, err := os.Stat(match.Data.Path.Text)
+			// Resolve the path from ripgrep's JSON output to an
+			// absolute path for os.Stat, then convert back to
+			// match the caller's original path format.
+			rawPath := match.Data.Path.Text
+			absPath := rawPath
+			if !filepath.IsAbs(absPath) {
+				absPath = filepath.Join(absRoot, rawPath)
+			}
+			fi, err := os.Stat(absPath)
 			if err != nil {
 				continue // Skip files we can't access
 			}
+			storePath := absPath
+			if !rootPathIsAbs {
+				if rel, relErr := filepath.Rel(absRoot, absPath); relErr == nil {
+					storePath = filepath.Join(filepath.Clean(rootPath), rel)
+				}
+			}
 			matches = append(matches, grepMatch{
-				path:     match.Data.Path.Text,
+				path:     storePath,
 				modTime:  fi.ModTime(),
 				lineNum:  match.Data.LineNumber,
 				charNum:  m.Start + 1, // ensure 1-based

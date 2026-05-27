@@ -3,6 +3,7 @@ package chat
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/zeebo/xxh3"
 )
 
 // assistantMessageTruncateFormat is the text shown when an assistant message is
@@ -26,6 +28,11 @@ const maxCollapsedThinkingHeight = 10
 // maxCollapsedSummaryHeight defines the maximum number of lines shown in a
 // collapsed context summary.
 const maxCollapsedSummaryHeight = 8
+
+// thinkingStreamThrottle is the minimum interval between cache invalidations
+// during pure thinking streaming. This prevents expensive re-renders on every
+// streaming delta while keeping the spinner animation smooth at 20 FPS.
+const thinkingStreamThrottle = 200 * time.Millisecond
 
 // AssistantMessageItem represents an assistant message in the chat UI.
 //
@@ -48,6 +55,20 @@ type AssistantMessageItem struct {
 	// currentAnimLabel tracks the current animation label to avoid redundant
 	// SetLabel calls on every animation frame.
 	currentAnimLabel string
+
+	// Thinking glamour render cache. Separates the expensive glamour markdown
+	// render from the truncation/box-styling step so that expand/collapse can
+	// reuse the glamour output without re-rendering.
+	thinkingFullRender  string // Full glamour-rendered thinking (not boxed).
+	thinkingContentHash uint64 // xxh3 hash of the raw thinking text.
+	thinkingRenderWidth int    // Width at which thinkingFullRender was rendered.
+	plainThinkingMode   bool   // True when cache holds raw text (streaming+expanded skip).
+
+	// Streaming invalidation throttle state. During pure thinking streaming,
+	// cache invalidation is throttled to avoid expensive re-renders on every
+	// delta while keeping the spinner smooth at 20 FPS.
+	lastInvalidation time.Time
+	wasThinking      bool
 
 	// prefixedCache stores the content with focus/blur prefixes already
 	// applied. This avoids re-splitting and re-joining the entire message on
@@ -243,15 +264,49 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 }
 
 // renderThinking renders the thinking/reasoning content with footer.
+//
+// The method is split into two phases:
+//   - Phase A (cacheable): glamour markdown render, keyed by content hash + width.
+//     This is the expensive step (~40-80ms for 800+ lines).
+//   - Phase B (cheap): truncation + box styling (~1-5ms collapsed, ~5-15ms expanded).
+//
+// Expand/collapse only re-runs Phase B, preserving the glamour cache.
 func (a *AssistantMessageItem) renderThinking(thinking string, width int) string {
-	renderer := common.PlainMarkdownRenderer(a.sty, width)
-	rendered, err := renderer.Render(thinking)
-	if err != nil {
-		rendered = thinking
-	}
-	rendered = strings.TrimSpace(rendered)
+	// Phase A: glamour markdown render (cached by content hash + width).
+	contentHash := xxh3.HashString(thinking)
 
-	lines := strings.Split(rendered, "\n")
+	// During active streaming with the thinking block expanded, skip the
+	// expensive glamour render (~40-80ms for 800+ lines) to keep scroll
+	// responsive. If a glamour render was cached before the user expanded,
+	// keep showing that (slightly stale but smooth). Once streaming ends
+	// (plainThinkingMode flips back to false), a full glamour re-render
+	// happens automatically because the cache is marked stale.
+	plainMode := a.message.IsThinking() && a.thinkingExpanded
+	if plainMode != a.plainThinkingMode {
+		// Mode transition — force glamour re-render on next non-plain pass.
+		a.thinkingContentHash = 0
+		a.plainThinkingMode = plainMode
+	}
+
+	if !plainMode && (contentHash != a.thinkingContentHash || width != a.thinkingRenderWidth) {
+		renderer := common.PlainMarkdownRenderer(a.sty, width)
+		rendered, err := renderer.Render(thinking)
+		if err != nil {
+			rendered = thinking
+		}
+		a.thinkingFullRender = strings.TrimSpace(rendered)
+		a.thinkingContentHash = contentHash
+		a.thinkingRenderWidth = width
+	}
+	// In plainMode: keep thinkingFullRender as-is (cached glamour or raw text).
+	// Fallback: if cache was cleared (e.g. just expanded during streaming),
+	// use raw thinking text to avoid showing empty content.
+	if a.thinkingFullRender == "" {
+		a.thinkingFullRender = thinking
+	}
+
+	// Phase B: truncation + box styling (runs on every call, relatively cheap).
+	lines := strings.Split(a.thinkingFullRender, "\n")
 	totalLines := len(lines)
 
 	isTruncated := totalLines > maxCollapsedThinkingHeight
@@ -268,7 +323,7 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 	a.thinkingBoxHeight = lipgloss.Height(result)
 
 	var footer string
-	// if thinking is done add the thought for footer
+	// If thinking is done add the thought for footer.
 	if !a.message.IsThinking() || len(a.message.ToolCalls()) > 0 {
 		duration := a.message.ThinkingDuration()
 		if duration.String() != "0s" {
@@ -379,10 +434,26 @@ func (a *AssistantMessageItem) renderSpinning() string {
 	return a.anim.Render()
 }
 
-// invalidateCache clears both the base content cache and the prefixed render
-// cache. Call this whenever the message content or visual state changes.
+// invalidateCache clears all render caches: base content, prefixed render,
+// and thinking glamour cache. Call this when the message content or visual
+// state changes in a way that affects the thinking glamour output.
 func (a *AssistantMessageItem) invalidateCache() {
 	a.clearCache()
+	a.invalidatePrefixedCache()
+	a.invalidateThinkingCache()
+}
+
+// invalidateContentCache clears the base content cache and prefixed render
+// cache but preserves the thinking glamour cache. Use this for state changes
+// that only affect truncation or styling, not the markdown content itself
+// (e.g. expand/collapse).
+func (a *AssistantMessageItem) invalidateContentCache() {
+	a.clearCache()
+	a.invalidatePrefixedCache()
+}
+
+// invalidatePrefixedCache clears the prefixed render cache.
+func (a *AssistantMessageItem) invalidatePrefixedCache() {
 	a.prefixedCache.width = 0
 	a.prefixedCache.rendered = ""
 	a.prefixedCache.focused = false
@@ -390,6 +461,13 @@ func (a *AssistantMessageItem) invalidateCache() {
 	a.prefixedCache.startCol = -1
 	a.prefixedCache.endLine = -1
 	a.prefixedCache.endCol = -1
+}
+
+// invalidateThinkingCache clears the glamour render cache for thinking content.
+func (a *AssistantMessageItem) invalidateThinkingCache() {
+	a.thinkingFullRender = ""
+	a.thinkingContentHash = 0
+	a.thinkingRenderWidth = 0
 }
 
 // renderError renders an error message.
@@ -414,11 +492,41 @@ func (a *AssistantMessageItem) isSpinning() bool {
 	return (isThinking || !isFinished) && !hasContent && !hasToolCalls
 }
 
-// SetMessage is used to update the underlying message.
-func (a *AssistantMessageItem) SetMessage(message *message.Message) tea.Cmd {
+// SetMessage is used to update the underlying message. During pure thinking
+// streaming, cache invalidation is throttled to thinkingStreamThrottle to
+// prevent expensive re-renders on every delta while keeping the spinner
+// animation smooth at 20 FPS.
+func (a *AssistantMessageItem) SetMessage(msg *message.Message) tea.Cmd {
 	wasSpinning := a.isSpinning()
-	a.message = message
-	a.invalidateCache()
+	wasThinking := a.wasThinking
+
+	thinkingNow := msg.ReasoningContent().Thinking != ""
+	contentNow := msg.Content().Text != "" || len(msg.ToolCalls()) > 0
+	a.wasThinking = thinkingNow
+
+	a.message = msg
+
+	shouldInvalidate := false
+	if contentNow {
+		// Content appeared or is streaming — always invalidate immediately.
+		// This covers the critical thinking→content transition.
+		shouldInvalidate = true
+	} else if thinkingNow {
+		if !wasThinking {
+			// First thinking delta — always show.
+			shouldInvalidate = true
+		} else if time.Since(a.lastInvalidation) >= thinkingStreamThrottle {
+			// Throttle window passed — safe to re-render.
+			shouldInvalidate = true
+		}
+		// else: throttled, skip invalidation; old render stays visible.
+	}
+
+	if shouldInvalidate {
+		a.invalidateCache()
+		a.lastInvalidation = time.Now()
+	}
+
 	if !wasSpinning && a.isSpinning() {
 		return a.StartAnimation()
 	}
@@ -428,7 +536,8 @@ func (a *AssistantMessageItem) SetMessage(message *message.Message) tea.Cmd {
 // ToggleExpanded toggles the expanded state of the thinking box.
 func (a *AssistantMessageItem) ToggleExpanded() {
 	a.thinkingExpanded = !a.thinkingExpanded
-	a.invalidateCache()
+	// Preserve the thinking glamour cache — only truncation/boxing changes.
+	a.invalidateContentCache()
 }
 
 // HandleMouseClick implements MouseClickable.
@@ -439,14 +548,15 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 	// Check if the click is within the thinking box.
 	if a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight {
 		a.thinkingExpanded = !a.thinkingExpanded
-		a.invalidateCache()
+		// Preserve the thinking glamour cache — only truncation/boxing changes.
+		a.invalidateContentCache()
 		return true
 	}
 	// Check if the click is within the summary box.
 	summaryEnd := a.summaryBoxStart + a.summaryBoxHeight
 	if a.summaryBoxHeight > 0 && y >= a.summaryBoxStart && y < summaryEnd {
 		a.summaryExpanded = !a.summaryExpanded
-		a.invalidateCache()
+		a.invalidateContentCache()
 		return true
 	}
 	return false

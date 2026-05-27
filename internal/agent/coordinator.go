@@ -4290,8 +4290,6 @@ func (c *coordinator) runBackgroundTaskNode(
 	return agentID
 }
 
-
-
 func tryLoadMentalModels(ctx context.Context, retriever engine.Retriever, ttl time.Duration, maxWait time.Duration) {
 	lr, ok := retriever.(engine.MentalModelsProvider)
 	if !ok {
@@ -4311,9 +4309,11 @@ func tryLoadMentalModels(ctx context.Context, retriever engine.Retriever, ttl ti
 	}()
 
 	if maxWait > 0 {
+		timer := time.NewTimer(maxWait)
+		defer timer.Stop()
 		select {
 		case <-done:
-		case <-time.After(maxWait):
+		case <-timer.C:
 			slog.Debug("Mental models load exceeded wait timeout, continuing in background", "timeout", maxWait)
 		}
 	}

@@ -72,7 +72,18 @@ func getCachedRenderer(plain bool, sty *styles.Styles, width int) *glamour.TermR
 		return nil
 	}
 	if len(rendererCache) >= rendererCacheMaxSize {
-		clear(rendererCache)
+		// Evict roughly half the entries (pseudo-random via map iteration
+		// order) instead of clearing everything. This avoids a "cache
+		// cliff" where all renderers must be recreated simultaneously
+		// after a single overflow event.
+		toRemove := len(rendererCache) / 2
+		for k := range rendererCache {
+			if toRemove <= 0 {
+				break
+			}
+			delete(rendererCache, k)
+			toRemove--
+		}
 	}
 	rendererCache[key] = r
 	return r

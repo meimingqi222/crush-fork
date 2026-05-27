@@ -61,7 +61,7 @@ func parseAndValidateHashlineReference(reference string, lines []string) (hashli
 	currentHash, err := validateHashlineReference(parsedRef, lines)
 	if err != nil {
 		if currentHash != "" {
-			return hashlineRef{}, fmt.Errorf("%w (current hash is %s). Re-run read with hashline=true and retry", err, currentHash)
+			return hashlineRef{}, fmt.Errorf("%w (current hash is %s). Re-read the file with a line selector and retry", err, currentHash)
 		}
 		return hashlineRef{}, err
 	}

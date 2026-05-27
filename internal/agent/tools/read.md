@@ -1,36 +1,40 @@
-Reads file contents or URL content with flexible output formatting.
+Reads file contents, directories, or URL content.
 
 <usage>
-- Provide path (file path or URL starting with http:// or https://) (required)
-- For files: optional offset/limit for pagination, hashline for line-addressable editing
-- For URLs: optional format (text, markdown, html) and timeout
-- When path is a directory, returns a directory tree listing
-- Supports image files (PNG, JPEG, GIF, WebP)
+- Provide path (required): file path, directory path, or URL
+- For files: append selectors for line ranges or raw mode (see below)
+- For URLs: optional format parameter (text, markdown, html)
+- Line selectors auto-enable hashline anchors (LINE#HASH) for line-addressable editing
 </usage>
 
+<selectors>
+Append `:<selector>` to the path for file reads:
+
+- `file.ts` — read from start (default limit: 2000 lines)
+- `file.ts:50` — from line 50 onward
+- `file.ts:50-100` — lines 50–100 inclusive
+- `file.ts:50+10` — 10 lines starting at line 50
+- `file.ts:50-` — from line 50 to end of file
+- `file.ts:raw` — verbatim output (no line numbers, no anchors, no wrapping)
+- `file.ts:50-100:raw` — combined (order-independent)
+
+When a line selector is present, output includes LINE#HASH anchors for use with the edit tool's operations[] parameter.
+</selectors>
+
 <features>
-- Unified interface for reading files and URLs
+- Unified interface for files, directories, and URLs
 - Displays file contents with line numbers
-- Handles large files with offset/limit pagination
+- Handles large files with selector-based pagination
 - Auto-truncates very long lines for display
 - Suggests similar filenames when file not found
 - Renders image files directly in terminal
-- Automatically lists directory contents when given a directory path (up to 1000 files)
+- Automatically lists directory contents when given a directory path
 - URL content can be returned as text, markdown, or HTML
 </features>
-
-<file_reading>
-When path is a file:
-- Offset (optional): start from specific line (0-based)
-- Limit (optional): number of lines to read (default 2000)
-- Hashline (optional): include hash anchors for line-addressable editing
-- Wait for LSP diagnostics by default for code intelligence
-</file_reading>
 
 <url_reading>
 When path is a URL (http:// or https://):
 - Format: text (plain text), markdown (converted from HTML), or html (raw HTML body)
-- Timeout: optional timeout in seconds (max 120)
 - Auto-converts HTML to markdown by default
 - Max response size: 1MB
 </url_reading>
@@ -38,9 +42,8 @@ When path is a URL (http:// or https://):
 <directory_support>
 When path is a directory:
 - Returns a tree view of the directory contents
-- Optional ignore: list of glob patterns to exclude
-- Optional depth: maximum directory depth to traverse
 - Truncates at 1000 files with a notice if too large
+- For filtered or deeper listing, use the Glob tool instead
 </directory_support>
 
 <limitations>
@@ -56,9 +59,7 @@ When path is a directory:
 - For code exploration: Grep to find relevant files, then read to examine
 - Do not use read to probe guessed paths. First ground uncertain paths with Glob, Grep, a directory read, or a path returned by another tool.
 - When a file is not found, follow the returned glob, parent-directory, or grep suggestion before retrying read.
-- For large files: use offset parameter for specific sections
-- When output says `Use offset=<n> to continue`, pass that exact offset and the same path in the next read call. Do not reuse this offset for a different file — always start from offset=0 when reading a new file unless you know its size.
-- Set `hashline=true` when preparing line-addressable edits
-- Pass a directory path to get a directory tree listing
+- When output says `Use path="file:N" to continue`, pass that exact path in the next read call. Do not reuse a continuation path for a different file.
+- For line-addressable edits: read with a line selector (e.g. `path="file.ts:50-100"`) to get LINE#HASH anchors, then use edit with operations[].
 - For URLs, markdown format is usually best for AI processing
 </tips>

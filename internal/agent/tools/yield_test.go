@@ -133,7 +133,7 @@ func TestYieldToolAllowsParentYieldAfterSubagentYield(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, sess.ID)
 
-	// Simulate a subagent yielding by storing a ToolResult with Name = "agent", 
+	// Simulate a subagent yielding by storing a ToolResult with Name = "agent",
 	// containing Yield metadata in the parent session messages.
 	_, err = messages.Create(ctx, sess.ID, message.CreateMessageParams{
 		Role: message.Tool,

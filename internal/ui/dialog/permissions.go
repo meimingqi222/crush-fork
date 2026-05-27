@@ -661,12 +661,6 @@ func (p *Permissions) renderReadContent(width int) string {
 	}
 
 	content := fmt.Sprintf("File: %s", fsext.PrettyPath(params.Path))
-	if params.Offset > 0 {
-		content += fmt.Sprintf("\nStarting from line: %d", params.Offset+1)
-	}
-	if params.Limit > 0 && params.Limit != 2000 {
-		content += fmt.Sprintf("\nLines to read: %d", params.Limit)
-	}
 
 	return p.renderContentPanel(content, width)
 }

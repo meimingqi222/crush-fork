@@ -4,14 +4,17 @@ Available subagent types:
 {agents}
 
 When to use the Agent tool:
-- **Use `explore` only for evidence gathering, not final judgment.** The `explore` subagent runs on a smaller, faster, cheaper model by default and is purpose-built for parallel context discovery. Treat it like Claude Code/opencode-style research subagents: ask it to map files, locate symbols, summarize diffs, collect local git facts, and return file:line evidence for the primary model to analyze.
-- Open-ended codebase exploration, pattern hunting, implementation lookup, dependency tracing, and diff summarization should usually use the `explore` subagent.
-- **Do not delegate final code review, correctness approval, or bug triage decisions to `explore`.** Use `review` for final code review so the work runs on a large/review-capable model with a read-only review prompt. `explore` can collect the relevant diff snippets, history, references, and candidate concerns for the primary agent or review subagent to verify.
-- Use `plan` for architecture planning before complex multi-file work; it is read-only and should return concrete files, sequence, edge cases, and verification steps rather than implementation. `plan` can spawn `explore` for parallel evidence gathering.
-- Use `review` for final code review; it runs on a large/review-capable model, is read-only, and returns patch-anchored findings. `review` is **blocking** — the main flow waits for it to complete. `review` can spawn `explore` for parallel evidence gathering.
-- Use `librarian` for source-verified dependency, framework, or external API research; it should cite local dependency source or official documentation instead of relying on model memory.
-- Use `designer` for UI/UX implementation and review; it has full tool access and can edit files and run verification.
-- Use `quick_task` only for small, mechanical, unambiguous tasks where a low-cost worker is appropriate; use `general` for normal implementation and verification work.
+
+All subagent types below are selected via the `subagent_type` parameter of this `agent` tool — they are NOT standalone tools.
+
+- **Delegate to the `explore` subagent type only for evidence gathering, not final judgment.** The `explore` subagent runs on a smaller, faster, cheaper model by default and is purpose-built for parallel context discovery. Treat it like Claude Code/opencode-style research subagents: ask it to map files, locate symbols, summarize diffs, collect local git facts, and return file:line evidence for the primary model to analyze.
+- Open-ended codebase exploration, pattern hunting, implementation lookup, dependency tracing, and diff summarization should usually use the `explore` subagent type.
+- **Do not delegate final code review, correctness approval, or bug triage decisions to `explore`.** Delegate to the `review` subagent type for final code review so the work runs on a large/review-capable model with a read-only review prompt. `explore` can collect the relevant diff snippets, history, references, and candidate concerns for the primary agent or review subagent to verify.
+- Delegate to the `plan` subagent type for architecture planning before complex multi-file work; it is read-only and should return concrete files, sequence, edge cases, and verification steps rather than implementation. `plan` can spawn `explore` for parallel evidence gathering.
+- Delegate to the `review` subagent type for final code review; it runs on a large/review-capable model, is read-only, and returns patch-anchored findings. `review` is **blocking** — the main flow waits for it to complete. `review` can spawn `explore` for parallel evidence gathering.
+- Delegate to the `librarian` subagent type for source-verified dependency, framework, or external API research; it should cite local dependency source or official documentation instead of relying on model memory.
+- Delegate to the `designer` subagent type for UI/UX implementation and review; it has full tool access and can edit files and run verification.
+- Delegate to the `quick_task` subagent type only for small, mechanical, unambiguous tasks where a low-cost worker is appropriate; use the `general` subagent type for normal implementation and verification work.
 - The `explore` subagent is read-only and has a restricted `bash` tool for direct local read-only git inspection only. It is suitable for `git diff`, `git status`, `git log`, `git show`, `git blame`, `git rev-parse`, `git merge-base`, and `git ls-files`, but not for mutating git commands, wrapper shells, build/test commands, package managers, linters, or general shell work.
 - **Do not assign build, test, lint, or reproduction tasks to `explore`.** Commands such as `go test`, `go build`, `npm test`, `pytest`, `cargo test`, `make`, `task`, or any command needing `2>&1`/general shell execution require the primary agent or a `general` subagent.
 - Independent implementation tasks, test reproduction, final code-review passes, or file-local refactors that can proceed without blocking your immediate next step should usually use the `general` subagent or remain with the primary agent.
@@ -30,6 +33,7 @@ When NOT to use the Agent tool:
 - **This rule applies equally to `explore`.** Do NOT use `explore` as a file-content relay. Prompts like "read these N files completely and return their contents" sent to `explore` are pure waste: the subagent reads the files, burns its output tokens echoing them back, and the primary agent still has to process them. `explore` exists to *search, locate, and summarize* — not to act as a proxy `read` call.
 - **Why this matters:** Spawning a subagent just to read files wastes an entire LLM turn and session context. The subagent will spend output tokens returning file contents that you could have read directly.
 - **Correct approach:** Call `read`/`glob`/`grep` directly in your current response. These tools support parallel invocation, so you can read multiple files simultaneously without subagent overhead.
+- **General principle:** If the subagent's job would be to read files and pass their contents back to you, that is always cheaper as direct tool calls. Delegate only when the subagent adds value through search, synthesis, analysis, or implementation.
 - If the next step depends immediately on the result, do the work directly instead of delegating and waiting.
 - Do not delegate tiny, tightly-coupled edits that are faster to do in the current thread.
 - Do not delegate lightweight isolated single-file operations when direct tool calls are likely cheaper in tokens and just as fast.

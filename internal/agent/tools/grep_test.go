@@ -467,6 +467,50 @@ func TestColumnMatch(t *testing.T) {
 	}
 }
 
+// TestGrepWithDifferentWorkingDirectory verifies that ripgrep-based search
+// works correctly when the process CWD differs from the search directory.
+// This is a regression test for the cmd.Dir bug where searchWithRipgrep
+// would return "No files found" because ripgrep ran from the wrong directory.
+func TestGrepWithDifferentWorkingDirectory(t *testing.T) {
+	// Cannot use t.Parallel() because os.Chdir affects the entire process.
+	searchDir := t.TempDir()
+	unrelatedDir := t.TempDir()
+
+	// Create test files in the search directory.
+	for path, content := range map[string]string{
+		"file1.go":     "package main\nfunc main() {}",
+		"sub/file2.go": "package sub\nfunc helper() {}",
+	} {
+		fullPath := filepath.Join(searchDir, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0o755))
+		require.NoError(t, os.WriteFile(fullPath, []byte(content), 0o644))
+	}
+
+	// Change process CWD to an unrelated directory.
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(unrelatedDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(origDir)) })
+
+	// Both implementations should find matches using the absolute search path.
+	for name, fn := range map[string]func(pattern, path, include string) ([]grepMatch, error){
+		"regex": searchFilesWithRegex,
+		"rg": func(pattern, path, include string) ([]grepMatch, error) {
+			return searchWithRipgrep(t.Context(), pattern, path, include)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "rg" && getRg() == "" {
+				t.Skip("rg is not in $PATH")
+			}
+
+			matches, err := fn("package", searchDir, "")
+			require.NoError(t, err)
+			require.Len(t, matches, 2, "should find 'package' in both files regardless of CWD")
+		})
+	}
+}
+
 func TestGrepSortingByModTime(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()

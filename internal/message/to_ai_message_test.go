@@ -1,7 +1,6 @@
 package message
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -162,10 +161,12 @@ func TestToAIMessage_ReasoningBeforeText(t *testing.T) {
 	require.True(t, isText, "second part must be TextPart, got %T", parts[1])
 }
 
-// TestToAIMessage_ReasoningOnlyAffectsAnthropicWhenNoSignature ensures that
-// when reasoning has a ThoughtSignature (Google) or ResponsesData (OpenAI),
-// those provider options remain present regardless of the Anthropic signature.
-func TestToAIMessage_ReasoningWithToolCallWithoutSignatureUsesRedactedData(t *testing.T) {
+// TestToAIMessage_ReasoningWithToolCallNoSignaturePreservesText ensures that
+// when reasoning has no provider-specific signature and the message includes
+// tool calls, the ReasoningPart retains the original thinking text (so that
+// OpenAI-compatible providers receive a non-empty reasoning_content field in
+// conversation history, as required by models like MiMo and DeepSeek).
+func TestToAIMessage_ReasoningWithToolCallNoSignaturePreservesText(t *testing.T) {
 	t.Parallel()
 
 	msg := Message{
@@ -189,14 +190,10 @@ func TestToAIMessage_ReasoningWithToolCallWithoutSignatureUsesRedactedData(t *te
 			continue
 		}
 		found = true
-		meta, ok := rp.Options()[anthropic.Name].(*anthropic.ReasoningOptionMetadata)
-		require.True(t, ok, "expected anthropic reasoning metadata")
-		require.Empty(t, meta.Signature)
-		require.NotEmpty(t, meta.RedactedData)
-		decoded, err := base64.StdEncoding.DecodeString(meta.RedactedData)
-		require.NoError(t, err)
-		require.Equal(t, "my thoughts", string(decoded))
-		require.Empty(t, rp.Text)
+		// Reasoning text must be preserved (not cleared or base64-wrapped).
+		require.Equal(t, "my thoughts", rp.Text)
+		// No provider-specific metadata should be present.
+		require.Empty(t, rp.Options())
 	}
 	require.True(t, found, "expected a ReasoningPart in tool-call turn")
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -122,6 +123,9 @@ func buildSubagentPromptTemplate(baseTemplate string, agentCfg config.Agent) str
 	if spawnsPrompt := buildSpawnsPrompt(agentCfg); spawnsPrompt != "" {
 		sections = append(sections, spawnsPrompt)
 	}
+	if schemaPrompt := buildOutputSchemaPrompt(agentCfg); schemaPrompt != "" {
+		sections = append(sections, schemaPrompt)
+	}
 	return strings.Join(sections, "\n\n")
 }
 
@@ -197,6 +201,26 @@ func buildSpawnsPrompt(agentCfg config.Agent) string {
 	}
 	spawnList := strings.Join(agentCfg.Spawns, ", ")
 	return fmt.Sprintf("<spawns>\nYou can spawn these subagent types for parallel evidence gathering: %s\nUse the `agent` tool with subagent_type set to one of these values.\n</spawns>", spawnList)
+}
+
+// buildOutputSchemaPrompt injects the agent's OutputSchema into the system
+// prompt so the subagent knows what structure its yield payload must conform
+// to.  Without this, the subagent only sees the generic yield tool description
+// and has no idea what fields the schema requires.
+func buildOutputSchemaPrompt(agentCfg config.Agent) string {
+	if agentCfg.OutputSchema == nil {
+		return ""
+	}
+	schemaBytes, err := json.MarshalIndent(agentCfg.OutputSchema, "", "  ")
+	if err != nil || len(schemaBytes) < 3 {
+		return ""
+	}
+	return fmt.Sprintf(`<output_schema>
+Your yield payload MUST conform to this JSON schema.
+Use the yield tool's "payload" field (not "data") for structured results.
+
+%s
+</output_schema>`, string(schemaBytes))
 }
 
 func promptForAgent(agentCfg config.Agent, isSubAgent bool, opts ...prompt.Option) (*prompt.Prompt, error) {

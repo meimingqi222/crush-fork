@@ -1850,17 +1850,22 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 }
 
 func (m *UI) removeToolItemsForMessage(messageID string, keepToolCallIDs map[string]struct{}) {
-	var toolItemIDs []string
-	for i := 0; i < m.chat.Len(); i++ {
-		item, ok := m.chat.list.ItemAt(i).(chat.ToolMessageItem)
-		if !ok || item.MessageID() != messageID {
-			continue
-		}
-		if _, keep := keepToolCallIDs[item.ToolCall().ID]; keep {
-			continue
-		}
-		toolItemIDs = append(toolItemIDs, item.ToolCall().ID)
+	// Use the secondary index to find tool calls for this message instead
+	// of scanning the entire list O(n). This is critical during streaming
+	// updates in long conversations where the list can have hundreds of items.
+	allToolCallIDs := m.chat.ToolCallIDsForMessage(messageID)
+	if len(allToolCallIDs) == 0 {
+		return
 	}
+
+	var toolItemIDs []string
+	for toolCallID := range allToolCallIDs {
+		if _, keep := keepToolCallIDs[toolCallID]; keep {
+			continue
+		}
+		toolItemIDs = append(toolItemIDs, toolCallID)
+	}
+
 	removedToolCallIDs := make(map[string]struct{}, len(toolItemIDs))
 	for _, toolItemID := range toolItemIDs {
 		removedToolCallIDs[toolItemID] = struct{}{}
@@ -3559,14 +3564,22 @@ func (m *UI) View() tea.View {
 	canvas := uv.NewScreenBuffer(m.width, m.height)
 	v.Cursor = m.Draw(canvas, canvas.Bounds())
 
-	content := strings.ReplaceAll(canvas.Render(), "\r\n", "\n") // normalize newlines
-	contentLines := strings.Split(content, "\n")
-	for i, line := range contentLines {
-		// Trim trailing spaces for concise rendering
-		contentLines[i] = strings.TrimRight(line, " ")
+	content := canvas.Render()
+	// Single-pass post-processing: normalize \r\n and trim trailing spaces
+	// per line. Avoids allocating a full string slice for every line (the
+	// old Split/TrimRight/Join approach allocated O(height) strings).
+	var buf strings.Builder
+	buf.Grow(len(content))
+	first := true
+	for line := range strings.SplitSeq(content, "\n") {
+		if !first {
+			buf.WriteByte('\n')
+		}
+		first = false
+		line = strings.TrimSuffix(line, "\r")
+		buf.WriteString(strings.TrimRight(line, " "))
 	}
-
-	content = strings.Join(contentLines, "\n")
+	content = buf.String()
 
 	v.Content = content
 	if m.progressBarEnabled && m.sendProgressBar && m.isAgentBusy() {

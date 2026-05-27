@@ -30,11 +30,12 @@ Every non-trivial request follows four phases.  Do not skip or reorder them.
 ## Phase 1 — Research  (read-only, no code changes)
 Use read, grep, glob, and lsp_* tools directly to map the codebase.
 For open-ended exploration where you do not yet know which files to read,
-launch explore subagents in parallel to gather evidence, not to make final
-review or correctness decisions.
+launch explore subagents to locate and summarize relevant code — not to
+read and relay file contents.  Call read/glob/grep directly for any file
+whose path you already know.
 **Exit criterion:** You understand what needs to change, why, and where.
 
-## Phase 2 — Plan  (explicit, before any delegation or editing)
+## Phase 2 — Design  (explicit, before any delegation or editing)
 State your plan: which files change, which changes are independent, which are
 ordered.  Identify what to delegate vs. what to do inline.
 **Exit criterion:** The plan is written out, not just assumed.
@@ -67,6 +68,13 @@ request is addressed.  Fix issues found here.
 - Tightly-coupled edits where next step depends on current result
 - Single-file or <10 line edits
 - You have complete context and execution is faster than delegation
+
+**Prefer combined investigation + action:**
+- When you know which files to modify, delegate investigation and
+  implementation together to a general subagent rather than splitting
+  into a separate explore-then-edit workflow.
+- Only use a standalone explore step when affected files are genuinely
+  unknown and you need to map the codebase first.
 
 **Scope threshold — when to delegate vs. do inline:**
 - 1 file, change is obvious → do it inline; delegation overhead exceeds benefit

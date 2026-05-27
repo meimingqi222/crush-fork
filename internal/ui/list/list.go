@@ -34,6 +34,13 @@ type List struct {
 
 	// renderCallbacks is a list of callbacks to apply when rendering items.
 	renderCallbacks []func(idx, selectedIdx int, item Item) Item
+
+	// frameCache stores rendered items for the current render cycle. It is
+	// cleared at the start of each Render() call and shared across getItem()
+	// calls within the same frame (e.g., VisibleItemIndices, lastOffsetItem,
+	// and Render itself). This avoids redundant item.Render() calls when
+	// multiple list methods traverse overlapping item ranges.
+	frameCache map[int]renderedItem
 }
 
 // renderedItem holds the rendered content and height of an item.
@@ -47,6 +54,7 @@ func NewList(items ...Item) *List {
 	l := new(List)
 	l.items = items
 	l.selectedIdx = -1
+	l.frameCache = make(map[int]renderedItem)
 	return l
 }
 
@@ -64,6 +72,7 @@ func (l *List) RegisterRenderCallback(cb RenderCallback) {
 func (l *List) SetSize(width, height int) {
 	l.width = width
 	l.height = height
+	clear(l.frameCache)
 }
 
 // SetGap sets the gap between items.
@@ -113,7 +122,9 @@ func (l *List) Len() int {
 }
 
 // lastOffsetItem returns the index and line offsets of the last item that can
-// be partially visible in the viewport.
+// be partially visible in the viewport. When called after Render() within the
+// same frame, getItem() benefits from the frameCache populated during the
+// forward render pass, making the backward walk essentially free.
 func (l *List) lastOffsetItem() (int, int, int) {
 	var totalHeight int
 	var idx int
@@ -129,17 +140,25 @@ func (l *List) lastOffsetItem() (int, int, int) {
 		}
 	}
 
-	// Calculate line offset within the item
+	// Calculate line offset within the item.
 	lineOffset := max(totalHeight-l.height, 0)
 	idx = max(idx, 0)
 
 	return idx, lineOffset, totalHeight
 }
 
-// getItem renders (if needed) and returns the item at the given index.
+// getItem renders (if needed) and returns the item at the given index. Results
+// are cached in frameCache for the duration of the current render cycle to
+// avoid redundant item.Render() calls when multiple list methods traverse
+// overlapping item ranges within the same frame.
 func (l *List) getItem(idx int) renderedItem {
 	if idx < 0 || idx >= len(l.items) {
 		return renderedItem{}
+	}
+
+	// Check the frame cache first.
+	if ri, ok := l.frameCache[idx]; ok {
+		return ri
 	}
 
 	item := l.items[idx]
@@ -159,6 +178,7 @@ func (l *List) getItem(idx int) renderedItem {
 		height:  height,
 	}
 
+	l.frameCache[idx] = ri
 	return ri
 }
 
@@ -273,6 +293,10 @@ func (l *List) Render() string {
 	if len(l.items) == 0 {
 		return ""
 	}
+
+	// Clear the frame cache at the start of each render cycle. Items may
+	// have changed since the last frame.
+	clear(l.frameCache)
 
 	var lines []string
 	currentIdx := l.offsetIdx

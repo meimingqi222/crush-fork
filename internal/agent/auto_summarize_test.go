@@ -1213,7 +1213,7 @@ func TestSummarizeRetriesWithoutRedactedThinkingOnAnthropicProxyError(t *testing
 	})
 	require.NoError(t, err)
 
-	sawRedacted := make([]bool, 0, 2)
+	sawRedacted := false
 	fakeAgent := &autoSummarizeTestAgent{
 		t: t,
 		summaryErrs: []error{
@@ -1221,10 +1221,8 @@ func TestSummarizeRetriesWithoutRedactedThinkingOnAnthropicProxyError(t *testing
 				StatusCode: 422,
 				Message:    `'redacted_thinking' is not a valid content block type`,
 			},
-			nil,
 		},
 		onSummary: func(call fantasy.AgentStreamCall) {
-			redacted := false
 			for _, msg := range call.Messages {
 				for _, part := range msg.Content {
 					rp, ok := part.(fantasy.ReasoningPart)
@@ -1232,19 +1230,22 @@ func TestSummarizeRetriesWithoutRedactedThinkingOnAnthropicProxyError(t *testing
 						continue
 					}
 					if isAnthropicRedactedReasoning(rp) {
-						redacted = true
+						sawRedacted = true
 					}
 				}
 			}
-			sawRedacted = append(sawRedacted, redacted)
 		},
 	}
 	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
 
 	err = sessionAgent.Summarize(t.Context(), testSession.ID, nil)
-	require.NoError(t, err)
-	require.Equal(t, 2, fakeAgent.summaryCalls)
-	require.Equal(t, []bool{true, false}, sawRedacted)
+	// Unsigned tool-calling reasoning no longer produces RedactedData, so
+	// stripRedactedThinkingParts finds nothing to strip and the retry loop
+	// cannot recover — the original error propagates.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "redacted_thinking")
+	require.Equal(t, 1, fakeAgent.summaryCalls)
+	require.False(t, sawRedacted, "no redacted reasoning should be present")
 }
 
 func TestSummarizeRetriesWithoutAnthropicThinkingOnUnsignedReasoningError(t *testing.T) {

@@ -34,27 +34,13 @@ import (
 var readDescription []byte
 
 type ReadParams struct {
-	Path               string   `json:"path" description:"REQUIRED. The path to the file or URL to read. You must specify this parameter in every single read call, even when paginating with offset."`
-	Offset             int      `json:"offset,omitempty" description:"The line number to start reading from (0-based, for files only)"`
-	Limit              int      `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000, for files only)"`
-	Format             string   `json:"format,omitempty" description:"The format to return URL content in: text, markdown, or html (for URLs only)"`
-	Hashline           bool     `json:"hashline,omitempty" description:"If true, include hashline anchors in the output for line-addressable editing"`
-	WaitForDiagnostics *bool    `json:"wait_for_diagnostics,omitempty" description:"If true, wait for LSP diagnostics (default: true, for files only)"`
-	Ignore             []string `json:"ignore,omitempty" description:"List of glob patterns to ignore (when path is a directory)"`
-	Depth              int      `json:"depth,omitempty" description:"The maximum directory depth to traverse (when path is a directory)"`
-	Timeout            int      `json:"timeout,omitempty" description:"Optional timeout in seconds for URL requests (max 120)"`
+	Path   string `json:"path" description:"REQUIRED. File path, directory path, or URL. For files: append :LINE or :START-END for line ranges (e.g. \"src/foo.ts:50-100\"), :raw for verbatim output. Selectors auto-enable hashline anchors for editing. See tool description for full selector syntax."`
+	Format string `json:"format,omitempty" description:"URL output format: text, markdown, or html (default: markdown, URLs only)"`
 }
 
 type ReadPermissionsParams struct {
-	Path               string   `json:"path"`
-	Offset             int      `json:"offset"`
-	Limit              int      `json:"limit"`
-	Format             string   `json:"format,omitempty"`
-	Hashline           bool     `json:"hashline,omitempty"`
-	WaitForDiagnostics *bool    `json:"wait_for_diagnostics,omitempty"`
-	Ignore             []string `json:"ignore,omitempty"`
-	Depth              int      `json:"depth,omitempty"`
-	Timeout            int      `json:"timeout,omitempty"`
+	Path   string `json:"path"`
+	Format string `json:"format,omitempty"`
 }
 
 type ReadResourceType string
@@ -82,6 +68,7 @@ type ReadResponseMetadata struct {
 	IsDirectory         bool             `json:"is_directory,omitempty"`
 	IsURL               bool             `json:"is_url,omitempty"`
 	TotalLines          int              `json:"total_lines,omitempty"`
+	StartLine           int              `json:"start_line,omitempty"`
 }
 
 const (
@@ -127,13 +114,18 @@ func NewReadTool(
 				return fantasy.NewTextErrorResponse("path is required"), nil
 			}
 
-			// Check if it's a URL
+			// Parse path selectors (line ranges, raw mode).
+			// URLs pass through unmodified.
+			sel := parsePathSelector(params.Path)
+			params.Path = sel.filePath
+
+			// Check if it's a URL.
 			if strings.HasPrefix(params.Path, "http://") || strings.HasPrefix(params.Path, "https://") {
 				return handleURLRead(ctx, params, call, permissions, httpClient)
 			}
 
-			// Handle file path
-			return handleFileRead(ctx, params, call, lspManager, permissions, filetracker, workingDir, lsConfig, skillsPaths...)
+			// Handle file path.
+			return handleFileRead(ctx, params, sel, call, lspManager, permissions, filetracker, workingDir, lsConfig, skillsPaths...)
 		})
 }
 
@@ -175,19 +167,11 @@ func handleURLRead(
 		return *permissionResponse, nil
 	}
 
-	// maxURLReadTimeoutSeconds is the maximum allowed timeout for URL read requests (2 minutes).
+	// Use a fixed 2-minute timeout for URL reads.
 	const maxURLReadTimeoutSeconds = 120
 
-	// Handle timeout with context
-	requestCtx := ctx
-	if params.Timeout > 0 {
-		if params.Timeout > maxURLReadTimeoutSeconds {
-			params.Timeout = maxURLReadTimeoutSeconds
-		}
-		var cancel context.CancelFunc
-		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(params.Timeout)*time.Second)
-		defer cancel()
-	}
+	requestCtx, cancel := context.WithTimeout(ctx, maxURLReadTimeoutSeconds*time.Second)
+	defer cancel()
 
 	req, err := http.NewRequestWithContext(requestCtx, "GET", params.Path, nil)
 	if err != nil {
@@ -241,7 +225,7 @@ func handleURLRead(
 		content = wrapInMarkdownCodeBlock(content)
 
 	case "html":
-		// return only the body of the HTML document
+		// Return only the body of the HTML document.
 		if strings.Contains(contentType, "text/html") {
 			doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
 			if err != nil {
@@ -277,6 +261,7 @@ func handleURLRead(
 func handleFileRead(
 	ctx context.Context,
 	params ReadParams,
+	sel pathSelector,
 	call fantasy.ToolCall,
 	lspManager *lsp.Manager,
 	permissions permission.Service,
@@ -288,10 +273,10 @@ func handleFileRead(
 	// Use session-specific working directory from context if available.
 	effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 
-	// Handle relative paths
+	// Handle relative paths.
 	filePath := filepathext.SmartJoin(effectiveWorkingDir, params.Path)
 
-	// Check if file is outside working directory and request permission if needed
+	// Check if file is outside working directory and request permission if needed.
 	absWorkingDir, err := filepath.Abs(effectiveWorkingDir)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("error resolving working directory: %w", err)
@@ -332,7 +317,7 @@ func handleFileRead(
 		}
 	}
 
-	// Check if file exists
+	// Check if file exists.
 	requestedFilePath := filePath
 	var recovery readPathRecovery
 	fileInfo, err := os.Stat(filePath)
@@ -378,8 +363,7 @@ func handleFileRead(
 
 	// Check if it's a directory — automatically list its contents.
 	if fileInfo.IsDir() {
-		lsParams := LSParams{Ignore: params.Ignore, Depth: params.Depth}
-		out, _, lsErr := ListDirectoryTree(filePath, lsParams, lsConfig)
+		out, _, lsErr := ListDirectoryTree(filePath, LSParams{}, lsConfig)
 		if lsErr != nil {
 			return fantasy.NewTextErrorResponse(lsErr.Error()), nil
 		}
@@ -393,14 +377,16 @@ func handleFileRead(
 
 	isSupportedImage, mimeType := getImageMimeType(filePath)
 
-	// Set default limit if not provided (no limit for SKILL.md files)
-	if params.Limit <= 0 {
+	// Resolve read limit from selector or defaults.
+	readLimit := sel.limit
+	if readLimit <= 0 {
 		if isSkillFile {
-			params.Limit = 1000000 // Effectively no limit for skill files
+			readLimit = 1000000 // Effectively no limit for skill files.
 		} else {
-			params.Limit = DefaultReadLimit
+			readLimit = DefaultReadLimit
 		}
 	}
+	readOffset := sel.offset
 
 	if isSupportedImage {
 		if !GetSupportsImagesFromContext(ctx) {
@@ -439,17 +425,18 @@ func handleFileRead(
 			return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", rErr)
 		}
 		GlobalFileCache.Put(sessionID, filePath, allLines)
-		readResult, err = extractReadResultFromLines(allLines, params.Offset, params.Limit)
+		readResult, err = extractReadResultFromLines(allLines, readOffset, readLimit)
 	} else {
-		readResult, err = readTextFileLines(filePath, params.Offset, params.Limit)
+		readResult, err = readTextFileLines(filePath, readOffset, readLimit)
 	}
 	if err != nil {
 		if errors.Is(err, errReadOffsetBeyondEOF) {
-			suggestion := fmt.Sprintf("Use path=%q and offset=0 to read from the start", filepath.ToSlash(params.Path))
+			slashPath := filepath.ToSlash(params.Path)
+			suggestion := fmt.Sprintf("Use path=%q to read from the start", slashPath)
 			if readResult.Total > 0 {
-				suggestion = fmt.Sprintf("Use path=%q and offset=0 to read from the start, or offset=%d to read the last line", filepath.ToSlash(params.Path), readResult.Total-1)
+				suggestion = fmt.Sprintf("Use path=%q to read from the start, or path=%q to read the last line", slashPath, fmt.Sprintf("%s:%d", slashPath, readResult.Total))
 			}
-			msg := fmt.Sprintf("Offset %d is beyond end of file (%d lines total). %s.", params.Offset, readResult.Total, suggestion)
+			msg := fmt.Sprintf("Line %d is beyond end of file (%d lines total). %s.", readOffset+1, readResult.Total, suggestion)
 			meta := ReadResponseMetadata{
 				Path:       filePath,
 				TotalLines: readResult.Total,
@@ -468,38 +455,52 @@ func handleFileRead(
 	}
 
 	openInLSPs(ctx, lspManager, filePath)
-	if shouldWaitForDiagnostics(params.WaitForDiagnostics) {
-		waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
-	}
-	output := "<file>\n"
-	if params.Hashline {
-		output += addHashlineLineNumbers(lines, params.Offset+1)
+	waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
+
+	// Determine output mode: raw, hashline (auto-enabled by line selector),
+	// or plain line numbers.
+	useHashline := sel.hasLineSel && !sel.raw
+	var output string
+	if sel.raw {
+		// Raw mode: verbatim text, no line numbers, no wrapping.
+		output = content
 	} else {
-		output += addLineNumbers(lines, params.Offset+1)
+		output = "<file>\n"
+		if useHashline {
+			output += addHashlineLineNumbers(lines, readOffset+1)
+		} else {
+			output += addLineNumbers(lines, readOffset+1)
+		}
 	}
 
-	nextOffset := params.Offset + len(lines)
-	if len(lines) > 0 {
-		startLine := params.Offset + 1
-		endLine := params.Offset + len(lines)
+	nextLine := readOffset + len(lines) + 1 // 1-indexed next line for pagination.
+	if !sel.raw && len(lines) > 0 {
+		startLine := readOffset + 1
+		endLine := readOffset + len(lines)
 		if readResult.HasMore {
-			output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use path=%q and offset=%d to continue.)",
-				startLine, endLine, filepath.ToSlash(params.Path), nextOffset)
+			slashPath := filepath.ToSlash(params.Path)
+			output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use path=%q to continue.)",
+				startLine, endLine, fmt.Sprintf("%s:%d", slashPath, nextLine))
 		} else if readResult.TotalKnown {
 			output += fmt.Sprintf("\n\n(Showing lines %d-%d. End of file - total %d lines.)",
 				startLine, endLine, readResult.Total)
 		}
-	} else if readResult.TotalKnown {
+	} else if !sel.raw && readResult.TotalKnown {
 		output += fmt.Sprintf("\n\n(End of file - total %d lines.)", readResult.Total)
 	}
-	output += "\n</file>\n"
+	if !sel.raw {
+		output += "\n</file>\n"
+	} else {
+		output += "\n"
+	}
 	output += getDiagnostics(filePath, lspManager)
 	filetracker.RecordRead(ctx, sessionID, filePath)
 
 	meta := ReadResponseMetadata{
-		Path:     filePath,
-		Content:  content,
-		Hashline: params.Hashline,
+		Path:      filePath,
+		Content:   content,
+		Hashline:  useHashline,
+		StartLine: readOffset + 1,
 	}
 	if readResult.TotalKnown {
 		meta.TotalLines = readResult.Total
@@ -693,13 +694,6 @@ func findReadSuggestions(filePath string) []string {
 	return suggestions
 }
 
-func shouldWaitForDiagnostics(wait *bool) bool {
-	if wait == nil {
-		return true
-	}
-	return *wait
-}
-
 func addLineNumbers(lines []textReadLine, startLine int) string {
 	if len(lines) == 0 {
 		return ""
@@ -828,8 +822,8 @@ type LineScanner struct {
 
 func NewLineScanner(r io.Reader) *LineScanner {
 	scanner := bufio.NewScanner(r)
-	// Increase buffer size to handle large lines (e.g., minified JSON, HTML)
-	// Default is 64KB, set to 1MB
+	// Increase buffer size to handle large lines (e.g., minified JSON, HTML).
+	// Default is 64KB, set to 1MB.
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	return &LineScanner{

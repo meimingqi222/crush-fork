@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -1456,6 +1457,42 @@ func builtinAgents(primaryTools, generalTools, exploreTools, contextPaths []stri
 			AllowedTools: exploreTools,
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
+			// Structured output schema forces the explore agent to synthesize
+			// findings rather than relaying raw file contents back to the primary
+			// agent.  This is the primary architectural defence against the
+			// "full-file content relay" anti-pattern.
+			OutputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"summary": map[string]any{
+						"type":        "string",
+						"description": "Brief summary of findings and conclusions.",
+					},
+					"files": map[string]any{
+						"type":        "array",
+						"description": "Files examined with relevant code references.",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"path": map[string]any{
+									"type":        "string",
+									"description": "Project-relative path, optionally suffixed with :line-range.",
+								},
+								"description": map[string]any{
+									"type":        "string",
+									"description": "What was found in this file — synthesized, not raw content.",
+								},
+							},
+							"required": []string{"path", "description"},
+						},
+					},
+					"architecture": map[string]any{
+						"type":        "string",
+						"description": "Brief explanation of how the discovered pieces connect.",
+					},
+				},
+				"required": []string{"summary", "files"},
+			},
 		},
 	}
 }
@@ -1514,6 +1551,9 @@ func mergeAgentConfig(base, override Agent) Agent {
 	if override.Spawns != nil {
 		merged.Spawns = override.Spawns
 	}
+	if override.OutputSchema != nil {
+		merged.OutputSchema = override.OutputSchema
+	}
 
 	return merged
 }
@@ -1536,7 +1576,8 @@ func agentConfigsEqual(a, b Agent) bool {
 		taskGovernanceEqual(a.TaskGovernance, b.TaskGovernance) &&
 		slices.Equal(a.ContextPaths, b.ContextPaths) &&
 		maps.EqualFunc(a.AllowedMCP, b.AllowedMCP, slices.Equal) &&
-		slices.Equal(a.Spawns, b.Spawns)
+		slices.Equal(a.Spawns, b.Spawns) &&
+		reflect.DeepEqual(a.OutputSchema, b.OutputSchema)
 }
 
 func taskGovernanceEqual(a, b *TaskGovernance) bool {

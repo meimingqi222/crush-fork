@@ -476,14 +476,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Check if memory prefetch is ready (non-blocking). If settled, use cached
 	// result. This approach mirrors Claude Code's design: the result is cached
 	// after settlement, so retries get the same data without re-running.
-	// Memory is now injected as user message (see below), not in system prompt,
-	// to preserve prompt cache.
+	// Memory is injected into systemPrompt below (when settled) for role-isolation,
+	// or as a System Message in PrepareStep when it settles asynchronously.
 	prefetchedRecallReady := false
+	prefetchedRecallResult := ""
 	prefetchNotReadyLogged := false
 	if !a.isSubAgent && call.MemoryPrefetch != nil {
 		if result, settled := call.MemoryPrefetch.GetSettled(); settled {
 			if result != "" {
 				prefetchedRecallReady = true
+				prefetchedRecallResult = result
 				slog.Debug("[PERF] sessionAgent: prefetched memory recall ready", "session_id", call.SessionID)
 			}
 		} else {
@@ -612,14 +614,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 	slog.Debug("[PERF] sessionAgent: user message created (animation starts here)", "duration", time.Since(start), "session_id", call.SessionID)
 
-	// Append settled prefetch memories and mental models to systemPrompt for role-isolation and caching.
-	// If prefetch is settled here, we set prefetchedRecallReady = true. This acts as a lock
-	// to prevent the same memories from being injected again as System Messages during PrepareStep.
-	if !a.isSubAgent && call.MemoryPrefetch != nil {
-		if result, settled := call.MemoryPrefetch.GetSettled(); settled && result != "" {
-			systemPrompt += "\n\n" + FormatAutoRecallMessage(result)
-			prefetchedRecallReady = true
-		}
+	// Append settled prefetch memories to systemPrompt for role-isolation and caching.
+	// prefetchedRecallReady was set above; reuse the cached result to avoid a redundant
+	// GetSettled() call. This flag also acts as a lock preventing re-injection as a
+	// System Message during PrepareStep.
+	if prefetchedRecallReady {
+		systemPrompt += "\n\n" + FormatAutoRecallMessage(prefetchedRecallResult)
 	}
 
 	if a.memoryEngineEnabled && a.memoryEngineBackend == "hindsight" {
@@ -1381,6 +1381,29 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				},
 			},
 		})
+
+		// Diagnostic: detect content anomalies and log periodic
+		// context snapshots. Runs on every successful stream response
+		// before any retry/recovery logic modifies the state.
+		if err == nil && currentAssistant != nil {
+			anomalies := detectContentAnomalies(currentAssistant)
+			for _, anomaly := range anomalies {
+				logAnomalyDiagnostic(anomaly, call.SessionID,
+					largeModel.ModelCfg.Model, largeModel.ModelCfg.Provider,
+					completedStepsThisRun, runToolUses, runLastTool,
+					currentAssistant, estimatedPromptTokens,
+					len(requestState.Messages))
+			}
+			if completedStepsThisRun > 0 &&
+				completedStepsThisRun%contentAnomalySnapshotInterval == 0 {
+				logContextSnapshot(call.SessionID,
+					largeModel.ModelCfg.Model, largeModel.ModelCfg.Provider,
+					completedStepsThisRun, runToolUses, runLastTool,
+					currentAssistant, estimatedPromptTokens,
+					len(requestState.Messages))
+			}
+		}
+
 		if err == nil {
 			hydrateAgentResultFromAssistantMessage(result, currentAssistant)
 		}

@@ -412,6 +412,7 @@ func (a *sessionAgent) cleanupFailedAttempt(ctx context.Context, assistant *mess
 // finish_reason=unknown with zero output. This is distinct from a legitimate
 // end_turn or tool_use completion: the response has no text, no reasoning, and
 // no tool calls. Retrying is safe because no tool side-effects occurred.
+
 func shouldRetryForEmptyStreamResponse(assistant *message.Message) bool {
 	if assistant == nil {
 		return false

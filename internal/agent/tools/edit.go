@@ -40,7 +40,7 @@ type EditParams struct {
 	NewString  string                  `json:"new_string,omitempty" description:"The text to replace it with"`
 	ReplaceAll bool                    `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)"`
 	Edits      []EditEntry             `json:"edits,omitempty" description:"Array of edit operations to perform sequentially on the file. When provided, old_string/new_string/replace_all are ignored."`
-	Operations []HashlineEditOperation `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from read(hashline=true). When provided, all other parameters except file_path are ignored."`
+	Operations []HashlineEditOperation `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from read with a line selector (e.g. path=\"file.ts:50-200\"). When provided, all other parameters except file_path are ignored."`
 	Patch      string                  `json:"patch,omitempty" description:"Unified diff format patch containing changes to apply to files"`
 }
 
@@ -1218,9 +1218,27 @@ func fuzzyReplace(content, oldString, newString string, replaceAll bool) (string
 	}
 
 	// Strategy 4: Comment-prefix strip matching.
+	// Cross-prefix substitution is intentionally restricted to unambiguous
+	// single-line comment tokens ("//", "#", ";"). Block-comment markers
+	// ("/*", "*/", "*") are excluded because they overlap with multiplication
+	// and pointer syntax, which would cause incorrect matches in non-comment code.
 	matches, ok = findBlockMatch(contentLines, oldLines,
 		func(a, b string) bool {
-			return isCommentLine(a) == isCommentLine(b) && stripCommentPrefix(a) == stripCommentPrefix(b)
+			pa, pb := commentLinePrefix(a), commentLinePrefix(b)
+			// Both non-comment lines: compare directly after whitespace trim.
+			if pa == "" && pb == "" {
+				return strings.TrimSpace(a) == strings.TrimSpace(b)
+			}
+			// Require both lines to be comments, then allow cross-prefix match
+			// only when both prefixes are safe single-line comment tokens or
+			// when the prefixes are identical.
+			if pa == "" || pb == "" {
+				return false
+			}
+			if pa == pb || (isSingleLineCommentPrefix(pa) && isSingleLineCommentPrefix(pb)) {
+				return stripCommentPrefix(a) == stripCommentPrefix(b)
+			}
+			return false
 		}, replaceAll)
 	if ok {
 		return applyMatches(content, oldString, newString, matches, replaceAll), true
@@ -1508,6 +1526,30 @@ func isCommentLine(line string) bool {
 		if strings.HasPrefix(trimmed, prefix) {
 			return true
 		}
+	}
+	return false
+}
+
+// commentLinePrefix returns the comment prefix token found at the start of line
+// (after trimming whitespace), or "" if the line is not a comment line.
+func commentLinePrefix(line string) string {
+	trimmed := strings.TrimSpace(line)
+	for _, prefix := range []string{"//", "/*", "*/", "*", "#", ";"} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// isSingleLineCommentPrefix reports whether prefix belongs to the set of
+// unambiguous single-line comment tokens. Multi-line block markers ("/*", "*/",
+// "*") are excluded because they overlap with multiplication and pointer syntax,
+// making cross-prefix substitution unsafe.
+func isSingleLineCommentPrefix(prefix string) bool {
+	switch prefix {
+	case "//", "#", ";":
+		return true
 	}
 	return false
 }

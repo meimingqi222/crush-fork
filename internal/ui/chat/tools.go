@@ -956,15 +956,7 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 	case tools.ReadToolName:
 		var params tools.ReadParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
-			var parts []string
-			parts = append(parts, fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.Path)))
-			if params.Limit > 0 {
-				parts = append(parts, fmt.Sprintf("**Limit:** %d", params.Limit))
-			}
-			if params.Offset > 0 {
-				parts = append(parts, fmt.Sprintf("**Offset:** %d", params.Offset))
-			}
-			return strings.Join(parts, "\n")
+			return fmt.Sprintf("**File:** %s", fsext.PrettyPath(params.Path))
 		}
 	case tools.EditToolName:
 		var params tools.EditParams

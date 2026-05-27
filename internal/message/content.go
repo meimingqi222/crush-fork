@@ -648,12 +648,6 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 					ToolID:    reasoning.ToolID,
 				}
 			}
-			if len(reasoningPart.ProviderOptions) == 0 && hasToolCalls {
-				reasoningPart.Text = ""
-				reasoningPart.ProviderOptions[anthropic.Name] = &anthropic.ReasoningOptionMetadata{
-					RedactedData: base64.StdEncoding.EncodeToString([]byte(thinking)),
-				}
-			}
 			if len(reasoningPart.ProviderOptions) > 0 {
 				parts = append(parts, reasoningPart)
 			} else if text == "" && !hasToolCalls {
@@ -666,14 +660,15 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				text = thinking
 				parts = append(parts, reasoningPart)
 			} else {
-				// No provider-specific metadata (not Anthropic signed/redacted,
-				// Google, or OpenAI Responses) but there is text content alongside
-				// the reasoning. Include as a plain ReasoningPart so that
-				// OpenAI-compatible providers (e.g. DeepSeek reasoning models via
-				// the native OpenAI-compat API) receive the required
-				// reasoning_content field when conversation history is passed back
-				// to the API. Providers that do not use this field (e.g. Anthropic
-				// without metadata) will emit a soft warning and skip it.
+				// No provider-specific metadata (not Anthropic signed, Google, or
+				// OpenAI Responses) but there is text content and/or tool calls
+				// alongside the reasoning. Include as a plain ReasoningPart so
+				// that OpenAI-compatible providers (e.g. DeepSeek, MiMo, or other
+				// reasoning models via the native OpenAI-compat API) receive the
+				// required reasoning_content field when conversation history is
+				// passed back to the API. Providers that do not use this field
+				// (e.g. Anthropic without metadata) will emit a soft warning and
+				// skip it.
 				parts = append(parts, reasoningPart)
 			}
 		}

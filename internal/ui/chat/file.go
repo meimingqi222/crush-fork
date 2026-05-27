@@ -2,7 +2,6 @@ package chat
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -49,12 +48,6 @@ func (v *ReadToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 
 	file := fsext.PrettyPath(params.Path)
 	toolParams := []string{file}
-	if params.Limit != 0 {
-		toolParams = append(toolParams, "limit", fmt.Sprintf("%d", params.Limit))
-	}
-	if params.Offset != 0 {
-		toolParams = append(toolParams, "offset", fmt.Sprintf("%d", params.Offset))
-	}
 
 	header := toolHeader(sty, opts.Status, "Read", cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
@@ -119,7 +112,11 @@ func (v *ReadToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	}
 
 	// Render code content with syntax highlighting.
-	body := toolOutputCodeContent(sty, params.Path, content, params.Offset, cappedWidth, opts.ExpandedContent)
+	startOffset := 0
+	if meta.StartLine > 0 {
+		startOffset = meta.StartLine - 1
+	}
+	body := toolOutputCodeContent(sty, params.Path, content, startOffset, cappedWidth, opts.ExpandedContent)
 	return joinToolParts(header, body)
 }
 

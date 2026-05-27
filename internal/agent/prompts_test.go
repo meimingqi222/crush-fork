@@ -170,7 +170,7 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 	// hashline_edit functionality is now integrated into the edit tool via
 	// its operations[] parameter, so the AllowedTools list only needs the
 	// core editing tools. The read tool provides hashline anchors via
-	// read(hashline=true).
+	// line selectors (e.g. path="file.ts:50-200").
 	promptBuilder, err := promptForAgent(config.Agent{
 		ID:           config.AgentGeneral,
 		AllowedTools: []string{"read", "edit", "write"},
@@ -181,8 +181,8 @@ func TestPromptForAgentBuildIncludesHashlineEditGuidance(t *testing.T) {
 	require.NoError(t, err)
 	// Guidance about hashline-anchored edits via the edit tool's operations[]
 	assert.Contains(t, built, "operations[]")
-	// The read tool's hashline mode should be referenced
-	assert.Contains(t, built, "read(hashline=true)")
+	// The read tool's hashline mode should be referenced via line selectors
+	assert.Contains(t, built, "line selector")
 	// Should explain when hashline mode is preferred
 	assert.Contains(t, built, "brittle")
 }

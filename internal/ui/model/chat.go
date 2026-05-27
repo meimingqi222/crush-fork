@@ -37,6 +37,11 @@ type Chat struct {
 	list     *list.List
 	idInxMap map[string]int // Map of message IDs to their indices in the list
 
+	// msgToolCallIDs maps message IDs to the set of tool call IDs that
+	// belong to that message. This avoids O(n) scans of the entire list in
+	// removeToolItemsForMessage during streaming updates.
+	msgToolCallIDs map[string]map[string]struct{}
+
 	// Animation visibility optimization: track animations paused due to items
 	// being scrolled out of view. When items become visible again, their
 	// animations are restarted.
@@ -71,6 +76,7 @@ func NewChat(com *common.Common) *Chat {
 	c := &Chat{
 		com:              com,
 		idInxMap:         make(map[string]int),
+		msgToolCallIDs:   make(map[string]map[string]struct{}),
 		pausedAnimations: make(map[string]struct{}),
 	}
 	l := list.NewList()
@@ -110,6 +116,7 @@ func (m *Chat) Len() int {
 // SetMessages sets the chat messages to the provided list of message items.
 func (m *Chat) SetMessages(msgs ...chat.MessageItem) {
 	m.idInxMap = make(map[string]int)
+	m.msgToolCallIDs = make(map[string]map[string]struct{})
 	m.pausedAnimations = make(map[string]struct{})
 
 	items := make([]list.Item, len(msgs))
@@ -120,6 +127,10 @@ func (m *Chat) SetMessages(msgs ...chat.MessageItem) {
 			for _, nested := range container.NestedTools() {
 				m.idInxMap[nested.ID()] = i
 			}
+		}
+		// Track tool call IDs per parent message for fast removal.
+		if toolItem, ok := msg.(chat.ToolMessageItem); ok {
+			m.registerToolCall(toolItem.MessageID(), toolItem.ToolCall().ID)
 		}
 		items[i] = msg
 	}
@@ -139,6 +150,10 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 				m.idInxMap[nested.ID()] = indexOffset + i
 			}
 		}
+		// Track tool call IDs per parent message for fast removal.
+		if toolItem, ok := msg.(chat.ToolMessageItem); ok {
+			m.registerToolCall(toolItem.MessageID(), toolItem.ToolCall().ID)
+		}
 		items[i] = msg
 	}
 	m.list.AppendItems(items...)
@@ -146,6 +161,7 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 
 func (m *Chat) rebuildIDIndexMap() {
 	m.idInxMap = make(map[string]int)
+	m.msgToolCallIDs = make(map[string]map[string]struct{})
 	for i := 0; i < m.list.Len(); i++ {
 		item, ok := m.list.ItemAt(i).(chat.MessageItem)
 		if !ok || item == nil {
@@ -157,6 +173,10 @@ func (m *Chat) rebuildIDIndexMap() {
 			for _, nested := range container.NestedTools() {
 				m.idInxMap[nested.ID()] = i
 			}
+		}
+		// Track tool call IDs per parent message for fast removal.
+		if toolItem, ok := item.(chat.ToolMessageItem); ok {
+			m.registerToolCall(toolItem.MessageID(), toolItem.ToolCall().ID)
 		}
 	}
 }
@@ -487,6 +507,12 @@ func (m *Chat) RemoveMessage(id string) {
 		return
 	}
 
+	// If the removed item is a tool call, unregister it from the parent
+	// message's tool call set.
+	if item, ok := m.list.ItemAt(idx).(chat.ToolMessageItem); ok {
+		m.unregisterToolCall(item.MessageID(), item.ToolCall().ID)
+	}
+
 	// Remove from list
 	m.list.RemoveItem(idx)
 
@@ -502,6 +528,35 @@ func (m *Chat) RemoveMessage(id string) {
 
 	// Clean up any paused animations for this message
 	delete(m.pausedAnimations, id)
+}
+
+// registerToolCall records that a tool call ID belongs to a parent message.
+func (m *Chat) registerToolCall(messageID, toolCallID string) {
+	ids, ok := m.msgToolCallIDs[messageID]
+	if !ok {
+		ids = make(map[string]struct{})
+		m.msgToolCallIDs[messageID] = ids
+	}
+	ids[toolCallID] = struct{}{}
+}
+
+// unregisterToolCall removes a tool call ID from a parent message's set.
+// If the set becomes empty, the parent entry is also removed.
+func (m *Chat) unregisterToolCall(messageID, toolCallID string) {
+	ids, ok := m.msgToolCallIDs[messageID]
+	if !ok {
+		return
+	}
+	delete(ids, toolCallID)
+	if len(ids) == 0 {
+		delete(m.msgToolCallIDs, messageID)
+	}
+}
+
+// ToolCallIDsForMessage returns the set of tool call IDs registered for the
+// given parent message ID. Returns nil if no tool calls are tracked.
+func (m *Chat) ToolCallIDsForMessage(messageID string) map[string]struct{} {
+	return m.msgToolCallIDs[messageID]
 }
 
 // RemoveTaskNodesForRemovedToolCalls removes any TaskNodeItems whose parent tool call ID

@@ -12,7 +12,7 @@ Edits files by replacing text, creating new files, or deleting content. For movi
 3. new_string: Replacement text
 4. replace_all: Replace all occurrences (default false)
 5. edits: Array of edit operations for multiple changes (when provided, old_string/new_string/replace_all are ignored)
-6. operations: Array of hashline operations using LINE#HASH line references from read(hashline=true). When provided, all other parameters except file_path are ignored. Each operation: {operation, content, line/start/end}. Operations: replace_line, replace_range, prepend, append.
+6. operations: Array of hashline operations using LINE#HASH line references from read with a line selector (e.g. path="file.ts:50-200"). When provided, all other parameters except file_path are ignored. Each operation: {operation, content, line/start/end}. Operations: replace_line, replace_range, prepend, append.
 </parameters>
 
 <special_cases>
@@ -32,7 +32,7 @@ Trailing whitespace differences and minor indentation variations are handled aut
 <hashline_mode>
 When exact text matching is brittle (heavy escaping, repeated snippets, special characters), use hashline mode:
 
-1. Read the file with `read(hashline=true)` to get LINE#HASH references
+1. Read the file with a line selector (e.g. `read(path="file.ts:50-200")`) to get LINE#HASH references
 2. Call `edit` with `operations` array instead of `old_string`/`new_string`
 3. Each operation uses `LINE#HASH` anchors (e.g. `"5#aa"`) from the read output
 
@@ -42,7 +42,7 @@ Operation types:
 - `prepend`: insert `content` before the referenced line
 - `append`: insert `content` after the referenced line
 
-If a hash mismatch error occurs, re-run `read(hashline=true)` and retry.
+If a hash mismatch error occurs, re-read the file with a line selector and retry.
 </hashline_mode>
 
 <critical_requirements>
@@ -83,7 +83,7 @@ If you get "old_string not found in file":
    - Look for blank lines
    - Check for trailing spaces
 4. **Verify character-by-character** that your old_string matches
-5. If the target contains heavy escaping, repeated text, or special characters, use `read(hashline=true)` to get LINE#HASH references, then pass `operations` array to this tool instead of `old_string`
+5. If the target contains heavy escaping, repeated text, or special characters, read the file with a line selector (e.g. `path="file.ts:1-100"`) to get LINE#HASH references, then pass `operations` array to this tool instead of `old_string`
 6. **Never guess** - always read the file to get exact text
    </recovery_steps>
 
