@@ -47,7 +47,7 @@ type HashlineEditResponseMetadata struct {
 	NewContent string `json:"new_content,omitempty"`
 }
 
-var hashlineReferencePattern = regexp.MustCompile(fmt.Sprintf(`^\s*[>+\-]*\s*(\d+)\s*#\s*([%s]{2,4})`, hashlineNibbleAlphabet))
+var hashlineReferencePattern = regexp.MustCompile(`^\s*[>+\-]*\s*(\d+)\s*#\s*([a-zA-Z]{2,4})`)
 
 type hashlineRef struct {
 	Line int
@@ -56,12 +56,7 @@ type hashlineRef struct {
 
 func computeHashlineID(lineNumber int, line string) string {
 	normalized := strings.TrimRightFunc(strings.ReplaceAll(line, "\r", ""), unicode.IsSpace)
-	input := normalized
-	if !containsSignificantRune(normalized) {
-		input = fmt.Sprintf("%d:%s", lineNumber, normalized)
-	}
-
-	hashValue := xxhash.Sum64String(input)
+	hashValue := xxhash.Sum64String(normalized)
 	val := uint16(hashValue & 0xffff)
 	return string([]byte{
 		hashlineNibbleAlphabet[val>>12],
@@ -88,7 +83,7 @@ func parseHashlineReference(reference string) (hashlineRef, error) {
 
 	return hashlineRef{
 		Line: lineNumber,
-		Hash: match[2],
+		Hash: strings.ToUpper(match[2]),
 	}, nil
 }
 

@@ -29,6 +29,7 @@ type Service interface {
 	Send(mailboxID, agentID, message string) (Envelope, error)
 	Stop(mailboxID, agentID, reason string) (Envelope, error)
 	Consume(mailboxID, agentID string) ([]Envelope, error)
+	ActiveMailboxes() map[string][]string
 }
 
 type service struct {
@@ -171,4 +172,19 @@ func (s *service) enqueue(envelope Envelope, agentID string) error {
 		box.queues[currentAgentID] = append(box.queues[currentAgentID], envelope)
 	}
 	return nil
+}
+
+func (s *service) ActiveMailboxes() map[string][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make(map[string][]string, len(s.mailboxes))
+	for id, box := range s.mailboxes {
+		agents := make([]string, 0, len(box.agents))
+		for agent := range box.agents {
+			agents = append(agents, agent)
+		}
+		out[id] = agents
+	}
+	return out
 }

@@ -6,8 +6,7 @@ Requests cancellation of a task graph task.
 Use this tool to stop one task or all tasks in an active mailbox.
 
 Parameters:
-- mailbox_id (required): Mailbox identifier (typically the parent task graph tool call ID).
-- task_id (optional): Specific task ID to stop. Omit to request stop for all tasks in that mailbox.
+- task_id (optional): Specific task name/ID to stop (e.g., 'linter', 'compiler'). Omit to request stop for all active sub-tasks in current session.
 - reason (optional): Human-readable cancellation reason.
 
 Notes:

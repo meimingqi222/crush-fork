@@ -426,7 +426,18 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 	}
 
 	if oldContent == currentContent {
-		return fantasy.NewTextErrorResponse("no changes made - all edits resulted in identical content"), nil
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextResponse("No changes were needed. The file is already in the desired state."),
+			EditResponseMetadata{
+				FilePath:     filePath,
+				OldContent:   oldContent,
+				NewContent:   currentContent,
+				Additions:    0,
+				Removals:     0,
+				EditsApplied: 0,
+				EditsFailed:  failedEdits,
+			},
+		), nil
 	}
 
 	_, additions, removals := diff.GenerateDiff(oldContent, currentContent, strings.TrimPrefix(filePath, edit.workingDir))
@@ -812,7 +823,17 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 	}
 
 	if oldContent == newContent {
-		return fantasy.NewTextErrorResponse("new content is the same as old content. No changes made."), nil
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextResponse("No changes were needed. The file is already in the desired state."),
+			EditResponseMetadata{
+				FilePath:     filePath,
+				OldContent:   oldContent,
+				NewContent:   newContent,
+				Additions:    0,
+				Removals:     0,
+				EditsApplied: 0,
+			},
+		), nil
 	}
 	_, additions, removals := diff.GenerateDiff(
 		oldContent,
@@ -1082,7 +1103,16 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 
 	newContent := joinHashlineFileLines(newLines, hadTrailingNewline)
 	if newContent == oldContent {
-		return fantasy.NewTextErrorResponse("new content is the same as old content. No changes made."), nil
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextResponse("No changes were needed. The file is already in the desired state."),
+			EditResponseMetadata{
+				FilePath:   filePath,
+				OldContent: oldContent,
+				NewContent: newContent,
+				Additions:  0,
+				Removals:   0,
+			},
+		), nil
 	}
 
 	_, additions, removals := diff.GenerateDiff(
