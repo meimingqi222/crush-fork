@@ -37,9 +37,10 @@ type Handler struct {
 	app    App
 	server *Server // set after server is constructed (circular reference resolved via setter)
 
-	mu         sync.RWMutex
-	cancels    map[string]*cancelEntry
-	sessionCWD map[string]string
+	mu               sync.RWMutex
+	cancels          map[string]*cancelEntry
+	sessionCWD       map[string]string
+	activeToolParams map[string]any
 }
 
 // App is the subset of app.App the ACP handler needs.
@@ -56,9 +57,36 @@ type App interface {
 // NewHandler constructs a Handler backed by the given App.
 func NewHandler(app App) *Handler {
 	return &Handler{
-		app:        app,
-		cancels:    make(map[string]*cancelEntry),
-		sessionCWD: make(map[string]string),
+		app:              app,
+		cancels:          make(map[string]*cancelEntry),
+		sessionCWD:       make(map[string]string),
+		activeToolParams: make(map[string]any),
+	}
+}
+
+func (h *Handler) setToolParams(toolCallID string, params any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.activeToolParams == nil {
+		h.activeToolParams = make(map[string]any)
+	}
+	h.activeToolParams[toolCallID] = params
+}
+
+func (h *Handler) getToolParams(toolCallID string) any {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.activeToolParams == nil {
+		return nil
+	}
+	return h.activeToolParams[toolCallID]
+}
+
+func (h *Handler) deleteToolParams(toolCallID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.activeToolParams != nil {
+		delete(h.activeToolParams, toolCallID)
 	}
 }
 
@@ -206,7 +234,7 @@ func (h *Handler) replayHistory(ctx context.Context, sessionID string) {
 			}
 		case message.Tool:
 			for _, tr := range msg.ToolResults() {
-				h.sendUpdateSyncWithContext(ctx, sessionID, h.sessionUpdateFromToolResult(tr))
+				h.sendUpdateSyncWithContext(ctx, sessionID, h.sessionUpdateFromToolResult(tr, sessionID, sessionID))
 			}
 		case message.Assistant:
 			content := msg.Content().Text
@@ -317,7 +345,7 @@ loop:
 				case event := <-msgSub:
 					drained = true
 					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleMessageEvent(event.Payload, readBytes, func(update SessionUpdate) {
+						h.handleMessageEvent(event.Payload, params.SessionID, readBytes, func(update SessionUpdate) {
 							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 						})
 					}
@@ -343,7 +371,7 @@ loop:
 				case event := <-runtimeSub:
 					drained = true
 					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleToolRuntimeEvent(event, runtimeSnapshotHashes, func(update SessionUpdate) {
+						h.handleToolRuntimeEvent(event, params.SessionID, runtimeSnapshotHashes, func(update SessionUpdate) {
 							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 						})
 					}
@@ -371,7 +399,7 @@ loop:
 			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, msg.SessionID, trackedSessionIDs) {
 				continue
 			}
-			h.handleMessageEvent(msg, readBytes, func(update SessionUpdate) {
+			h.handleMessageEvent(msg, params.SessionID, readBytes, func(update SessionUpdate) {
 				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 			})
 
@@ -390,7 +418,7 @@ loop:
 			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
 				continue
 			}
-			h.handleToolRuntimeEvent(event, runtimeSnapshotHashes, func(update SessionUpdate) {
+			h.handleToolRuntimeEvent(event, params.SessionID, runtimeSnapshotHashes, func(update SessionUpdate) {
 				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 			})
 
@@ -411,36 +439,52 @@ loop:
 }
 
 // handleMessageEvent converts a message update into session/update notifications.
-func (h *Handler) handleMessageEvent(msg message.Message, readBytes map[string]int, send func(SessionUpdate)) {
+func (h *Handler) handleMessageEvent(msg message.Message, parentSessionID string, readBytes map[string]int, send func(SessionUpdate)) {
 	switch msg.Role {
 	case message.Assistant:
-		// Stream text content as agent_message_chunk.
-		content := msg.Content().Text
-		prev := readBytes[msg.ID]
-		if len(content) > prev {
-			chunk := content[prev:]
-			readBytes[msg.ID] = len(content)
-			send(SessionUpdate{
-				SessionUpdate: SessionUpdateAgentMessageChunk,
-				Content:       TextBlock(chunk),
-			})
-		}
+		if msg.SessionID == parentSessionID {
+			// Stream text content as agent_message_chunk.
+			content := msg.Content().Text
+			prev := readBytes[msg.ID]
+			if len(content) > prev {
+				chunk := content[prev:]
+				readBytes[msg.ID] = len(content)
+				send(SessionUpdate{
+					SessionUpdate: SessionUpdateAgentMessageChunk,
+					Content:       TextBlock(chunk),
+				})
+			}
 
-		// Stream reasoning/thinking.
-		thinking := msg.ReasoningContent().Thinking
-		prevThink := readBytes[msg.ID+":think"]
-		if len(thinking) > prevThink {
-			chunk := thinking[prevThink:]
-			readBytes[msg.ID+":think"] = len(thinking)
-			send(SessionUpdate{
-				SessionUpdate: SessionUpdateAgentThoughtChunk,
-				Content:       TextBlock(chunk),
-			})
+			// Stream reasoning/thinking.
+			thinking := msg.ReasoningContent().Thinking
+			prevThink := readBytes[msg.ID+":think"]
+			if len(thinking) > prevThink {
+				chunk := thinking[prevThink:]
+				readBytes[msg.ID+":think"] = len(thinking)
+				send(SessionUpdate{
+					SessionUpdate: SessionUpdateAgentThoughtChunk,
+					Content:       TextBlock(chunk),
+				})
+			}
 		}
 
 		// Emit tool call events.
 		for _, tc := range msg.ToolCalls() {
 			key := msg.ID + ":tc:" + tc.ID
+			var inputParams any
+			if tc.Input != "" {
+				_ = json.Unmarshal([]byte(tc.Input), &inputParams)
+			}
+			prefix := h.getSubagentPrefix(context.Background(), msg.SessionID, parentSessionID)
+			beautifulTitle := prefix + GetBeautifulTitle(tc.Name, "", inputParams)
+			toolKind := GetToolKind(tc.Name)
+			h.setToolParams(tc.ID, inputParams)
+
+			parentTCID := ""
+			if msg.SessionID != parentSessionID {
+				parentTCID = cleanParentToolCallID(msg.SessionID)
+			}
+
 			if _, seen := readBytes[key]; !seen {
 				readBytes[key] = 1
 				status := ToolCallStatusInProgress
@@ -448,24 +492,26 @@ func (h *Handler) handleMessageEvent(msg message.Message, readBytes map[string]i
 					status = ToolCallStatusCompleted
 				}
 				send(SessionUpdate{
-					SessionUpdate: SessionUpdateToolCall,
-					ToolCallID:    tc.ID,
-					Title:         tc.Name,
-					Kind:          "tool",
-					Status:        status,
-					RawInput:      tc.Input,
+					SessionUpdate:    SessionUpdateToolCall,
+					ToolCallID:       tc.ID,
+					Title:            beautifulTitle,
+					Kind:             toolKind,
+					Status:           status,
+					RawInput:         tc.Input,
+					ParentToolCallID: parentTCID,
 				})
 			} else if tc.Finished {
 				finishedKey := msg.ID + ":tc:" + tc.ID + ":done"
 				if _, done := readBytes[finishedKey]; !done {
 					readBytes[finishedKey] = 1
 					send(SessionUpdate{
-						SessionUpdate: SessionUpdateToolCallUpdate,
-						ToolCallID:    tc.ID,
-						Title:         tc.Name,
-						Kind:          "tool",
-						Status:        ToolCallStatusCompleted,
-						RawInput:      tc.Input,
+						SessionUpdate:    SessionUpdateToolCallUpdate,
+						ToolCallID:       tc.ID,
+						Title:            beautifulTitle,
+						Kind:             toolKind,
+						Status:           ToolCallStatusCompleted,
+						RawInput:         tc.Input,
+						ParentToolCallID: parentTCID,
 					})
 				}
 			}
@@ -475,13 +521,13 @@ func (h *Handler) handleMessageEvent(msg message.Message, readBytes map[string]i
 			key := msg.ID + ":tr:" + tr.ToolCallID
 			if _, seen := readBytes[key]; !seen {
 				readBytes[key] = 1
-				send(h.sessionUpdateFromToolResult(tr))
+				send(h.sessionUpdateFromToolResult(tr, msg.SessionID, parentSessionID))
 			}
 		}
 	}
 }
 
-func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], snapshotHashes map[string][32]byte, send func(SessionUpdate)) {
+func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], parentSessionID string, snapshotHashes map[string][32]byte, send func(SessionUpdate)) {
 	if event.Type == pubsub.DeletedEvent {
 		return
 	}
@@ -503,15 +549,24 @@ func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], 
 		}
 		snapshotHashes[state.ToolCallID] = hash
 
+		inputParams := h.getToolParams(state.ToolCallID)
+		prefix := h.getSubagentPrefix(context.Background(), state.SessionID, parentSessionID)
+		parentTCID := ""
+		if state.SessionID != parentSessionID {
+			parentTCID = cleanParentToolCallID(state.SessionID)
+		}
+
 		send(SessionUpdate{
-			SessionUpdate:  SessionUpdateToolCallUpdate,
-			ToolCallID:     state.ToolCallID,
-			Title:          state.ToolName,
-			Kind:           "tool",
-			Status:         ToolCallStatusInProgress,
-			Content:        TextBlock(snapshot),
-			ClientMetadata: state.ClientMetadata,
-			DurationMs:     state.DurationMs,
+			SessionUpdate:    SessionUpdateToolCallUpdate,
+			ToolCallID:       state.ToolCallID,
+			Title:            prefix + GetBeautifulTitle(state.ToolName, "", inputParams),
+			Kind:             GetToolKind(state.ToolName),
+			Status:           ToolCallStatusInProgress,
+			Content:          TextBlock(snapshot),
+			ClientMetadata:   state.ClientMetadata,
+			DurationMs:       state.DurationMs,
+			ParentToolCallID: parentTCID,
+			Locations:        h.getToolLocations(state.ToolName, inputParams),
 		})
 		return
 	}
@@ -520,6 +575,8 @@ func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], 
 		return
 	}
 	delete(snapshotHashes, state.ToolCallID)
+	// Do not delete activeToolParams here, as sessionUpdateFromToolResult
+	// will need these parameters to generate the final beautiful title.
 
 	status := ToolCallStatusCompleted
 	switch state.Status {
@@ -529,14 +586,23 @@ func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], 
 		status = ToolCallStatusCanceled
 	}
 
+	inputParams := h.getToolParams(state.ToolCallID)
+	prefix := h.getSubagentPrefix(context.Background(), state.SessionID, parentSessionID)
+	parentTCID := ""
+	if state.SessionID != parentSessionID {
+		parentTCID = cleanParentToolCallID(state.SessionID)
+	}
+
 	send(SessionUpdate{
-		SessionUpdate:  SessionUpdateToolCallUpdate,
-		ToolCallID:     state.ToolCallID,
-		Title:          state.ToolName,
-		Kind:           "tool",
-		Status:         status,
-		ClientMetadata: state.ClientMetadata,
-		DurationMs:     state.DurationMs,
+		SessionUpdate:    SessionUpdateToolCallUpdate,
+		ToolCallID:       state.ToolCallID,
+		Title:            prefix + GetBeautifulTitle(state.ToolName, "", inputParams),
+		Kind:             GetToolKind(state.ToolName),
+		Status:           status,
+		ClientMetadata:   state.ClientMetadata,
+		DurationMs:       state.DurationMs,
+		ParentToolCallID: parentTCID,
+		Locations:        h.getToolLocations(state.ToolName, inputParams),
 	})
 }
 
@@ -560,7 +626,7 @@ func (h *Handler) handleTimelineEvent(event pubsub.Event[timeline.Event], send f
 	})
 }
 
-func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult) SessionUpdate {
+func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult, sessionID, parentSessionID string) SessionUpdate {
 	status := ToolCallStatusCompleted
 	subtaskResult, hasSubtaskResult := tr.SubtaskResult()
 	if hasSubtaskResult {
@@ -574,14 +640,34 @@ func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult) SessionUpda
 		status = ToolCallStatusFailed
 	}
 
-	update := SessionUpdate{
-		SessionUpdate: SessionUpdateToolCallUpdate,
-		ToolCallID:    tr.ToolCallID,
-		Title:         tr.Name,
-		Kind:          "tool",
-		Status:        status,
-		RawOutput:     tr,
+	inputParams := h.getToolParams(tr.ToolCallID)
+	prefix := h.getSubagentPrefix(context.Background(), sessionID, parentSessionID)
+	parentTCID := ""
+	if sessionID != parentSessionID {
+		parentTCID = cleanParentToolCallID(sessionID)
 	}
+
+	toolKind := GetToolKind(tr.Name)
+	var content any = TextBlock(tr.Content)
+	if toolKind == ToolKindEdit {
+		diffContent := h.getToolDiffContent(tr.Name, inputParams, tr.Content)
+		if diffContent != nil {
+			content = diffContent
+		}
+	}
+
+	update := SessionUpdate{
+		SessionUpdate:    SessionUpdateToolCallUpdate,
+		ToolCallID:       tr.ToolCallID,
+		Title:            prefix + GetBeautifulTitle(tr.Name, "", inputParams),
+		Kind:             toolKind,
+		Status:           status,
+		RawOutput:        tr.Content,
+		Content:          content,
+		ParentToolCallID: parentTCID,
+		Locations:        h.getToolLocations(tr.Name, inputParams),
+	}
+	h.deleteToolParams(tr.ToolCallID)
 	if hasSubtaskResult {
 		update.ChildSessionID = subtaskResult.ChildSessionID
 		update.ParentToolCallID = subtaskResult.ParentToolCallID
@@ -1066,3 +1152,117 @@ func (h *Handler) handleSetConfigOption(ctx context.Context, req *Request) (any,
 // Compile-time check that pubsub.Event[message.Message] is the event type used
 // in the message subscription loop.
 var _ pubsub.Event[message.Message]
+
+func (h *Handler) getSubagentPrefix(ctx context.Context, sessionID, parentSessionID string) string {
+	if sessionID == "" || sessionID == parentSessionID {
+		return ""
+	}
+	sess, err := h.app.GetSessions().Get(ctx, sessionID)
+	if err != nil {
+		return ""
+	}
+	// Extract subagent name from title like "Explore task (@explore subagent)"
+	if idx := strings.Index(sess.Title, "(@"); idx != -1 {
+		sub := sess.Title[idx+2:]
+		if endIdx := strings.Index(sub, " "); endIdx != -1 {
+			return "[" + sub[:endIdx] + "] "
+		}
+	}
+	// Fallback to title
+	title := sess.Title
+	if len(title) > 15 {
+		title = title[:12] + "..."
+	}
+	return "[" + title + "] "
+}
+
+func (h *Handler) getToolLocations(toolName string, params any) []Location {
+	if params == nil {
+		return nil
+	}
+	path := extractParam(params, "TargetFile", "file_path", "filePath", "filepath", "path", "src", "Source", "SearchPath", "search_path")
+	if path != "" {
+		return []Location{{Path: path}}
+	}
+	return nil
+}
+
+func (h *Handler) getToolDiffContent(toolName string, params any, toolOutput string) []any {
+	if params == nil {
+		return nil
+	}
+
+	path := extractParam(params, "TargetFile", "file_path", "filePath", "filepath", "path")
+	if path == "" {
+		return nil
+	}
+
+	blocks := []any{TextBlock(toolOutput)}
+
+	// replace_file_content
+	if toolName == "replace_file_content" {
+		oldText := extractParam(params, "TargetContent")
+		newText := extractParam(params, "ReplacementContent")
+		if oldText != "" || newText != "" {
+			blocks = append(blocks, DiffBlock{
+				Type:    "diff",
+				Path:    path,
+				OldText: oldText,
+				NewText: newText,
+			})
+			return blocks
+		}
+	}
+
+	// multi_replace_file_content
+	if toolName == "multi_replace_file_content" {
+		type localChunk struct {
+			TargetContent      string `json:"TargetContent"`
+			ReplacementContent string `json:"ReplacementContent"`
+		}
+		type localMultiParams struct {
+			ReplacementChunks []localChunk `json:"ReplacementChunks"`
+		}
+		var mp localMultiParams
+		if data, err := json.Marshal(params); err == nil {
+			if err := json.Unmarshal(data, &mp); err == nil {
+				for _, ch := range mp.ReplacementChunks {
+					blocks = append(blocks, DiffBlock{
+						Type:    "diff",
+						Path:    path,
+						OldText: ch.TargetContent,
+						NewText: ch.ReplacementContent,
+					})
+				}
+				return blocks
+			}
+		}
+	}
+
+	// write_to_file, write, fs/write_text_file
+	if toolName == "write_to_file" || toolName == "write" || toolName == "fs/write_text_file" {
+		newText := extractParam(params, "CodeContent", "content", "data", "text")
+		if newText != "" {
+			blocks = append(blocks, DiffBlock{
+				Type:    "diff",
+				Path:    path,
+				OldText: "",
+				NewText: newText,
+			})
+			return blocks
+		}
+	}
+
+	return nil
+}
+
+func cleanParentToolCallID(sessionID string) string {
+	// Only strip the prefix before "$$" if present (e.g. "messageID$$toolCallID")
+	// We MUST preserve the "::" task suffix because the coordinator publishes
+	// the delegation ToolCall in the parent session with the "::" suffix
+	// to distinguish multiple parallel subagents in the IDE UI.
+	if idx := strings.Index(sessionID, "$$"); idx != -1 {
+		return sessionID[idx+2:]
+	}
+	return sessionID
+}

@@ -273,6 +273,21 @@ const (
 	ToolCallStatusCanceled ToolCallStatus = "canceled"
 )
 
+// ToolKind categorizes tools within the ACP framework to guide UI rendering.
+type ToolKind string
+
+const (
+	ToolKindRead    ToolKind = "read"
+	ToolKindEdit    ToolKind = "edit"
+	ToolKindDelete  ToolKind = "delete"
+	ToolKindMove    ToolKind = "move"
+	ToolKindSearch  ToolKind = "search"
+	ToolKindExecute ToolKind = "execute"
+	ToolKindThink   ToolKind = "think"
+	ToolKindFetch   ToolKind = "fetch"
+	ToolKindOther   ToolKind = "other"
+)
+
 type SubtaskResult struct {
 	Status          string `json:"status,omitempty"`
 	ParentMessageID string `json:"parentMessageId,omitempty"`
@@ -295,17 +310,18 @@ type SessionUpdate struct {
 	SessionUpdate SessionUpdateType `json:"sessionUpdate"`
 	// Content for message/thought chunks (agent_message_chunk, user_message_chunk,
 	// agent_thought_chunk). Must be a ContentBlock per ACP spec.
-	Content *ContentBlock `json:"content,omitempty"`
+	Content any `json:"content,omitempty"`
 	// Tool call or session info title.
 	Title string `json:"title,omitempty"`
 	// Tool call identifier.
 	ToolCallID     string         `json:"toolCallId,omitempty"`
-	Kind           string         `json:"kind,omitempty"`
+	Kind           ToolKind       `json:"kind,omitempty"`
 	Status         ToolCallStatus `json:"status,omitempty"`
 	RawInput       any            `json:"rawInput,omitempty"`
 	RawOutput      any            `json:"rawOutput,omitempty"`
 	ClientMetadata map[string]any `json:"clientMetadata,omitempty"`
 	DurationMs     int64          `json:"durationMs,omitempty"`
+	Locations      []Location     `json:"locations,omitempty"`
 	// Structured subtask result metadata projected from tool-result metadata.
 	ChildSessionID   string         `json:"childSessionId,omitempty"`
 	ParentToolCallID string         `json:"parentToolCallId,omitempty"`
@@ -374,7 +390,7 @@ type PermissionOption struct {
 type ACPToolCall struct {
 	ToolCallID string         `json:"toolCallId"`
 	Title      string         `json:"title,omitempty"`
-	Kind       string         `json:"kind,omitempty"`
+	Kind       ToolKind       `json:"kind,omitempty"`
 	RawInput   any            `json:"rawInput,omitempty"`
 	Status     ToolCallStatus `json:"status,omitempty"`
 }
@@ -513,3 +529,13 @@ func (id *ID) Int64() (int64, bool) {
 	return 0, false
 }
 
+type Location struct {
+	Path string `json:"path"`
+}
+
+type DiffBlock struct {
+	Type    string `json:"type"` // "diff"
+	Path    string `json:"path"`
+	OldText string `json:"oldText"`
+	NewText string `json:"newText"`
+}

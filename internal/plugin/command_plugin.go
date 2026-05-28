@@ -27,6 +27,8 @@ const (
 	commandPluginHookMessages          = "chat_messages_transform"
 	commandPluginHookSystem            = "chat_system_transform"
 	commandPluginHookCompacting        = "session_compacting"
+	commandPluginHookToolBeforeExecute = "tool_before_execute"
+	commandPluginHookToolAfterExecute  = "tool_after_execute"
 	commandPluginProtocolVersion       = 1
 	commandPluginDefaultOutputMaxBytes = 32 << 20
 	commandPluginMaxOutputMaxBytes     = 64 << 20
@@ -139,6 +141,124 @@ type commandPluginSessionCompactingInput struct {
 type commandPluginSessionCompactingOutput struct {
 	Context []string `json:"context,omitempty"`
 	Prompt  string   `json:"prompt,omitempty"`
+}
+
+type commandPluginToolBeforeExecuteInput struct {
+	Tool      string         `json:"tool"`
+	SessionID string         `json:"session_id"`
+	CallID    string         `json:"call_id"`
+	Args      map[string]any `json:"args"`
+}
+
+type commandPluginToolBeforeExecuteOutput struct {
+	Args      map[string]any `json:"args,omitempty"`
+	Skip      bool           `json:"skip"`
+	PreResult string         `json:"pre_result,omitempty"`
+}
+
+type commandPluginToolAfterExecuteInput struct {
+	Tool      string         `json:"tool"`
+	SessionID string         `json:"session_id"`
+	CallID    string         `json:"call_id"`
+	Args      map[string]any `json:"args"`
+	Result    string         `json:"result"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+type commandPluginToolAfterExecuteOutput struct {
+	Result        string         `json:"result,omitempty"`
+	ResultChanged bool           `json:"result_changed"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
+type toolBeforeExecuteHookDescriptor struct{}
+
+func (toolBeforeExecuteHookDescriptor) name() string {
+	return commandPluginHookToolBeforeExecute
+}
+
+func (toolBeforeExecuteHookDescriptor) attach(hooks *Hooks, invoker commandPluginInvoker) {
+	hooks.ToolBeforeExecute = func(ctx context.Context, input ToolBeforeExecuteInput) (*ToolBeforeExecuteOutput, error) {
+		var output ToolBeforeExecuteOutput
+		err := invokeCommandPluginHook(
+			ctx, invoker, commandPluginHookToolBeforeExecute,
+			input, &output,
+			func(input ToolBeforeExecuteInput) commandPluginToolBeforeExecuteInput {
+				return commandPluginToolBeforeExecuteInput{
+					Tool:      input.Tool,
+					SessionID: input.SessionID,
+					CallID:    input.CallID,
+					Args:      input.Args,
+				}
+			},
+			func(output *ToolBeforeExecuteOutput) commandPluginToolBeforeExecuteOutput {
+				return commandPluginToolBeforeExecuteOutput{
+					Args:      output.Args,
+					Skip:      output.Skip,
+					PreResult: output.PreResult,
+				}
+			},
+			func(output *ToolBeforeExecuteOutput, response commandPluginToolBeforeExecuteOutput) error {
+				if response.Args != nil {
+					output.Args = response.Args
+				}
+				output.Skip = response.Skip
+				output.PreResult = response.PreResult
+				return nil
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &output, nil
+	}
+}
+
+type toolAfterExecuteHookDescriptor struct{}
+
+func (toolAfterExecuteHookDescriptor) name() string {
+	return commandPluginHookToolAfterExecute
+}
+
+func (toolAfterExecuteHookDescriptor) attach(hooks *Hooks, invoker commandPluginInvoker) {
+	hooks.ToolAfterExecute = func(ctx context.Context, input ToolAfterExecuteInput) (*ToolAfterExecuteOutput, error) {
+		var output ToolAfterExecuteOutput
+		err := invokeCommandPluginHook(
+			ctx, invoker, commandPluginHookToolAfterExecute,
+			input, &output,
+			func(input ToolAfterExecuteInput) commandPluginToolAfterExecuteInput {
+				return commandPluginToolAfterExecuteInput{
+					Tool:      input.Tool,
+					SessionID: input.SessionID,
+					CallID:    input.CallID,
+					Args:      input.Args,
+					Result:    input.Result,
+					Metadata:  input.Metadata,
+				}
+			},
+			func(output *ToolAfterExecuteOutput) commandPluginToolAfterExecuteOutput {
+				return commandPluginToolAfterExecuteOutput{
+					Result:        output.Result,
+					ResultChanged: output.ResultChanged,
+					Metadata:      output.Metadata,
+				}
+			},
+			func(output *ToolAfterExecuteOutput, response commandPluginToolAfterExecuteOutput) error {
+				if response.ResultChanged {
+					output.Result = response.Result
+					output.ResultChanged = true
+				}
+				if response.Metadata != nil {
+					output.Metadata = response.Metadata
+				}
+				return nil
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &output, nil
+	}
 }
 
 type chatMessagesTransformHookDescriptor struct{}
@@ -278,6 +398,8 @@ var commandPluginHookDescriptors = []commandPluginHookDescriptor{
 	chatMessagesTransformHookDescriptor{},
 	chatSystemTransformHookDescriptor{},
 	sessionCompactingHookDescriptor{},
+	toolBeforeExecuteHookDescriptor{},
+	toolAfterExecuteHookDescriptor{},
 }
 
 func supportedCommandPluginHooks() []string {

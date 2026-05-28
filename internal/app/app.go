@@ -39,6 +39,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -183,6 +184,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		}
 		plugin.SetDefaultRuntime(app.previousPluginRT)
 	}()
+
+	plugin.Register(redact.NewPlugin())
 
 	if err := app.PluginRuntime.Init(ctx, plugin.PluginInput{
 		Config:     store,

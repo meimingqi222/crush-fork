@@ -913,7 +913,7 @@ func TestSessionPrompt_ForwardsChildSessionToolUpdates(t *testing.T) {
 		if envelope.Params.Update.SessionUpdate == acp.SessionUpdateToolCallUpdate && envelope.Params.Update.ToolCallID == "tool-agent-1" {
 			seenSubToolUpdate = true
 			require.Equal(t, sessionID, envelope.Params.SessionID)
-			require.Equal(t, "agent", envelope.Params.Update.Title)
+			require.Equal(t, "[child] Delegate sub-agent (@general)", envelope.Params.Update.Title)
 			require.Equal(t, subSessionID, envelope.Params.Update.ChildSessionID)
 			require.Equal(t, "tool-agent-1", envelope.Params.Update.ParentToolCallID)
 			require.NotNil(t, envelope.Params.Update.SubtaskResult)
@@ -1035,7 +1035,7 @@ func TestSessionPrompt_ForwardsNonBashRuntimeCompletion(t *testing.T) {
 		if update.SessionUpdate == acp.SessionUpdateToolCallUpdate && update.ToolCallID == "tool-read-1" {
 			seenRuntimeUpdate = true
 			require.Equal(t, acp.ToolCallStatusCompleted, update.Status)
-			require.Equal(t, "read", update.Title)
+			require.Equal(t, "Read file", update.Title)
 		}
 	}
 	require.True(t, seenRuntimeUpdate)
