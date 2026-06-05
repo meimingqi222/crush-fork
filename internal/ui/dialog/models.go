@@ -88,7 +88,7 @@ const (
 // ModelsID is the identifier for the model selection dialog.
 const ModelsID = "models"
 
-const defaultModelsDialogMaxWidth = 73
+const defaultModelsDialogMaxWidth = 90
 
 const modelSummaryContentHeight = 4
 
