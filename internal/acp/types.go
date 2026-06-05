@@ -3,7 +3,10 @@
 // communicate with AI agents in a standardized way.
 package acp
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Protocol version supported.
 const ProtocolVersion = 1
@@ -270,6 +273,21 @@ const (
 	ToolCallStatusCanceled ToolCallStatus = "canceled"
 )
 
+// ToolKind categorizes tools within the ACP framework to guide UI rendering.
+type ToolKind string
+
+const (
+	ToolKindRead    ToolKind = "read"
+	ToolKindEdit    ToolKind = "edit"
+	ToolKindDelete  ToolKind = "delete"
+	ToolKindMove    ToolKind = "move"
+	ToolKindSearch  ToolKind = "search"
+	ToolKindExecute ToolKind = "execute"
+	ToolKindThink   ToolKind = "think"
+	ToolKindFetch   ToolKind = "fetch"
+	ToolKindOther   ToolKind = "other"
+)
+
 type SubtaskResult struct {
 	Status          string `json:"status,omitempty"`
 	ParentMessageID string `json:"parentMessageId,omitempty"`
@@ -292,17 +310,18 @@ type SessionUpdate struct {
 	SessionUpdate SessionUpdateType `json:"sessionUpdate"`
 	// Content for message/thought chunks (agent_message_chunk, user_message_chunk,
 	// agent_thought_chunk). Must be a ContentBlock per ACP spec.
-	Content *ContentBlock `json:"content,omitempty"`
+	Content any `json:"content,omitempty"`
 	// Tool call or session info title.
 	Title string `json:"title,omitempty"`
 	// Tool call identifier.
 	ToolCallID     string         `json:"toolCallId,omitempty"`
-	Kind           string         `json:"kind,omitempty"`
+	Kind           ToolKind       `json:"kind,omitempty"`
 	Status         ToolCallStatus `json:"status,omitempty"`
 	RawInput       any            `json:"rawInput,omitempty"`
 	RawOutput      any            `json:"rawOutput,omitempty"`
 	ClientMetadata map[string]any `json:"clientMetadata,omitempty"`
 	DurationMs     int64          `json:"durationMs,omitempty"`
+	Locations      []Location     `json:"locations,omitempty"`
 	// Structured subtask result metadata projected from tool-result metadata.
 	ChildSessionID   string         `json:"childSessionId,omitempty"`
 	ParentToolCallID string         `json:"parentToolCallId,omitempty"`
@@ -371,7 +390,7 @@ type PermissionOption struct {
 type ACPToolCall struct {
 	ToolCallID string         `json:"toolCallId"`
 	Title      string         `json:"title,omitempty"`
-	Kind       string         `json:"kind,omitempty"`
+	Kind       ToolKind       `json:"kind,omitempty"`
 	RawInput   any            `json:"rawInput,omitempty"`
 	Status     ToolCallStatus `json:"status,omitempty"`
 }
@@ -400,7 +419,7 @@ type RequestPermissionResult struct {
 // Request is a JSON-RPC 2.0 request or notification message.
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      *int64          `json:"id,omitempty"`
+	ID      *ID             `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
@@ -408,7 +427,7 @@ type Request struct {
 // Response is a JSON-RPC 2.0 response message.
 type Response struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      *int64          `json:"id,omitempty"`
+	ID      *ID             `json:"id,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *RPCError       `json:"error,omitempty"`
 }
@@ -429,3 +448,94 @@ const (
 	CodeAuthRequired     = -32000
 	CodeResourceNotFound = -32002
 )
+
+// ID represents a JSON-RPC 2.0 message ID, which can be an integer, a string, or null.
+type ID struct {
+	num *int64
+	str *string
+	raw []byte
+}
+
+// NewIDFromInt creates a new ID from an int64.
+func NewIDFromInt(v int64) *ID {
+	return &ID{num: &v}
+}
+
+// NewIDFromString creates a new ID from a string.
+func NewIDFromString(v string) *ID {
+	return &ID{str: &v}
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (id *ID) UnmarshalJSON(data []byte) error {
+	id.raw = make([]byte, len(data))
+	copy(id.raw, data)
+
+	if string(data) == "null" {
+		return nil
+	}
+
+	var num int64
+	if err := json.Unmarshal(data, &num); err == nil {
+		id.num = &num
+		return nil
+	}
+
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		id.str = &str
+		return nil
+	}
+
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler.
+func (id ID) MarshalJSON() ([]byte, error) {
+	if id.raw != nil {
+		return id.raw, nil
+	}
+	if id.num != nil {
+		return json.Marshal(*id.num)
+	}
+	if id.str != nil {
+		return json.Marshal(*id.str)
+	}
+	return []byte("null"), nil
+}
+
+// String returns the string representation of the ID.
+func (id *ID) String() string {
+	if id == nil {
+		return "null"
+	}
+	if id.str != nil {
+		return *id.str
+	}
+	if id.num != nil {
+		return fmt.Sprintf("%d", *id.num)
+	}
+	return "null"
+}
+
+// Int64 returns the ID as an int64 and a boolean indicating success.
+func (id *ID) Int64() (int64, bool) {
+	if id == nil {
+		return 0, false
+	}
+	if id.num != nil {
+		return *id.num, true
+	}
+	return 0, false
+}
+
+type Location struct {
+	Path string `json:"path"`
+}
+
+type DiffBlock struct {
+	Type    string `json:"type"` // "diff"
+	Path    string `json:"path"`
+	OldText string `json:"oldText"`
+	NewText string `json:"newText"`
+}

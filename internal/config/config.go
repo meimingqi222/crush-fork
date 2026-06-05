@@ -3,7 +3,6 @@ package config
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -997,40 +996,8 @@ type SubagentRuntimeConfig struct {
 	SafeSummary                  bool   `json:"safe_summary,omitempty" jsonschema:"description=Prefer structured finish summaries over raw child output,default=true"` // TODO: not yet consumed at runtime; structured finish is already preferred when available
 }
 
-func (c *SubagentRuntimeConfig) UnmarshalJSON(data []byte) error {
-	type rawSubagentRuntimeConfig struct {
-		StructuredCompletionRequired *bool  `json:"structured_completion_required,omitempty"`
-		MissingFinishPolicy          string `json:"missing_finish_policy,omitempty"`
-		DefaultRetryPolicy           string `json:"default_retry_policy,omitempty"`
-		MaxConcurrency               int    `json:"max_concurrency,omitempty"`
-		AllowRecursiveAgents         *bool  `json:"allow_recursive_agents,omitempty"`
-		DefaultIsolation             string `json:"default_isolation,omitempty"`
-		SafeSummary                  *bool  `json:"safe_summary,omitempty"`
-	}
-
-	var raw rawSubagentRuntimeConfig
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	*c = SubagentRuntimeConfig{
-		StructuredCompletionRequired: true,
-		MissingFinishPolicy:          raw.MissingFinishPolicy,
-		DefaultRetryPolicy:           raw.DefaultRetryPolicy,
-		MaxConcurrency:               raw.MaxConcurrency,
-		DefaultIsolation:             raw.DefaultIsolation,
-		SafeSummary:                  true,
-	}
-	if raw.StructuredCompletionRequired != nil {
-		c.StructuredCompletionRequired = *raw.StructuredCompletionRequired
-	}
-	if raw.AllowRecursiveAgents != nil {
-		c.AllowRecursiveAgents = *raw.AllowRecursiveAgents
-	}
-	if raw.SafeSummary != nil {
-		c.SafeSummary = *raw.SafeSummary
-	}
-	return nil
+type RedactConfig struct {
+	Enabled *bool `json:"enabled,omitempty" jsonschema:"description=Enable secret redaction (default true)"`
 }
 
 type Config struct {
@@ -1058,6 +1025,8 @@ type Config struct {
 	Hooks []hooks.HookConfig `json:"hooks,omitempty" jsonschema:"description=Tool execution hooks (PreToolUse)"`
 
 	Plugins []PluginConfig `json:"plugins,omitempty" jsonschema:"description=External command plugins for chat or tool lifecycle customization"`
+
+	Redact *RedactConfig `json:"redact,omitempty" jsonschema:"description=Secret redaction configuration"`
 
 	Agents    map[string]Agent       `json:"agents,omitempty" jsonschema:"description=Named agent configurations, including built-in overrides and custom subagents"`
 	Subagents *SubagentRuntimeConfig `json:"subagents,omitempty" jsonschema:"description=Subagent runtime execution controls"`

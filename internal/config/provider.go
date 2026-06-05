@@ -130,6 +130,10 @@ var (
 	hyperSyncer   = &hyperSync{}
 )
 
+// ProviderUpdateTimeout is the timeout used when fetching updated provider data.
+// It can be adjusted externally (e.g. during ACP startup) to prevent long hangs.
+var ProviderUpdateTimeout = 45 * time.Second
+
 // Providers returns the list of providers, taking into account cached results
 // and whether or not auto update is enabled.
 //
@@ -147,7 +151,7 @@ func Providers(cfg *Config) ([]catwalk.Provider, error) {
 		autoupdate := !cfg.Options.DisableProviderAutoUpdate
 		customProvidersOnly := cfg.Options.DisableDefaultProviders
 
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), ProviderUpdateTimeout)
 		defer cancel()
 
 		wg.Go(func() {

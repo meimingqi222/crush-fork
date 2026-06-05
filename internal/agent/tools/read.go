@@ -34,13 +34,11 @@ import (
 var readDescription []byte
 
 type ReadParams struct {
-	Path   string `json:"path" description:"REQUIRED. File path, directory path, or URL. For files: append :LINE or :START-END for line ranges (e.g. \"src/foo.ts:50-100\"), :raw for verbatim output. Selectors auto-enable hashline anchors for editing. See tool description for full selector syntax."`
-	Format string `json:"format,omitempty" description:"URL output format: text, markdown, or html (default: markdown, URLs only)"`
+	Path string `json:"path" description:"path or url; append :<sel> for line ranges or raw mode (e.g. \"src/foo.ts:50-200\")"`
 }
 
 type ReadPermissionsParams struct {
-	Path   string `json:"path"`
-	Format string `json:"format,omitempty"`
+	Path string `json:"path"`
 }
 
 type ReadResourceType string
@@ -136,13 +134,7 @@ func handleURLRead(
 	permissions permission.Service,
 	client *http.Client,
 ) (fantasy.ToolResponse, error) {
-	format := strings.ToLower(params.Format)
-	if format != "" && format != "text" && format != "markdown" && format != "html" {
-		return fantasy.NewTextErrorResponse("Format must be one of: text, markdown, html"), nil
-	}
-	if format == "" {
-		format = "markdown"
-	}
+	format := "markdown"
 
 	sessionID := GetSessionFromContext(ctx)
 	if sessionID == "" {

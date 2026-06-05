@@ -167,7 +167,12 @@ func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.Too
 	if a == nil || a.workingDir == "" || tr.Content == "" {
 		return "", nil
 	}
-	truncationDir := filepath.Join(a.workingDir, contextWindowTruncationDir)
+	var truncationDir string
+	if a.dataDirectory != "" {
+		truncationDir = filepath.Join(a.dataDirectory, "truncation")
+	} else {
+		truncationDir = filepath.Join(a.workingDir, ".crush", "truncation")
+	}
 	if err := os.MkdirAll(truncationDir, 0o755); err != nil {
 		return "", err
 	}
@@ -181,7 +186,7 @@ func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.Too
 		return "", err
 	}
 	path := file.Name()
-	if relPath, err := filepath.Rel(a.workingDir, path); err == nil {
+	if relPath, err := filepath.Rel(a.workingDir, path); err == nil && !strings.HasPrefix(relPath, "..") {
 		return relPath, nil
 	}
 	return path, nil
