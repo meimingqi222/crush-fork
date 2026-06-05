@@ -98,6 +98,28 @@ func (h *highlightableMessageItem) renderHighlighted(content string, width, heig
 	return list.Highlight(content, area, h.startLine, h.startCol, h.endLine, h.endCol, h.highlighter)
 }
 
+// renderHighlightedOffset highlights a visible slice of content, adjusting
+// highlight line coordinates by subtracting lineOffset. This is used by
+// viewport-aware rendering to highlight only the visible portion.
+func (h *highlightableMessageItem) renderHighlightedOffset(content string, width, height, lineOffset int) string {
+	if !h.isHighlighted() {
+		return content
+	}
+	adjStartLine := h.startLine - lineOffset
+	adjEndLine := h.endLine
+	if adjEndLine >= 0 {
+		// endLine is a specific line number (not the -1 "to end" sentinel).
+		adjEndLine -= lineOffset
+		// Skip if highlight is entirely above the visible range.
+		if adjEndLine < 0 {
+			return content
+		}
+	}
+	adjStartLine = max(0, adjStartLine)
+	area := image.Rect(0, 0, width, height)
+	return list.Highlight(content, area, adjStartLine, h.startCol, adjEndLine, h.endCol, h.highlighter)
+}
+
 // SetHighlight implements list.Highlightable.
 func (h *highlightableMessageItem) SetHighlight(startLine int, startCol int, endLine int, endCol int) {
 	// Adjust columns for the style's left inset (border + padding) since we

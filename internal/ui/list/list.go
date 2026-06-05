@@ -43,10 +43,17 @@ type List struct {
 	frameCache map[int]renderedItem
 }
 
-// renderedItem holds the rendered content and height of an item.
+// renderedItem holds the rendered content and height of an item. When
+// heightOnly is true the content field is empty and only height is valid
+// (used for ViewportRenderable items whose full render is deferred to the
+// Render() pass). The item field stores the callback-processed item so
+// that Render() can use it for ViewportRenderable assertions instead of
+// reaching back into l.items (which would bypass render callbacks).
 type renderedItem struct {
-	content string
-	height  int
+	content    string
+	height     int
+	heightOnly bool
+	item       Item
 }
 
 // NewList creates a new lazy-loaded list.
@@ -151,6 +158,10 @@ func (l *List) lastOffsetItem() (int, int, int) {
 // are cached in frameCache for the duration of the current render cycle to
 // avoid redundant item.Render() calls when multiple list methods traverse
 // overlapping item ranges within the same frame.
+//
+// For ViewportRenderable items, only the height is computed (via
+// TotalHeight); the full render is deferred to the Render() pass which
+// calls RenderVisible with the exact visible line range.
 func (l *List) getItem(idx int) renderedItem {
 	if idx < 0 || idx >= len(l.items) {
 		return renderedItem{}
@@ -170,12 +181,27 @@ func (l *List) getItem(idx int) renderedItem {
 		}
 	}
 
+	// For ViewportRenderable items, only compute height (cheap). The full
+	// content render is deferred to Render() which calls RenderVisible
+	// with the exact visible line range.
+	if vp, ok := item.(ViewportRenderable); ok {
+		ri := renderedItem{
+			content:    "",
+			height:     vp.TotalHeight(l.width),
+			heightOnly: true,
+			item:       item,
+		}
+		l.frameCache[idx] = ri
+		return ri
+	}
+
 	rendered := item.Render(l.width)
 	rendered = strings.TrimRight(rendered, "\n")
 	height := strings.Count(rendered, "\n") + 1
 	ri := renderedItem{
 		content: rendered,
 		height:  height,
+		item:    item,
 	}
 
 	l.frameCache[idx] = ri
@@ -306,27 +332,61 @@ func (l *List) Render() string {
 
 	for linesNeeded > 0 && currentIdx < len(l.items) {
 		item := l.getItem(currentIdx)
-		itemLines := strings.Split(item.content, "\n")
-		itemHeight := len(itemLines)
+		itemHeight := item.height
 
-		if currentOffset >= 0 && currentOffset < itemHeight {
-			// Add visible content lines
-			lines = append(lines, itemLines[currentOffset:]...)
+		if item.heightOnly {
+			// ViewportRenderable: render only the visible line slice.
+			// Use item.item (the callback-processed item) rather than
+			// l.items[currentIdx] to respect render callbacks.
+			vp := item.item.(ViewportRenderable)
+			visStart := currentOffset
+			visEnd := min(itemHeight, currentOffset+linesNeeded)
 
-			// Add gap if this is not the absolute last visual element (conceptually gaps are between items)
-			// But in the loop we can just add it and trim later
-			if l.gap > 0 {
+			if visStart < itemHeight {
+				visible := vp.RenderVisible(l.width, visStart, visEnd)
+				itemLines := strings.Split(visible, "\n")
+				lines = append(lines, itemLines...)
+			} else {
+				// Offset starts in the gap region (past this item).
+				gapOffset := currentOffset - itemHeight
+				gapRemaining := l.gap - gapOffset
+				if gapRemaining > 0 {
+					for range gapRemaining {
+						lines = append(lines, "")
+					}
+				}
+			}
+
+			if l.gap > 0 && visStart < itemHeight {
 				for i := 0; i < l.gap; i++ {
 					lines = append(lines, "")
 				}
 			}
 		} else {
-			// offsetLine starts in the gap
-			gapOffset := currentOffset - itemHeight
-			gapRemaining := l.gap - gapOffset
-			if gapRemaining > 0 {
-				for range gapRemaining {
-					lines = append(lines, "")
+			// Standard path: full render then slice.
+			itemLines := strings.Split(item.content, "\n")
+			itemHeight = len(itemLines)
+
+			if currentOffset >= 0 && currentOffset < itemHeight {
+				// Add visible content lines.
+				lines = append(lines, itemLines[currentOffset:]...)
+
+				// Add gap if this is not the absolute last visual element
+				// (conceptually gaps are between items). But in the loop we
+				// can just add it and trim later.
+				if l.gap > 0 {
+					for i := 0; i < l.gap; i++ {
+						lines = append(lines, "")
+					}
+				}
+			} else {
+				// offsetLine starts in the gap.
+				gapOffset := currentOffset - itemHeight
+				gapRemaining := l.gap - gapOffset
+				if gapRemaining > 0 {
+					for range gapRemaining {
+						lines = append(lines, "")
+					}
 				}
 			}
 		}

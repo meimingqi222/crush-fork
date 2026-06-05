@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/planmode"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/zeebo/xxh3"
@@ -82,7 +83,21 @@ type AssistantMessageItem struct {
 		endLine   int
 		endCol    int
 	}
+
+	// Viewport rendering cache. Stores the full content render split into
+	// lines so that RenderVisible can slice the visible range without
+	// re-rendering. This is the primary optimization for large expanded
+	// thinking blocks: only ~40-50 visible lines are processed per frame
+	// instead of all 500+.
+	viewportLines  []string
+	viewportWidth  int
+	viewportHeight int
 }
+
+var (
+	_ Expandable              = (*AssistantMessageItem)(nil)
+	_ list.ViewportRenderable = (*AssistantMessageItem)(nil)
+)
 
 // NewAssistantMessageItem creates a new AssistantMessageItem.
 func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) MessageItem {
@@ -435,21 +450,24 @@ func (a *AssistantMessageItem) renderSpinning() string {
 }
 
 // invalidateCache clears all render caches: base content, prefixed render,
-// and thinking glamour cache. Call this when the message content or visual
-// state changes in a way that affects the thinking glamour output.
+// thinking glamour cache, and viewport cache. Call this when the message
+// content or visual state changes in a way that affects the thinking glamour
+// output.
 func (a *AssistantMessageItem) invalidateCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
 	a.invalidateThinkingCache()
+	a.invalidateViewportCache()
 }
 
-// invalidateContentCache clears the base content cache and prefixed render
-// cache but preserves the thinking glamour cache. Use this for state changes
-// that only affect truncation or styling, not the markdown content itself
-// (e.g. expand/collapse).
+// invalidateContentCache clears the base content cache, prefixed render
+// cache, and viewport cache but preserves the thinking glamour cache. Use
+// this for state changes that only affect truncation or styling, not the
+// markdown content itself (e.g. expand/collapse).
 func (a *AssistantMessageItem) invalidateContentCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
+	a.invalidateViewportCache()
 }
 
 // invalidatePrefixedCache clears the prefixed render cache.
@@ -468,6 +486,106 @@ func (a *AssistantMessageItem) invalidateThinkingCache() {
 	a.thinkingFullRender = ""
 	a.thinkingContentHash = 0
 	a.thinkingRenderWidth = 0
+}
+
+// invalidateViewportCache clears the viewport rendering cache.
+func (a *AssistantMessageItem) invalidateViewportCache() {
+	a.viewportLines = nil
+	a.viewportWidth = 0
+	a.viewportHeight = 0
+}
+
+// ensureViewportCache populates the viewport cache if it has been
+// invalidated or the width has changed. This calls renderMessageContent
+// which internally reuses the cached glamour render, so repeated calls
+// within the same frame are O(1).
+func (a *AssistantMessageItem) ensureViewportCache(cappedWidth int) {
+	if a.viewportWidth == cappedWidth && len(a.viewportLines) > 0 {
+		return
+	}
+	content := a.renderMessageContent(cappedWidth)
+	a.viewportLines = strings.Split(content, "\n")
+	a.viewportWidth = cappedWidth
+	a.viewportHeight = len(a.viewportLines)
+}
+
+// TotalHeight implements [list.ViewportRenderable]. It returns the total
+// number of lines the item would occupy when fully rendered, without doing
+// the expensive post-processing (highlight, prefix, ANSI parsing).
+func (a *AssistantMessageItem) TotalHeight(width int) int {
+	cappedWidth := cappedMessageWidth(width)
+	a.ensureViewportCache(cappedWidth)
+	h := a.viewportHeight
+	if a.isSpinning() {
+		if h > 0 {
+			// Non-empty content: blank separator line + spinner line.
+			h += 2
+		} else {
+			// Empty content: just the spinner (no separator).
+			h += 1
+		}
+	}
+	return h
+}
+
+// RenderVisible implements [list.ViewportRenderable]. It renders only the
+// visible line range [startLine, endLine), applying highlight and prefix to
+// just those lines instead of the full content. This is the primary
+// performance optimization for large expanded thinking blocks.
+func (a *AssistantMessageItem) RenderVisible(width, startLine, endLine int) string {
+	cappedWidth := cappedMessageWidth(width)
+	a.ensureViewportCache(cappedWidth)
+
+	totalLines := len(a.viewportLines)
+
+	// Determine the focus/blur prefix.
+	prefix := a.sty.Chat.Message.AssistantBlurred.Render()
+	if a.focused {
+		prefix = a.sty.Chat.Message.AssistantFocused.Render()
+	}
+
+	// Handle the case where startLine is past the content (into the
+	// spinner area). Only relevant when spinning.
+	if startLine >= totalLines {
+		if a.isSpinning() {
+			spinner := a.renderSpinning()
+			return applyLinePrefix(spinner, prefix)
+		}
+		return ""
+	}
+
+	if endLine < 0 || endLine > totalLines {
+		endLine = totalLines
+	}
+	startLine = max(0, startLine)
+
+	// Slice visible lines from cached content.
+	visibleLines := a.viewportLines[startLine:endLine]
+	visibleContent := strings.Join(visibleLines, "\n")
+
+	// Apply highlight with adjusted coordinates.
+	visibleHeight := len(visibleLines)
+	visibleContent = a.renderHighlightedOffset(visibleContent, cappedWidth, visibleHeight, startLine)
+
+	// Apply focus/blur prefix to visible lines only.
+	result := applyLinePrefix(visibleContent, prefix)
+
+	// Append spinner if the visible range extends to the end of content
+	// and the message is still generating. Use len(visibleLines) > 0
+	// (not result) to decide whether to insert the separator, because
+	// applyLinePrefix("", prefix) produces a non-empty string (just the
+	// prefix) which would incorrectly trigger the separator.
+	if a.isSpinning() && endLine >= totalLines {
+		spinner := a.renderSpinning()
+		prefixedSpinner := applyLinePrefix(spinner, prefix)
+		if len(visibleLines) > 0 {
+			result += "\n\n" + prefixedSpinner
+		} else {
+			result = prefixedSpinner
+		}
+	}
+
+	return result
 }
 
 // renderError renders an error message.
@@ -534,10 +652,11 @@ func (a *AssistantMessageItem) SetMessage(msg *message.Message) tea.Cmd {
 }
 
 // ToggleExpanded toggles the expanded state of the thinking box.
-func (a *AssistantMessageItem) ToggleExpanded() {
+func (a *AssistantMessageItem) ToggleExpanded() bool {
 	a.thinkingExpanded = !a.thinkingExpanded
 	// Preserve the thinking glamour cache — only truncation/boxing changes.
 	a.invalidateContentCache()
+	return a.thinkingExpanded
 }
 
 // HandleMouseClick implements MouseClickable.

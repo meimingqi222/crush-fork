@@ -43,6 +43,20 @@ type MouseClickable interface {
 	HandleMouseClick(btn ansi.MouseButton, x, y int) bool
 }
 
+// ViewportRenderable is an optional interface for items that can render
+// only their visible line range. This avoids expensive full-content
+// processing (highlighting, prefix application, ANSI parsing) for items
+// that span many lines but only have a few visible in the viewport.
+type ViewportRenderable interface {
+	// TotalHeight returns the total number of lines the item would occupy
+	// when fully rendered at the given width. Must be cheap to call.
+	TotalHeight(width int) int
+
+	// RenderVisible renders only lines [startLine, endLine) of the item.
+	// Line 0 is the item's first line. If endLine < 0, render to the end.
+	RenderVisible(width, startLine, endLine int) string
+}
+
 // SpacerItem is a spacer item that adds vertical space in the list.
 type SpacerItem struct {
 	Height int
