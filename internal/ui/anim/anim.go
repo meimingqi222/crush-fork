@@ -86,6 +86,21 @@ func settingsHash(opts Settings) string {
 // StepMsg is a message type used to trigger the next step in the animation.
 type StepMsg struct{ ID string }
 
+// GlobalTickMsg is a single global animation tick that drives all active
+// animations. Instead of each animation running its own timer, the UI model
+// fires this message at a steady FPS, and all visible animations advance
+// together in one redraw cycle.
+type GlobalTickMsg struct{}
+
+// GlobalTick returns a command that fires a GlobalTickMsg after the standard
+// animation frame interval. The UI model should call this in its Update loop
+// to keep the global ticker running.
+func GlobalTick() tea.Cmd {
+	return tea.Tick(time.Second/time.Duration(fps), func(t time.Time) tea.Msg {
+		return GlobalTickMsg{}
+	})
+}
+
 // Settings defines settings for the animation.
 type Settings struct {
 	ID          string
@@ -104,7 +119,7 @@ const ()
 type Anim struct {
 	width            int
 	cyclingCharWidth int
-	label            *csync.Slice[string]
+	label            []string               // plain slice copy; label data is set by SetLabel and read by Render on the same goroutine
 	labelWidth       int
 	labelColor       color.Color
 	startTime        time.Time
@@ -114,7 +129,7 @@ type Anim struct {
 	cyclingFrames    [][]string           // frames for the cycling characters
 	step             atomic.Int64         // current main frame step
 	ellipsisStep     atomic.Int64         // current ellipsis frame step
-	ellipsisFrames   *csync.Slice[string] // ellipsis animation frames
+	ellipsisFrames   []string             // plain slice copy of ellipsis animation frames
 	id               string
 }
 
@@ -152,8 +167,8 @@ func New(opts Settings) *Anim {
 		// Use cached values
 		a.width = cached.width
 		a.labelWidth = cached.labelWidth
-		a.label = csync.NewSliceFrom(cached.label)
-		a.ellipsisFrames = csync.NewSliceFrom(cached.ellipsisFrames)
+		a.label = cached.label
+		a.ellipsisFrames = cached.ellipsisFrames
 		a.initialFrames = cached.initialFrames
 		a.cyclingFrames = cached.cyclingFrames
 	} else {
@@ -230,21 +245,13 @@ func New(opts Settings) *Anim {
 		}
 
 		// Cache the results
-		labelSlice := make([]string, a.label.Len())
-		for i, v := range a.label.Seq2() {
-			labelSlice[i] = v
-		}
-		ellipsisSlice := make([]string, a.ellipsisFrames.Len())
-		for i, v := range a.ellipsisFrames.Seq2() {
-			ellipsisSlice[i] = v
-		}
 		cached = &animCache{
 			initialFrames:  a.initialFrames,
 			cyclingFrames:  a.cyclingFrames,
 			width:          a.width,
 			labelWidth:     a.labelWidth,
-			label:          labelSlice,
-			ellipsisFrames: ellipsisSlice,
+			label:          a.label,
+			ellipsisFrames: a.ellipsisFrames,
 		}
 		animCacheMap.Set(cacheKey, cached)
 	}
@@ -277,25 +284,23 @@ func (a *Anim) renderLabel(label string) {
 	if a.labelWidth > 0 {
 		// Pre-render the label.
 		labelRunes := []rune(label)
-		a.label = csync.NewSlice[string]()
-		for i := range labelRunes {
-			rendered := lipgloss.NewStyle().
+		a.label = make([]string, len(labelRunes))
+		for i, r := range labelRunes {
+			a.label[i] = lipgloss.NewStyle().
 				Foreground(a.labelColor).
-				Render(string(labelRunes[i]))
-			a.label.Append(rendered)
+				Render(string(r))
 		}
 
 		// Pre-render the ellipsis frames which come after the label.
-		a.ellipsisFrames = csync.NewSlice[string]()
-		for _, frame := range ellipsisFrames {
-			rendered := lipgloss.NewStyle().
+		a.ellipsisFrames = make([]string, len(ellipsisFrames))
+		for i, frame := range ellipsisFrames {
+			a.ellipsisFrames[i] = lipgloss.NewStyle().
 				Foreground(a.labelColor).
 				Render(frame)
-			a.ellipsisFrames.Append(rendered)
 		}
 	} else {
-		a.label = csync.NewSlice[string]()
-		a.ellipsisFrames = csync.NewSlice[string]()
+		a.label = nil
+		a.ellipsisFrames = nil
 	}
 }
 
@@ -317,17 +322,17 @@ func (a *Anim) Width() (w int) {
 	return w
 }
 
-// Start starts the animation.
+// Start starts the animation. It returns a no-op command; the caller should
+// use GlobalTickMsg to drive animation via the global ticker instead of
+// per-animation timers.
 func (a *Anim) Start() tea.Cmd {
-	return a.Step()
+	return nil
 }
 
-// Animate advances the animation to the next step.
-func (a *Anim) Animate(msg StepMsg) tea.Cmd {
-	if msg.ID != a.id {
-		return nil
-	}
-
+// Tick advances the animation by one step. This is called by the global
+// animation ticker rather than per-animation timers, ensuring a single
+// redraw cycle regardless of how many animations are active.
+func (a *Anim) Tick() {
 	step := a.step.Add(1)
 	if int(step) >= len(a.cyclingFrames) {
 		a.step.Store(0)
@@ -342,16 +347,30 @@ func (a *Anim) Animate(msg StepMsg) tea.Cmd {
 	} else if !a.initialized.Load() && time.Since(a.startTime) >= maxBirthOffset {
 		a.initialized.Store(true)
 	}
-	return a.Step()
+}
+
+// Animate advances the animation to the next step. Kept for backward
+// compatibility; prefer Tick() driven by the global ticker.
+func (a *Anim) Animate(msg StepMsg) tea.Cmd {
+	if msg.ID != a.id {
+		return nil
+	}
+	a.Tick()
+	return nil
 }
 
 // Render renders the current state of the animation.
 func (a *Anim) Render() string {
 	var b strings.Builder
+	b.Grow(a.width * 25) // ~25 bytes per ANSI-styled character
+
 	step := int(a.step.Load())
+	initialized := a.initialized.Load()
+	elapsed := time.Since(a.startTime)
+
 	for i := range a.width {
 		switch {
-		case !a.initialized.Load() && i < len(a.birthOffsets) && time.Since(a.startTime) < a.birthOffsets[i]:
+		case !initialized && i < len(a.birthOffsets) && elapsed < a.birthOffsets[i]:
 			// Birth offset not reached: render initial character.
 			b.WriteString(a.initialFrames[step][i])
 		case i < a.cyclingCharWidth:
@@ -362,17 +381,19 @@ func (a *Anim) Render() string {
 			b.WriteString(labelGap)
 		case i > a.cyclingCharWidth:
 			// Label.
-			if labelChar, ok := a.label.Get(i - a.cyclingCharWidth - labelGapWidth); ok {
-				b.WriteString(labelChar)
+			labelIdx := i - a.cyclingCharWidth - labelGapWidth
+			if labelIdx >= 0 && labelIdx < len(a.label) {
+				b.WriteString(a.label[labelIdx])
 			}
 		}
 	}
 	// Render animated ellipsis at the end of the label if all characters
 	// have been initialized.
-	if a.initialized.Load() && a.labelWidth > 0 {
+	if initialized && a.labelWidth > 0 {
 		ellipsisStep := int(a.ellipsisStep.Load())
-		if ellipsisFrame, ok := a.ellipsisFrames.Get(ellipsisStep / ellipsisAnimSpeed); ok {
-			b.WriteString(ellipsisFrame)
+		frameIdx := ellipsisStep / ellipsisAnimSpeed
+		if frameIdx >= 0 && frameIdx < len(a.ellipsisFrames) {
+			b.WriteString(a.ellipsisFrames[frameIdx])
 		}
 	}
 

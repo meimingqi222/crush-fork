@@ -12,6 +12,12 @@ import (
 	"github.com/charmbracelet/ultraviolet/layout"
 )
 
+// invalidateSidebarCache marks the sidebar cache as dirty so the next
+// drawSidebar call will re-render the sidebar content.
+func (m *UI) invalidateSidebarCache() {
+	m.sidebarCacheDirty = true
+}
+
 // modelInfo renders the current model information including reasoning
 // settings and context usage/cost for the sidebar.
 func (m *UI) modelInfo(width int) string {
@@ -66,7 +72,9 @@ func (m *UI) modelInfo(width int) string {
 
 	var modelContext *common.ModelContextInfo
 	if model != nil && m.session != nil {
-		usage := m.currentContextUsageSnapshot()
+		// Use the per-frame cached snapshot when available to avoid
+		// walking the message list a second time.
+		usage := m.frameUsageSnapshotCached()
 		modelContext = &common.ModelContextInfo{
 			OutputTokens: usage.OutputTokens,
 			TotalTokens:  usage.TotalTokens,
@@ -200,11 +208,30 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		return
 	}
 
+	width := area.Dx()
+	height := area.Dy()
+
+	// Return cached sidebar when nothing changed and dimensions match.
+	if !m.sidebarCacheDirty && m.sidebarCacheContent != "" &&
+		m.sidebarCacheWidth == width && m.sidebarCacheHeight == height {
+		uv.NewStyledString(m.sidebarCacheContent).Draw(scr, area)
+		return
+	}
+
+	rendered := m.renderSidebarContent(width, height)
+	m.sidebarCacheContent = rendered
+	m.sidebarCacheWidth = width
+	m.sidebarCacheHeight = height
+	m.sidebarCacheDirty = false
+
+	uv.NewStyledString(rendered).Draw(scr, area)
+}
+
+// renderSidebarContent builds the full sidebar string.
+func (m *UI) renderSidebarContent(width, height int) string {
 	const logoHeightBreakpoint = 30
 
 	t := m.com.Styles
-	width := area.Dx()
-	height := area.Dy()
 
 	title := t.Muted.Width(width).MaxHeight(2).Render(m.session.Title)
 	cwd := common.PrettyPath(t, m.com.Store().WorkingDir(), width)
@@ -237,24 +264,22 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	filesSection := m.filesInfo(m.com.Store().WorkingDir(), width, maxFiles, true)
 	timelineSection := m.timelineInfo(width, maxTimeline, true)
 
-	uv.NewStyledString(
-		lipgloss.NewStyle().
-			MaxWidth(width).
-			MaxHeight(height).
-			Render(
-				lipgloss.JoinVertical(
-					lipgloss.Left,
-					sidebarHeader,
-					filesSection,
-					"",
-					lspSection,
-					"",
-					mcpSection,
-					"",
-					skillsSection,
-					"",
-					timelineSection,
-				),
+	return lipgloss.NewStyle().
+		MaxWidth(width).
+		MaxHeight(height).
+		Render(
+			lipgloss.JoinVertical(
+				lipgloss.Left,
+				sidebarHeader,
+				filesSection,
+				"",
+				lspSection,
+				"",
+				mcpSection,
+				"",
+				skillsSection,
+				"",
+				timelineSection,
 			),
-	).Draw(scr, area)
+		)
 }

@@ -37,6 +37,10 @@ type Chat struct {
 	list     *list.List
 	idInxMap map[string]int // Map of message IDs to their indices in the list
 
+	// animating tracks IDs of items that are currently animating (spinning).
+	// When a global tick arrives, only these items are advanced.
+	animating map[string]struct{}
+
 	// msgToolCallIDs maps message IDs to the set of tool call IDs that
 	// belong to that message. This avoids O(n) scans of the entire list in
 	// removeToolItemsForMessage during streaming updates.
@@ -78,6 +82,7 @@ func NewChat(com *common.Common) *Chat {
 		idInxMap:         make(map[string]int),
 		msgToolCallIDs:   make(map[string]map[string]struct{}),
 		pausedAnimations: make(map[string]struct{}),
+		animating:        make(map[string]struct{}),
 	}
 	l := list.NewList()
 	l.SetGap(1)
@@ -221,6 +226,45 @@ func (m *Chat) UpdateNestedToolIDs(containerID string) {
 	}
 }
 
+// UpdateNestedToolIDsIncremental updates the ID index map for a container's
+// nested tools by removing stale entries and adding new ones. This avoids a
+// full rebuildIDIndexMap() scan of all items and only touches the entries
+// that actually changed.
+func (m *Chat) UpdateNestedToolIDsIncremental(containerID string, oldNestedIDs []string) {
+	idx, ok := m.idInxMap[containerID]
+	if !ok {
+		return
+	}
+
+	item, ok := m.list.ItemAt(idx).(chat.MessageItem)
+	if !ok {
+		return
+	}
+
+	container, ok := item.(chat.NestedToolContainer)
+	if !ok {
+		return
+	}
+
+	// Build a set of current nested tool IDs.
+	newIDs := make(map[string]struct{})
+	for _, nested := range container.NestedTools() {
+		newIDs[nested.ID()] = struct{}{}
+	}
+
+	// Remove stale entries that are no longer in the nested tools list.
+	for _, oldID := range oldNestedIDs {
+		if _, exists := newIDs[oldID]; !exists {
+			delete(m.idInxMap, oldID)
+		}
+	}
+
+	// Register all current nested tool IDs (overwrites existing, adds new).
+	for _, nested := range container.NestedTools() {
+		m.idInxMap[nested.ID()] = idx
+	}
+}
+
 // Animate animates items in the chat list. Only propagates animation messages
 // to visible items to save CPU. When items are not visible, their animation ID
 // is tracked so it can be restarted when they become visible again.
@@ -251,6 +295,66 @@ func (m *Chat) Animate(msg anim.StepMsg) tea.Cmd {
 	return animatable.Animate(msg)
 }
 
+// RegisterAnimation registers an item as animating. The global ticker will
+// advance it on each frame.
+func (m *Chat) RegisterAnimation(id string) {
+	m.animating[id] = struct{}{}
+}
+
+// UnregisterAnimation removes an item from the animating set.
+func (m *Chat) UnregisterAnimation(id string) {
+	delete(m.animating, id)
+}
+
+// TickAnimations advances all visible animating items by one frame. This is
+// called by the global animation ticker so that all animations share a single
+// redraw cycle regardless of how many are active.
+func (m *Chat) TickAnimations() {
+	if len(m.animating) == 0 {
+		return
+	}
+
+	startIdx, endIdx := m.list.VisibleItemIndices()
+
+	for id := range m.animating {
+		idx, ok := m.idInxMap[id]
+		if !ok {
+			delete(m.animating, id)
+			continue
+		}
+
+		// Only tick visible items. Move off-screen items to pausedAnimations
+		// and remove from animating so HasAnimating() reflects only active
+		// (non-paused) animations. This prevents the global ticker from
+		// running indefinitely when all animations are scrolled off-screen.
+		if idx < startIdx || idx > endIdx {
+			m.pausedAnimations[id] = struct{}{}
+			delete(m.animating, id)
+			continue
+		}
+
+		animatable, ok := m.list.ItemAt(idx).(chat.Animatable)
+		if !ok {
+			delete(m.animating, id)
+			continue
+		}
+
+		// Check if the item is still spinning.
+		if !animatable.IsAnimating() {
+			delete(m.animating, id)
+			continue
+		}
+
+		delete(m.pausedAnimations, id)
+		animatable.TickAnimation()
+	}
+}
+
+// HasAnimating returns whether any items are currently animating.
+func (m *Chat) HasAnimating() bool {
+	return len(m.animating) > 0
+}
+
 // RestartPausedVisibleAnimations restarts animations for items that were paused
 // due to being scrolled out of view but are now visible again.
 func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
@@ -259,7 +363,6 @@ func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
 	}
 
 	startIdx, endIdx := m.list.VisibleItemIndices()
-	var cmds []tea.Cmd
 
 	for id := range m.pausedAnimations {
 		idx, ok := m.idInxMap[id]
@@ -270,20 +373,13 @@ func (m *Chat) RestartPausedVisibleAnimations() tea.Cmd {
 		}
 
 		if idx >= startIdx && idx <= endIdx {
-			// Item is now visible - restart its animation.
-			if animatable, ok := m.list.ItemAt(idx).(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+			// Item is now visible - re-register for the global ticker.
+			m.animating[id] = struct{}{}
 			delete(m.pausedAnimations, id)
 		}
 	}
 
-	if len(cmds) == 0 {
-		return nil
-	}
-	return tea.Batch(cmds...)
+	return nil
 }
 
 // ClickCount returns the current consecutive click count for the last mouse click.

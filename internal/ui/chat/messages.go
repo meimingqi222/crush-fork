@@ -34,6 +34,11 @@ type Identifiable interface {
 type Animatable interface {
 	StartAnimation() tea.Cmd
 	Animate(msg anim.StepMsg) tea.Cmd
+	// TickAnimation advances the animation by one frame without returning a
+	// command. Used by the global animation ticker.
+	TickAnimation()
+	// IsAnimating reports whether the item is currently spinning.
+	IsAnimating() bool
 }
 
 // Expandable is an interface for items that can be expanded or collapsed.

@@ -28,6 +28,16 @@ func (m *UI) currentContextUsageSnapshot() contextUsageSnapshot {
 	return resolveContextUsageSnapshot(m.session, m.sessionMessages, cfg, selected)
 }
 
+// frameUsageSnapshotCached returns the per-frame cached usage snapshot.
+// If the cache has not been computed yet for this frame (i.e. Draw() has
+// not set it), it falls back to computing it on the fly.
+func (m *UI) frameUsageSnapshotCached() contextUsageSnapshot {
+	if m != nil && m.frameUsageSnapshotValid {
+		return m.frameUsageSnapshot
+	}
+	return m.currentContextUsageSnapshot()
+}
+
 func resolveContextUsageSnapshot(sess *session.Session, messages []message.Message, cfg *config.Config, selected *agent.Model) contextUsageSnapshot {
 	if sess == nil {
 		return contextUsageSnapshot{}

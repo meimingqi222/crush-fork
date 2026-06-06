@@ -182,6 +182,26 @@ type baseToolMessageItem struct {
 	sty             *styles.Styles
 	anim            *anim.Anim
 	expandedContent bool
+
+	// displayName is the human-readable name shown in the spinner line (e.g. "Bash", "Job").
+	displayName string
+
+	// Body cache: stores the rendered content body (everything except the
+	// spinner animation line) so that only the spinner needs to be
+	// regenerated on each animation frame.
+	cachedBody      string
+	cachedBodyWidth int
+
+	// Prefix cache: stores the rendered line prefix (compact/focused/blurred)
+	// so it is only recomputed when the focus or compact state changes.
+	cachedPrefix    string
+	cachedPrefixKey string
+
+	// Spinner prefix cache: stores the pre-computed "icon styledName " prefix
+	// used by the pending-tool spinner line.  Recomputed only when the tool
+	// name or compact state changes.
+	cachedSpinnerPrefix    string
+	cachedSpinnerPrefixKey string
 }
 
 var _ Expandable = (*baseToolMessageItem)(nil)
@@ -242,51 +262,80 @@ func NewToolMessageItem(
 	switch toolCall.Name {
 	case tools.BashToolName:
 		item = NewBashToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Bash"
 	case tools.JobOutputToolName:
 		item = NewJobOutputToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Job"
 	case tools.JobWaitToolName:
 		item = NewJobWaitToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Job"
 	case tools.JobKillToolName:
 		item = NewJobKillToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Job"
 	case tools.ReadToolName:
 		item = NewReadToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Read"
 	case tools.WriteToolName:
 		item = NewWriteToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Write"
 	case tools.EditToolName:
 		item = NewEditToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Edit"
 	case tools.GlobToolName:
 		item = NewGlobToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Glob"
 	case tools.GrepToolName:
 		item = NewGrepToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Grep"
 	case tools.DownloadToolName:
 		item = NewDownloadToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Download"
 	case tools.SourcegraphToolName:
 		item = NewSourcegraphToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Sourcegraph"
 	case tools.DiagnosticsToolName:
 		item = NewDiagnosticsToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Diagnostics"
 	case agent.AgentToolName:
 		item = NewAgentToolMessageItem(sty, toolCall, result, canceled)
+		item.(*AgentToolMessageItem).displayName = "Agent"
 	case tools.AgenticFetchToolName:
 		item = NewAgenticFetchToolMessageItem(sty, toolCall, result, canceled)
+		item.(*AgenticFetchToolMessageItem).displayName = "Agentic Fetch"
 	case tools.WebFetchToolName:
 		item = NewWebFetchToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Fetch"
 	case tools.WebSearchToolName:
 		item = NewWebSearchToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Search"
 	case tools.TodosToolName:
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "To-Do"
 	case tools.RequestUserInputToolName:
 		item = NewRequestUserInputToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Request User Input"
 	case tools.ReferencesToolName:
 		item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Find References"
 	case tools.LSPRestartToolName:
 		item = NewLSPRestartToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Restart LSP"
 	default:
 		if IsDockerMCPTool(toolCall.Name) {
 			item = NewDockerMCPToolMessageItem(sty, toolCall, result, canceled)
+			item.(*baseToolMessageItem).displayName = "Docker MCP"
 		} else if strings.HasPrefix(toolCall.Name, "mcp_") {
 			item = NewMCPToolMessageItem(sty, toolCall, result, canceled)
+			// Compute MCP display name: "mcp_<server>_<tool>" → server name.
+			parts := strings.SplitN(toolCall.Name, "_", 3)
+			if len(parts) >= 2 {
+				item.(*baseToolMessageItem).displayName = humanizedToolName(parts[1])
+			} else {
+				item.(*baseToolMessageItem).displayName = "MCP"
+			}
 		} else {
 			item = NewGenericToolMessageItem(sty, toolCall, result, canceled)
+			item.(*baseToolMessageItem).displayName = humanizedToolName(toolCall.Name)
 		}
 	}
 	item.SetMessageID(messageID)
@@ -296,6 +345,7 @@ func NewToolMessageItem(
 // SetCompact implements the Compactable interface.
 func (t *baseToolMessageItem) SetCompact(compact bool) {
 	t.isCompact = compact
+	t.invalidateBodyCache()
 	t.clearCache()
 }
 
@@ -306,6 +356,7 @@ func (t *baseToolMessageItem) SetLoadingStateVisible(visible bool) {
 		return
 	}
 	t.showLoadingState = visible
+	t.invalidateBodyCache()
 	t.clearCache()
 }
 
@@ -316,10 +367,7 @@ func (t *baseToolMessageItem) ID() string {
 
 // StartAnimation starts the assistant message animation if it should be spinning.
 func (t *baseToolMessageItem) StartAnimation() tea.Cmd {
-	if !t.isSpinning() {
-		return nil
-	}
-	return t.anim.Start()
+	return nil
 }
 
 // Animate progresses the assistant message animation if it should be spinning.
@@ -330,6 +378,18 @@ func (t *baseToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 	return t.anim.Animate(msg)
 }
 
+// TickAnimation advances the animation by one frame.
+func (t *baseToolMessageItem) TickAnimation() {
+	if t.isSpinning() {
+		t.anim.Tick()
+	}
+}
+
+// IsAnimating reports whether the tool message is currently spinning.
+func (t *baseToolMessageItem) IsAnimating() bool {
+	return t.isSpinning()
+}
+
 // RawRender implements [MessageItem].
 func (t *baseToolMessageItem) RawRender(width int) string {
 	toolItemWidth := width - MessageLeftPaddingTotal
@@ -337,9 +397,61 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 		toolItemWidth = cappedMessageWidth(width)
 	}
 
+	spining := t.isSpinning()
+
+	if spining {
+		status := t.computeStatus()
+
+		// Fast path: the tool is still pending (no body content yet) and
+		// has no custom spinning logic (tools with a spinningFunc may render
+		// additional content such as child-session status or nested tools).
+		// Also skip when runtime state is present — the runtime may carry
+		// snapshot text that the renderer wants to display.
+		isPending := t.spinningFunc == nil && t.runtimeState == nil && !t.toolCall.Finished && t.result == nil && status != ToolStatusCanceled
+		if isPending {
+			content := t.renderPendingSpinner(toolItemWidth)
+			height := lipgloss.Height(content)
+			return t.renderHighlighted(content, toolItemWidth, height)
+		}
+
+		// The tool is spinning but already has body content (e.g. a
+		// streaming bash snapshot).  Try the body cache first so only the
+		// spinner line is regenerated.
+		if t.cachedBodyWidth == toolItemWidth && t.cachedBody != "" {
+			spinnerLine := t.renderPendingSpinner(toolItemWidth)
+			content := spinnerLine + "\n" + t.cachedBody
+			height := lipgloss.Height(content)
+			return t.renderHighlighted(content, toolItemWidth, height)
+		}
+
+		// Cache miss – do a full render, then split the spinner line from
+		// the body and cache the body for subsequent frames.
+		content := t.toolRenderer.RenderTool(t.sty, toolItemWidth, &ToolRenderOpts{
+			ToolCall:        t.toolCall,
+			Result:          t.result,
+			RuntimeState:    t.runtimeState,
+			Anim:            t.anim,
+			ExpandedContent: t.expandedContent,
+			Compact:         t.isCompact,
+			IsSpinning:      true,
+			Status:          status,
+		})
+
+		// Separate the first line (spinner) from the rest (body) so the
+		// body can be reused on the next animation tick.
+		if idx := strings.IndexByte(content, '\n'); idx >= 0 {
+			t.cachedBody = content[idx+1:]
+			t.cachedBodyWidth = toolItemWidth
+		}
+
+		height := lipgloss.Height(content)
+		t.setCachedRender(content, toolItemWidth, height)
+		return t.renderHighlighted(content, toolItemWidth, height)
+	}
+
+	// Not spinning – use the full-render cache.
 	content, height, ok := t.getCachedRender(toolItemWidth)
-	// if we are spinning or there is no cache rerender
-	if !ok || t.isSpinning() {
+	if !ok {
 		content = t.toolRenderer.RenderTool(t.sty, toolItemWidth, &ToolRenderOpts{
 			ToolCall:        t.toolCall,
 			Result:          t.result,
@@ -347,11 +459,10 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 			Anim:            t.anim,
 			ExpandedContent: t.expandedContent,
 			Compact:         t.isCompact,
-			IsSpinning:      t.isSpinning(),
+			IsSpinning:      false,
 			Status:          t.computeStatus(),
 		})
 		height = lipgloss.Height(content)
-		// cache the rendered content
 		t.setCachedRender(content, toolItemWidth, height)
 	}
 
@@ -360,15 +471,28 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 
 // Render renders the tool message item at the given width.
 func (t *baseToolMessageItem) Render(width int) string {
-	var prefix string
+	// Determine which prefix style applies and whether the cached prefix
+	// is still valid.
+	var prefixKey string
 	if t.isCompact {
-		prefix = t.sty.Chat.Message.ToolCallCompact.Render()
+		prefixKey = "compact"
 	} else if t.focused {
-		prefix = t.sty.Chat.Message.ToolCallFocused.Render()
+		prefixKey = "focused"
 	} else {
-		prefix = t.sty.Chat.Message.ToolCallBlurred.Render()
+		prefixKey = "blurred"
 	}
-	return applyLinePrefix(t.RawRender(width), prefix)
+	if t.cachedPrefixKey != prefixKey {
+		switch prefixKey {
+		case "compact":
+			t.cachedPrefix = t.sty.Chat.Message.ToolCallCompact.Render()
+		case "focused":
+			t.cachedPrefix = t.sty.Chat.Message.ToolCallFocused.Render()
+		default:
+			t.cachedPrefix = t.sty.Chat.Message.ToolCallBlurred.Render()
+		}
+		t.cachedPrefixKey = prefixKey
+	}
+	return applyLinePrefix(t.RawRender(width), t.cachedPrefix)
 }
 
 // ToolCall returns the tool call associated with this message item.
@@ -379,12 +503,14 @@ func (t *baseToolMessageItem) ToolCall() message.ToolCall {
 // SetToolCall sets the tool call associated with this message item.
 func (t *baseToolMessageItem) SetToolCall(tc message.ToolCall) {
 	t.toolCall = tc
+	t.invalidateBodyCache()
 	t.clearCache()
 }
 
 // SetResult sets the tool result associated with this message item.
 func (t *baseToolMessageItem) SetResult(res *message.ToolResult) {
 	t.result = res
+	t.invalidateBodyCache()
 	t.clearCache()
 }
 
@@ -401,6 +527,7 @@ func (t *baseToolMessageItem) SetMessageID(id string) {
 // SetStatus sets the tool status.
 func (t *baseToolMessageItem) SetStatus(status ToolStatus) {
 	t.status = status
+	t.invalidateBodyCache()
 	t.clearCache()
 }
 
@@ -412,11 +539,13 @@ func (t *baseToolMessageItem) Status() ToolStatus {
 func (t *baseToolMessageItem) SetRuntimeState(state *toolruntime.State) {
 	if state == nil {
 		t.runtimeState = nil
+		t.invalidateBodyCache()
 		t.clearCache()
 		return
 	}
 	copyState := *state
 	t.runtimeState = &copyState
+	t.invalidateBodyCache()
 	t.clearCache()
 }
 
@@ -481,8 +610,51 @@ func (t *baseToolMessageItem) SetSpinningFunc(fn SpinningFunc) {
 // ToggleExpanded toggles the expanded state of the thinking box.
 func (t *baseToolMessageItem) ToggleExpanded() bool {
 	t.expandedContent = !t.expandedContent
+	t.invalidateBodyCache()
 	t.clearCache()
 	return t.expandedContent
+}
+
+// invalidateBodyCache clears the body cache and the spinner-prefix cache.
+// It must be called whenever any data that feeds the tool render changes
+// (tool call, result, status, runtime state, compact, expanded, etc.).
+func (t *baseToolMessageItem) invalidateBodyCache() {
+	t.cachedBody = ""
+	t.cachedBodyWidth = 0
+	t.cachedSpinnerPrefix = ""
+	t.cachedSpinnerPrefixKey = ""
+}
+
+// renderPendingSpinner builds just the spinner animation line for a pending
+// tool, re-using cached style computations when possible.
+func (t *baseToolMessageItem) renderPendingSpinner(width int) string {
+	prefix := t.getSpinnerPrefix()
+	var animView string
+	if t.anim != nil {
+		animView = t.anim.Render()
+	}
+	return prefix + animView
+}
+
+// getSpinnerPrefix returns the cached "icon styledName " prefix used by the
+// spinner line.  The prefix is recomputed only when the tool name or compact
+// state changes.
+func (t *baseToolMessageItem) getSpinnerPrefix() string {
+	key := t.displayName
+	if t.isCompact {
+		key += "|compact"
+	}
+	if t.cachedSpinnerPrefixKey != key {
+		icon := t.sty.Tool.IconPending.Render()
+		nameStyle := t.sty.Tool.NameNormal
+		if t.isCompact {
+			nameStyle = t.sty.Tool.NameNested
+		}
+		toolName := nameStyle.Render(t.displayName)
+		t.cachedSpinnerPrefix = icon + " " + toolName + " "
+		t.cachedSpinnerPrefixKey = key
+	}
+	return t.cachedSpinnerPrefix
 }
 
 // HandleMouseClick implements MouseClickable.
@@ -501,19 +673,28 @@ func (t *baseToolMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 
 // pendingTool renders a tool that is still in progress with an animation.
 func pendingTool(sty *styles.Styles, name string, anim *anim.Anim, nested bool) string {
-	icon := sty.Tool.IconPending.Render()
-	nameStyle := sty.Tool.NameNormal
-	if nested {
-		nameStyle = sty.Tool.NameNested
-	}
-	toolName := nameStyle.Render(name)
+	// Pre-compute the static prefix (icon + styled name) so only the
+	// animation view is regenerated on every call.
+	prefix := spinnerPrefix(sty, name, nested)
 
 	var animView string
 	if anim != nil {
 		animView = anim.Render()
 	}
 
-	return fmt.Sprintf("%s %s %s", icon, toolName, animView)
+	return prefix + animView
+}
+
+// spinnerPrefix builds the static "icon styledName " prefix that precedes
+// the animation in a pending-tool spinner line.
+func spinnerPrefix(sty *styles.Styles, name string, nested bool) string {
+	icon := sty.Tool.IconPending.Render()
+	nameStyle := sty.Tool.NameNormal
+	if nested {
+		nameStyle = sty.Tool.NameNested
+	}
+	toolName := nameStyle.Render(name)
+	return icon + " " + toolName + " "
 }
 
 // toolEarlyStateContent handles error/cancelled/pending states before content rendering.

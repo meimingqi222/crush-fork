@@ -92,6 +92,19 @@ type AssistantMessageItem struct {
 	viewportLines  []string
 	viewportWidth  int
 	viewportHeight int
+
+	// Cached stripped content: avoids calling StripTextualToolCallProtocol
+	// (regex) on every render frame.
+	cachedStrippedThinking      string
+	cachedStrippedThinkingInput string
+	cachedStrippedContent       string
+	cachedStrippedContentInput  string
+
+	// Cached summary render: avoids expensive glamour markdown render on
+	// every frame when the summary content hasn't changed.
+	summaryRenderCache  string
+	summaryContentHash  uint64
+	summaryRenderWidth  int
 }
 
 var (
@@ -123,10 +136,7 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 
 // StartAnimation starts the assistant message animation if it should be spinning.
 func (a *AssistantMessageItem) StartAnimation() tea.Cmd {
-	if !a.isSpinning() {
-		return nil
-	}
-	return a.anim.Start()
+	return nil
 }
 
 // Animate progresses the assistant message animation if it should be spinning.
@@ -135,6 +145,18 @@ func (a *AssistantMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 		return nil
 	}
 	return a.anim.Animate(msg)
+}
+
+// TickAnimation advances the animation by one frame.
+func (a *AssistantMessageItem) TickAnimation() {
+	if a.isSpinning() {
+		a.anim.Tick()
+	}
+}
+
+// IsAnimating reports whether the assistant message is currently spinning.
+func (a *AssistantMessageItem) IsAnimating() bool {
+	return a.isSpinning()
 }
 
 // ID implements MessageItem.
@@ -237,10 +259,21 @@ func (a *AssistantMessageItem) SetLoadingStateVisible(visible bool) {
 // renderMessageContent renders the message content including thinking, main content, and finish reason.
 func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	var messageParts []string
-	thinking, _ := message.StripTextualToolCallProtocol(a.message.ReasoningContent().Thinking)
-	thinking = strings.TrimSpace(thinking)
-	content, _ := message.StripTextualToolCallProtocol(a.message.Content().Text)
-	content = strings.TrimSpace(content)
+
+	// Use cached stripped content to avoid regex on every frame.
+	rawThinking := a.message.ReasoningContent().Thinking
+	if rawThinking != a.cachedStrippedThinkingInput {
+		a.cachedStrippedThinking, _ = message.StripTextualToolCallProtocol(rawThinking)
+		a.cachedStrippedThinkingInput = rawThinking
+	}
+	thinking := strings.TrimSpace(a.cachedStrippedThinking)
+
+	rawContent := a.message.Content().Text
+	if rawContent != a.cachedStrippedContentInput {
+		a.cachedStrippedContent, _ = message.StripTextualToolCallProtocol(rawContent)
+		a.cachedStrippedContentInput = rawContent
+	}
+	content := strings.TrimSpace(a.cachedStrippedContent)
 	// if the massage has reasoning content add that first
 	if thinking != "" {
 		messageParts = append(messageParts, a.renderThinking(thinking, width))
@@ -357,6 +390,12 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 // renderSummary renders context compaction summary content in a collapsible
 // box with a distinct header tag row and a left-bordered body.
 func (a *AssistantMessageItem) renderSummary(content string, width int) string {
+	// Check cache: skip expensive glamour render if content and width unchanged.
+	contentHash := xxh3.HashString(content)
+	if a.summaryRenderCache != "" && a.summaryContentHash == contentHash && a.summaryRenderWidth == width {
+		return a.summaryRenderCache
+	}
+
 	// Account for left border (1) + left padding (2) + right padding (1).
 	const boxOverhead = 4
 	innerWidth := max(width-boxOverhead, 10)
@@ -405,6 +444,12 @@ func (a *AssistantMessageItem) renderSummary(content string, width int) string {
 	}
 	result := strings.Join(parts, "\n")
 	a.summaryBoxHeight = lipgloss.Height(result)
+
+	// Cache the result.
+	a.summaryRenderCache = result
+	a.summaryContentHash = contentHash
+	a.summaryRenderWidth = width
+
 	return result
 }
 
@@ -450,24 +495,27 @@ func (a *AssistantMessageItem) renderSpinning() string {
 }
 
 // invalidateCache clears all render caches: base content, prefixed render,
-// thinking glamour cache, and viewport cache. Call this when the message
-// content or visual state changes in a way that affects the thinking glamour
-// output.
+// thinking glamour cache, viewport cache, and summary cache. Call this when
+// the message content or visual state changes in a way that affects the
+// thinking glamour output.
 func (a *AssistantMessageItem) invalidateCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
 	a.invalidateThinkingCache()
 	a.invalidateViewportCache()
+	a.invalidateSummaryCache()
+	a.invalidateStrippedCache()
 }
 
 // invalidateContentCache clears the base content cache, prefixed render
-// cache, and viewport cache but preserves the thinking glamour cache. Use
-// this for state changes that only affect truncation or styling, not the
-// markdown content itself (e.g. expand/collapse).
+// cache, viewport cache, and summary cache but preserves the thinking glamour
+// cache. Use this for state changes that only affect truncation or styling,
+// not the markdown content itself (e.g. expand/collapse).
 func (a *AssistantMessageItem) invalidateContentCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
 	a.invalidateViewportCache()
+	a.invalidateSummaryCache()
 }
 
 // invalidatePrefixedCache clears the prefixed render cache.
@@ -493,6 +541,21 @@ func (a *AssistantMessageItem) invalidateViewportCache() {
 	a.viewportLines = nil
 	a.viewportWidth = 0
 	a.viewportHeight = 0
+}
+
+// invalidateSummaryCache clears the summary render cache.
+func (a *AssistantMessageItem) invalidateSummaryCache() {
+	a.summaryRenderCache = ""
+	a.summaryContentHash = 0
+	a.summaryRenderWidth = 0
+}
+
+// invalidateStrippedCache clears the cached StripTextualToolCallProtocol results.
+func (a *AssistantMessageItem) invalidateStrippedCache() {
+	a.cachedStrippedThinking = ""
+	a.cachedStrippedThinkingInput = ""
+	a.cachedStrippedContent = ""
+	a.cachedStrippedContentInput = ""
 }
 
 // ensureViewportCache populates the viewport cache if it has been
@@ -605,9 +668,21 @@ func (a *AssistantMessageItem) isSpinning() bool {
 	}
 	isThinking := a.message.IsThinking()
 	isFinished := a.message.IsFinished()
-	hasContent := strings.TrimSpace(a.message.Content().Text) != ""
+	hasContent := hasNonWhitespace(a.message.Content().Text)
 	hasToolCalls := len(a.message.ToolCalls()) > 0
 	return (isThinking || !isFinished) && !hasContent && !hasToolCalls
+}
+
+// hasNonWhitespace returns true if s contains at least one non-whitespace
+// character. This avoids the allocation of strings.TrimSpace.
+func hasNonWhitespace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 // SetMessage is used to update the underlying message. During pure thinking
@@ -675,6 +750,7 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 	summaryEnd := a.summaryBoxStart + a.summaryBoxHeight
 	if a.summaryBoxHeight > 0 && y >= a.summaryBoxStart && y < summaryEnd {
 		a.summaryExpanded = !a.summaryExpanded
+		a.invalidateSummaryCache()
 		a.invalidateContentCache()
 		return true
 	}

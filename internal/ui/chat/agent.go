@@ -66,6 +66,15 @@ type AgentToolMessageItem struct {
 	// hasTaskNodes is true when TaskNodeItems have been injected below
 	// this item, so the inline task list only renders the summary line.
 	hasTaskNodes bool
+
+	// Cached parsed data to avoid repeated json.Unmarshal during spinning renders.
+	cachedParams     *agent.AgentParams
+	cachedParamInput string
+	cachedTasks      []agentTaskRenderEntry
+
+	// Cached task status parsing to avoid repeated regexp during renders.
+	cachedTaskStatuses      map[string]message.ToolResultSubtaskStatus
+	cachedTaskStatusContent string
 }
 
 var (
@@ -91,6 +100,8 @@ func NewAgentToolMessageItem(
 }
 
 // Animate progresses the message animation if it should be spinning.
+// Kept for backward compatibility with any residual StepMsg in flight.
+// Nested tools are animated independently by the global ticker.
 func (a *AgentToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 	if a.result != nil || a.Status() == ToolStatusCanceled {
 		return nil
@@ -98,15 +109,40 @@ func (a *AgentToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 	if msg.ID == a.ID() {
 		return a.anim.Animate(msg)
 	}
+	return nil
+}
+
+// TickAnimation advances the animation by one frame.
+// Nested tools are ticked independently by the global ticker (they are
+// registered separately in the Chat.animating map), so this method only
+// ticks the agent item's own animation.
+func (a *AgentToolMessageItem) TickAnimation() {
+	if a.result != nil || a.Status() == ToolStatusCanceled {
+		return
+	}
+	if a.isSpinning() {
+		a.anim.Tick()
+	}
+}
+
+// IsAnimating reports whether the agent tool message is currently spinning.
+// This checks both the agent item itself and its nested tools, since nested
+// tools are registered independently in the animation set.
+func (a *AgentToolMessageItem) IsAnimating() bool {
+	if a.result != nil || a.Status() == ToolStatusCanceled {
+		return false
+	}
+	if a.isSpinning() {
+		return true
+	}
 	for _, nestedTool := range a.nestedTools {
-		if msg.ID != nestedTool.ID() {
-			continue
-		}
 		if s, ok := nestedTool.(Animatable); ok {
-			return s.Animate(msg)
+			if s.IsAnimating() {
+				return true
+			}
 		}
 	}
-	return nil
+	return false
 }
 
 // NestedTools returns the nested tools.
@@ -117,6 +153,7 @@ func (a *AgentToolMessageItem) NestedTools() []ToolMessageItem {
 // SetNestedTools sets the nested tools.
 func (a *AgentToolMessageItem) SetNestedTools(tools []ToolMessageItem) {
 	a.nestedTools = tools
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -127,6 +164,7 @@ func (a *AgentToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 		s.SetCompact(true)
 	}
 	a.nestedTools = append(a.nestedTools, tool)
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -134,6 +172,7 @@ func (a *AgentToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 func (a *AgentToolMessageItem) ToggleExpanded() bool {
 	a.nestedExpanded = !a.nestedExpanded
 	a.expandedContent = a.nestedExpanded
+	a.invalidateBodyCache()
 	a.clearCache()
 	return a.nestedExpanded
 }
@@ -145,6 +184,7 @@ func (a *AgentToolMessageItem) SetChildSessionStatus(text string, isError bool) 
 	}
 	a.childStatusText = text
 	a.childStatusIsError = isError
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -154,6 +194,7 @@ func (a *AgentToolMessageItem) SetHasTaskNodes(v bool) {
 		return
 	}
 	a.hasTaskNodes = v
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -164,7 +205,58 @@ func (a *AgentToolMessageItem) ClearChildSessionStatus() {
 	}
 	a.childStatusText = ""
 	a.childStatusIsError = false
+	a.invalidateBodyCache()
 	a.clearCache()
+}
+
+// SetToolCall overrides the base SetToolCall to invalidate the parsed-param cache
+// when the tool call input changes.
+func (a *AgentToolMessageItem) SetToolCall(tc message.ToolCall) {
+	if tc.Input != a.cachedParamInput {
+		a.cachedParams = nil
+		a.cachedParamInput = tc.Input
+		a.cachedTasks = nil
+	}
+	a.baseToolMessageItem.SetToolCall(tc)
+}
+
+// SetResult overrides the base SetResult to invalidate the cached task statuses
+// when the result changes.
+func (a *AgentToolMessageItem) SetResult(res *message.ToolResult) {
+	a.cachedTaskStatuses = nil
+	a.cachedTaskStatusContent = ""
+	a.baseToolMessageItem.SetResult(res)
+}
+
+// getCachedAgentParams lazily parses and caches the agent params from the tool
+// call input. During spinning renders (20fps), this avoids calling
+// json.Unmarshal on every frame; parsing only happens once until the input changes.
+func (a *AgentToolMessageItem) getCachedAgentParams(input string) (agent.AgentParams, []agentTaskRenderEntry) {
+	if a.cachedParams != nil && a.cachedParamInput == input {
+		return *a.cachedParams, a.cachedTasks
+	}
+	var params agent.AgentParams
+	_ = json.Unmarshal([]byte(input), &params)
+	a.cachedParams = &params
+	a.cachedParamInput = input
+	a.cachedTasks = collectAgentTaskEntries(params)
+	return params, a.cachedTasks
+}
+
+// getCachedTaskStatuses lazily parses and caches per-task statuses from the
+// tool result content using regexp. This avoids re-running the regex on every
+// render frame once the result is available.
+func (a *AgentToolMessageItem) getCachedTaskStatuses(result *message.ToolResult) map[string]message.ToolResultSubtaskStatus {
+	if result == nil {
+		return make(map[string]message.ToolResultSubtaskStatus)
+	}
+	if a.cachedTaskStatuses != nil && a.cachedTaskStatusContent == result.Content {
+		return a.cachedTaskStatuses
+	}
+	statuses := ParseTaskStatusesFromAgentResult(result)
+	a.cachedTaskStatuses = statuses
+	a.cachedTaskStatusContent = result.Content
+	return statuses
 }
 
 // AgentToolRenderContext renders agent tool messages.
@@ -186,9 +278,8 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		return pendingTool(sty, "Agent", opts.Anim, opts.Compact)
 	}
 
-	var params agent.AgentParams
-	_ = json.Unmarshal([]byte(opts.ToolCall.Input), &params)
-	tasks := collectAgentTaskEntries(params)
+	// Use cached parsed params/tasks to avoid json.Unmarshal on every spinning frame.
+	params, tasks := r.agent.getCachedAgentParams(opts.ToolCall.Input)
 
 	firstTask := agentTaskRenderEntry{}
 	if len(tasks) > 0 {
@@ -237,7 +328,7 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	}
 
 	header = lipgloss.JoinVertical(lipgloss.Left, headerParts...)
-	header = renderAgentTaskList(sty, header, tasks, remainingWidth, opts, r.agent.hasTaskNodes)
+	header = renderAgentTaskList(sty, header, tasks, remainingWidth, opts, r.agent.hasTaskNodes, r.agent)
 
 	visibleNestedTools, hiddenNestedTools := agentNestedToolWindow(r.agent.nestedTools, r.agent.nestedExpanded)
 	header = renderAgentHeaderWithToggle(sty, header, remainingWidth, r.agent.nestedExpanded, len(r.agent.nestedTools), hiddenNestedTools)
@@ -308,6 +399,10 @@ type AgenticFetchToolMessageItem struct {
 
 	childStatusText    string
 	childStatusIsError bool
+
+	// Cached parsed params to avoid repeated json.Unmarshal during spinning renders.
+	cachedParams     *agenticFetchParams
+	cachedParamInput string
 }
 
 var (
@@ -340,6 +435,7 @@ func (a *AgenticFetchToolMessageItem) NestedTools() []ToolMessageItem {
 // SetNestedTools sets the nested tools.
 func (a *AgenticFetchToolMessageItem) SetNestedTools(tools []ToolMessageItem) {
 	a.nestedTools = tools
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -350,6 +446,7 @@ func (a *AgenticFetchToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 		s.SetCompact(true)
 	}
 	a.nestedTools = append(a.nestedTools, tool)
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -357,6 +454,7 @@ func (a *AgenticFetchToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 func (a *AgenticFetchToolMessageItem) ToggleExpanded() bool {
 	a.nestedExpanded = !a.nestedExpanded
 	a.expandedContent = a.nestedExpanded
+	a.invalidateBodyCache()
 	a.clearCache()
 	return a.nestedExpanded
 }
@@ -368,6 +466,7 @@ func (a *AgenticFetchToolMessageItem) SetChildSessionStatus(text string, isError
 	}
 	a.childStatusText = text
 	a.childStatusIsError = isError
+	a.invalidateBodyCache()
 	a.clearCache()
 }
 
@@ -378,7 +477,32 @@ func (a *AgenticFetchToolMessageItem) ClearChildSessionStatus() {
 	}
 	a.childStatusText = ""
 	a.childStatusIsError = false
+	a.invalidateBodyCache()
 	a.clearCache()
+}
+
+// SetToolCall overrides the base SetToolCall to invalidate the parsed-param cache
+// when the tool call input changes.
+func (a *AgenticFetchToolMessageItem) SetToolCall(tc message.ToolCall) {
+	if tc.Input != a.cachedParamInput {
+		a.cachedParams = nil
+		a.cachedParamInput = tc.Input
+	}
+	a.baseToolMessageItem.SetToolCall(tc)
+}
+
+// getCachedFetchParams lazily parses and caches the fetch params from the tool
+// call input. During spinning renders (20fps), this avoids calling
+// json.Unmarshal on every frame; parsing only happens once until the input changes.
+func (a *AgenticFetchToolMessageItem) getCachedFetchParams(input string) agenticFetchParams {
+	if a.cachedParams != nil && a.cachedParamInput == input {
+		return *a.cachedParams
+	}
+	var params agenticFetchParams
+	_ = json.Unmarshal([]byte(input), &params)
+	a.cachedParams = &params
+	a.cachedParamInput = input
+	return params
 }
 
 // AgenticFetchToolRenderContext renders agentic fetch tool messages.
@@ -399,8 +523,8 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 		return pendingTool(sty, "Agentic Fetch", opts.Anim, opts.Compact)
 	}
 
-	var params agenticFetchParams
-	_ = json.Unmarshal([]byte(opts.ToolCall.Input), &params)
+	// Use cached parsed params to avoid json.Unmarshal on every spinning frame.
+	params := r.fetch.getCachedFetchParams(opts.ToolCall.Input)
 
 	prompt := params.Prompt
 	prompt = strings.ReplaceAll(prompt, "\n", " ")
@@ -492,7 +616,7 @@ func collectAgentTaskEntries(params agent.AgentParams) []agentTaskRenderEntry {
 	return tasks
 }
 
-func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRenderEntry, width int, opts *ToolRenderOpts, summaryOnly bool) string {
+func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRenderEntry, width int, opts *ToolRenderOpts, summaryOnly bool, agentItem *AgentToolMessageItem) string {
 	if len(tasks) <= 1 || width <= 0 {
 		return header
 	}
@@ -503,7 +627,13 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 		return lipgloss.JoinVertical(lipgloss.Left, header, taskTag)
 	}
 
-	statusesByID := parseTaskStatusesFromAgentResult(opts)
+	// Use cached task statuses to avoid repeated regexp execution during spinning renders.
+	var statusesByID map[string]message.ToolResultSubtaskStatus
+	if agentItem != nil {
+		statusesByID = agentItem.getCachedTaskStatuses(opts.Result)
+	} else {
+		statusesByID = parseTaskStatusesFromAgentResult(opts)
+	}
 	completed, failed, canceled, blocked, inProgress, pending := summarizeTaskStatusCounts(tasks, statusesByID)
 	summaryText := fmt.Sprintf("done %d · running %d · pending %d", completed, inProgress, pending)
 	if failed > 0 {

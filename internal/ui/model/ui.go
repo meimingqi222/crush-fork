@@ -208,6 +208,7 @@ type UI struct {
 	com             *common.Common
 	session         *session.Session
 	sessionMessages []message.Message
+	sessionMsgIndex map[string]int // Maps message ID to index in sessionMessages for O(1) lookup.
 	sessionFiles    []SessionFile
 
 	// childSessionInfoCache caches child session metadata to avoid
@@ -336,6 +337,22 @@ type UI struct {
 	todoSpinner    spinner.Model
 	todoIsSpinning bool
 
+	// globalTickActive tracks whether the global animation ticker is
+	// currently running. It is started when the first animation is
+	// registered and stopped when no animations remain.
+	globalTickActive bool
+
+	// sidebar cache to avoid full re-render every frame.
+	sidebarCacheDirty   bool
+	sidebarCacheContent string
+	sidebarCacheWidth   int
+	sidebarCacheHeight  int
+
+	// Per-frame usage snapshot cache: computed once in Draw(), consumed
+	// by both drawHeader and modelInfo (sidebar) without recomputing.
+	frameUsageSnapshot      contextUsageSnapshot
+	frameUsageSnapshotValid bool
+
 	// mouse highlighting related state
 	lastClickTime              time.Time
 	lastClipboardPasteShortcut time.Time
@@ -421,6 +438,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		notifyWindowFocused: true,
 		initialSessionID:    initialSessionID,
 		continueLastSession: continueLast,
+		sessionMsgIndex:     make(map[string]int),
 	}
 
 	status := NewStatus(com, ui)
@@ -565,8 +583,19 @@ func (m *UI) loadMCPrompts() tea.Msg {
 // Update handles updates to the UI model.
 func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	if m.syncPromptQueue() {
-		m.updateLayoutAndSize()
+	// Only sync prompt queue for message types that could change queue state.
+	// Skip high-frequency types (animation ticks, mouse, keyboard) to avoid
+	// mutex contention on every frame.
+	switch msg.(type) {
+	case anim.GlobalTickMsg, anim.StepMsg, spinner.TickMsg,
+		tea.MouseMsg, tea.MouseClickMsg, tea.MouseMotionMsg,
+		tea.MouseReleaseMsg, tea.MouseWheelMsg,
+		tea.KeyPressMsg, tea.KeyReleaseMsg, tea.PasteMsg:
+		// Skip prompt queue sync for high-frequency events.
+	default:
+		if m.syncPromptQueue() {
+			m.updateLayoutAndSize()
+		}
 	}
 	// Update terminal capabilities
 	m.caps.Update(msg)
@@ -610,7 +639,6 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.com != nil && m.com.App != nil && m.com.App.GetTimeline() != nil && m.session != nil {
 			m.timelineEvents = m.com.App.GetTimeline().ListBySession(m.session.ID)
 		}
-		m.syncPromptQueue()
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
 		if cmd := m.setSessionMessages(msg.messages); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -643,6 +671,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyReset()
 		cmds = append(cmds, m.loadPromptHistory())
 		m.updateLayoutAndSize()
+		m.invalidateSidebarCache()
 
 	case openChildSessionMsg:
 		cmds = append(cmds, m.loadSession(msg.sessionID))
@@ -654,11 +683,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			paths = append(paths, f.LatestVersion.Path)
 		}
 		cmds = append(cmds, m.startLSPs(paths))
+		m.invalidateSidebarCache()
 
 	case sessionUsageRefreshedMsg:
 		if msg.session != nil && m.session != nil && msg.session.ID == m.session.ID {
 			m.session = msg.session
 		}
+		m.invalidateSidebarCache()
 
 	case sendMessageMsg:
 		cmds = append(cmds, m.sendMessage(msg.Content, msg.Attachments...))
@@ -668,6 +699,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
 			cmds = append(cmds, m.loadSession(msg.SessionID))
 		}
+		m.invalidateSidebarCache()
 
 	case planModeChangedMsg:
 		cmds = append(cmds, util.ReportInfo(msg.Status))
@@ -677,6 +709,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
 			cmds = append(cmds, m.loadSession(msg.SessionID))
 		}
+		m.invalidateSidebarCache()
 
 	case userCommandsLoadedMsg:
 		m.customCommands = msg.Commands
@@ -692,6 +725,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mcpStateChangedMsg:
 		m.mcpStates = msg.states
+		m.invalidateSidebarCache()
 		dia := m.dialog.Dialog(dialog.MCPID)
 		if mcpDialog, ok := dia.(*dialog.MCP); ok {
 			mcpDialog.SetStates(msg.states)
@@ -733,6 +767,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, cmd)
 				}
 			}
+			m.invalidateSidebarCache()
 			break
 		}
 		if m.session != nil && msg.Payload.ID == m.session.ID {
@@ -743,6 +778,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.todoSpinner.Tick)
 				m.updateLayoutAndSize()
 			}
+			m.invalidateSidebarCache()
 		}
 	case pubsub.Event[message.Message]:
 		// Check if this is a child session message for an agent tool.
@@ -761,6 +797,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			break
 		}
+		// Messages affect the sidebar via usage counts and file info.
+		m.invalidateSidebarCache()
 		switch msg.Type {
 		case pubsub.CreatedEvent:
 			cmds = append(cmds, m.appendSessionMessage(msg.Payload))
@@ -781,6 +819,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if hasInProgressTodo(m.session.Todos) && m.isAgentBusy() && !m.todoIsSpinning {
 			m.todoIsSpinning = true
 			cmds = append(cmds, m.todoSpinner.Tick)
+			if !m.globalTickActive {
+				m.globalTickActive = true
+				cmds = append(cmds, anim.GlobalTick())
+			}
 		}
 		// stop the spinner if the agent is not busy anymore
 		if m.todoIsSpinning && !m.isAgentBusy() {
@@ -799,13 +841,17 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleTimelineEvent(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		m.invalidateSidebarCache()
 	case pubsub.Event[history.File]:
 		cmds = append(cmds, m.handleFileEvent(msg.Payload))
+		m.invalidateSidebarCache()
 	case pubsub.Event[app.LSPEvent]:
 		m.lspStates = app.GetLSPStates()
+		m.invalidateSidebarCache()
 	case pubsub.Event[mcp.Event]:
 		switch msg.Payload.Type {
 		case mcp.EventStateChanged:
+			m.invalidateSidebarCache()
 			return m, tea.Batch(
 				m.handleStateChanged(),
 				m.loadMCPrompts,
@@ -813,12 +859,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case mcp.EventPromptsListChanged:
 			return m, handleMCPPromptsEvent(msg.Payload.Name)
 		case mcp.EventToolsListChanged:
+			m.invalidateSidebarCache()
 			return m, handleMCPToolsEvent(m.com.Store(), msg.Payload.Name)
 		case mcp.EventResourcesListChanged:
 			return m, handleMCPResourcesEvent(msg.Payload.Name)
 		}
 	case pubsub.Event[skills.DiscoveryState]:
 		m.skillsState = msg.Payload
+		m.invalidateSidebarCache()
 		m.updateLayoutAndSize()
 	case pubsub.Event[permission.PermissionRequest]:
 		if cmd := m.openPermissionsDialog(msg.Payload); cmd != nil {
@@ -994,15 +1042,18 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case anim.StepMsg:
+		// Per-animation StepMsg is no longer used for driving animations
+		// (the global ticker handles that), but we keep the handler for
+		// any residual messages in flight.
+	case anim.GlobalTickMsg:
 		if m.state == uiChat {
-			if cmd := m.chat.Animate(msg); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			if m.chat.Follow() {
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+			m.chat.TickAnimations()
+		}
+		// Keep the global ticker running as long as there are animations.
+		if m.chat.HasAnimating() || m.todoIsSpinning {
+			cmds = append(cmds, anim.GlobalTick())
+		} else {
+			m.globalTickActive = false
 		}
 	case spinner.TickMsg:
 		if m.dialog.HasDialogs() {
@@ -1167,11 +1218,21 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// This logic gets triggered on any message type, but should it?
-	switch m.focus {
-	case uiFocusMain:
-	case uiFocusEditor:
-		m.refreshEditorPlaceholder()
+	// Refresh editor placeholder on state changes, but skip for
+	// high-frequency messages (animation ticks, mouse, keyboard) to
+	// avoid unnecessary work on every frame.
+	switch msg.(type) {
+	case anim.GlobalTickMsg, anim.StepMsg, spinner.TickMsg,
+		tea.MouseMsg, tea.MouseClickMsg, tea.MouseMotionMsg,
+		tea.MouseReleaseMsg, tea.MouseWheelMsg,
+		tea.KeyPressMsg, tea.KeyReleaseMsg, tea.PasteMsg:
+		// Skip placeholder refresh for high-frequency events.
+	default:
+		switch m.focus {
+		case uiFocusMain:
+		case uiFocusEditor:
+			m.refreshEditorPlaceholder()
+		}
 	}
 
 	// at this point this can only handle [message.Attachment] message, and we
@@ -1182,30 +1243,55 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *UI) setCurrentSessionMessages(msgs []message.Message) {
 	m.sessionMessages = slices.Clone(msgs)
+	// Rebuild the index from scratch.
+	m.sessionMsgIndex = make(map[string]int, len(m.sessionMessages))
+	for i, msg := range m.sessionMessages {
+		m.sessionMsgIndex[msg.ID] = i
+	}
 }
 
 func (m *UI) appendCurrentSessionMessage(msg message.Message) {
+	if m.sessionMsgIndex == nil {
+		m.sessionMsgIndex = make(map[string]int, len(m.sessionMessages))
+		for i, sm := range m.sessionMessages {
+			m.sessionMsgIndex[sm.ID] = i
+		}
+	}
+	m.sessionMsgIndex[msg.ID] = len(m.sessionMessages)
 	m.sessionMessages = append(m.sessionMessages, msg)
 }
 
 func (m *UI) updateCurrentSessionMessage(msg message.Message) {
-	for i := range m.sessionMessages {
-		if m.sessionMessages[i].ID != msg.ID {
-			continue
+	if m.sessionMsgIndex == nil {
+		m.sessionMsgIndex = make(map[string]int, len(m.sessionMessages))
+		for i, sm := range m.sessionMessages {
+			m.sessionMsgIndex[sm.ID] = i
 		}
+	}
+	if i, ok := m.sessionMsgIndex[msg.ID]; ok {
 		m.sessionMessages[i] = msg
 		return
 	}
+	m.sessionMsgIndex[msg.ID] = len(m.sessionMessages)
 	m.sessionMessages = append(m.sessionMessages, msg)
 }
 
 func (m *UI) removeCurrentSessionMessage(messageID string) {
-	for i := range m.sessionMessages {
-		if m.sessionMessages[i].ID != messageID {
-			continue
+	if m.sessionMsgIndex == nil {
+		m.sessionMsgIndex = make(map[string]int, len(m.sessionMessages))
+		for i, sm := range m.sessionMessages {
+			m.sessionMsgIndex[sm.ID] = i
 		}
-		m.sessionMessages = slices.Delete(m.sessionMessages, i, i+1)
+	}
+	i, ok := m.sessionMsgIndex[messageID]
+	if !ok {
 		return
+	}
+	m.sessionMessages = slices.Delete(m.sessionMessages, i, i+1)
+	// Rebuild index from the deleted position onward.
+	delete(m.sessionMsgIndex, messageID)
+	for j := i; j < len(m.sessionMessages); j++ {
+		m.sessionMsgIndex[m.sessionMessages[j].ID] = j
 	}
 }
 
@@ -1271,12 +1357,8 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	// If the user switches between sessions while the agent still has active or
 	// queued work, keep the loading animations visible.
 	if m.hasLiveSessionActivity() {
-		for _, item := range items {
-			if animatable, ok := item.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+		if cmd := m.startAnimations(items); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	}
 
@@ -1598,12 +1680,8 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 	case message.User:
 		m.lastUserMessageTime = msg.CreatedAt
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
-		for _, item := range items {
-			if animatable, ok := item.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+		if cmd := m.startAnimations(items); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		m.chat.AppendMessages(items...)
 		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
@@ -1612,12 +1690,8 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 	case message.Assistant:
 		m.updateLatestProposedPlan(msg)
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
-		for _, item := range items {
-			if animatable, ok := item.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-			}
+		if cmd := m.startAnimations(items); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		m.chat.AppendMessages(items...)
 		if m.chat.Follow() {
@@ -1700,9 +1774,12 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 
 	existingItem := m.chat.MessageItem(msg.ID)
 	shouldRenderAssistant := chat.ShouldRenderAssistantMessage(&msg)
-	toolCallIDs := make(map[string]struct{}, len(msg.ToolCalls()))
-	for _, tc := range msg.ToolCalls() {
-		toolCallIDs[tc.ID] = struct{}{}
+	var toolCallIDs map[string]struct{}
+	if tcs := msg.ToolCalls(); len(tcs) > 0 {
+		toolCallIDs = make(map[string]struct{}, len(tcs))
+		for _, tc := range tcs {
+			toolCallIDs[tc.ID] = struct{}{}
+		}
 	}
 
 	if existingItem != nil {
@@ -1718,10 +1795,8 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 		if !inserted {
 			m.chat.AppendMessages(assistantItem)
 		}
-		if animatable, ok := assistantItem.(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
+		if cmd := m.startAnimations([]chat.MessageItem{assistantItem}); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		if m.chat.Follow() {
 			if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
@@ -1779,12 +1854,8 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 		}
 	}
 
-	for _, item := range items {
-		if animatable, ok := item.(chat.Animatable); ok {
-			if cmd := animatable.StartAnimation(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
+	if cmd := m.startAnimations(items); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 
 	m.chat.AppendMessages(items...)
@@ -1983,6 +2054,19 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	// Get existing nested tools.
 	nestedTools := nestedTarget.NestedTools()
 
+	// Capture old nested tool IDs before any modifications for incremental
+	// ID index map updates. This avoids a full rebuildIDIndexMap() scan of
+	// all chat items on every child session message (e.g. every streamed
+	// token from a sub-agent).
+	containerID := ""
+	if item, ok := nestedTarget.(chat.MessageItem); ok {
+		containerID = item.ID()
+	}
+	oldNestedIDs := make([]string, 0, len(nestedTools))
+	for _, nt := range nestedTools {
+		oldNestedIDs = append(oldNestedIDs, nt.ID())
+	}
+
 	if event.Payload.Role == message.Assistant {
 		toolCallIDs := make(map[string]struct{}, len(event.Payload.ToolCalls()))
 		for _, tc := range event.Payload.ToolCalls() {
@@ -1994,13 +2078,13 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	// Only process tool call and result updates below this point.
 	if len(event.Payload.ToolCalls()) == 0 && len(event.Payload.ToolResults()) == 0 {
 		nestedTarget.SetNestedTools(nestedTools)
-		m.chat.rebuildIDIndexMap()
+		m.chat.UpdateNestedToolIDsIncremental(containerID, oldNestedIDs)
 		return nil
 	}
 
 	if event.Type == pubsub.DeletedEvent {
 		nestedTarget.SetNestedTools(nestedTools)
-		m.chat.rebuildIDIndexMap()
+		m.chat.UpdateNestedToolIDsIncremental(containerID, oldNestedIDs)
 		return nil
 	}
 
@@ -2021,8 +2105,8 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 				simplifiable.SetCompact(true)
 			}
 			if animatable, ok := nestedItem.(chat.Animatable); ok {
-				if cmd := animatable.StartAnimation(); cmd != nil {
-					cmds = append(cmds, cmd)
+				if animatable.IsAnimating() {
+					m.chat.RegisterAnimation(nestedItem.ID())
 				}
 			}
 			nestedTools = append(nestedTools, nestedItem)
@@ -2050,8 +2134,8 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	// Update the agent item with the new nested tools.
 	nestedTarget.SetNestedTools(nestedTools)
 
-	// Rebuild the ID map so removed nested tools stop resolving to the parent.
-	m.chat.rebuildIDIndexMap()
+	// Incrementally update the ID map instead of a full rebuild.
+	m.chat.UpdateNestedToolIDsIncremental(containerID, oldNestedIDs)
 
 	if m.chat.Follow() {
 		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
@@ -3407,11 +3491,13 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 // drawHeader draws the header section of the UI.
 func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
+	// Use the per-frame cached snapshot to avoid a second walk through
+	// the message list.
 	m.header.drawHeader(
 		scr,
 		area,
 		m.session,
-		m.currentContextUsageSnapshot(),
+		m.frameUsageSnapshotCached(),
 		m.isCompact,
 		m.detailsOpen,
 		area.Dx(),
@@ -3426,6 +3512,13 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		m.layout = layout
 		m.updateSize()
 	}
+
+	// Compute the usage snapshot once for the entire frame so that both
+	// drawHeader and modelInfo (sidebar) share the same value without
+	// re-walking the message list.
+	m.frameUsageSnapshot = m.currentContextUsageSnapshot()
+	m.frameUsageSnapshotValid = true
+	defer func() { m.frameUsageSnapshotValid = false }()
 
 	// Clear the screen first
 	screen.Clear(scr)
@@ -3873,6 +3966,26 @@ func (m *UI) updateTextareaWithPrevHeight(msg tea.Msg, prevHeight int) tea.Cmd {
 	return tea.Batch(cmd, m.handleTextareaHeightChange(prevHeight))
 }
 
+// startAnimations registers animatable items with the chat's animation set
+// and ensures the global animation ticker is running. This replaces the old
+// per-animation timer approach with a single shared ticker.
+func (m *UI) startAnimations(items []chat.MessageItem) tea.Cmd {
+	var needTick bool
+	for _, item := range items {
+		if animatable, ok := item.(chat.Animatable); ok {
+			if animatable.IsAnimating() {
+				m.chat.RegisterAnimation(item.ID())
+				needTick = true
+			}
+		}
+	}
+	if needTick && !m.globalTickActive {
+		m.globalTickActive = true
+		return anim.GlobalTick()
+	}
+	return nil
+}
+
 // updateSize updates the sizes of UI components based on the current layout.
 func (m *UI) updateSize() {
 	// Set status width
@@ -3889,6 +4002,8 @@ func (m *UI) updateSize() {
 		if !m.isCompact {
 			m.cacheSidebarLogo(m.layout.sidebar.Dx())
 		}
+		// Sidebar dimensions may have changed; invalidate cache.
+		m.invalidateSidebarCache()
 	}
 }
 
