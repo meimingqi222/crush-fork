@@ -119,17 +119,17 @@ const ()
 type Anim struct {
 	width            int
 	cyclingCharWidth int
-	label            []string               // plain slice copy; label data is set by SetLabel and read by Render on the same goroutine
+	label            []string // plain slice copy; label data is set by SetLabel and read by Render on the same goroutine
 	labelWidth       int
 	labelColor       color.Color
 	startTime        time.Time
 	birthOffsets     []time.Duration
 	initialFrames    [][]string // frames for the initial characters
 	initialized      atomic.Bool
-	cyclingFrames    [][]string           // frames for the cycling characters
-	step             atomic.Int64         // current main frame step
-	ellipsisStep     atomic.Int64         // current ellipsis frame step
-	ellipsisFrames   []string             // plain slice copy of ellipsis animation frames
+	cyclingFrames    [][]string   // frames for the cycling characters
+	step             atomic.Int64 // current main frame step
+	ellipsisStep     atomic.Int64 // current ellipsis frame step
+	ellipsisFrames   []string     // plain slice copy of ellipsis animation frames
 	id               string
 }
 

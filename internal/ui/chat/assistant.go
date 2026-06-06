@@ -102,9 +102,9 @@ type AssistantMessageItem struct {
 
 	// Cached summary render: avoids expensive glamour markdown render on
 	// every frame when the summary content hasn't changed.
-	summaryRenderCache  string
-	summaryContentHash  uint64
-	summaryRenderWidth  int
+	summaryRenderCache string
+	summaryContentHash uint64
+	summaryRenderWidth int
 }
 
 var (

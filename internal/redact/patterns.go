@@ -3,14 +3,14 @@ package redact
 import "regexp"
 
 type SecretPattern struct {
-	ID            string
-	Category      string
-	Title         string
-	Pattern       string
-	Keywords      []string
+	ID              string
+	Category        string
+	Title           string
+	Pattern         string
+	Keywords        []string
 	CaseInsensitive bool
-	ExcludeWords  []string // Captured values containing these words are skipped (false-positive prevention)
-	compiled      *regexp.Regexp
+	ExcludeWords    []string // Captured values containing these words are skipped (false-positive prevention)
+	compiled        *regexp.Regexp
 }
 
 var BuiltinPatterns = []SecretPattern{

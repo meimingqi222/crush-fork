@@ -2107,6 +2107,10 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 			if animatable, ok := nestedItem.(chat.Animatable); ok {
 				if animatable.IsAnimating() {
 					m.chat.RegisterAnimation(nestedItem.ID())
+					if !m.globalTickActive {
+						m.globalTickActive = true
+						cmds = append(cmds, anim.GlobalTick())
+					}
 				}
 			}
 			nestedTools = append(nestedTools, nestedItem)

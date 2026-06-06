@@ -104,72 +104,72 @@ func GetBeautifulTitle(toolName, action string, params any) string {
 		if filePath != "" {
 			base := filepath.Base(filePath)
 			if base == "." || base == "/" || base == "\\" || filePath == "" {
-			return "List project root"
+				return "List project root"
+			}
+			hasExt := strings.Contains(base, ".") && !strings.HasPrefix(base, ".")
+			if hasExt {
+				return fmt.Sprintf("Read file: %s", base)
+			}
+			return fmt.Sprintf("Read directory: %s", base)
 		}
-		hasExt := strings.Contains(base, ".") && !strings.HasPrefix(base, ".")
-		if hasExt {
-			return fmt.Sprintf("Read file: %s", base)
+		return "Read file"
+	case "write", "edit", "patch", "fs/write_text_file", "replace_file_content", "multi_replace_file_content", "write_to_file":
+		filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
+		if filePath != "" {
+			return fmt.Sprintf("Edit file: %s", filepath.Base(filePath))
 		}
-		return fmt.Sprintf("Read directory: %s", base)
-	}
-	return "Read file"
-case "write", "edit", "patch", "fs/write_text_file", "replace_file_content", "multi_replace_file_content", "write_to_file":
-	filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
-	if filePath != "" {
-		return fmt.Sprintf("Edit file: %s", filepath.Base(filePath))
-	}
-	return "Edit file"
-case "delete", "fs/delete_file":
-	filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
-	if filePath != "" {
-		return fmt.Sprintf("Delete file: %s", filepath.Base(filePath))
-	}
-	return "Delete file"
-case "move", "rename":
-	src := extractParam(params, "src", "source", "old_path")
-	dest := extractParam(params, "dest", "destination", "new_path")
-	if src != "" && dest != "" {
-		return fmt.Sprintf("Move file: %s -> %s", filepath.Base(src), filepath.Base(dest))
-	}
-	return "Move file"
-case "search", "grep", "grep_search", "glob", "locate", "search_context", "codebase_search", "github_codebase_search", "warp_grep", "tool_search":
-	query := extractParam(params, "query", "Query", "pattern", "Pattern", "q")
-	path := extractParam(params, "path", "Path", "SearchPath", "search_path", "project_root_path", "projectRootPath")
+		return "Edit file"
+	case "delete", "fs/delete_file":
+		filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
+		if filePath != "" {
+			return fmt.Sprintf("Delete file: %s", filepath.Base(filePath))
+		}
+		return "Delete file"
+	case "move", "rename":
+		src := extractParam(params, "src", "source", "old_path")
+		dest := extractParam(params, "dest", "destination", "new_path")
+		if src != "" && dest != "" {
+			return fmt.Sprintf("Move file: %s -> %s", filepath.Base(src), filepath.Base(dest))
+		}
+		return "Move file"
+	case "search", "grep", "grep_search", "glob", "locate", "search_context", "codebase_search", "github_codebase_search", "warp_grep", "tool_search":
+		query := extractParam(params, "query", "Query", "pattern", "Pattern", "q")
+		path := extractParam(params, "path", "Path", "SearchPath", "search_path", "project_root_path", "projectRootPath")
 
-	if query != "" && path != "" {
-		if len(query) > 20 {
-			query = query[:17] + "..."
+		if query != "" && path != "" {
+			if len(query) > 20 {
+				query = query[:17] + "..."
+			}
+			return fmt.Sprintf("Search: '%s' (%s)", query, filepath.Base(path))
 		}
-		return fmt.Sprintf("Search: '%s' (%s)", query, filepath.Base(path))
-	}
-	if query != "" {
-		if len(query) > 30 {
-			query = query[:27] + "..."
+		if query != "" {
+			if len(query) > 30 {
+				query = query[:27] + "..."
+			}
+			return fmt.Sprintf("Search: '%s'", query)
 		}
-		return fmt.Sprintf("Search: '%s'", query)
-	}
-	if path != "" {
-		return fmt.Sprintf("List project: %s", filepath.Base(path))
-	}
-	return "List project"
-case "execute", "bash", "run_command", "shell", "execute_command", "run_terminal_command", "bash_exec", "terminal":
-	command := extractParam(params, "command", "CommandLine", "command_line", "cmd", "script", "args", "arguments", "code")
-	if command != "" {
-		if len(command) > 40 {
-			command = command[:37] + "..."
+		if path != "" {
+			return fmt.Sprintf("List project: %s", filepath.Base(path))
 		}
-		return fmt.Sprintf("Run command: '%s'", command)
-	}
-	return "Run terminal command"
-case "fetch", "web_fetch", "search_web", "download":
-	url := extractParam(params, "url", "Url", "URL", "query", "Query")
-	if url != "" {
-		if len(url) > 45 {
-			url = url[:42] + "..."
+		return "List project"
+	case "execute", "bash", "run_command", "shell", "execute_command", "run_terminal_command", "bash_exec", "terminal":
+		command := extractParam(params, "command", "CommandLine", "command_line", "cmd", "script", "args", "arguments", "code")
+		if command != "" {
+			if len(command) > 40 {
+				command = command[:37] + "..."
+			}
+			return fmt.Sprintf("Run command: '%s'", command)
 		}
-		return fmt.Sprintf("Fetch: %s", url)
-	}
-	return "Access webpage/fetch data"
+		return "Run terminal command"
+	case "fetch", "web_fetch", "search_web", "download":
+		url := extractParam(params, "url", "Url", "URL", "query", "Query")
+		if url != "" {
+			if len(url) > 45 {
+				url = url[:42] + "..."
+			}
+			return fmt.Sprintf("Fetch: %s", url)
+		}
+		return "Access webpage/fetch data"
 	case "agent":
 		type localTask struct {
 			Name        string `json:"name"`
@@ -209,9 +209,9 @@ case "fetch", "web_fetch", "search_web", "download":
 				if len(joined) > 40 {
 					joined = joined[:37] + "..."
 				}
-			return fmt.Sprintf("Parallel tasks: %s", joined)
-		}
-		return fmt.Sprintf("Delegate %d parallel sub-agents", len(ap.Tasks))
+				return fmt.Sprintf("Parallel tasks: %s", joined)
+			}
+			return fmt.Sprintf("Delegate %d parallel sub-agents", len(ap.Tasks))
 		}
 
 		// Single task.
@@ -235,9 +235,9 @@ case "fetch", "web_fetch", "search_web", "download":
 			if len(taskDesc) > 40 {
 				taskDesc = taskDesc[:37] + "..."
 			}
-		return fmt.Sprintf("Delegate sub-agent (@%s): %s", subagentType, taskDesc)
-	}
-	return fmt.Sprintf("Delegate sub-agent (@%s)", subagentType)
+			return fmt.Sprintf("Delegate sub-agent (@%s): %s", subagentType, taskDesc)
+		}
+		return fmt.Sprintf("Delegate sub-agent (@%s)", subagentType)
 	default:
 		if action != "" {
 			return fmt.Sprintf("%s: %s", toolName, action)

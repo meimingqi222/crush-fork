@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	maxCacheSize       = 2000
-	maxCacheEntryLen   = 512_000
+	maxCacheSize     = 2000
+	maxCacheEntryLen = 512_000
 )
 
 var unicodeTagsRe = regexp.MustCompile(`[\x{DB40}][\x{DC00}-\x{DC7F}]`)
