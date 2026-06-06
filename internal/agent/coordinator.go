@@ -396,6 +396,7 @@ func (c *coordinator) clearTranscriptTurnCountForSession(sessionID string) {
 // onSessionClosed cleans up coordinator and memory-engine state for a session.
 func (c *coordinator) onSessionClosed(ctx context.Context, sessionID string) {
 	c.clearTranscriptTurnCountForSession(sessionID)
+	c.backgroundAgents.RemoveForSession(sessionID)
 	if c.memoryEngine != nil {
 		if err := c.memoryEngine.OnSessionClosed(ctx, sessionID); err != nil {
 			slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
@@ -585,7 +586,7 @@ func collectSurfacedMemories(ctx context.Context, messagesSvc message.Service, s
 			}
 			totalBytes += len(content)
 			// Extract keys from lines like "- key (meta): value"
-			for _, line := range strings.Split(content, "\n") {
+			for line := range strings.SplitSeq(content, "\n") {
 				line = strings.TrimSpace(line)
 				if !strings.HasPrefix(line, "- ") {
 					continue

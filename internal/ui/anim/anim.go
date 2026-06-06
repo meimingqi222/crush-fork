@@ -112,9 +112,6 @@ type Settings struct {
 	CycleColors bool
 }
 
-// Default settings.
-const ()
-
 // Anim is a Bubble for an animated spinner.
 type Anim struct {
 	width            int

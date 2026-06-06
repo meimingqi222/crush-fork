@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
@@ -357,6 +358,35 @@ func (r *backgroundAgentRegistry) Stop(agentID string) {
 	r.mu.Unlock()
 }
 
+// Remove deletes a completed, failed, or canceled agent from the registry.
+func (r *backgroundAgentRegistry) Remove(agentID string) {
+	r.mu.Lock()
+	entry, ok := r.agents[agentID]
+	if !ok {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.agents, agentID)
+	delete(r.nameToID, entry.AgentName)
+	r.mu.Unlock()
+}
+
+// RemoveForSession removes all completed, failed, or canceled agents
+// associated with the given parent session ID.
+func (r *backgroundAgentRegistry) RemoveForSession(parentSessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, entry := range r.agents {
+		if entry.ParentSessionID == parentSessionID &&
+			(entry.Status == backgroundAgentStatusCompleted ||
+				entry.Status == backgroundAgentStatusFailed ||
+				entry.Status == backgroundAgentStatusCanceled) {
+			delete(r.agents, id)
+			delete(r.nameToID, entry.AgentName)
+		}
+	}
+}
+
 // Get retrieves a background agent entry by ID.
 func (r *backgroundAgentRegistry) Get(agentID string) (*backgroundAgentEntry, bool) {
 	r.mu.RLock()
@@ -424,7 +454,7 @@ func formatBackgroundAgentNotification(entry *backgroundAgentEntry) string {
 		action = "was canceled"
 	}
 	content := entry.Content
-	if len([]rune(content)) > 2000 {
+	if utf8.RuneCountInString(content) > 2000 {
 		content = string([]rune(content)[:2000]) + "\n…[truncated]"
 	}
 	return fmt.Sprintf(backgroundAgentResultNotification, entry.AgentID, status, entry.Description, action, content)

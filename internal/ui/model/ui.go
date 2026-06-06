@@ -5179,7 +5179,12 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 			if m.pendingSubagentNotifications == nil {
 				m.pendingSubagentNotifications = make(map[string][]string)
 			}
-			m.pendingSubagentNotifications[n.SessionID] = append(m.pendingSubagentNotifications[n.SessionID], n.Summary)
+			pending := m.pendingSubagentNotifications[n.SessionID]
+			if len(pending) >= 50 {
+				pending = pending[len(pending)-49:]
+			}
+			pending = append(pending, n.Summary)
+			m.pendingSubagentNotifications[n.SessionID] = pending
 			return m.sendNotification(notification.Notification{
 				Title:   "Crush background task finished (queued)",
 				Message: fmt.Sprintf("Subagent task %s completed. Notification has been queued.", n.SubagentID),
@@ -5202,6 +5207,7 @@ func (m *UI) newSession() tea.Cmd {
 	m.session = nil
 	m.sessionFiles = nil
 	m.sessionFileReads = nil
+	m.pendingSubagentNotifications = nil
 	m.setState(uiLanding, uiFocusEditor)
 	m.textarea.Focus()
 	m.chat.Blur()

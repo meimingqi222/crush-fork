@@ -37,16 +37,20 @@ func newRegexCache() *regexCache {
 	}
 }
 
-// get retrieves a compiled regex from cache or compiles and caches it
+// get retrieves a compiled regex from cache or compiles and caches it.
+// Returns an error if the pattern is invalid (not stored in cache).
 func (rc *regexCache) get(pattern string) (*regexp.Regexp, error) {
-	var rerr error
-	return rc.GetOrSet(pattern, func() *regexp.Regexp {
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			rerr = err
-		}
-		return regex
-	}), rerr
+	// Try cache first
+	if cached, ok := rc.Map.Get(pattern); ok {
+		return cached, nil
+	}
+	// Compile and cache only on success
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	rc.Map.Set(pattern, regex)
+	return regex, nil
 }
 
 // ResetCache clears compiled regex caches to prevent unbounded growth across sessions.
@@ -263,7 +267,12 @@ func looksLikeRegexSyntaxError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "invalid regex pattern") || strings.Contains(msg, "error parsing regexp") || strings.Contains(msg, "missing closing") || strings.Contains(msg, "unexpected")
+	return strings.Contains(msg, "invalid regex pattern") ||
+		strings.Contains(msg, "error parsing regexp") ||
+		strings.Contains(msg, "missing closing") ||
+		strings.Contains(msg, "unexpected") ||
+		strings.Contains(msg, "unclosed character class") ||
+		strings.Contains(msg, "regex parse error")
 }
 
 func searchWithRipgrep(ctx context.Context, pattern, rootPath, include string) ([]grepMatch, error) {

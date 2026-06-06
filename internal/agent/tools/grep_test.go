@@ -90,6 +90,21 @@ func TestRunGrepSearchFallsBackToLiteralTextOnInvalidRegex(t *testing.T) {
 	require.Equal(t, []string{"literal_text"}, result.metadata.RecoveredParameters)
 }
 
+// TestRunGrepSearchFallsBackToLiteralTextOnUnclosedCharacterClass tests that
+// patterns with unclosed character classes (like "agents[") are treated
+// as literal text when ripgrep reports "unclosed character class" error.
+func TestRunGrepSearchFallsBackToLiteralTextOnUnclosedCharacterClass(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "sample.go"), []byte("c.agents[config.AgentCoder] = agent\n"), 0o644))
+
+	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "agents["}, tempDir, 100)
+	require.NoError(t, err)
+	require.Len(t, result.matches, 1)
+	require.True(t, result.metadata.LiteralText)
+	require.Equal(t, "literal_text_fallback", result.metadata.RecoveredBy)
+}
+
 func TestRunGrepSearchReportsMissingSearchPath(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()

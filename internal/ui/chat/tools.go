@@ -510,8 +510,12 @@ func (t *baseToolMessageItem) SetToolCall(tc message.ToolCall) {
 // SetResult sets the tool result associated with this message item.
 func (t *baseToolMessageItem) SetResult(res *message.ToolResult) {
 	t.result = res
-	t.invalidateBodyCache()
-	t.clearCache()
+	// Don't clear body cache while spinning to avoid flicker during streaming.
+	// The cache will be invalidated when spinning stops via SetStatus.
+	if !t.isSpinning() {
+		t.invalidateBodyCache()
+		t.clearCache()
+	}
 }
 
 // MessageID returns the ID of the message containing this tool call.
@@ -526,9 +530,14 @@ func (t *baseToolMessageItem) SetMessageID(id string) {
 
 // SetStatus sets the tool status.
 func (t *baseToolMessageItem) SetStatus(status ToolStatus) {
+	wasSpinning := t.isSpinning()
 	t.status = status
-	t.invalidateBodyCache()
-	t.clearCache()
+	// Only clear cache when transitioning from spinning to not spinning.
+	// This avoids cache invalidation during streaming updates.
+	if wasSpinning && !t.isSpinning() {
+		t.invalidateBodyCache()
+		t.clearCache()
+	}
 }
 
 // Status returns the current tool status.
@@ -545,6 +554,7 @@ func (t *baseToolMessageItem) SetRuntimeState(state *toolruntime.State) {
 	}
 	copyState := *state
 	t.runtimeState = &copyState
+	// Always invalidate cache when runtime state changes to show live updates.
 	t.invalidateBodyCache()
 	t.clearCache()
 }

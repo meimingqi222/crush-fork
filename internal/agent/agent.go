@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -1102,7 +1103,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					"prepared_messages", len(prepared.Messages),
 					"prepared_tools", len(prepared.Tools),
 					"has_current_user_message", hasCurrentUserMessage,
-					"prompt_for_estimate_chars", len([]rune(promptForEstimate)),
+					"prompt_for_estimate_chars", utf8.RuneCountInString(promptForEstimate),
 					"attachments_for_estimate", len(attachmentsForEstimate),
 				)
 				stepMessages = cloneFantasyMessages(prepared.Messages)
