@@ -24,7 +24,6 @@ import (
 
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
-	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
 // EditEntry is a single edit operation used when making multiple edits.
@@ -145,9 +144,6 @@ func NewEditTool(
 			}
 
 			sessionID := GetSessionFromContext(ctx)
-			for _, file := range modifiedFiles {
-				applyFormattingAndSyncHistory(ctx, lspManager, files, file, sessionID)
-			}
 
 			for _, file := range modifiedFiles {
 				if client, _, _, ok := lspClientForFile(ctx, lspManager, file); ok {
@@ -1441,58 +1437,6 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		fantasy.NewTextResponse(successMessage.String()),
 		fileMetadata,
 	), nil
-}
-
-// applyFormattingAndSyncHistory checks if formatting is possible, formats the file using LSP,
-// and if changes were made, updates the history version.
-func applyFormattingAndSyncHistory(ctx context.Context, lspManager *lsp.Manager, files history.Service, filePath, sessionID string) {
-	if lspManager == nil || files == nil || sessionID == "" {
-		return
-	}
-
-	beforeContentBytes, err := os.ReadFile(filePath)
-	if err != nil {
-		return
-	}
-	beforeContent := string(beforeContentBytes)
-
-	client, absPath, _, ok := lspClientForFile(ctx, lspManager, filePath)
-	if !ok {
-		return
-	}
-
-	edits, err := client.FormatDocument(ctx, absPath, protocol.FormattingOptions{
-		TabSize:      4,
-		InsertSpaces: true,
-	})
-	if err != nil || len(edits) == 0 {
-		return
-	}
-
-	workspaceEdit := protocol.WorkspaceEdit{
-		Changes: map[protocol.DocumentURI][]protocol.TextEdit{
-			protocol.URIFromPath(absPath): edits,
-		},
-	}
-
-	if err := client.ApplyWorkspaceEdit(workspaceEdit); err != nil {
-		slog.Error("Failed to apply formatting workspace edit", "error", err, "path", absPath)
-		return
-	}
-
-	afterContentBytes, err := os.ReadFile(filePath)
-	if err != nil {
-		return
-	}
-	afterContent := string(afterContentBytes)
-
-	if afterContent != beforeContent {
-		_, err = files.CreateVersion(ctx, sessionID, filePath, afterContent)
-		if err != nil {
-			slog.Error("Failed to create history version after formatting", "error", err, "path", filePath)
-		}
-		_ = client.NotifyChange(ctx, absPath)
-	}
 }
 
 func levenshteinDistance(s, t string) int {
