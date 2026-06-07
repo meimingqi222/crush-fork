@@ -27,14 +27,23 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.addCheckpointFileStmt, err = db.PrepareContext(ctx, addCheckpointFile); err != nil {
 		return nil, fmt.Errorf("error preparing query AddCheckpointFile: %w", err)
 	}
+	if q.appendMemoryEventStmt, err = db.PrepareContext(ctx, appendMemoryEvent); err != nil {
+		return nil, fmt.Errorf("error preparing query AppendMemoryEvent: %w", err)
+	}
 	if q.countCheckpointFilesStmt, err = db.PrepareContext(ctx, countCheckpointFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query CountCheckpointFiles: %w", err)
+	}
+	if q.countMessagesBySessionStmt, err = db.PrepareContext(ctx, countMessagesBySession); err != nil {
+		return nil, fmt.Errorf("error preparing query CountMessagesBySession: %w", err)
 	}
 	if q.createCheckpointStmt, err = db.PrepareContext(ctx, createCheckpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateCheckpoint: %w", err)
 	}
 	if q.createFileStmt, err = db.PrepareContext(ctx, createFile); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateFile: %w", err)
+	}
+	if q.createMemoryJobStmt, err = db.PrepareContext(ctx, createMemoryJob); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateMemoryJob: %w", err)
 	}
 	if q.createMessageStmt, err = db.PrepareContext(ctx, createMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateMessage: %w", err)
@@ -90,6 +99,18 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getLatestSessionCheckpointStmt, err = db.PrepareContext(ctx, getLatestSessionCheckpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query GetLatestSessionCheckpoint: %w", err)
 	}
+	if q.getMaterializedViewStmt, err = db.PrepareContext(ctx, getMaterializedView); err != nil {
+		return nil, fmt.Errorf("error preparing query GetMaterializedView: %w", err)
+	}
+	if q.getMaxMemoryEventWatermarkStmt, err = db.PrepareContext(ctx, getMaxMemoryEventWatermark); err != nil {
+		return nil, fmt.Errorf("error preparing query GetMaxMemoryEventWatermark: %w", err)
+	}
+	if q.getMemoryEventByIDStmt, err = db.PrepareContext(ctx, getMemoryEventByID); err != nil {
+		return nil, fmt.Errorf("error preparing query GetMemoryEventByID: %w", err)
+	}
+	if q.getMemorySourceByNameStmt, err = db.PrepareContext(ctx, getMemorySourceByName); err != nil {
+		return nil, fmt.Errorf("error preparing query GetMemorySourceByName: %w", err)
+	}
 	if q.getMessageStmt, err = db.PrepareContext(ctx, getMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query GetMessage: %w", err)
 	}
@@ -132,11 +153,32 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listLatestSessionFilesStmt, err = db.PrepareContext(ctx, listLatestSessionFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListLatestSessionFiles: %w", err)
 	}
+	if q.listMaterializedViewsStmt, err = db.PrepareContext(ctx, listMaterializedViews); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMaterializedViews: %w", err)
+	}
+	if q.listMemoryEventsByWatermarkStmt, err = db.PrepareContext(ctx, listMemoryEventsByWatermark); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMemoryEventsByWatermark: %w", err)
+	}
+	if q.listMemoryEventsFilteredStmt, err = db.PrepareContext(ctx, listMemoryEventsFiltered); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMemoryEventsFiltered: %w", err)
+	}
+	if q.listMemoryJobsByStatusStmt, err = db.PrepareContext(ctx, listMemoryJobsByStatus); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMemoryJobsByStatus: %w", err)
+	}
+	if q.listMemorySourcesStmt, err = db.PrepareContext(ctx, listMemorySources); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMemorySources: %w", err)
+	}
 	if q.listMessagesBySessionStmt, err = db.PrepareContext(ctx, listMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMessagesBySession: %w", err)
 	}
+	if q.listMessagesBySessionPageStmt, err = db.PrepareContext(ctx, listMessagesBySessionPage); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMessagesBySessionPage: %w", err)
+	}
 	if q.listNewFilesStmt, err = db.PrepareContext(ctx, listNewFiles); err != nil {
 		return nil, fmt.Errorf("error preparing query ListNewFiles: %w", err)
+	}
+	if q.listRecentMemoryJobsStmt, err = db.PrepareContext(ctx, listRecentMemoryJobs); err != nil {
+		return nil, fmt.Errorf("error preparing query ListRecentMemoryJobs: %w", err)
 	}
 	if q.listSessionCheckpointsStmt, err = db.PrepareContext(ctx, listSessionCheckpoints); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionCheckpoints: %w", err)
@@ -159,8 +201,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.renameSessionStmt, err = db.PrepareContext(ctx, renameSession); err != nil {
 		return nil, fmt.Errorf("error preparing query RenameSession: %w", err)
 	}
+	if q.resetMaterializedViewWatermarkStmt, err = db.PrepareContext(ctx, resetMaterializedViewWatermark); err != nil {
+		return nil, fmt.Errorf("error preparing query ResetMaterializedViewWatermark: %w", err)
+	}
 	if q.searchMessagesStmt, err = db.PrepareContext(ctx, searchMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query SearchMessages: %w", err)
+	}
+	if q.updateMemoryJobStatusStmt, err = db.PrepareContext(ctx, updateMemoryJobStatus); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateMemoryJobStatus: %w", err)
 	}
 	if q.updateMessageStmt, err = db.PrepareContext(ctx, updateMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateMessage: %w", err)
@@ -177,6 +225,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.updateSessionTitleAndUsageStmt, err = db.PrepareContext(ctx, updateSessionTitleAndUsage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionTitleAndUsage: %w", err)
 	}
+	if q.upsertMaterializedViewStmt, err = db.PrepareContext(ctx, upsertMaterializedView); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertMaterializedView: %w", err)
+	}
+	if q.upsertMemorySourceStmt, err = db.PrepareContext(ctx, upsertMemorySource); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertMemorySource: %w", err)
+	}
 	return &q, nil
 }
 
@@ -187,9 +241,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing addCheckpointFileStmt: %w", cerr)
 		}
 	}
+	if q.appendMemoryEventStmt != nil {
+		if cerr := q.appendMemoryEventStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing appendMemoryEventStmt: %w", cerr)
+		}
+	}
 	if q.countCheckpointFilesStmt != nil {
 		if cerr := q.countCheckpointFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing countCheckpointFilesStmt: %w", cerr)
+		}
+	}
+	if q.countMessagesBySessionStmt != nil {
+		if cerr := q.countMessagesBySessionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing countMessagesBySessionStmt: %w", cerr)
 		}
 	}
 	if q.createCheckpointStmt != nil {
@@ -200,6 +264,11 @@ func (q *Queries) Close() error {
 	if q.createFileStmt != nil {
 		if cerr := q.createFileStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createFileStmt: %w", cerr)
+		}
+	}
+	if q.createMemoryJobStmt != nil {
+		if cerr := q.createMemoryJobStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createMemoryJobStmt: %w", cerr)
 		}
 	}
 	if q.createMessageStmt != nil {
@@ -292,6 +361,26 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getLatestSessionCheckpointStmt: %w", cerr)
 		}
 	}
+	if q.getMaterializedViewStmt != nil {
+		if cerr := q.getMaterializedViewStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getMaterializedViewStmt: %w", cerr)
+		}
+	}
+	if q.getMaxMemoryEventWatermarkStmt != nil {
+		if cerr := q.getMaxMemoryEventWatermarkStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getMaxMemoryEventWatermarkStmt: %w", cerr)
+		}
+	}
+	if q.getMemoryEventByIDStmt != nil {
+		if cerr := q.getMemoryEventByIDStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getMemoryEventByIDStmt: %w", cerr)
+		}
+	}
+	if q.getMemorySourceByNameStmt != nil {
+		if cerr := q.getMemorySourceByNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getMemorySourceByNameStmt: %w", cerr)
+		}
+	}
 	if q.getMessageStmt != nil {
 		if cerr := q.getMessageStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getMessageStmt: %w", cerr)
@@ -362,14 +451,49 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listLatestSessionFilesStmt: %w", cerr)
 		}
 	}
+	if q.listMaterializedViewsStmt != nil {
+		if cerr := q.listMaterializedViewsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMaterializedViewsStmt: %w", cerr)
+		}
+	}
+	if q.listMemoryEventsByWatermarkStmt != nil {
+		if cerr := q.listMemoryEventsByWatermarkStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMemoryEventsByWatermarkStmt: %w", cerr)
+		}
+	}
+	if q.listMemoryEventsFilteredStmt != nil {
+		if cerr := q.listMemoryEventsFilteredStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMemoryEventsFilteredStmt: %w", cerr)
+		}
+	}
+	if q.listMemoryJobsByStatusStmt != nil {
+		if cerr := q.listMemoryJobsByStatusStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMemoryJobsByStatusStmt: %w", cerr)
+		}
+	}
+	if q.listMemorySourcesStmt != nil {
+		if cerr := q.listMemorySourcesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMemorySourcesStmt: %w", cerr)
+		}
+	}
 	if q.listMessagesBySessionStmt != nil {
 		if cerr := q.listMessagesBySessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listMessagesBySessionStmt: %w", cerr)
 		}
 	}
+	if q.listMessagesBySessionPageStmt != nil {
+		if cerr := q.listMessagesBySessionPageStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMessagesBySessionPageStmt: %w", cerr)
+		}
+	}
 	if q.listNewFilesStmt != nil {
 		if cerr := q.listNewFilesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listNewFilesStmt: %w", cerr)
+		}
+	}
+	if q.listRecentMemoryJobsStmt != nil {
+		if cerr := q.listRecentMemoryJobsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listRecentMemoryJobsStmt: %w", cerr)
 		}
 	}
 	if q.listSessionCheckpointsStmt != nil {
@@ -407,9 +531,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing renameSessionStmt: %w", cerr)
 		}
 	}
+	if q.resetMaterializedViewWatermarkStmt != nil {
+		if cerr := q.resetMaterializedViewWatermarkStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing resetMaterializedViewWatermarkStmt: %w", cerr)
+		}
+	}
 	if q.searchMessagesStmt != nil {
 		if cerr := q.searchMessagesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing searchMessagesStmt: %w", cerr)
+		}
+	}
+	if q.updateMemoryJobStatusStmt != nil {
+		if cerr := q.updateMemoryJobStatusStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateMemoryJobStatusStmt: %w", cerr)
 		}
 	}
 	if q.updateMessageStmt != nil {
@@ -435,6 +569,16 @@ func (q *Queries) Close() error {
 	if q.updateSessionTitleAndUsageStmt != nil {
 		if cerr := q.updateSessionTitleAndUsageStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateSessionTitleAndUsageStmt: %w", cerr)
+		}
+	}
+	if q.upsertMaterializedViewStmt != nil {
+		if cerr := q.upsertMaterializedViewStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertMaterializedViewStmt: %w", cerr)
+		}
+	}
+	if q.upsertMemorySourceStmt != nil {
+		if cerr := q.upsertMemorySourceStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertMemorySourceStmt: %w", cerr)
 		}
 	}
 	return err
@@ -477,9 +621,12 @@ type Queries struct {
 	db                                 DBTX
 	tx                                 *sql.Tx
 	addCheckpointFileStmt              *sql.Stmt
+	appendMemoryEventStmt              *sql.Stmt
 	countCheckpointFilesStmt           *sql.Stmt
+	countMessagesBySessionStmt         *sql.Stmt
 	createCheckpointStmt               *sql.Stmt
 	createFileStmt                     *sql.Stmt
+	createMemoryJobStmt                *sql.Stmt
 	createMessageStmt                  *sql.Stmt
 	createSessionStmt                  *sql.Stmt
 	deleteCheckpointStmt               *sql.Stmt
@@ -498,6 +645,10 @@ type Queries struct {
 	getHourDayHeatmapStmt              *sql.Stmt
 	getLastSessionStmt                 *sql.Stmt
 	getLatestSessionCheckpointStmt     *sql.Stmt
+	getMaterializedViewStmt            *sql.Stmt
+	getMaxMemoryEventWatermarkStmt     *sql.Stmt
+	getMemoryEventByIDStmt             *sql.Stmt
+	getMemorySourceByNameStmt          *sql.Stmt
 	getMessageStmt                     *sql.Stmt
 	getRecentActivityStmt              *sql.Stmt
 	getSessionByIDStmt                 *sql.Stmt
@@ -512,8 +663,15 @@ type Queries struct {
 	listFilesByPathStmt                *sql.Stmt
 	listFilesBySessionStmt             *sql.Stmt
 	listLatestSessionFilesStmt         *sql.Stmt
+	listMaterializedViewsStmt          *sql.Stmt
+	listMemoryEventsByWatermarkStmt    *sql.Stmt
+	listMemoryEventsFilteredStmt       *sql.Stmt
+	listMemoryJobsByStatusStmt         *sql.Stmt
+	listMemorySourcesStmt              *sql.Stmt
 	listMessagesBySessionStmt          *sql.Stmt
+	listMessagesBySessionPageStmt      *sql.Stmt
 	listNewFilesStmt                   *sql.Stmt
+	listRecentMemoryJobsStmt           *sql.Stmt
 	listSessionCheckpointsStmt         *sql.Stmt
 	listSessionReadFilesStmt           *sql.Stmt
 	listSessionsStmt                   *sql.Stmt
@@ -521,12 +679,16 @@ type Queries struct {
 	listUserMessagesBySessionStmt      *sql.Stmt
 	recordFileReadStmt                 *sql.Stmt
 	renameSessionStmt                  *sql.Stmt
+	resetMaterializedViewWatermarkStmt *sql.Stmt
 	searchMessagesStmt                 *sql.Stmt
+	updateMemoryJobStatusStmt          *sql.Stmt
 	updateMessageStmt                  *sql.Stmt
 	updateSessionStmt                  *sql.Stmt
 	updateSessionCollaborationModeStmt *sql.Stmt
 	updateSessionPermissionModeStmt    *sql.Stmt
 	updateSessionTitleAndUsageStmt     *sql.Stmt
+	upsertMaterializedViewStmt         *sql.Stmt
+	upsertMemorySourceStmt             *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
@@ -534,9 +696,12 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                 tx,
 		tx:                                 tx,
 		addCheckpointFileStmt:              q.addCheckpointFileStmt,
+		appendMemoryEventStmt:              q.appendMemoryEventStmt,
 		countCheckpointFilesStmt:           q.countCheckpointFilesStmt,
+		countMessagesBySessionStmt:         q.countMessagesBySessionStmt,
 		createCheckpointStmt:               q.createCheckpointStmt,
 		createFileStmt:                     q.createFileStmt,
+		createMemoryJobStmt:                q.createMemoryJobStmt,
 		createMessageStmt:                  q.createMessageStmt,
 		createSessionStmt:                  q.createSessionStmt,
 		deleteCheckpointStmt:               q.deleteCheckpointStmt,
@@ -555,6 +720,10 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getHourDayHeatmapStmt:              q.getHourDayHeatmapStmt,
 		getLastSessionStmt:                 q.getLastSessionStmt,
 		getLatestSessionCheckpointStmt:     q.getLatestSessionCheckpointStmt,
+		getMaterializedViewStmt:            q.getMaterializedViewStmt,
+		getMaxMemoryEventWatermarkStmt:     q.getMaxMemoryEventWatermarkStmt,
+		getMemoryEventByIDStmt:             q.getMemoryEventByIDStmt,
+		getMemorySourceByNameStmt:          q.getMemorySourceByNameStmt,
 		getMessageStmt:                     q.getMessageStmt,
 		getRecentActivityStmt:              q.getRecentActivityStmt,
 		getSessionByIDStmt:                 q.getSessionByIDStmt,
@@ -569,8 +738,15 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listFilesByPathStmt:                q.listFilesByPathStmt,
 		listFilesBySessionStmt:             q.listFilesBySessionStmt,
 		listLatestSessionFilesStmt:         q.listLatestSessionFilesStmt,
+		listMaterializedViewsStmt:          q.listMaterializedViewsStmt,
+		listMemoryEventsByWatermarkStmt:    q.listMemoryEventsByWatermarkStmt,
+		listMemoryEventsFilteredStmt:       q.listMemoryEventsFilteredStmt,
+		listMemoryJobsByStatusStmt:         q.listMemoryJobsByStatusStmt,
+		listMemorySourcesStmt:              q.listMemorySourcesStmt,
 		listMessagesBySessionStmt:          q.listMessagesBySessionStmt,
+		listMessagesBySessionPageStmt:      q.listMessagesBySessionPageStmt,
 		listNewFilesStmt:                   q.listNewFilesStmt,
+		listRecentMemoryJobsStmt:           q.listRecentMemoryJobsStmt,
 		listSessionCheckpointsStmt:         q.listSessionCheckpointsStmt,
 		listSessionReadFilesStmt:           q.listSessionReadFilesStmt,
 		listSessionsStmt:                   q.listSessionsStmt,
@@ -578,11 +754,15 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listUserMessagesBySessionStmt:      q.listUserMessagesBySessionStmt,
 		recordFileReadStmt:                 q.recordFileReadStmt,
 		renameSessionStmt:                  q.renameSessionStmt,
+		resetMaterializedViewWatermarkStmt: q.resetMaterializedViewWatermarkStmt,
 		searchMessagesStmt:                 q.searchMessagesStmt,
+		updateMemoryJobStatusStmt:          q.updateMemoryJobStatusStmt,
 		updateMessageStmt:                  q.updateMessageStmt,
 		updateSessionStmt:                  q.updateSessionStmt,
 		updateSessionCollaborationModeStmt: q.updateSessionCollaborationModeStmt,
 		updateSessionPermissionModeStmt:    q.updateSessionPermissionModeStmt,
 		updateSessionTitleAndUsageStmt:     q.updateSessionTitleAndUsageStmt,
+		upsertMaterializedViewStmt:         q.upsertMaterializedViewStmt,
+		upsertMemorySourceStmt:             q.upsertMemorySourceStmt,
 	}
 }

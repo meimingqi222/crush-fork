@@ -37,7 +37,9 @@ func (r *ReferencesToolRenderContext) RenderTool(sty *styles.Styles, width int, 
 	}
 
 	var params tools.ReferencesParams
-	_ = json.Unmarshal([]byte(opts.ToolCall.Input), &params)
+	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
+		return ""
+	}
 
 	toolParams := []string{params.Symbol}
 	if params.Path != "" {

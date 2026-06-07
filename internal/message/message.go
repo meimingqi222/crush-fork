@@ -28,6 +28,8 @@ type Service interface {
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
+	ListPage(ctx context.Context, sessionID string, offset, limit int) ([]Message, error)
+	Count(ctx context.Context, sessionID string) (int64, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	Delete(ctx context.Context, id string) error
@@ -170,6 +172,29 @@ func (s *service) List(ctx context.Context, sessionID string) ([]Message, error)
 	}
 	slog.Debug("[PERF] message.List: fromDBItem conversion done", "duration", time.Since(start), "session_id", sessionID)
 	return messages, nil
+}
+
+func (s *service) ListPage(ctx context.Context, sessionID string, offset, limit int) ([]Message, error) {
+	dbMessages, err := s.q.ListMessagesBySessionPage(ctx, db.ListMessagesBySessionPageParams{
+		SessionID: sessionID,
+		Limit:     int64(limit),
+		Offset:    int64(offset),
+	})
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) Count(ctx context.Context, sessionID string) (int64, error) {
+	return s.q.CountMessagesBySession(ctx, sessionID)
 }
 
 func (s *service) ListUserMessages(ctx context.Context, sessionID string) ([]Message, error) {

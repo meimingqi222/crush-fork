@@ -41,7 +41,9 @@ func (d *DiagnosticsToolRenderContext) RenderTool(sty *styles.Styles, width int,
 	}
 
 	var params tools.DiagnosticsParams
-	_ = json.Unmarshal([]byte(opts.ToolCall.Input), &params)
+	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
+		return ""
+	}
 
 	// Show "project" if no file path, otherwise show the file path.
 	mainParam := "project"

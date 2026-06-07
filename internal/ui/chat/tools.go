@@ -471,6 +471,10 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 
 // Render renders the tool message item at the given width.
 func (t *baseToolMessageItem) Render(width int) string {
+	raw := t.RawRender(width)
+	if raw == "" {
+		return ""
+	}
 	// Determine which prefix style applies and whether the cached prefix
 	// is still valid.
 	var prefixKey string
@@ -492,7 +496,7 @@ func (t *baseToolMessageItem) Render(width int) string {
 		}
 		t.cachedPrefixKey = prefixKey
 	}
-	return applyLinePrefix(t.RawRender(width), t.cachedPrefix)
+	return applyLinePrefix(raw, t.cachedPrefix)
 }
 
 // ToolCall returns the tool call associated with this message item.
@@ -668,8 +672,9 @@ func (t *baseToolMessageItem) getSpinnerPrefix() string {
 }
 
 // HandleMouseClick implements MouseClickable.
+// Returns false to let HandleDelayedClick fall through to ToggleExpanded.
 func (t *baseToolMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) bool {
-	return btn == ansi.MouseLeft
+	return false
 }
 
 // HandleKeyEvent implements KeyEventHandler.

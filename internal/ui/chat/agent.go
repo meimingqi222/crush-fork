@@ -231,16 +231,18 @@ func (a *AgentToolMessageItem) SetResult(res *message.ToolResult) {
 // getCachedAgentParams lazily parses and caches the agent params from the tool
 // call input. During spinning renders (20fps), this avoids calling
 // json.Unmarshal on every frame; parsing only happens once until the input changes.
-func (a *AgentToolMessageItem) getCachedAgentParams(input string) (agent.AgentParams, []agentTaskRenderEntry) {
+func (a *AgentToolMessageItem) getCachedAgentParams(input string) (agent.AgentParams, []agentTaskRenderEntry, bool) {
 	if a.cachedParams != nil && a.cachedParamInput == input {
-		return *a.cachedParams, a.cachedTasks
+		return *a.cachedParams, a.cachedTasks, true
 	}
 	var params agent.AgentParams
-	_ = json.Unmarshal([]byte(input), &params)
+	if err := json.Unmarshal([]byte(input), &params); err != nil {
+		return params, nil, false
+	}
 	a.cachedParams = &params
 	a.cachedParamInput = input
 	a.cachedTasks = collectAgentTaskEntries(params)
-	return params, a.cachedTasks
+	return params, a.cachedTasks, true
 }
 
 // getCachedTaskStatuses lazily parses and caches per-task statuses from the
@@ -279,7 +281,10 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	}
 
 	// Use cached parsed params/tasks to avoid json.Unmarshal on every spinning frame.
-	params, tasks := r.agent.getCachedAgentParams(opts.ToolCall.Input)
+	params, tasks, ok := r.agent.getCachedAgentParams(opts.ToolCall.Input)
+	if !ok {
+		return ""
+	}
 
 	firstTask := agentTaskRenderEntry{}
 	if len(tasks) > 0 {
@@ -494,15 +499,17 @@ func (a *AgenticFetchToolMessageItem) SetToolCall(tc message.ToolCall) {
 // getCachedFetchParams lazily parses and caches the fetch params from the tool
 // call input. During spinning renders (20fps), this avoids calling
 // json.Unmarshal on every frame; parsing only happens once until the input changes.
-func (a *AgenticFetchToolMessageItem) getCachedFetchParams(input string) agenticFetchParams {
+func (a *AgenticFetchToolMessageItem) getCachedFetchParams(input string) (agenticFetchParams, bool) {
 	if a.cachedParams != nil && a.cachedParamInput == input {
-		return *a.cachedParams
+		return *a.cachedParams, true
 	}
 	var params agenticFetchParams
-	_ = json.Unmarshal([]byte(input), &params)
+	if err := json.Unmarshal([]byte(input), &params); err != nil {
+		return params, false
+	}
 	a.cachedParams = &params
 	a.cachedParamInput = input
-	return params
+	return params, true
 }
 
 // AgenticFetchToolRenderContext renders agentic fetch tool messages.
@@ -524,7 +531,10 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 	}
 
 	// Use cached parsed params to avoid json.Unmarshal on every spinning frame.
-	params := r.fetch.getCachedFetchParams(opts.ToolCall.Input)
+	params, ok := r.fetch.getCachedFetchParams(opts.ToolCall.Input)
+	if !ok {
+		return ""
+	}
 
 	prompt := params.Prompt
 	prompt = strings.ReplaceAll(prompt, "\n", " ")
@@ -989,8 +999,9 @@ func (t *TaskNodeItem) ToggleExpanded() bool {
 }
 
 // HandleMouseClick implements MouseClickable.
+// Returns false to let HandleDelayedClick fall through to ToggleExpanded.
 func (t *TaskNodeItem) HandleMouseClick(btn ansi.MouseButton, x, y int) bool {
-	return btn == ansi.MouseLeft
+	return false
 }
 
 func (t *TaskNodeItem) SetFocused(focused bool) {

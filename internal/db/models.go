@@ -30,6 +30,68 @@ type File struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
+type MemoryEvent struct {
+	ID         string         `json:"id"`
+	SessionID  string         `json:"session_id"`
+	Scope      string         `json:"scope"`
+	Kind       string         `json:"kind"`
+	Content    string         `json:"content"`
+	Summary    string         `json:"summary"`
+	SourceJson string         `json:"source_json"`
+	SourceHash string         `json:"source_hash"`
+	Confidence float64        `json:"confidence"`
+	Importance float64        `json:"importance"`
+	Supersedes sql.NullString `json:"supersedes"`
+	TagsJson   string         `json:"tags_json"`
+	Watermark  int64          `json:"watermark"`
+	CreatedAt  int64          `json:"created_at"`
+	UpdatedAt  int64          `json:"updated_at"`
+	ExpiresAt  sql.NullInt64  `json:"expires_at"`
+}
+
+type MemoryEventsFt struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Summary string `json:"summary"`
+	Scope   string `json:"scope"`
+	Kind    string `json:"kind"`
+	Tags    string `json:"tags"`
+}
+
+type MemoryJob struct {
+	ID             string        `json:"id"`
+	JobType        string        `json:"job_type"`
+	Status         string        `json:"status"`
+	Owner          string        `json:"owner"`
+	LeaseExpiresAt sql.NullInt64 `json:"lease_expires_at"`
+	RetryCount     int64         `json:"retry_count"`
+	MaxRetries     int64         `json:"max_retries"`
+	PayloadJson    string        `json:"payload_json"`
+	ErrorMessage   string        `json:"error_message"`
+	CreatedAt      int64         `json:"created_at"`
+	UpdatedAt      int64         `json:"updated_at"`
+}
+
+type MemoryMaterializedView struct {
+	ID            string `json:"id"`
+	ViewName      string `json:"view_name"`
+	Watermark     int64  `json:"watermark"`
+	SchemaVersion int64  `json:"schema_version"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+type MemorySource struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	SourceType             string `json:"source_type"`
+	Cursor                 string `json:"cursor"`
+	LastProcessedMessageID string `json:"last_processed_message_id"`
+	Watermark              int64  `json:"watermark"`
+	CreatedAt              int64  `json:"created_at"`
+	UpdatedAt              int64  `json:"updated_at"`
+}
+
 type Message struct {
 	ID               string         `json:"id"`
 	SessionID        string         `json:"session_id"`

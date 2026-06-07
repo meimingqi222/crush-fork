@@ -9,6 +9,18 @@ FROM messages
 WHERE session_id = ?
 ORDER BY created_at ASC;
 
+-- name: CountMessagesBySession :one
+SELECT COUNT(*)
+FROM messages
+WHERE session_id = ?;
+
+-- name: ListMessagesBySessionPage :many
+SELECT *
+FROM messages
+WHERE session_id = ?
+ORDER BY created_at ASC
+LIMIT sqlc.arg(limit) OFFSET sqlc.arg(offset);
+
 -- name: CreateMessage :one
 INSERT INTO messages (
     id,

@@ -211,6 +211,13 @@ type UI struct {
 	sessionMsgIndex map[string]int // Maps message ID to index in sessionMessages for O(1) lookup.
 	sessionFiles    []SessionFile
 
+	// Virtual scrolling: tracks how many messages are skipped (not loaded)
+	// at the beginning of the session. When the user scrolls to the top,
+	// older messages are loaded on demand and this count decreases.
+	skippedMessageCount int64
+	totalMessageCount   int64
+	loadingMoreMessages bool
+
 	// childSessionInfoCache caches child session metadata to avoid
 	// DB I/O in the render path.
 	childSessionInfoCache map[string]childSessionInfo
@@ -633,6 +640,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isCanceling = false
 		m.todoIsSpinning = false
 		m.session = msg.session
+		m.skippedMessageCount = msg.skippedMessageCount
+		m.totalMessageCount = msg.totalMessageCount
+		m.loadingMoreMessages = false
 		m.sessionFiles = msg.files
 		m.childSessionInfoCache = msg.childSessionInfo
 		m.timelineEvents = nil
@@ -672,6 +682,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadPromptHistory())
 		m.updateLayoutAndSize()
 		m.invalidateSidebarCache()
+
+	case loadMoreMessagesMsg:
+		m.loadingMoreMessages = false
+		m.skippedMessageCount = msg.count
+		if len(msg.messages) > 0 {
+			if cmd := m.prependSessionMessages(msg.messages); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 
 	case openChildSessionMsg:
 		cmds = append(cmds, m.loadSession(msg.sessionID))
@@ -1238,6 +1257,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// at this point this can only handle [message.Attachment] message, and we
 	// should return all cmds anyway.
 	_ = m.attachments.Update(msg)
+
+	// Check if we need to load more historical messages (virtual scrolling).
+	if cmd := m.maybeLoadMoreMessages(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1376,6 +1401,93 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	}
 	m.chat.SelectLast()
 	return tea.Sequence(cmds...)
+}
+
+// prependSessionMessages prepends older messages to the current session's chat
+// list. This is used for virtual scrolling: when the user scrolls to the top,
+// older messages are loaded from the database and inserted before the current
+// items. The scroll position is adjusted so the user stays at the same visual
+// position.
+func (m *UI) prependSessionMessages(msgs []message.Message) tea.Cmd {
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	// Prepend to the session messages slice.
+	oldLen := len(m.sessionMessages)
+	m.sessionMessages = slices.Concat(msgs, m.sessionMessages)
+	// Rebuild the index from scratch since we prepended.
+	m.sessionMsgIndex = make(map[string]int, len(m.sessionMessages))
+	for i, msg := range m.sessionMessages {
+		m.sessionMsgIndex[msg.ID] = i
+	}
+
+	// Build tool result map from ALL session messages (not just the new ones)
+	// because tool calls in the new messages may have their results in the
+	// already-loaded messages, and vice versa.
+	allMsgPtrs := make([]*message.Message, len(m.sessionMessages))
+	for i := range m.sessionMessages {
+		allMsgPtrs[i] = &m.sessionMessages[i]
+	}
+	toolResultMap := chat.BuildToolResultMap(allMsgPtrs)
+
+	// Build pointers for the new messages only (for iteration below).
+	msgPtrs := make([]*message.Message, len(msgs))
+	for i := range msgs {
+		msgPtrs[i] = &msgs[i]
+	}
+
+	// Extract message items from the new messages.
+	items := make([]chat.MessageItem, 0, len(msgs)*2)
+	for _, msg := range msgPtrs {
+		if msg.IsSummaryMessage && !msg.IsFinished() && strings.TrimSpace(msg.Content().Text) == "" && !m.hasLiveSessionActivity() {
+			continue
+		}
+		switch msg.Role {
+		case message.User:
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+		case message.Assistant:
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
+				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(msg.CreatedAt, 0))
+				items = append(items, infoItem)
+			}
+		default:
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+		}
+	}
+
+	// Load nested tool calls for the new items.
+	m.loadNestedToolCalls(items)
+	items = m.restoreTaskNodes(items, toolResultMap)
+	m.loadTaskNodeNestedTools(items)
+
+	if !m.hasLiveSessionActivity() {
+		m.setLoadingStateVisible(items, false)
+	}
+
+	// Prepend items to the chat list and adjust scroll position.
+	m.chat.PrependMessages(items...)
+
+	// Update tool runtime states for the new items.
+	if m.session != nil && m.com != nil && m.com.App != nil && m.com.App.GetToolRuntime() != nil {
+		for _, state := range m.com.App.GetToolRuntime().ListBySession(m.session.ID) {
+			item := m.chat.MessageItem(state.ToolCallID)
+			if toolItem, ok := item.(chat.ToolMessageItem); ok {
+				toolItem.SetRuntimeState(&state)
+			}
+		}
+	}
+
+	// Update lastUserMessageTime if the prepended messages contain user messages.
+	_ = oldLen // oldLen used for debugging if needed
+	for _, msg := range msgPtrs {
+		if msg.Role == message.User {
+			m.lastUserMessageTime = msg.CreatedAt
+		}
+	}
+
+	return nil
 }
 
 func (m *UI) setLoadingStateVisible(items []chat.MessageItem, visible bool) {
@@ -4009,6 +4121,19 @@ func (m *UI) updateSize() {
 		// Sidebar dimensions may have changed; invalidate cache.
 		m.invalidateSidebarCache()
 	}
+}
+
+// maybeLoadMoreMessages checks if the user has scrolled near the top of the
+// chat and there are more historical messages to load. If so, it triggers an
+// async load of older messages.
+func (m *UI) maybeLoadMoreMessages() tea.Cmd {
+	if m.skippedMessageCount <= 0 || m.loadingMoreMessages || m.state != uiChat {
+		return nil
+	}
+	if m.chat.AtTop() {
+		return m.loadMoreMessages()
+	}
+	return nil
 }
 
 // generateLayout calculates the layout rectangles for all UI components based

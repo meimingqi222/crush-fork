@@ -50,34 +50,35 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	var body string
 
 	// Parse params for pending state (before result is available).
-	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err == nil {
-		completedCount := 0
-		inProgressTask := ""
-		for _, todo := range params.Todos {
-			if todo.Status == "completed" {
-				completedCount++
-			}
-			if todo.Status == "in_progress" {
-				if todo.ActiveForm != "" {
-					inProgressTask = todo.ActiveForm
-				} else {
-					inProgressTask = todo.Content
-				}
+	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
+		return ""
+	}
+	completedCount := 0
+	inProgressTask := ""
+	for _, todo := range params.Todos {
+		if todo.Status == "completed" {
+			completedCount++
+		}
+		if todo.Status == "in_progress" {
+			if todo.ActiveForm != "" {
+				inProgressTask = todo.ActiveForm
+			} else {
+				inProgressTask = todo.Content
 			}
 		}
+	}
 
-		// Default display from params (used when pending or no metadata).
-		ratio := sty.Tool.TodoRatio.Render(fmt.Sprintf("%d/%d", completedCount, len(params.Todos)))
-		headerText = ratio
-		if inProgressTask != "" {
-			headerText = fmt.Sprintf("%s · %s", ratio, inProgressTask)
-		}
+	// Default display from params (used when pending or no metadata).
+	ratio := sty.Tool.TodoRatio.Render(fmt.Sprintf("%d/%d", completedCount, len(params.Todos)))
+	headerText = ratio
+	if inProgressTask != "" {
+		headerText = fmt.Sprintf("%s · %s", ratio, inProgressTask)
+	}
 
-		// If we have metadata, use it for richer display.
-		if opts.HasResult() && opts.Result.Metadata != "" {
-			if err := json.Unmarshal([]byte(opts.Result.Metadata), &meta); err == nil {
-				headerText, body = renderTodosMetadata(sty, meta, cappedWidth)
-			}
+	// If we have metadata, use it for richer display.
+	if opts.HasResult() && opts.Result.Metadata != "" {
+		if err := json.Unmarshal([]byte(opts.Result.Metadata), &meta); err == nil {
+			headerText, body = renderTodosMetadata(sty, meta, cappedWidth)
 		}
 	}
 

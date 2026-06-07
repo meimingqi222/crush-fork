@@ -32,13 +32,26 @@ import (
 // loadSessionMsg is a message indicating that a session and its files have
 // been loaded.
 type loadSessionMsg struct {
-	session           *session.Session
-	messages          []message.Message
-	files             []SessionFile
-	readFiles         []string
-	selectedMessageID string
-	childSessionInfo  map[string]childSessionInfo
+	session             *session.Session
+	messages            []message.Message
+	files               []SessionFile
+	readFiles           []string
+	selectedMessageID   string
+	childSessionInfo    map[string]childSessionInfo
+	totalMessageCount   int64
+	skippedMessageCount int64
 }
+
+// loadMoreMessagesMsg is sent when older messages have been loaded from the
+// database to prepend to the chat list.
+type loadMoreMessagesMsg struct {
+	messages []message.Message
+	count    int64 // Number of messages that were skipped before this batch
+}
+
+// loadMoreMessagesCount is the number of older messages to load per batch
+// when the user scrolls to the top.
+const loadMoreMessagesCount = 100
 
 // lspFilePaths returns deduplicated file paths from both modified and read
 // files for starting LSP servers.
@@ -89,6 +102,11 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 	return m.loadSessionWithSelection(sessionID, "")
 }
 
+// initialMessageLoadLimit is the maximum number of messages to load initially
+// when switching sessions. If the session has more messages, they can be
+// loaded on demand when the user scrolls to the top.
+const initialMessageLoadLimit = 200
+
 func (m *UI) loadSessionWithSelection(sessionID string, selectedMessageID string) tea.Cmd {
 	m.pendingSessionLoad = sessionID
 	return func() tea.Msg {
@@ -107,7 +125,22 @@ func (m *UI) loadSessionWithSelection(sessionID string, selectedMessageID string
 			slog.Error("Failed to load read files for session", "error", err)
 		}
 
-		msgs, err := m.com.App.Messages.List(context.Background(), sessionID)
+		// Load only the most recent messages initially. If the session has
+		// more messages than initialMessageLoadLimit, older messages can be
+		// loaded on demand when the user scrolls to the top.
+		totalCount, err := m.com.App.Messages.Count(context.Background(), sessionID)
+		if err != nil {
+			return util.ReportError(err)
+		}
+
+		var msgs []message.Message
+		var skippedCount int64
+		if totalCount > int64(initialMessageLoadLimit) {
+			skippedCount = totalCount - int64(initialMessageLoadLimit)
+			msgs, err = m.com.App.Messages.ListPage(context.Background(), sessionID, int(skippedCount), initialMessageLoadLimit)
+		} else {
+			msgs, err = m.com.App.Messages.List(context.Background(), sessionID)
+		}
 		if err != nil {
 			return util.ReportError(err)
 		}
@@ -120,12 +153,41 @@ func (m *UI) loadSessionWithSelection(sessionID string, selectedMessageID string
 		}
 
 		return loadSessionMsg{
-			session:           &session,
-			messages:          msgs,
-			files:             sessionFiles,
-			readFiles:         readFiles,
-			selectedMessageID: selectedMessageID,
-			childSessionInfo:  childInfo,
+			session:             &session,
+			messages:            msgs,
+			files:               sessionFiles,
+			readFiles:           readFiles,
+			selectedMessageID:   selectedMessageID,
+			childSessionInfo:    childInfo,
+			totalMessageCount:   totalCount,
+			skippedMessageCount: skippedCount,
+		}
+	}
+}
+
+// loadMoreMessages loads older messages from the database and returns them
+// as a loadMoreMessagesMsg. The offset is the number of messages to skip
+// from the beginning (i.e., m.skippedMessageCount - loadMoreMessagesCount).
+func (m *UI) loadMoreMessages() tea.Cmd {
+	if m.session == nil || m.skippedMessageCount <= 0 || m.loadingMoreMessages {
+		return nil
+	}
+	m.loadingMoreMessages = true
+	sessionID := m.session.ID
+	skipCount := m.skippedMessageCount
+	limit := int64(loadMoreMessagesCount)
+	if skipCount < limit {
+		limit = skipCount
+	}
+	offset := skipCount - limit
+	return func() tea.Msg {
+		msgs, err := m.com.App.Messages.ListPage(context.Background(), sessionID, int(offset), int(limit))
+		if err != nil {
+			return util.ReportError(err)
+		}
+		return loadMoreMessagesMsg{
+			messages: msgs,
+			count:    offset,
 		}
 	}
 }

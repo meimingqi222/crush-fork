@@ -43,7 +43,7 @@ func (v *ReadToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 
 	var params tools.ReadParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	file := fsext.PrettyPath(params.Path)
@@ -153,7 +153,7 @@ func (w *WriteToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 
 	var params tools.WriteParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	file := fsext.PrettyPath(params.FilePath)
@@ -208,7 +208,7 @@ func (e *EditToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 
 	var params tools.EditParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, width)
+		return ""
 	}
 
 	file := fsext.PrettyPath(params.FilePath)
@@ -276,7 +276,7 @@ func (d *DownloadToolRenderContext) RenderTool(sty *styles.Styles, width int, op
 
 	var params tools.DownloadParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	toolParams := []string{params.URL}

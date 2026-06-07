@@ -40,7 +40,7 @@ func (d *DockerMCPToolRenderContext) RenderTool(sty *styles.Styles, width int, o
 
 	var params map[string]any
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		params = make(map[string]any)
+		return ""
 	}
 
 	tool := strings.TrimPrefix(opts.ToolCall.Name, "mcp_"+config.DockerMCPName+"_")

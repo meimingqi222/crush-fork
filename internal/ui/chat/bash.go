@@ -43,7 +43,7 @@ func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	cappedWidth := cappedMessageWidth(width)
 	var params tools.BashParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		params.Command = "failed to parse command"
+		return ""
 	}
 
 	// Check if this is a background job.
@@ -166,7 +166,7 @@ func (j *JobOutputToolRenderContext) RenderTool(sty *styles.Styles, width int, o
 
 	var params tools.JobOutputParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	var description string
@@ -213,7 +213,7 @@ func (j *JobWaitToolRenderContext) RenderTool(sty *styles.Styles, width int, opt
 
 	var params tools.JobWaitParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	var description string
@@ -264,7 +264,7 @@ func (j *JobKillToolRenderContext) RenderTool(sty *styles.Styles, width int, opt
 
 	var params tools.JobKillParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	var description string

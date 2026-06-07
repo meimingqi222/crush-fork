@@ -11,9 +11,12 @@ import (
 
 type Querier interface {
 	AddCheckpointFile(ctx context.Context, arg AddCheckpointFileParams) error
+	AppendMemoryEvent(ctx context.Context, arg AppendMemoryEventParams) error
 	CountCheckpointFiles(ctx context.Context, checkpointID string) (int64, error)
+	CountMessagesBySession(ctx context.Context, sessionID string) (int64, error)
 	CreateCheckpoint(ctx context.Context, arg CreateCheckpointParams) (Checkpoint, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
+	CreateMemoryJob(ctx context.Context, arg CreateMemoryJobParams) error
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	DeleteCheckpoint(ctx context.Context, id string) error
@@ -32,6 +35,10 @@ type Querier interface {
 	GetHourDayHeatmap(ctx context.Context) ([]GetHourDayHeatmapRow, error)
 	GetLastSession(ctx context.Context) (Session, error)
 	GetLatestSessionCheckpoint(ctx context.Context, sessionID string) (Checkpoint, error)
+	GetMaterializedView(ctx context.Context, viewName string) (MemoryMaterializedView, error)
+	GetMaxMemoryEventWatermark(ctx context.Context) (interface{}, error)
+	GetMemoryEventByID(ctx context.Context, id string) (GetMemoryEventByIDRow, error)
+	GetMemorySourceByName(ctx context.Context, name string) (MemorySource, error)
 	GetMessage(ctx context.Context, id string) (Message, error)
 	GetRecentActivity(ctx context.Context) ([]GetRecentActivityRow, error)
 	GetSessionByID(ctx context.Context, id string) (Session, error)
@@ -46,8 +53,15 @@ type Querier interface {
 	ListFilesByPath(ctx context.Context, path string) ([]File, error)
 	ListFilesBySession(ctx context.Context, sessionID string) ([]File, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
+	ListMaterializedViews(ctx context.Context) ([]MemoryMaterializedView, error)
+	ListMemoryEventsByWatermark(ctx context.Context, arg ListMemoryEventsByWatermarkParams) ([]ListMemoryEventsByWatermarkRow, error)
+	ListMemoryEventsFiltered(ctx context.Context, arg ListMemoryEventsFilteredParams) ([]ListMemoryEventsFilteredRow, error)
+	ListMemoryJobsByStatus(ctx context.Context, status string) ([]MemoryJob, error)
+	ListMemorySources(ctx context.Context) ([]MemorySource, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
+	ListMessagesBySessionPage(ctx context.Context, arg ListMessagesBySessionPageParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
+	ListRecentMemoryJobs(ctx context.Context, limit int64) ([]MemoryJob, error)
 	ListSessionCheckpoints(ctx context.Context, sessionID string) ([]Checkpoint, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
@@ -55,12 +69,16 @@ type Querier interface {
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
+	ResetMaterializedViewWatermark(ctx context.Context, arg ResetMaterializedViewWatermarkParams) error
 	SearchMessages(ctx context.Context, arg SearchMessagesParams) ([]Message, error)
+	UpdateMemoryJobStatus(ctx context.Context, arg UpdateMemoryJobStatusParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionCollaborationMode(ctx context.Context, arg UpdateSessionCollaborationModeParams) (Session, error)
 	UpdateSessionPermissionMode(ctx context.Context, arg UpdateSessionPermissionModeParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) (Session, error)
+	UpsertMaterializedView(ctx context.Context, arg UpsertMaterializedViewParams) error
+	UpsertMemorySource(ctx context.Context, arg UpsertMemorySourceParams) error
 }
 
 var _ Querier = (*Queries)(nil)

@@ -197,7 +197,10 @@ func (l *List) getItem(idx int) renderedItem {
 
 	rendered := item.Render(l.width)
 	rendered = strings.TrimRight(rendered, "\n")
-	height := strings.Count(rendered, "\n") + 1
+	height := 0
+	if rendered != "" {
+		height = strings.Count(rendered, "\n") + 1
+	}
 	ri := renderedItem{
 		content: rendered,
 		height:  height,
@@ -241,9 +244,11 @@ func (l *List) ScrollBy(lines int) {
 		l.offsetLine += lines
 		currentItem := l.getItem(l.offsetIdx)
 		for l.offsetLine >= currentItem.height {
-			l.offsetLine -= currentItem.height
-			if l.gap > 0 {
-				l.offsetLine = max(0, l.offsetLine-l.gap)
+			if currentItem.height > 0 {
+				l.offsetLine -= currentItem.height
+				if l.gap > 0 {
+					l.offsetLine = max(0, l.offsetLine-l.gap)
+				}
 			}
 
 			// Move to next item
@@ -273,6 +278,10 @@ func (l *List) ScrollBy(lines int) {
 				break
 			}
 			prevItem := l.getItem(l.offsetIdx)
+			// Skip zero-height items to avoid infinite loop.
+			if prevItem.height == 0 && l.gap == 0 {
+				continue
+			}
 			totalHeight := prevItem.height
 			if l.gap > 0 {
 				totalHeight += l.gap
@@ -364,6 +373,12 @@ func (l *List) Render() string {
 			}
 		} else {
 			// Standard path: full render then slice.
+			// Skip items with empty content (e.g., tool nodes hidden due to
+			// invalid parameters). They contribute zero lines.
+			if item.content == "" {
+				currentIdx++
+				continue
+			}
 			itemLines := strings.Split(item.content, "\n")
 			itemHeight = len(itemLines)
 
@@ -516,6 +531,11 @@ func (l *List) Blur() {
 func (l *List) ScrollToTop() {
 	l.offsetIdx = 0
 	l.offsetLine = 0
+}
+
+// AtTop returns whether the list is scrolled to the top.
+func (l *List) AtTop() bool {
+	return l.offsetIdx == 0 && l.offsetLine == 0
 }
 
 // ScrollToBottom scrolls the list to the bottom.

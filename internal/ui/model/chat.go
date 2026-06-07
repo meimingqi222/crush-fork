@@ -164,6 +164,22 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 	m.list.AppendItems(items...)
 }
 
+// PrependMessages prepends message items to the beginning of the chat list.
+// This is used for virtual scrolling to insert older messages when the user
+// scrolls to the top. The idInxMap is rebuilt to reflect the new indices.
+func (m *Chat) PrependMessages(msgs ...chat.MessageItem) {
+	if len(msgs) == 0 {
+		return
+	}
+	items := make([]list.Item, len(msgs))
+	for i, msg := range msgs {
+		items[i] = msg
+	}
+	m.list.PrependItems(items...)
+	// Rebuild the entire index map since all indices shifted.
+	m.rebuildIDIndexMap()
+}
+
 func (m *Chat) rebuildIDIndexMap() {
 	m.idInxMap = make(map[string]int)
 	m.msgToolCallIDs = make(map[string]map[string]struct{})
@@ -310,11 +326,29 @@ func (m *Chat) UnregisterAnimation(id string) {
 // called by the global animation ticker so that all animations share a single
 // redraw cycle regardless of how many are active.
 func (m *Chat) TickAnimations() {
-	if len(m.animating) == 0 {
+	if len(m.animating) == 0 && len(m.pausedAnimations) == 0 {
 		return
 	}
 
 	startIdx, endIdx := m.list.VisibleItemIndices()
+
+	// Resume paused animations that have scrolled back into view.
+	for id := range m.pausedAnimations {
+		idx, ok := m.idInxMap[id]
+		if !ok {
+			delete(m.pausedAnimations, id)
+			continue
+		}
+		if idx >= startIdx && idx <= endIdx {
+			animatable, ok := m.list.ItemAt(idx).(chat.Animatable)
+			if !ok || !animatable.IsAnimating() {
+				delete(m.pausedAnimations, id)
+				continue
+			}
+			m.animating[id] = struct{}{}
+			delete(m.pausedAnimations, id)
+		}
+	}
 
 	for id := range m.animating {
 		idx, ok := m.idInxMap[id]
@@ -324,9 +358,7 @@ func (m *Chat) TickAnimations() {
 		}
 
 		// Only tick visible items. Move off-screen items to pausedAnimations
-		// and remove from animating so HasAnimating() reflects only active
-		// (non-paused) animations. This prevents the global ticker from
-		// running indefinitely when all animations are scrolled off-screen.
+		// so the global ticker keeps running but skips the expensive tick.
 		if idx < startIdx || idx > endIdx {
 			m.pausedAnimations[id] = struct{}{}
 			delete(m.animating, id)
@@ -342,17 +374,19 @@ func (m *Chat) TickAnimations() {
 		// Check if the item is still spinning.
 		if !animatable.IsAnimating() {
 			delete(m.animating, id)
+			delete(m.pausedAnimations, id)
 			continue
 		}
 
-		delete(m.pausedAnimations, id)
 		animatable.TickAnimation()
 	}
 }
 
-// HasAnimating returns whether any items are currently animating.
+// HasAnimating returns whether any items are animating or paused (off-screen).
+// Paused animations must be included so the global ticker keeps running and
+// can resume them when they scroll back into view.
 func (m *Chat) HasAnimating() bool {
-	return len(m.animating) > 0
+	return len(m.animating) > 0 || len(m.pausedAnimations) > 0
 }
 
 // RestartPausedVisibleAnimations restarts animations for items that were paused
@@ -400,6 +434,11 @@ func (m *Chat) Blur() {
 // AtBottom returns whether the chat list is currently scrolled to the bottom.
 func (m *Chat) AtBottom() bool {
 	return m.list.AtBottom()
+}
+
+// AtTop returns whether the chat view is scrolled to the top.
+func (m *Chat) AtTop() bool {
+	return m.list.AtTop()
 }
 
 // Follow returns whether the chat view is in follow mode (auto-scroll to
@@ -835,10 +874,16 @@ func (m *Chat) HandleDelayedClick(msg DelayedClickMsg) bool {
 	selectedItem := m.list.SelectedItem()
 	if clickable, ok := selectedItem.(list.MouseClickable); ok {
 		handled := clickable.HandleMouseClick(ansi.MouseButton1, msg.X, msg.Y)
-		// Toggle expansion if applicable.
-		if expandable, ok := selectedItem.(chat.Expandable); ok {
-			if !expandable.ToggleExpanded() {
-				m.ScrollToIndex(m.list.Selected())
+		// If HandleMouseClick already handled the click (e.g., toggled a
+		// specific region like thinking/summary), skip the generic toggle.
+		// Otherwise, fall through to ToggleExpanded for items that don't
+		// handle clicks themselves (e.g., baseToolMessageItem).
+		if !handled {
+			if expandable, ok := selectedItem.(chat.Expandable); ok {
+				handled = true
+				if !expandable.ToggleExpanded() {
+					m.ScrollToIndex(m.list.Selected())
+				}
 			}
 		}
 		if m.AtBottom() {

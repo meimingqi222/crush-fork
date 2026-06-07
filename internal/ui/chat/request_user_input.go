@@ -39,7 +39,7 @@ func (r *RequestUserInputToolRenderContext) RenderTool(sty *styles.Styles, width
 
 	var params tools.RequestUserInputParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
+		return ""
 	}
 
 	totalQuestions := len(params.Questions)
