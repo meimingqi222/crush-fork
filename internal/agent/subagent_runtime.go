@@ -141,31 +141,6 @@ func (s SideEffectSummary) HasAny() bool {
 		s.ApprovalGranted
 }
 
-// Deprecated: ShouldRetrySubagent is DAG-era retry logic. In the simplified
-// execution model the parent LLM decides whether to retry failed tasks.
-func ShouldRetrySubagent(result subagentResult, runtime SubagentRuntimeContext, sideEffects SideEffectSummary) bool {
-	if result.Status == message.ToolResultSubtaskStatusCanceled ||
-		result.Status == message.ToolResultSubtaskStatusBlocked ||
-		statusReleasesDependents(result.Status) {
-		return false
-	}
-	if runtime.Retry.MaxAttempts > 0 && result.Attempts >= runtime.Retry.MaxAttempts {
-		return false
-	}
-	switch runtime.Retry.Kind {
-	case RetryNever:
-		return false
-	case RetryReadOnlyOnly:
-		return runtime.AgentProfile.ReadOnly && !sideEffects.HasAny()
-	case RetryIdempotent:
-		return !sideEffects.HasAny()
-	case RetryIsolated:
-		return runtime.Isolation.Available
-	default:
-		return false
-	}
-}
-
 type SubagentEventType string
 
 const (
@@ -228,9 +203,8 @@ type SubagentRuntimeContext struct {
 	Permissions       DerivedSubagentPermissions
 	ApprovalAuthority ApprovalAuthority
 	Workspace         SubagentWorkspacePolicy
-	Isolation         SubagentIsolation
-	Retry             SubagentRetryPolicy
-	Result            SubagentResultContract
+	Isolation SubagentIsolation
+	Result    SubagentResultContract
 	Events            SubagentEventSink
 
 	// MaxTurns is the maximum number of LLM turns the subagent is allowed.
@@ -286,8 +260,7 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 			Available: true,
 			Path:      strings.TrimSpace(workspaceRoot),
 		},
-		Retry:        subagentRetryPolicy(profile),
-		Result:       subagentResultContract(profile),
+		Result: subagentResultContract(profile),
 		Events:       eventSink,
 		MaxTurns:     agentCfg.MaxTurns,
 		OutputSchema: agentCfg.OutputSchema,
@@ -424,9 +397,6 @@ func applySubagentRuntimeConfig(runtime *SubagentRuntimeContext, runtimeCfg conf
 	if policy := parseMissingFinishPolicy(runtimeCfg.MissingFinishPolicy); policy != "" {
 		runtime.Result.MissingFinishPolicy = policy
 	}
-	if retryKind := parseSubagentRetryPolicyKind(runtimeCfg.DefaultRetryPolicy); retryKind != "" {
-		runtime.Retry.Kind = retryKind
-	}
 }
 
 func parseMissingFinishPolicy(value string) MissingFinishPolicy {
@@ -444,31 +414,6 @@ func parseMissingFinishPolicy(value string) MissingFinishPolicy {
 	}
 }
 
-func parseSubagentRetryPolicyKind(value string) SubagentRetryPolicyKind {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case string(RetryNever):
-		return RetryNever
-	case string(RetryReadOnlyOnly):
-		return RetryReadOnlyOnly
-	case string(RetryIdempotent):
-		return RetryIdempotent
-	case string(RetryIsolated):
-		return RetryIsolated
-	default:
-		return ""
-	}
-}
 
-func subagentRetryPolicy(profile SubagentProfile) SubagentRetryPolicy {
-	policy := SubagentRetryPolicy{MaxAttempts: 1}
-	if profile.ReadOnly {
-		policy.Kind = RetryReadOnlyOnly
-		return policy
-	}
-	policy.Kind = RetryIdempotent
-	return policy
-}
 
-func statusReleasesDependents(status message.ToolResultSubtaskStatus) bool {
-	return status == message.ToolResultSubtaskStatusCompleted || status == message.ToolResultSubtaskStatusCompletedWithWarnings
-}
+
