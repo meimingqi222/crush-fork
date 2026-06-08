@@ -416,7 +416,7 @@ func TestDeriveSubagentPermissionsFiltersUnallowedMCPAndPlugins(t *testing.T) {
 func TestShapeToolsForSubagentFiltersToolList(t *testing.T) {
 	shaped := ShapeToolsForSubagent([]fantasy.AgentTool{
 		tools.NewGlobTool("/tmp"),
-		tools.NewReadTool(nil, nil, nil, "/tmp", config.ToolLs{}, nil),
+		tools.NewReadTool(nil, nil, nil, "/tmp", config.ToolLs{}, nil, nil),
 		tools.NewEditTool(nil, nil, nil, nil, "/tmp"),
 	}, SubagentToolProfile{Allowed: map[string]struct{}{"glob": {}, "read": {}}, Denied: map[string]struct{}{"edit": {}}})
 

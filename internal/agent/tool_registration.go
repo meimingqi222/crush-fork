@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/skills"
 )
 
 type registeredTool struct {
@@ -107,6 +108,14 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 
 	editTool := agenttools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir())
 
+	// Discover skills for URL resolution in read and bash tools.
+	var discoveredSkills []*skills.Skill
+	if c.cfg.Config().Options != nil && len(c.cfg.Config().Options.SkillsPaths) > 0 {
+		discoveredSkills = skills.Discover(c.cfg.Config().Options.SkillsPaths)
+	}
+
+	bashOpts.SkillList = discoveredSkills
+
 	builtin := []fantasy.AgentTool{
 		agenttools.NewRequestUserInputTool(c.userInput),
 		agenttools.NewPlanExitTool(c.sessions),
@@ -116,7 +125,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewJobKillTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		editTool,
-		agenttools.NewReadTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, c.cfg.Config().Options.SkillsPaths...),
+		agenttools.NewReadTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, discoveredSkills, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),
@@ -182,8 +191,23 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 	}
 
 	if mode != session.CollaborationModePlan {
-		toolSearch := agenttools.NewToolSearchTool(registry, c.activateDeferredTools)
-		register(toolSearch, "builtin", builtinToolMetadata(agenttools.ToolSearchToolName))
+		// Only register tool_search when there are deferred tools to discover.
+		// This prevents the LLM from calling tool_search when no MCP or
+		// external tools are available, reducing unnecessary tool calls.
+		hasDeferred := false
+		for _, entry := range registry.Search("", agenttools.RegistrySearchOptions{
+			Limit:           10_000,
+			IncludeDeferred: true,
+		}) {
+			if entry.Metadata.IsDeferred() {
+				hasDeferred = true
+				break
+			}
+		}
+		if hasDeferred {
+			toolSearch := agenttools.NewToolSearchTool(registry, c.activateDeferredTools)
+			register(toolSearch, "builtin", builtinToolMetadata(agenttools.ToolSearchToolName))
+		}
 	}
 
 	return registered, nil

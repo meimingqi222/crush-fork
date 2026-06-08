@@ -26,6 +26,7 @@ This tool is not PowerShell. Use direct POSIX-style commands or the dedicated Vi
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)
 - Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)
+- skill:// URLs in commands are auto-resolved to filesystem paths (e.g. `python skill://pdf/scripts/run.py` → `python '/path/to/skills/pdf/scripts/run.py'`)
 </usage_notes>
 
 <background_execution>

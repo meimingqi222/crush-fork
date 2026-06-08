@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/charmbracelet/crush/internal/skills"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -12,6 +13,7 @@ type BashToolOptions struct {
 	RestrictedToGitReadOnly bool
 	DisableBackground       bool
 	DescriptionOverride     string
+	SkillList               []*skills.Skill
 }
 
 var restrictedGitGlobalFlags = map[string]bool{

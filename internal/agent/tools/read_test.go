@@ -48,7 +48,7 @@ func runReadToolForTest(t *testing.T, tool fantasy.AgentTool, ctx context.Contex
 }
 
 func newReadToolForTest(workingDir string, tracker filetracker.Service) fantasy.AgentTool {
-	return NewReadTool(nil, nil, tracker, workingDir, config.ToolLs{}, nil)
+	return NewReadTool(nil, nil, tracker, workingDir, config.ToolLs{}, nil, nil)
 }
 
 func parseReadMetadata(t *testing.T, resp fantasy.ToolResponse) ReadResponseMetadata {

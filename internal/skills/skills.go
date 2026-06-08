@@ -240,7 +240,9 @@ func ToPromptXML(skills []*Skill) string {
 		sb.WriteString("  <skill>\n")
 		fmt.Fprintf(&sb, "    <name>%s</name>\n", escape(s.Name))
 		fmt.Fprintf(&sb, "    <description>%s</description>\n", escape(s.Description))
-		fmt.Fprintf(&sb, "    <location>%s</location>\n", escape(s.SkillFilePath))
+		// Use skill:// virtual URL instead of absolute filesystem path.
+		// This hides the physical location and enables portable skill references.
+		fmt.Fprintf(&sb, "    <location>skill://%s</location>\n", escape(s.Name))
 
 		// Write when_to_use if present
 		if s.WhenToUse != "" {

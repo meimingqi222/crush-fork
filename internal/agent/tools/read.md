@@ -1,7 +1,7 @@
 Reads file contents, directories, or URL content.
 
 <usage>
-- Provide path (required): file path, directory path, or URL
+- Provide path (required): file path, directory path, skill:// URL, or URL
 - For files: append selectors for line ranges or raw mode (see below)
 - Line selectors auto-enable hashline anchors (LINE#HASH) for line-addressable editing
 </usage>
@@ -35,6 +35,14 @@ When path is a URL (http:// or https://):
 - Auto-converts HTML to markdown by default
 - Max response size: 1MB
 </url_reading>
+
+<skill_urls>
+When path is a skill:// URL:
+- `skill://<name>` — reads the skill's SKILL.md file
+- `skill://<name>/<path>` — reads a relative path within the skill's directory (e.g. `skill://pdf/scripts/convert.py`)
+- Supports the same line selectors as regular file paths (e.g. `skill://pdf/SKILL.md:10-50`)
+- Use skill:// URLs to access skill resources (scripts, references, assets) without knowing their filesystem location
+</skill_urls>
 
 <directory_support>
 When path is a directory:

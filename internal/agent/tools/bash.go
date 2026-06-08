@@ -173,6 +173,18 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				params.Description = string(runes)
 			}
 
+			// Expand skill:// URLs in the command to filesystem paths.
+			if toolOpts.SkillList != nil {
+				params.Command = ExpandSkillURLs(params.Command, toolOpts.SkillList)
+				if IsSkillURL(params.WorkingDir) {
+					resolvedWd, err := ResolveSkillURL(params.WorkingDir, toolOpts.SkillList)
+					if err != nil {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to resolve skill:// URL in working_dir: %s", err)), nil
+					}
+					params.WorkingDir = resolvedWd
+				}
+			}
+
 			execWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), params.WorkingDir, workingDir)
 			fallbackCommand := ""
 			sessionID := GetSessionFromContext(ctx)

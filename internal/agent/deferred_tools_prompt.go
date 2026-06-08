@@ -38,6 +38,11 @@ func collectDeferredToolHints(entries map[string]tools.RegistryEntry, disabledSe
 // appendDeferredToolsPromptSection appends a section listing deferred tool names.
 // Following Claude Code's approach, we only list tool names (not descriptions/hints)
 // to minimize token usage while keeping all tools discoverable via tool_search.
+//
+// Unlike the previous unconditional approach, the guidance now includes scenario
+// qualifiers to reduce tool_search misuse: LLMs should only call tool_search
+// when the task actually involves external integrations (MCP tools, APIs, etc.),
+// not for routine local coding tasks.
 func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools.RegistryEntry) string {
 	if len(deferredEntries) == 0 {
 		return basePrompt
@@ -51,7 +56,12 @@ func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools
 
 	lines := []string{
 		"<available_deferred_tools>",
-		"The following deferred tools are available. These tools are not loaded yet - you MUST call tool_search to activate them before use.",
+		"Some tools are deferred (not loaded yet) to reduce context size. These are primarily MCP and external integration tools.",
+		"",
+		"When to use tool_search:",
+		"- When the task involves external systems, APIs, databases, deployments, or other non-local integrations",
+		"- When you need an MCP tool that isn't in your default tool set",
+		"- Do NOT call tool_search for routine local coding tasks (file editing, searching, running tests, etc.)",
 		"",
 		"Usage workflow:",
 		"1. Call tool_search with query \"select:tool_name\" to get the full schema",

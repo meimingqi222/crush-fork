@@ -98,6 +98,7 @@ func NewReadTool(
 	workingDir string,
 	lsConfig config.ToolLs,
 	httpClient *http.Client,
+	skillList []*skills.Skill,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
 	if httpClient == nil {
@@ -120,6 +121,30 @@ func NewReadTool(
 			// Check if it's a URL.
 			if strings.HasPrefix(params.Path, "http://") || strings.HasPrefix(params.Path, "https://") {
 				return handleURLRead(ctx, params, call, permissions, httpClient)
+			}
+
+			// Check if it's a skill:// URL and resolve to filesystem path.
+			if IsSkillURL(params.Path) {
+				resolvedPath, err := ResolveSkillURL(params.Path, skillList)
+				if err != nil {
+					return fantasy.NewTextErrorResponse(err.Error()), nil
+				}
+				params.Path = resolvedPath
+				// Re-parse selectors for the resolved path, preserving any
+				// line selectors that were already parsed from the original
+				// skill:// URL (e.g. skill://pdf:10-50 → sel has line range).
+				resolvedSel := parsePathSelector(params.Path)
+				params.Path = resolvedSel.filePath
+				// If the original selector had line ranges but the resolved
+				// path doesn't, preserve the original line selectors.
+				if sel.hasLineSel && !resolvedSel.hasLineSel {
+					resolvedSel.offset = sel.offset
+					resolvedSel.limit = sel.limit
+					resolvedSel.raw = sel.raw
+					resolvedSel.hasLineSel = sel.hasLineSel
+					resolvedSel.hasSelector = sel.hasSelector
+				}
+				sel = resolvedSel
 			}
 
 			// Handle file path.

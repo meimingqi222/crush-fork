@@ -437,16 +437,20 @@ Skills are reusable workflow packages that extend your capabilities. Each skill 
 
 To use a skill:
 1. Match the skill's `when_to_use` or `description` to the user's task
-2. **Read the skill's SKILL.md file**: You MUST first read the skill's `SKILL.md` file at the location path using `view_file` (or appropriate file viewing tool) to get full instructions before proceeding. Never guess or assume skill instructions.
+2. **Read the skill's SKILL.md file**: You MUST first read the skill's SKILL.md using `read skill://<name>` to get full instructions before proceeding. Never guess or assume skill instructions.
 3. Follow the skill instructions directly, substituting arguments when needed
+
+Accessing skill resources:
+- `read skill://<name>` — reads the skill's SKILL.md
+- `read skill://<name>/scripts/run.sh` — reads a script within the skill's directory
+- `bash "python skill://<name>/scripts/run.py"` — runs a script from the skill (auto-resolved to filesystem path)
+- skill:// URLs work in both `read` and `bash` tools; you never need to know the skill's filesystem location
 
 Skill argument substitution:
 - $ARGUMENTS: Full arguments string
 - $ARGUMENTS[0], $ARGUMENTS[1]: Indexed arguments
 - $0, $1: Shorthand for indexed arguments
 - $name: Named argument (if skill defines `arguments`)
-
-If a skill mentions scripts, references, or assets, they are in the skill's folder (scripts/, references/, assets/ subdirectories).
 </skills_usage>
 {{end}}
 

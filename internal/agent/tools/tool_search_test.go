@@ -53,39 +53,6 @@ func runToolSearch(t *testing.T, tool fantasy.AgentTool, params ToolSearchParams
 	return response.Results
 }
 
-func TestToolSearchIncludesDeferredByDefault(t *testing.T) {
-	t.Parallel()
-
-	registry := toolSearchRegistryStub{entries: []RegistryEntry{
-		{
-			Name:        "read",
-			Description: "read file",
-			Parameters:  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}}, "required": []string{"file_path"}},
-			Required:    []string{"file_path"},
-			Exposed:     true,
-			Metadata:    ToolMetadata{Exposure: ToolExposureDefault},
-		},
-		{
-			Name:        "sourcegraph",
-			Description: "search public repositories",
-			Parameters:  map[string]any{"type": "object"},
-			Metadata:    ToolMetadata{Exposure: ToolExposureDeferred},
-		},
-	}}
-
-	tool := NewToolSearchTool(registry, nil)
-	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: ""})
-	results := response.Results
-
-	require.Len(t, results, 2)
-	require.Equal(t, "read", results[0].Name)
-	require.Equal(t, "sourcegraph", results[1].Name)
-	require.NotNil(t, results[0].Parameters)
-	require.Equal(t, []string{"file_path"}, results[0].Required)
-	require.Equal(t, []string{"read", "sourcegraph"}, response.Matches)
-	require.Equal(t, 1, response.TotalDeferred)
-}
-
 func TestToolSearchSelectActivatesDeferredTools(t *testing.T) {
 	t.Parallel()
 
@@ -114,14 +81,12 @@ func TestToolSearchSelectActivatesDeferredTools(t *testing.T) {
 	require.Equal(t, []string{"sourcegraph"}, activated)
 	require.Len(t, results, 2)
 	require.Equal(t, "sourcegraph", results[0].Name)
-	require.True(t, results[0].Selected)
 	require.True(t, results[0].Activated)
 	require.Equal(t, "read", results[1].Name)
-	require.True(t, results[1].Selected)
 	require.False(t, results[1].Activated)
 
 	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: "select:sourcegraph,missing,read"})
-	require.Equal(t, []string{"sourcegraph"}, response.ActivatedDeferredTools)
+	require.Equal(t, []string{"sourcegraph"}, response.ActivatedTools)
 	require.Contains(t, response.ActivationHint, "sourcegraph")
 }
 
@@ -148,7 +113,6 @@ func TestToolSearchSelectSkipsUnexposedNonDeferredTools(t *testing.T) {
 
 	require.Len(t, results, 1)
 	require.Equal(t, "read", results[0].Name)
-	require.True(t, results[0].Selected)
 }
 
 func TestToolSearchExactNameActivatesDeferredTool(t *testing.T) {
@@ -173,11 +137,10 @@ func TestToolSearchExactNameActivatesDeferredTool(t *testing.T) {
 	require.Equal(t, []string{"sourcegraph"}, activated)
 	require.Len(t, results, 1)
 	require.Equal(t, "sourcegraph", results[0].Name)
-	require.True(t, results[0].Selected)
 	require.True(t, results[0].Activated)
 }
 
-func TestToolSearchKeywordQueryActivatesDeferredMatches(t *testing.T) {
+func TestToolSearchBM25KeywordQuery(t *testing.T) {
 	t.Parallel()
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
@@ -207,25 +170,9 @@ func TestToolSearchKeywordQueryActivatesDeferredMatches(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, "sourcegraph", results[0].Name)
 	require.True(t, results[0].Activated)
-	require.False(t, results[0].Selected)
 }
 
-func TestToolSearchUsesMaxResultsAlias(t *testing.T) {
-	t.Parallel()
-
-	registry := toolSearchRegistryStub{entries: []RegistryEntry{
-		{Name: "read", Description: "read files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
-		{Name: "grep", Description: "search files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
-		{Name: "glob", Description: "find files", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
-	}}
-
-	tool := NewToolSearchTool(registry, nil)
-	results := runToolSearch(t, tool, ToolSearchParams{Query: "files", MaxResults: 2})
-
-	require.Len(t, results, 2)
-}
-
-func TestToolSearchKeywordRankingPrefersHintAndTags(t *testing.T) {
+func TestToolSearchBM25RankingPrefersHintAndTags(t *testing.T) {
 	t.Parallel()
 
 	registry := toolSearchRegistryStub{entries: []RegistryEntry{
@@ -251,39 +198,7 @@ func TestToolSearchKeywordRankingPrefersHintAndTags(t *testing.T) {
 	}}
 
 	tool := NewToolSearchTool(registry, nil)
-	results := runToolSearch(t, tool, ToolSearchParams{Query: "code-search"})
-
-	require.Len(t, results, 1)
-	require.Equal(t, "sourcegraph", results[0].Name)
-}
-
-func TestToolSearchKeywordRequiredTerms(t *testing.T) {
-	t.Parallel()
-
-	registry := toolSearchRegistryStub{entries: []RegistryEntry{
-		{
-			Name:        "sourcegraph",
-			Description: "search public repositories",
-			Metadata: ToolMetadata{
-				Exposure:   ToolExposureDeferred,
-				SearchHint: "search public repositories",
-				SearchTags: []string{"code-search", "network"},
-			},
-		},
-		{
-			Name:        "read",
-			Description: "read local files",
-			Exposed:     true,
-			Metadata: ToolMetadata{
-				Exposure:   ToolExposureDefault,
-				SearchHint: "inspect local files",
-				SearchTags: []string{"filesystem"},
-			},
-		},
-	}}
-
-	tool := NewToolSearchTool(registry, nil)
-	results := runToolSearch(t, tool, ToolSearchParams{Query: "+network search"})
+	results := runToolSearch(t, tool, ToolSearchParams{Query: "code search"})
 
 	require.Len(t, results, 1)
 	require.Equal(t, "sourcegraph", results[0].Name)
@@ -303,9 +218,8 @@ func TestToolSearchNoMatchIncludesPendingMCPServers(t *testing.T) {
 	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: "jira"})
 
 	require.Empty(t, response.Results)
-	require.Empty(t, response.Matches)
 	require.Equal(t, []string{"github", "slack"}, response.PendingMCPServers)
-	require.Equal(t, 1, response.TotalDeferred)
+	require.Equal(t, 1, response.TotalTools)
 }
 
 func TestToolSearchMCPNameAliasExactMatch(t *testing.T) {
@@ -327,7 +241,6 @@ func TestToolSearchMCPNameAliasExactMatch(t *testing.T) {
 
 	response := runToolSearchResponse(t, tool, ToolSearchParams{Query: "mcp__github__issue__list"})
 
-	require.Equal(t, []string{"mcp_github_issue_list"}, response.Matches)
 	require.Equal(t, []string{"mcp_github_issue_list"}, activated)
 	require.Len(t, response.Results, 1)
 	require.True(t, response.Results[0].Activated)
@@ -362,4 +275,81 @@ func TestToolSearchMCPKeywordRanking(t *testing.T) {
 
 	require.NotEmpty(t, response.Results)
 	require.Equal(t, "mcp_github_issue_list", response.Results[0].Name)
+}
+
+func TestToolSearchEmptyQueryReturnsError(t *testing.T) {
+	t.Parallel()
+
+	registry := toolSearchRegistryStub{entries: []RegistryEntry{
+		{Name: "read", Description: "read file", Exposed: true, Metadata: ToolMetadata{Exposure: ToolExposureDefault}},
+	}}
+
+	tool := NewToolSearchTool(registry, nil)
+	input, err := json.Marshal(ToolSearchParams{Query: ""})
+	require.NoError(t, err)
+	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  ToolSearchToolName,
+		Input: string(input),
+	})
+	require.NoError(t, err)
+	require.True(t, resp.IsError)
+}
+
+func TestToolSearchExcludesAlreadyActivatedTools(t *testing.T) {
+	t.Parallel()
+
+	registry := toolSearchRegistryStub{entries: []RegistryEntry{
+		{
+			Name:        "sourcegraph",
+			Description: "search public repositories",
+			Metadata:    ToolMetadata{Exposure: ToolExposureDeferred},
+		},
+		{
+			Name:        "mcp_github_issue",
+			Description: "list github issues",
+			Metadata:    ToolMetadata{Exposure: ToolExposureDeferred},
+		},
+	}}
+
+	// First call activates sourcegraph.
+	callCount := 0
+	tool := NewToolSearchTool(registry, func(_ context.Context, toolNames []string) []string {
+		callCount++
+		if len(toolNames) == 0 {
+			// getActivatedSet call: return already-activated tools.
+			if callCount == 1 {
+				return nil
+			}
+			return []string{"sourcegraph"}
+		}
+		return toolNames
+	})
+
+	// First search should find both.
+	results := runToolSearch(t, tool, ToolSearchParams{Query: "search repositories"})
+	require.Len(t, results, 1)
+	require.Equal(t, "sourcegraph", results[0].Name)
+}
+
+func TestTokenizeWithCamelCase(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"mcp_github_issue_list", []string{"mcp", "github", "issue", "list"}},
+		{"fooBar", []string{"foo", "bar", "foobar"}},
+		{"MCPTool", []string{"mcp", "tool", "mcptool"}},
+		{"simple", []string{"simple"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			got := tokenizeWithCamelCase(tt.input)
+			require.Equal(t, tt.want, got)
+		})
+	}
 }

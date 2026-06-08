@@ -2221,8 +2221,21 @@ func (c *coordinator) RefreshTools(ctx context.Context) error {
 
 func (c *coordinator) activateDeferredTools(ctx context.Context, toolNames []string) []string {
 	sessionID := tools.GetSessionFromContext(ctx)
-	if sessionID == "" || len(toolNames) == 0 {
+	if sessionID == "" {
 		return nil
+	}
+	// When called with nil/empty, return the list of already-activated tools.
+	// This allows tool_search to exclude already-activated tools from results.
+	if len(toolNames) == 0 {
+		activated := c.activatedDeferredToolsForSession(sessionID)
+		if len(activated) == 0 {
+			return nil
+		}
+		names := make([]string, 0, len(activated))
+		for name := range activated {
+			names = append(names, name)
+		}
+		return names
 	}
 	return c.activateDeferredToolsForSession(sessionID, toolNames)
 }

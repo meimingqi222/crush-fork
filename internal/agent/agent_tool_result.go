@@ -22,7 +22,7 @@ func deferredToolStateFromToolSearchResult(content string) (message.ToolResultDe
 		return message.ToolResultDeferredToolState{}, false
 	}
 	state := message.ToolResultDeferredToolState{
-		ActivatedTools: payload.ActivatedDeferredTools,
+		ActivatedTools: payload.ActivatedTools,
 		RecoveryAction: strings.TrimSpace(payload.ActivationHint),
 	}
 	if state.ActivatedTools == nil && strings.TrimSpace(state.RecoveryAction) == "" {
