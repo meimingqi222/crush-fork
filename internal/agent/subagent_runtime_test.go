@@ -14,35 +14,30 @@ func TestSubagentResultContract_ProfileDefaults(t *testing.T) {
 		name        string
 		profile     SubagentProfile
 		wantPolicy  MissingFinishPolicy
-		wantRetry   SubagentRetryPolicyKind
 		wantRequire bool
 	}{
 		{
 			name:        "explore",
 			profile:     SubagentProfile{Kind: SubagentProfileExplore, ReadOnly: true},
 			wantPolicy:  MissingFinishRetryThenWarn,
-			wantRetry:   RetryReadOnlyOnly,
 			wantRequire: true,
 		},
 		{
 			name:        "general",
 			profile:     SubagentProfile{Kind: SubagentProfileGeneral},
 			wantPolicy:  MissingFinishRetryThenFail,
-			wantRetry:   RetryIdempotent,
 			wantRequire: true,
 		},
 		{
 			name:        "review",
 			profile:     SubagentProfile{Kind: SubagentProfileReview},
 			wantPolicy:  MissingFinishRetryThenWarn,
-			wantRetry:   RetryIdempotent,
 			wantRequire: true,
 		},
 		{
 			name:        "guardian",
 			profile:     SubagentProfile{Kind: SubagentProfileGuardian},
 			wantPolicy:  MissingFinishFail,
-			wantRetry:   RetryIdempotent,
 			wantRequire: true,
 		},
 	}
@@ -54,9 +49,6 @@ func TestSubagentResultContract_ProfileDefaults(t *testing.T) {
 			contract := subagentResultContract(tt.profile)
 			require.Equal(t, tt.wantPolicy, contract.MissingFinishPolicy)
 			require.Equal(t, tt.wantRequire, contract.Required)
-
-			retry := subagentRetryPolicy(tt.profile)
-			require.Equal(t, tt.wantRetry, retry.Kind)
 		})
 	}
 }
@@ -84,7 +76,6 @@ func TestApplySubagentRuntimeConfig_DoesNotOverrideProfileDefaultsWhenEmpty(t *t
 
 	// Profile default for general should remain intact.
 	require.Equal(t, MissingFinishRetryThenFail, ctx.Result.MissingFinishPolicy)
-	require.Equal(t, RetryIdempotent, ctx.Retry.Kind)
 	require.True(t, ctx.Result.Required)
 }
 

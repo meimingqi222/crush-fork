@@ -155,7 +155,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("done"), nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -198,7 +198,7 @@ func TestRunSubAgent(t *testing.T) {
 			return nil, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -235,7 +235,7 @@ func TestRunSubAgent(t *testing.T) {
 			},
 		}
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -261,7 +261,7 @@ func TestRunSubAgent(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 
-		_, err = coord.runSubAgent(ctx, subAgentParams{
+		_, err = coord.runSubAgentDirect(ctx, subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -283,7 +283,7 @@ func TestRunSubAgent(t *testing.T) {
 		// Agent references a provider that doesn't exist in config.
 		agent := newMockAgent("unknown-provider", 4096, nil)
 
-		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+		_, err = coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -307,7 +307,7 @@ func TestRunSubAgent(t *testing.T) {
 			return nil, errors.New("agent exploded")
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -349,7 +349,7 @@ func TestRunSubAgent(t *testing.T) {
 			return nil, errors.New("agent exploded")
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -382,7 +382,7 @@ func TestRunSubAgent(t *testing.T) {
 			return &fantasy.AgentResult{}, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -418,7 +418,7 @@ func TestRunSubAgent(t *testing.T) {
 			return &fantasy.AgentResult{}, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -468,7 +468,7 @@ func TestRunSubAgent(t *testing.T) {
 			return &fantasy.AgentResult{}, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -515,7 +515,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("The task is complete."), nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -550,7 +550,7 @@ func TestRunSubAgent(t *testing.T) {
 			return &fantasy.AgentResult{}, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{Agent: agent, SessionID: parentSession.ID, AgentMessageID: "msg-1", ParentMessageID: "msg-1", ToolCallID: "call-1", Prompt: "test", SessionTitle: "Test", SubagentType: config.AgentGeneral})
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{Agent: agent, SessionID: parentSession.ID, AgentMessageID: "msg-1", ParentMessageID: "msg-1", ToolCallID: "call-1", Prompt: "test", SessionTitle: "Test", SubagentType: config.AgentGeneral})
 		require.NoError(t, err)
 		yield, ok := message.ParseToolResultYield(resp.Metadata)
 		require.True(t, ok)
@@ -569,7 +569,7 @@ func TestRunSubAgent(t *testing.T) {
 			return &fantasy.AgentResult{}, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -611,7 +611,7 @@ func TestRunSubAgent(t *testing.T) {
 			return &fantasy.AgentResult{}, nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -637,7 +637,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("ok"), nil
 		})
 
-		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+		_, err = coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -668,7 +668,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("ok"), nil
 		})
 
-		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+		_, err = coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -699,7 +699,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("ok"), nil
 		})
 
-		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+		_, err = coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -732,7 +732,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("ok"), nil
 		})
 
-		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",
@@ -771,7 +771,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("ok"), nil
 		})
 
-		_, err = coord.runSubAgent(
+		_, err = coord.runSubAgentDirect(
 			context.WithValue(t.Context(), sessionAgentRuntimeConfigContextKey{}, parentRuntimeConfig),
 			subAgentParams{
 				Agent:          agent,
@@ -806,7 +806,7 @@ func TestRunSubAgent(t *testing.T) {
 			return agentResultWithText("ok"), nil
 		})
 
-		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+		_, err = coord.runSubAgentDirect(t.Context(), subAgentParams{
 			Agent:           agent,
 			SessionID:       parentSession.ID,
 			AgentMessageID:  "msg-1",

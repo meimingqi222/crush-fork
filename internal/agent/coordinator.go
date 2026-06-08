@@ -2502,21 +2502,7 @@ type subagentResult struct {
 	Followups      []string
 }
 
-type subagentReducerInput struct {
-	TaskResult   reducer.TaskResult
-	ChildSession message.ToolResultReducerChildSession
-	Result       subagentResult
-	SideEffects  SideEffectSummary
-	Runtime      SubagentRuntimeContext
-	HasRuntime   bool
-	AttemptCount int
-}
-
 type subAgentFactory func(context.Context, string) (SessionAgent, config.Agent, error)
-
-func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
-	return c.runSubAgentDirect(ctx, params)
-}
 
 func (p subAgentParams) SubagentTypeOrDefault() string {
 	if strings.TrimSpace(p.SubagentType) != "" {
@@ -2674,7 +2660,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			c.hookManager.RunSubagentStart(ctx, p.ToolCallID, p.SubagentType, p.SessionID)
 			defer c.hookManager.RunSubagentStop(context.Background(), p.ToolCallID, p.SubagentType, p.SessionID)
 		}
-		return c.runSubAgent(ctx, p)
+		return c.runSubAgentDirect(ctx, p)
 	}
 	executor := newSubagentExecutor(runtimeCfg.MaxConcurrency, false, runner)
 
@@ -2907,55 +2893,6 @@ func mergeUniqueStrings(values ...[]string) []string {
 		}
 	}
 	return merged
-}
-
-func (c *coordinator) sideEffectSummary(ctx context.Context, result subagentResult) SideEffectSummary {
-	filesTouched := slices.Clone(result.FilesTouched)
-	if len(filesTouched) > 1 {
-		slices.Sort(filesTouched)
-		filesTouched = slices.Compact(filesTouched)
-	}
-	summary := SideEffectSummary{
-		FilesTouched: filesTouched,
-	}
-	if len(filesTouched) > 0 {
-		summary.MutatingTools = append(summary.MutatingTools, tools.EditToolName)
-	}
-	if strings.TrimSpace(result.AgentID) != "" || result.Status == message.ToolResultSubtaskStatusRunning {
-		summary.SpawnedBackground = true
-	}
-	if c == nil || c.messages == nil || strings.TrimSpace(result.ChildSessionID) == "" {
-		return summary
-	}
-	msgs, err := c.messages.List(ctx, result.ChildSessionID)
-	if err != nil {
-		return summary
-	}
-	for _, msg := range msgs {
-		if msg.Role != message.Tool {
-			continue
-		}
-		for _, toolResult := range msg.ToolResults() {
-			switch toolResult.Name {
-			case tools.EditToolName, tools.WriteToolName, tools.DownloadToolName:
-				summary.MutatingTools = append(summary.MutatingTools, toolResult.Name)
-			case tools.BashToolName:
-				if !toolResult.IsError {
-					summary.MutatingTools = append(summary.MutatingTools, toolResult.Name)
-				}
-			}
-		}
-	}
-	if len(summary.MutatingTools) > 1 {
-		slices.Sort(summary.MutatingTools)
-		summary.MutatingTools = slices.Compact(summary.MutatingTools)
-	}
-	if len(summary.FilesTouched) == 0 && c.filetracker != nil && strings.TrimSpace(result.ChildSessionID) != "" {
-		if files, err := c.filetracker.ListReadFiles(ctx, result.ChildSessionID); err == nil {
-			summary.FilesTouched = append(summary.FilesTouched, files...)
-		}
-	}
-	return summary
 }
 
 func reduceResultToChildSession(result subagentResult) message.ToolResultReducerChildSession {
@@ -4579,7 +4516,7 @@ func (c *coordinator) runBackgroundTaskNode(
 			AgentBackground:   agentCfg.Background,
 			SkipHandoffReview: true,
 		}
-		response, runErr := c.runSubAgent(attemptCtx, runParams)
+		response, runErr := c.runSubAgentDirect(attemptCtx, runParams)
 		cancel()
 
 		if c.hookManager != nil {

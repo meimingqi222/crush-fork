@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/timeline"
 )
 
@@ -61,23 +60,9 @@ type DerivedSubagentPermissions struct {
 	AgentToolExternallyDenied bool
 }
 
-// ApprovalAuthority is reserved for future explicit parent-delegated approval
-// escalation. Currently not wired into the permission flow.
-type ApprovalAuthority struct {
-	SessionID       string
-	ParentSessionID string
-	ChildSessionID  string
-	TaskID          string
-}
-
-// SubagentWorkspacePolicy is reserved for future scoped workspace controls.
-// AllowedPaths, DeniedPaths, and DisjointScope are not yet consumed.
 type SubagentWorkspacePolicy struct {
-	Root          string
-	WriteMode     string
-	AllowedPaths  []string // TODO: not yet consumed at runtime
-	DeniedPaths   []string // TODO: not yet consumed at runtime
-	DisjointScope []string // TODO: not yet consumed at runtime
+	Root      string
+	WriteMode string
 }
 
 type SubagentIsolationKind string
@@ -111,34 +96,6 @@ type SubagentResultContract struct {
 	Required             bool
 	AllowRawTextFallback bool
 	MissingFinishPolicy  MissingFinishPolicy
-}
-
-type SubagentRetryPolicyKind string
-
-const (
-	RetryNever        SubagentRetryPolicyKind = "never"
-	RetryReadOnlyOnly SubagentRetryPolicyKind = "read_only_only"
-	RetryIdempotent   SubagentRetryPolicyKind = "idempotent"
-	RetryIsolated     SubagentRetryPolicyKind = "isolated"
-)
-
-type SubagentRetryPolicy struct {
-	Kind        SubagentRetryPolicyKind
-	MaxAttempts int
-}
-
-type SideEffectSummary struct {
-	FilesTouched      []string
-	MutatingTools     []string
-	SpawnedBackground bool
-	ApprovalGranted   bool
-}
-
-func (s SideEffectSummary) HasAny() bool {
-	return len(s.FilesTouched) > 0 ||
-		len(s.MutatingTools) > 0 ||
-		s.SpawnedBackground ||
-		s.ApprovalGranted
 }
 
 type SubagentEventType string
@@ -198,14 +155,13 @@ type SubagentRuntimeContext struct {
 	TaskID           string
 	TaskDescription  string
 
-	AgentProfile      SubagentProfile
-	ToolProfile       SubagentToolProfile
-	Permissions       DerivedSubagentPermissions
-	ApprovalAuthority ApprovalAuthority
-	Workspace         SubagentWorkspacePolicy
-	Isolation SubagentIsolation
-	Result    SubagentResultContract
-	Events            SubagentEventSink
+	AgentProfile SubagentProfile
+	ToolProfile  SubagentToolProfile
+	Permissions  DerivedSubagentPermissions
+	Workspace    SubagentWorkspacePolicy
+	Isolation    SubagentIsolation
+	Result       SubagentResultContract
+	Events       SubagentEventSink
 
 	// MaxTurns is the maximum number of LLM turns the subagent is allowed.
 	// Zero means no limit.
@@ -245,12 +201,6 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 		AgentProfile:     profile,
 		ToolProfile:      toolProfile,
 		Permissions:      permissions,
-		ApprovalAuthority: ApprovalAuthority{
-			SessionID:       strings.TrimSpace(parentSessionID),
-			ParentSessionID: strings.TrimSpace(parentSessionID),
-			ChildSessionID:  strings.TrimSpace(childSessionID),
-			TaskID:          strings.TrimSpace(task.Name),
-		},
 		Workspace: SubagentWorkspacePolicy{
 			Root:      strings.TrimSpace(workspaceRoot),
 			WriteMode: subagentWorkspaceWriteMode(profile),
@@ -260,7 +210,7 @@ func buildSubagentRuntimeContext(parentSessionID, childSessionID, parentMessageI
 			Available: true,
 			Path:      strings.TrimSpace(workspaceRoot),
 		},
-		Result: subagentResultContract(profile),
+		Result:       subagentResultContract(profile),
 		Events:       eventSink,
 		MaxTurns:     agentCfg.MaxTurns,
 		OutputSchema: agentCfg.OutputSchema,
@@ -413,7 +363,3 @@ func parseMissingFinishPolicy(value string) MissingFinishPolicy {
 		return ""
 	}
 }
-
-
-
-

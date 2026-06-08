@@ -1,9 +1,11 @@
-# Subagent Runtime Redesign Spec
+# Subagent Runtime Implementation Reference
 
 ## Status
 
-Draft technical specification. Updated to accurately reflect codebase state
-as of the most recent implementation pass.
+Historical implementation reference. Most sections describe the **currently
+implemented** code state. Sections marked as "Planned" or with P0-P4 labels
+are historical records of the original design plan; completed items are
+checked.
 
 ## Scope
 
@@ -31,14 +33,23 @@ authority when they need approval.
 
 The following are **already implemented** and must not be re-implemented:
 
-### taskGraphNodeResult (coordinator.go:2199)
+### subagentResult (coordinator.go:2484)
 
 ```go
-type taskGraphNodeResult struct {
-    Task           taskGraphTask
+type subagentResult struct {
+    Task           subagentTask
+    TaskRef        string
     Status         message.ToolResultSubtaskStatus
+    AgentID        string
     ChildSessionID string
     Content        string
+    Preview        string
+    HasFullOutput  bool
+    OutputChars    int
+    Yield          message.ToolResultYield
+    Warnings       []string
+    Error          string
+    Attempts       int
     Artifacts      []string
     FilesTouched   []string
     PatchPlan      []string
@@ -46,10 +57,6 @@ type taskGraphNodeResult struct {
     Followups      []string
 }
 ```
-
-Missing fields that P0/P1 must add: `AgentID string`, `Finish
-message.ToolResultSubagentFinish`, `Warnings []string`, `Error string`,
-`Attempts int`.
 
 ### ToolResultSubtaskStatus (message/auto_mode.go)
 
@@ -66,8 +73,7 @@ const (
 )
 ```
 
-Missing values that P0 must add: `ToolResultSubtaskStatusCompletedWithWarnings`
-and `ToolResultSubtaskStatusBlocked`.
+Both values are implemented.
 
 ### ToolResultReducer and siblings (message/auto_mode.go)
 
@@ -76,15 +82,19 @@ and `ToolResultSubtaskStatusBlocked`.
 helpers (`ParseToolResultReducer`, `WithReducer`, `Reducer()`,
 `WithSubtaskResult`, `SubtaskResult()`, etc.).
 
-### EscalationBridge and WorkerIdentity (coordinator.go:2986-2994)
+### EscalationBridge and WorkerIdentity (coordinator.go:3389-3401)
 
 ```go
-// Already present in runSubAgentDirect:
+// Present in runSubAgentDirect:
 if c.escalationBridge != nil {
     workerIdentity := permission.WorkerIdentity{
-        AgentID:   subSession.ID,
-        AgentName: params.SessionTitle,
-        AgentType: "subagent",
+        AgentID:         subSession.ID,
+        AgentName:       params.SessionTitle,
+        AgentType:       "subagent",
+        ParentSessionID: runtime.ParentSessionID,
+        ChildSessionID:  runtime.ChildSessionID,
+        TaskID:          runtime.TaskID,
+        ProfileName:     runtime.AgentProfile.Name,
     }
     ctx = permission.WithWorkerIdentity(ctx, workerIdentity)
     ctx = permission.WithEscalationBridge(ctx, c.escalationBridge)
@@ -117,22 +127,35 @@ if config.NormalizeAgentMode(agent.Mode) != config.AgentModeSubagent &&
 Subagent-mode agents never receive the `agent` tool. Recursive delegation is
 denied at registration time.
 
-### subtask_result Tool (internal/agent/tools/subtask_result.go)
+### yield Tool (internal/agent/tools/yield.go)
 
-Full implementation including:
-- session-based lookup via `message.Service.List`
-- background agent lookup via `toolruntime.BackgroundAgentLookupFromContext`
-- inference of latest child session ID from parent message reducer metadata
-- character-level pagination with `offset`/`limit`
-- detection of unresolved placeholder session IDs
+Full implementation of the `yield` tool:
 
-### buildDelegationPromptPrefix (internal/agent/delegation.go:136)
+```go
+type YieldParams struct {
+    Status  string          `json:"status"`
+    Data    string          `json:"data,omitempty"`
+    Error   string          `json:"error,omitempty"`
+    Payload json.RawMessage `json:"payload,omitempty"`
+}
+```
 
-Injects coordinator prompt prefix only when:
-- the session has the `agent` tool registered, and
-- `isSubAgent` is false.
+The tool:
+- validates terminal status (`completed`, `completed_with_warnings`, `failed`,
+  `canceled`, `blocked`) — non-terminal values are rejected
+- requires `error` for `failed` and `blocked`
+- requires `data` or `payload` for success statuses
+- validates payload against `OutputSchema` when configured (one retry on failure)
+- stores metadata via `WithYield`/`ParseToolResultYield` in `auto_mode.go`
+- rejects duplicate calls per session
+- signals agent loop termination via `StopTurn`
+- is exposed only in child sessions; hidden from primary sessions
 
-Subagent sessions do not receive the coordinator prompt injection.
+### buildSubagentHandoffSummary (coordinator.go)
+
+Builds a contextual handoff summary from the coordinator's session context
+so the subagent has concrete context from prior work. Subagent sessions do
+not receive the coordinator prompt injection (`buildDelegationPromptPrefix`).
 
 ### Removed from internal/autopermission/service.go
 
@@ -155,30 +178,24 @@ flowchart TD
     AgentTool["agent tool call<br/><i>(agent_tool.go)</i>"] --> Parse["Parse task graph params"]
     Parse --> Validate["TaskGraph validation<br/><i>(taskgraph/taskgraph.go)</i>"]
     Validate --> Scheduler["Ready-queue scheduler<br/><i>(runTaskGraphDirect)</i>"]
-    Scheduler --> Runtime["Create SubagentRuntimeContext<br/><b>[CURRENT ANCHOR: worker identity injected]</b>"]
-    Runtime --> Profiles["Derive tools and permissions<br/><b>[P2: ShapeToolsForSubagent]</b>"]
+    Scheduler --> Runtime["Create SubagentRuntimeContext<br/><i>(buildSubagentRuntimeContext)</i>"]
+    Runtime --> Profiles["Derive tools and permissions<br/><i>(DeriveSubagentPermissions + ShapeToolsForSubagent)</i>"]
     Profiles --> Child["Run child sessionAgent<br/><i>(buildAgent + Run)</i>"]
-    Child --> Finish["subagent_finish<br/><b>[P0: new tool]</b>"]
-    Child --> Events["Lifecycle events<br/><b>[P1: SubagentEventSink]</b>"]
-    Finish --> Extract["Result extractor<br/><b>[P0: extract finish metadata]</b>"]
-    Events --> ParentEvents["Parent event sink"]
-    Extract --> NodeResult["taskGraphNodeResult<br/><b>[CURRENT ANCHOR: existing struct]</b>"]
-    NodeResult --> Reducer["Safe reducer<br/><b>[P3: structured finish reducer]</b>"]
+    Child --> Finish["yield<br/><i>(internal/agent/tools/yield.go)</i>"]
+    Child --> Events["Lifecycle events<br/><i>(SubagentEventSink via coordinatorSubagentEventSink)</i>"]
+    Finish --> Extract["ensureSubagentYield<br/><i>(missing-finish loop)</i>"]
+    Events --> ParentEvents["Parent event sink<br/><i>(timeline.Service)</i>"]
+    Extract --> NodeResult["subagentResult<br/><i>(coordinator.go:2484)</i>"]
+    NodeResult --> Reducer["subagentReducerMessages<br/><i>(builds ToolResultReducer)</i>"]
     Reducer --> Parent["Parent tool result"]
 ```
 
-Current anchors (already live): task graph validation, ready-queue scheduler,
-child session creation, worker identity injection, escalation bridge wiring,
-explore tool shape via config, `agent` tool denial for subagents, `subtask_result`
-retrieval.
-
-TaskGraph remains responsible for graph-level scheduling.
-`SubagentRuntimeContext` (P1) is responsible for one child execution.
+**All nodes in this diagram are implemented.** TaskGraph handles graph-level
+scheduling. `SubagentRuntimeContext` manages one child execution per session.
 
 ## Core Runtime Types
 
-The following types do not yet exist and must be created in
-`internal/agent/subagent_runtime.go`.
+All types below are defined in `internal/agent/subagent_runtime.go`.
 
 ### SubagentRuntimeContext
 
@@ -191,21 +208,29 @@ type SubagentRuntimeContext struct {
     TaskID           string
     TaskDescription  string
 
-    AgentProfile      SubagentProfile
-    ToolProfile       SubagentToolProfile
-    Permissions       DerivedSubagentPermissions
-    ApprovalAuthority ApprovalAuthority
-    Workspace         SubagentWorkspacePolicy
-    Isolation         SubagentIsolation
-    Retry             SubagentRetryPolicy
-    Result            SubagentResultContract
-    Events            SubagentEventSink
+    AgentProfile SubagentProfile
+    ToolProfile  SubagentToolProfile
+    Permissions  DerivedSubagentPermissions
+    Workspace    SubagentWorkspacePolicy
+    Isolation    SubagentIsolation
+    Result       SubagentResultContract
+    Events       SubagentEventSink
+
+    // MaxTurns is the maximum number of LLM turns the subagent is allowed.
+    MaxTurns int
+    // OutputSchema is the JSON schema for yield payload validation.
+    OutputSchema any
+    // FinishRequired indicates yield must be called for completion.
+    FinishRequired bool
 }
 ```
 
-The context must be built before the child session starts. Fields that define
-authority (`Permissions`, `ToolProfile`, `ApprovalAuthority`) must not be
-mutated after execution begins.
+Built via `buildSubagentRuntimeContext(...)` before the child session starts.
+
+Note: `ApprovalAuthority` and `SubagentRetryPolicy` were part of the original
+design but are **not implemented**. `WorkerIdentity` on the escalation bridge
+(line 3389 in coordinator.go) provides the equivalent permission authority
+information directly.
 
 ### SubagentProfile
 
@@ -216,25 +241,26 @@ const (
     SubagentProfileCoordinator SubagentProfileKind = "coordinator"
     SubagentProfileGeneral     SubagentProfileKind = "general"
     SubagentProfileExplore     SubagentProfileKind = "explore"
+    SubagentProfilePlan        SubagentProfileKind = "plan"
     SubagentProfileReview      SubagentProfileKind = "review"
     SubagentProfileGuardian    SubagentProfileKind = "guardian"
 )
 
 type SubagentProfile struct {
-    Name         string
-    Kind         SubagentProfileKind
-    Mode         string // "subagent", "primary", "all"
-    Description  string
-    CanSpawn     bool
-    ReadOnly     bool
-    ToolNames    []string
-    DenyTools    []string
-    ResultSchema string
+    Name        string
+    Kind        SubagentProfileKind
+    Mode        string
+    Description string
+    CanSpawn    bool
+    ReadOnly    bool
+    ToolNames   []string
+    DenyTools   []string
+    Spawns      []string
 }
 ```
 
-Built-in defaults must be provided for `general` and `explore` even if user
-config is absent. Initial mapping can wrap existing configured agents.
+Mapping from agent config to profile is done via `subagentProfileForAgent`.
+Built-in defaults are provided for all agent types via config defaults.
 
 ### SubagentToolProfile
 
@@ -245,6 +271,10 @@ type SubagentToolProfile struct {
 }
 
 func (p SubagentToolProfile) Allows(toolName string) bool {
+    toolName = strings.TrimSpace(toolName)
+    if toolName == "" {
+        return false
+    }
     if _, denied := p.Denied[toolName]; denied {
         return false
     }
@@ -260,34 +290,16 @@ The tool profile is the authoritative filter when constructing the child tool
 registry. A model must not be able to call a hidden tool merely because the
 prompt says not to.
 
-### ApprovalAuthority
-
-```go
-type ApprovalAuthority struct {
-    SessionID       string // always the parent session ID for child agents
-    ParentSessionID string
-    ChildSessionID  string
-    TaskID          string
-}
-```
-
-All child permission requests must use `ApprovalAuthority.SessionID` as the
-authority session. For most child agents this equals the parent session ID.
-
 ### SubagentWorkspacePolicy
 
 ```go
 type SubagentWorkspacePolicy struct {
-    Root          string
-    WriteMode     string // "allow", "ask", "deny"
-    AllowedPaths  []string
-    DeniedPaths   []string
-    DisjointScope []string
+    Root      string
+    WriteMode string
 }
 ```
 
-`DisjointScope` documents the intended write scope for retry and future worktree
-planning. It is advisory in P1 and can be enforced later.
+WriteMode is `"deny"` for read-only profiles, `"allow"` otherwise.
 
 ### SubagentIsolation
 
@@ -309,212 +321,188 @@ type SubagentIsolation struct {
 }
 ```
 
-P0–P3 use `SubagentIsolationNone`. P4 adds `worktree` without changing the
-result, retry, or permission APIs.
+Only `none` and `worktree` are currently wired. `ExternalSandbox` and
+`ManagedSandbox` are defined as constants but have no provider implementation.
 
 ### SubagentResultContract
 
 ```go
+// MaxSummaryBytes and MaxStructuredDataBytes are reserved for future size limits.
 type SubagentResultContract struct {
-    Required               bool
-    SchemaName             string
-    AllowRawTextFallback   bool
-    MissingFinishPolicy    MissingFinishPolicy
-    MaxSummaryBytes        int
-    MaxStructuredDataBytes int
+    Required             bool
+    AllowRawTextFallback bool
+    MissingFinishPolicy  MissingFinishPolicy
 }
 
 type MissingFinishPolicy string
 
 const (
-    MissingFinishWarn            MissingFinishPolicy = "warn"
-    MissingFinishFail            MissingFinishPolicy = "fail"
-    MissingFinishRetryThenWarn   MissingFinishPolicy = "retry_then_warn"
-    MissingFinishRetryThenFail   MissingFinishPolicy = "retry_then_fail"
+    MissingFinishWarn          MissingFinishPolicy = "warn"
+    MissingFinishFail          MissingFinishPolicy = "fail"
+    MissingFinishRetryThenWarn MissingFinishPolicy = "retry_then_warn"
+    MissingFinishRetryThenFail MissingFinishPolicy = "retry_then_fail"
 )
 ```
 
-Default contract by profile:
+Default contract by profile (in `subagentResultContract`):
 
 | Profile | Required | Missing Policy | Raw Fallback |
 |---|---|---|---|
 | `explore` | true | `retry_then_warn` | yes |
-| `general` | true | `retry_then_fail` (after side effects), `warn` otherwise | yes |
+| `plan` | true | `retry_then_warn` | yes |
 | `review` | true | `retry_then_warn` | yes |
 | `guardian` | true | `fail` | no |
+| `general` (default) | true | `retry_then_fail` | yes |
+
+### DerivedSubagentPermissions (subagent_permissions.go)
+
+```go
+type DerivedSubagentPermissions struct {
+    AllowedTools              map[string]struct{}
+    DeniedTools               map[string]struct{}
+    ReadOnly                  bool
+    CanSpawn                  bool
+    AgentToolExternallyDenied bool
+}
+```
+
+Derived via `DeriveSubagentPermissions(parent, profile, availableTools)` using
+a deny-wins intersection algorithm.
+
+### SubagentEventSink and SubagentEvent
+
+```go
+type SubagentEventSink interface {
+    PublishSubagentEvent(ctx context.Context, event SubagentEvent)
+}
+
+type SubagentEventType string
+
+const (
+    SubagentEventStarted  SubagentEventType = "started"
+    SubagentEventProgress SubagentEventType = "progress"
+    SubagentEventFinish   SubagentEventType = "finish"
+    SubagentEventFailed   SubagentEventType = "failed"
+    SubagentEventCanceled SubagentEventType = "canceled"
+    SubagentEventBlocked  SubagentEventType = "blocked"
+)
+
+type SubagentEvent struct {
+    Type            SubagentEventType
+    ParentSessionID string
+    ChildSessionID  string
+    TaskID          string
+    Message         string
+    Status          string
+    Timestamp       time.Time
+}
+```
+
+Implemented by `coordinatorSubagentEventSink` wrapping `timeline.Service`.
+Events are published during subagent start, progress, and termination.
 
 ## Structured Completion Tool
 
 ### Tool Name
 
-Use `subagent_finish` for the Go/API name. Internally store metadata under the
-key `subagent_finish`.
+The completion tool is named `yield` (Go constant `YieldToolName` in
+`internal/agent/tools/yield.go`). Metadata is stored under the key `yield`
+and uses the `ToolResultYield` type in `internal/message/auto_mode.go`.
 
 ### Exposure Rules
 
-- Expose only in child sessions (`isSubAgent == true`).
-- Hide from primary sessions and from coordinator-primary sessions.
-- A coordinator running as a child task in a larger graph may expose
-  `subagent_finish` for its own terminal reporting.
-- Only one valid finish result is accepted per session. Later calls return an
-  error. The first valid terminal call is authoritative.
+- Expose only in child sessions (`isSubAgent == true`). Hidden from primary
+  and coordinator-primary sessions at tool registration time.
+- Only one valid yield result is accepted per session. Subsequent calls return
+  an error. The first valid terminal call is authoritative.
+- When `OutputSchema` is configured on the subagent, the tool validates the
+  `payload` field against the schema (one retry on failure to prevent loops).
 
 ### Parameters
 
 ```go
-type SubagentFinishParams struct {
-    Status       SubagentTerminalStatus `json:"status"`
-    Summary      string                 `json:"summary,omitempty"`
-    Artifacts    []string               `json:"artifacts,omitempty"`
-    FilesTouched []string               `json:"files_touched,omitempty"`
-    PatchPlan    []string               `json:"patch_plan,omitempty"`
-    TestResults  []string               `json:"test_results,omitempty"`
-    Followups    []string               `json:"followups,omitempty"`
-    Risks        []string               `json:"risks,omitempty"`
-    NextActions  []string               `json:"next_actions,omitempty"`
-    Confidence   string                 `json:"confidence,omitempty"`
-    Error        string                 `json:"error,omitempty"`
-    Data         json.RawMessage        `json:"data,omitempty"`
+type YieldParams struct {
+    Status  string          `json:"status"`
+    Data    string          `json:"data,omitempty"`
+    Error   string          `json:"error,omitempty"`
+    Payload json.RawMessage `json:"payload,omitempty"`
 }
-
-type SubagentTerminalStatus string
-
-const (
-    SubagentStatusCompleted             SubagentTerminalStatus = "completed"
-    SubagentStatusCompletedWithWarnings SubagentTerminalStatus = "completed_with_warnings"
-    SubagentStatusFailed                SubagentTerminalStatus = "failed"
-    SubagentStatusCanceled              SubagentTerminalStatus = "canceled"
-    SubagentStatusBlocked               SubagentTerminalStatus = "blocked"
-)
 ```
 
-Validation rules:
+Validation rules (in `NewYieldTool`):
 
-- `status` is required; non-terminal values (`pending`, `in_progress`,
-  `running`) are rejected with a descriptive error.
-- `summary` is required for `completed` and `completed_with_warnings` unless
-  typed `Data` satisfies the configured schema.
+- `status` defaults to `"completed"` if empty; non-terminal values
+  (`pending`, `in_progress`, `running`) are rejected.
 - `error` is required for `failed` and `blocked`.
-- `files_touched` must be deduplicated and workspace-relative when possible.
-- Each list field has a configurable count limit (default 100 items) and byte
-  limit (default 8 KB per field).
-- `Data` must be size-limited (default 64 KB) and schema-validated when
-  `SubagentResultContract.SchemaName` is set.
+- `data` or `payload` is required for success statuses (`completed`,
+  `completed_with_warnings`).
+- `payload` is validated against `OutputSchema` when configured.
+- Duplicate calls are rejected.
 
-### Metadata Type
-
-Add to `internal/message/auto_mode.go` or a new
-`internal/message/subagent.go`:
+### Metadata Type (internal/message/auto_mode.go)
 
 ```go
-const ToolResultSubagentFinishMetadataKey = "subagent_finish"
+const toolResultYieldMetadataKey = "yield"
 
-type ToolResultSubagentFinish struct {
-    Status      string          `json:"status,omitempty"`
-    Summary     string          `json:"summary,omitempty"`
-    Artifacts   []string        `json:"artifacts,omitempty"`
-    FilesTouched []string       `json:"files_touched,omitempty"`
-    PatchPlan   []string        `json:"patch_plan,omitempty"`
-    TestResults []string        `json:"test_results,omitempty"`
-    Followups   []string        `json:"followups,omitempty"`
-    Risks       []string        `json:"risks,omitempty"`
-    NextActions []string        `json:"next_actions,omitempty"`
-    Confidence  string          `json:"confidence,omitempty"`
-    Error       string          `json:"error,omitempty"`
-    Data        json.RawMessage `json:"data,omitempty"`
+type ToolResultYield struct {
+    Data    string          `json:"data,omitempty"`
+    Status  string          `json:"status,omitempty"`
+    Error   string          `json:"error,omitempty"`
+    Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-func ParseToolResultSubagentFinish(metadata string) (ToolResultSubagentFinish, bool)
-func (t ToolResult) SubagentFinish() (ToolResultSubagentFinish, bool)
-func (t ToolResult) WithSubagentFinish(f ToolResultSubagentFinish) ToolResult
+func ParseToolResultYield(metadata string) (ToolResultYield, bool)
+func (t ToolResult) Yield() (ToolResultYield, bool)
+func (t ToolResult) WithYield(yield ToolResultYield) ToolResult
 ```
 
-Follow the existing pattern used by `WithReducer`/`ParseToolResultReducer`:
-decode into a top-level JSON map keyed by `subagent_finish`, merge alongside
-other metadata keys.
+`ToolResultSubagentFinish` and `WithSubagentFinish`/`ParseToolResultSubagentFinish`
+also exist in `auto_mode.go` as an earlier design representation. The `yield` tool
+is the active implementation.
 
-### Missing Finish Loop
+### Missing Finish Loop (ensureSubagentYield, coordinator.go:3194)
 
-After `sessionAgent.Run` returns for a foreground child:
+After `sessionAgent.Run` returns for a foreground child, `ensureSubagentYield`:
 
-1. Scan child session messages for tool results with `SubagentFinish()` metadata.
-2. If found, build `taskGraphNodeResult` from structured finish.
-3. If not found and `AllowRawTextFallback` is true, use sanitized final child
-   assistant text and mark status according to response error state.
-4. If not found and `MissingFinishPolicy` includes retry: send a short reminder
-   prompt requiring `subagent_finish`. Allow at most two reminders by default.
-5. After exhausting reminders, apply `MissingFinishPolicy` (`warn` → use
-   fallback text with `completed_with_warnings`, `fail` → mark `failed`).
-
-Reminder prompt text:
-
-```text
-Call subagent_finish exactly once now. Summarize only the work already
-completed. Do not start new work unless needed to determine final status.
-```
+1. Scans child session messages for `ToolResultYield` metadata.
+2. If found, returns the structured yield result.
+3. If `!runtime.Result.Required`, returns empty — raw text fallback allowed.
+4. If `MissingFinishPolicy` includes retry: sends up to 2 reminder prompts:
+   `"Call yield exactly once now. Summarize only the work already completed.
+   Do not start new work unless needed to determine final status."`
+5. After exhausting retries:
+   - `fail` / `retry_then_fail` → marks `ToolResultSubtaskStatusFailed`
+   - `warn` / `retry_then_warn` → marks `ToolResultSubtaskStatusCompletedWithWarnings`
+     with fallback text.
 
 ## Lifecycle and Status Semantics
 
-### Internal Runtime Status Type
+### Public Status Values (message/auto_mode.go)
 
 ```go
-// SubagentRuntimeStatus is the internal fine-grained status used within
-// SubagentRuntimeContext. It maps to message.ToolResultSubtaskStatus for
-// public transport.
-type SubagentRuntimeStatus string
+type ToolResultSubtaskStatus string
 
 const (
-    RuntimePending               SubagentRuntimeStatus = "pending"
-    RuntimeInProgress            SubagentRuntimeStatus = "in_progress"
-    RuntimeLaunched              SubagentRuntimeStatus = "launched"  // background accepted
-    RuntimeRunning               SubagentRuntimeStatus = "running"   // background still executing
-    RuntimeCompleted             SubagentRuntimeStatus = "completed"
-    RuntimeCompletedWithWarnings SubagentRuntimeStatus = "completed_with_warnings"
-    RuntimeFailed                SubagentRuntimeStatus = "failed"
-    RuntimeCanceled              SubagentRuntimeStatus = "canceled"
-    RuntimeBlocked               SubagentRuntimeStatus = "blocked"
+    ToolResultSubtaskStatusPending               ToolResultSubtaskStatus = "pending"
+    ToolResultSubtaskStatusInProgress            ToolResultSubtaskStatus = "in_progress"
+    ToolResultSubtaskStatusRunning               ToolResultSubtaskStatus = "running"
+    ToolResultSubtaskStatusCompleted             ToolResultSubtaskStatus = "completed"
+    ToolResultSubtaskStatusCompletedWithWarnings ToolResultSubtaskStatus = "completed_with_warnings"
+    ToolResultSubtaskStatusFailed                ToolResultSubtaskStatus = "failed"
+    ToolResultSubtaskStatusCanceled              ToolResultSubtaskStatus = "canceled"
+    ToolResultSubtaskStatusBlocked               ToolResultSubtaskStatus = "blocked"
 )
 ```
 
-### Mapping to Public Status
-
-| SubagentRuntimeStatus | message.ToolResultSubtaskStatus |
-|---|---|
-| `pending` | `pending` |
-| `in_progress` | `in_progress` |
-| `launched` | `running` |
-| `running` | `running` |
-| `completed` | `completed` |
-| `completed_with_warnings` | `completed_with_warnings` *(P0: add)* |
-| `failed` | `failed` |
-| `canceled` | `canceled` |
-| `blocked` | `blocked` *(P0: add)* |
+All values are implemented. No internal `SubagentRuntimeStatus` type was
+created; the code uses `message.ToolResultSubtaskStatus` directly.
 
 ### Dependency Release Rule
 
-**Already correctly implemented at coordinator.go:2321.** The check is:
-
-```go
-if dependencyResult.Status != message.ToolResultSubtaskStatusCompleted {
-    // dependency not satisfied — block dependent
-}
-```
-
-After P0 adds `completed_with_warnings`, the function that decides whether a
-status satisfies dependencies should be:
-
-```go
-// statusReleasesDependents returns true only for terminal-success statuses.
-func statusReleasesDependents(status message.ToolResultSubtaskStatus) bool {
-    return status == message.ToolResultSubtaskStatusCompleted ||
-        status == message.ToolResultSubtaskStatusCompletedWithWarnings
-}
-```
-
-This must be wired into the existing dependency check so that
-`completed_with_warnings` also releases dependents. The current `!= completed`
-check correctly rejects `running`, `failed`, `canceled`; the update only adds
-`completed_with_warnings` to the allowed set.
+The dependency check at coordinator.go uses `!= completed` to gate releases.
+The P0 plan to add `statusReleasesDependents` including `completed_with_warnings`
+has **not been implemented** — the check remains `!= completed` only. This is a
+remaining gap if `completed_with_warnings` should release dependents.
 
 ### Background Tasks
 
@@ -522,10 +510,9 @@ For task-level background execution:
 
 - Build `SubagentRuntimeContext` with isolation `none`.
 - Launch child session in background goroutine.
-- Return `launched` / `running` status immediately.
-- Do not mark business completion.
+- Return `running` status immediately.
 - Do not release dependents.
-- Record child session ID and background agent ID in `taskGraphNodeResult`.
+- Record child session ID in `subagentResult.ChildSessionID`.
 - Expose polling through `subtask_result`.
 
 For graph-level background execution (`params.RunInBackground == true`):
@@ -536,77 +523,52 @@ For graph-level background execution (`params.RunInBackground == true`):
 
 ## Permission Derivation
 
-### ParentPermissionContext
+### ParentPermissionContext (subagent_permissions.go)
 
 ```go
-// ParentPermissionContext captures the permission state of the parent agent
-// that will be used to constrain a child agent's derived permissions.
 type ParentPermissionContext struct {
     SessionID    string
     AgentName    string
     AllowedTools []string
     DeniedTools  []string
-    Rules        []permission.Rule
     ExternalDeny []string
-    Mode         string // "auto", "suggest", "manual"
+    Mode         string
 }
 ```
 
-Populate from the parent session config, the parent agent's `AllowedTools`, and
-the parent permission service state.
+Populated from the parent session config and the parent agent's `AllowedTools`.
 
-### DerivedSubagentPermissions
+### DerivedSubagentPermissions (subagent_permissions.go)
 
 ```go
 type DerivedSubagentPermissions struct {
-    AllowedTools map[string]struct{}
-    DeniedTools  map[string]struct{}
-    Rules        []permission.Rule
-    ReadOnly     bool
-    CanSpawn     bool
+    AllowedTools              map[string]struct{}
+    DeniedTools               map[string]struct{}
+    ReadOnly                  bool
+    CanSpawn                  bool
+    AgentToolExternallyDenied bool
 }
 ```
 
-### Algorithm
+### Algorithm (internal/agent/subagent_permissions.go:20)
 
-```go
-func DeriveSubagentPermissions(
-    parent ParentPermissionContext,
-    profile SubagentProfile,
-    availableTools []string,
-) DerivedSubagentPermissions {
-    // Start from profile-allowed tools, intersect with available.
-    allowed := intersect(profile.ToolNames, availableTools)
+The actual implementation follows this flow:
 
-    // If parent has an explicit allowlist, restrict further.
-    if len(parent.AllowedTools) > 0 {
-        allowed = intersect(allowed, parent.AllowedTools)
-    }
+1. Intersect profile `ToolNames` with `availableTools`. If empty (no profile
+   restriction), use all available tools.
+2. If parent has an explicit `AllowedTools`, intersect with that.
+3. Always include mandatory subagent tools (`yield`).
+4. Dynamically preserve non-builtin tools (MCP, custom plugins) from parent.
+5. Union deny sources: `parent.DeniedTools`, `parent.ExternalDeny`,
+   `profile.DenyTools`, and global denied tools (`plan_exit`, `request_user_input`).
+6. If `ReadOnly`: add `edit`, `write`, `download`, `retain`, `todos`,
+   `send_message`, `task_stop`, LSP mutation tools to denied set.
+7. If `!CanSpawn`: add `agent` to denied set.
+8. Subtract denied from allowed.
 
-    // Union all deny sources. Deny always wins.
-    denied := union(parent.DeniedTools, profile.DenyTools, globalSubagentDenies())
-    rules := append([]permission.Rule{}, parent.Rules...)
-
-    if profile.ReadOnly {
-        denied = union(denied, mutatingToolNames())
-        rules = append(rules, denyMutatingBashRule())
-    }
-    if !profile.CanSpawn {
-        denied = union(denied, []string{"agent"})
-    }
-
-    // Remove denied tools from the allowed set.
-    allowed = subtract(allowed, denied)
-
-    return DerivedSubagentPermissions{
-        AllowedTools: toSet(allowed),
-        DeniedTools:  toSet(denied),
-        Rules:        rules,
-        ReadOnly:     profile.ReadOnly,
-        CanSpawn:     profile.CanSpawn,
-    }
-}
-```
+**Note:** The `Rules []permission.Rule` field from the original design was not
+implemented. Permission enforcement uses `WorkerIdentity` on the escalation
+bridge instead.
 
 Required behavior:
 
@@ -621,87 +583,39 @@ Required behavior:
 
 ## Tool Profile Shaping
 
-The tool registry construction must call `ShapeToolsForSubagent` as the
-authoritative filter before the model sees any tool list.
+`ShapeToolsForSubagent` in `internal/agent/subagent_tools.go` is the
+authoritative filter called during tool registry construction.
 
 ```go
-// ShapeToolsForSubagent filters a full tool list to only those allowed by the
-// derived tool profile. This is the single authoritative enforcement point for
-// child tool sets.
 func ShapeToolsForSubagent(
-    all []tools.BaseTool,
+    all []fantasy.AgentTool,
     profile SubagentToolProfile,
-) []tools.BaseTool {
-    shaped := make([]tools.BaseTool, 0, len(all))
-    for _, tool := range all {
-        name := tool.Info().Name
-        if profile.Allows(name) {
-            shaped = append(shaped, tool)
-        }
-    }
-    return shaped
+) []fantasy.AgentTool {
+    // ... filters by profile.Allows(name) ...
 }
 ```
+
+`shapeDeferredHintsForSubagent` filters `RegistryEntry` hints the same way.
 
 Do not rely on prompt text for read-only enforcement. Runtime filtering is
 primary; prompt is secondary.
 
 ### Built-in Profile Defaults
 
-#### coordinator
+Profile defaults are derived from config agent definitions via
+`subagentProfileForAgent`. The built-in agents have pre-configured
+`AllowedTools` in `config/builtin_agents.go`. The `globalSubagentDeniedTools`
+in `subagent_permissions.go` deny `plan_exit` and `request_user_input` for all
+subagents. Read-only tools are denied via `readOnlyDeniedToolNames()`.
 
-Allowed:
-- `agent`, `send_message`, `task_stop`, `subtask_result`
-- `view`, `grep`, `glob`, `bash` (read-only mode)
-- LSP read-only tools
+Key defaults:
 
-Denied:
-- `edit`, `write`, `download`
-- mutating bash by default
-
-#### explore
-
-Allowed:
-- `view`, `grep`, `glob`
-- LSP read-only tools (`lsp_definition`, `lsp_references`, `lsp_hover`,
-  `lsp_document_symbols`, `lsp_workspace_symbols`, `lsp_type_definition`,
-  `lsp_declaration`, `lsp_implementation`)
-- semantic/context search tools when available
-- web fetch tools if network policy allows
-- `bash` with `DisableBackground: true` (already set via `tool_registration.go`)
-- `subtask_result`
-
-Denied:
-- `edit`, `write`, `download`
-- mutating bash
-- `agent` (recursive spawn)
-- package managers, build commands, destructive shell operations
-
-Note: explore's `DisableBackground` and the absence of write/edit/download are
-already enforced via config `AllowedTools` and `BashToolOptions` in
-`tool_registration.go:80-89`. P2 adds `ShapeToolsForSubagent` as the runtime
-layer on top of this existing config-based enforcement.
-
-#### general
-
-Allowed:
-- All read tools
-- `edit`, `write`, `download` under parent-derived policy
-- `bash` under parent-derived policy
-- test/build commands under bash policy
-
-Denied by default:
-- `agent` (recursive spawn), unless `CanSpawn: true`
-- deploy/publish/push/destructive commands unless approved through parent
-  authority
-
-#### review
-
-Allowed:
-- All read-only tools and diff inspection tools
-
-Denied:
-- `edit`, `write`, `download`, mutating bash, `agent`
+| Profile | ReadOnly | CanSpawn | Key Denied Tools |
+|---|---|---|---|
+| `explore` | yes | no | `edit`, `write`, `download`, `agent`, LSP mutations |
+| `plan` | yes | no | same as explore |
+| `review` | yes | no | same as explore |
+| `general` | no | varies | `agent` by default |
 
 ## Approval and Event Forwarding
 
@@ -710,7 +624,7 @@ Denied:
 ```text
 child tool request
   -> child permission service
-  -> SubagentRuntimeContext.ApprovalAuthority
+  -> WorkerIdentity on escalation bridge (coordinator.go:3389)
   -> parent permission/autopermission service
   -> manual/auto policy decision
   -> result returned to child tool execution
@@ -719,14 +633,18 @@ child tool request
 Requirements:
 
 - Approval request metadata includes `task_id`, `child_session_id`, and child
-  profile name.
+  profile name via `WorkerIdentity`.
 - Child session cannot persist permission grants under its own authority if
   parent authority is required.
 - Denials are reported both to the child (via permission error) and to the
   parent event sink.
-- The `WorkerIdentity` injected at `coordinator.go:2988` already provides the
-  `AgentID` and `AgentType` for escalation bridge routing; P3 adds task ID
-  metadata to approval requests.
+- The `WorkerIdentity` injected at `coordinator.go:3389` already provides
+  `AgentID`, `AgentType`, `ParentSessionID`, `ChildSessionID`, `TaskID`, and
+  `ProfileName` for escalation bridge routing.
+
+**Note:** The `ApprovalAuthority` type from the original design was not
+implemented. Its function is fulfilled by `permission.WorkerIdentity` on the
+escalation bridge directly.
 
 ### SubagentEventSink
 
@@ -763,61 +681,30 @@ thin adapter. The `timeline.ChildSessionFinishedEvent` calls at
 
 ## Result Extraction and Reduction
 
-### taskGraphNodeResult Extension
+### subagentResult (already complete, coordinator.go:2484)
 
-Extend the existing struct with the following missing fields:
+The `subagentResult` struct already has all fields including `AgentID`,
+`Yield`, `Warnings`, `Error`, and `Attempts` — no extension needed.
 
-```go
-type taskGraphNodeResult struct {
-    Task           taskGraphTask
-    Status         message.ToolResultSubtaskStatus
-    ChildSessionID string
-    AgentID        string                            // background agent ID, separate from session
-    Content        string
-    Artifacts      []string
-    FilesTouched   []string
-    PatchPlan      []string
-    TestResults    []string
-    Followups      []string
-    Finish         message.ToolResultSubagentFinish  // structured finish metadata (P0)
-    Warnings       []string                          // non-fatal warnings (P0)
-    Error          string                            // terminal error reason (P0)
-    Attempts       int                               // retry attempt count (P3)
-}
-```
+### Extraction Order (ensureSubagentYield)
 
-### Extraction Order
+After `sessionAgent.Run` returns for a foreground child, `ensureSubagentYield`
+extracts in this order:
 
-After `sessionAgent.Run` returns for a foreground child, extract in this order:
+1. **Structured yield metadata** (`yield` key in child session tool results):
+   most reliable, directly sets all output fields.
+2. If yield not found and `!runtime.Result.Required`: raw text fallback.
+3. If yield not found and `MissingFinishPolicy` includes retry: reminder loop
+   (up to 2 prompts calling `yield`).
+4. After reminders exhausted: apply `MissingFinishPolicy` — `fail` → `failed`,
+   `warn` → `completed_with_warnings`.
 
-1. **Structured finish metadata** (`subagent_finish` key in child session tool
-   results): most reliable, directly sets all output fields.
-2. **Existing `subtask_result` metadata** (`ToolResultSubtaskResult`): session
-   ID and status if no finish metadata found.
-3. **Child final assistant text** as fallback if `AllowRawTextFallback` is true
-   and no structured data found.
-4. **`ToolResponse.IsError`** and returned error string for failure cases.
-5. **Missing-finish policy** as the last resort (reminder loop or immediate
-   fail/warn).
+### Safe Reducer (subagentReducerMessages)
 
-### Safe Reducer
-
-The parent-visible reducer must prefer structured finish metadata:
-
-```go
-// reduceNodeToChildSession converts a node result to the structured child
-// session entry for the parent ToolResultReducer. It uses structured finish
-// data when available and sanitized text as fallback.
-func reduceNodeToChildSession(result taskGraphNodeResult) message.ToolResultReducerChildSession {
-    cs := message.ToolResultReducerChildSession{
-        TaskID:      result.Task.ID,
-        Description: result.Task.Description,
-        SessionID:   result.ChildSessionID,
-        Status:      result.Status,
-    }
-    return cs
-}
-```
+The parent-visible reducer `subagentReducerMessages` in `coordinator.go:3822`
+builds `ToolResultReducer` messages from `[]subagentResult`. The helper
+`reduceResultToChildSession` maps individual results to
+`ToolResultReducerChildSession`.
 
 The graph-level reducer aggregates:
 
@@ -833,127 +720,40 @@ Use `subtask_result` for explicit full-transcript retrieval.
 
 ## Retry Semantics
 
-### SubagentRetryPolicy
-
-```go
-type SubagentRetryPolicyKind string
-
-const (
-    RetryNever        SubagentRetryPolicyKind = "never"
-    RetryReadOnlyOnly SubagentRetryPolicyKind = "read_only_only"
-    RetryIdempotent   SubagentRetryPolicyKind = "idempotent"
-    RetryIsolated     SubagentRetryPolicyKind = "isolated"
-)
-
-type SubagentRetryPolicy struct {
-    Kind        SubagentRetryPolicyKind
-    MaxAttempts int
-}
-```
-
-### ShouldRetrySubagent
-
-```go
-// ShouldRetrySubagent decides whether a failed task node should be retried
-// given its runtime context and observed side effects.
-func ShouldRetrySubagent(
-    result taskGraphNodeResult,
-    runtime SubagentRuntimeContext,
-    sideEffects SideEffectSummary,
-) bool {
-    // Never retry canceled or blocked.
-    if result.Status == message.ToolResultSubtaskStatusCanceled ||
-        result.Status == message.ToolResultSubtaskStatusBlocked {
-        return false
-    }
-    if result.Attempts >= runtime.Retry.MaxAttempts {
-        return false
-    }
-    switch runtime.Retry.Kind {
-    case RetryNever:
-        return false
-    case RetryReadOnlyOnly:
-        return runtime.AgentProfile.ReadOnly && !sideEffects.HasAny()
-    case RetryIdempotent:
-        return !sideEffects.HasAny()
-    case RetryIsolated:
-        return runtime.Isolation.Available
-    }
-    return false
-}
-```
-
-### SideEffectSummary
-
-```go
-type SideEffectSummary struct {
-    FilesTouched      []string
-    MutatingTools     []string
-    SpawnedBackground bool
-    ApprovalGranted   bool
-}
-
-func (s SideEffectSummary) HasAny() bool {
-    return len(s.FilesTouched) > 0 ||
-        len(s.MutatingTools) > 0 ||
-        s.SpawnedBackground ||
-        s.ApprovalGranted
-}
-```
-
-Sources for `SideEffectSummary` population:
-
-- `subagent_finish.files_touched` field
-- `internal/filetracker` file tracker for the child session
-- tool metadata `ReadOnly: false` flags from executed tools
-- approval bridge records (grants recorded during child run)
-- background launch records
+**Not implemented.** The original design included `SubagentRetryPolicy`,
+`ShouldRetrySubagent`, and `SideEffectSummary` but these were never built
+in code. Retry behavior currently defaults to whatever the LLM provider or
+agent loop provides naturally. The `DefaultRetryPolicy` config field
+(`internal/config/config.go:992`) exists but is not consumed at runtime
+(TODO noted in config).
 
 ## Cancellation Semantics
 
 - Parent context cancellation propagates to all active child execution contexts
   via `ctx.Done()`.
 - `task_stop` targets one task or mailbox graph and emits cancellation events.
-- Child cancellation produces terminal `ToolResultSubtaskStatusCanceled`.
-- Dependents of canceled tasks are finalized with `ToolResultSubtaskStatusCanceled`
-  plus a dependency-reason string.
-- Cleanup warnings that occur after a successful `subagent_finish` call must
-  not change the terminal status from `completed` to `failed`. They may produce
-  `completed_with_warnings` if the finish record indicates success.
+- Child cancellation produces terminal `ToolResultSubtaskStatusCanceled`
+  via `SubagentEventSink` and timeline events.
+- Dependents of canceled tasks are finalized with `ToolResultSubtaskStatusCanceled`.
+- Cleanup warnings (implemented via `SubagentEventSink` events) do not change
+  terminal status from `completed` to `failed`.
 
 ## TaskGraph Changes
 
 ### statusReleasesDependents
 
-The current check at `coordinator.go:2321` is already correct for the current
-status set:
-
-```go
-if dependencyResult.Status != message.ToolResultSubtaskStatusCompleted {
-    // dependency not satisfied
-}
-```
-
-After P0 adds `completed_with_warnings`, replace with:
-
-```go
-func statusReleasesDependents(status message.ToolResultSubtaskStatus) bool {
-    return status == message.ToolResultSubtaskStatusCompleted ||
-        status == message.ToolResultSubtaskStatusCompletedWithWarnings
-}
-```
-
-Wire this function into the dependency check loop. The semantics remain: only
-terminal-success statuses release dependents. `running`, `failed`, `canceled`,
-and `blocked` do not.
+**Not implemented.** The check at `coordinator.go` remains
+`dependencyResult.Status != message.ToolResultSubtaskStatusCompleted`.
+The `statusReleasesDependents` helper was never created, and
+`completed_with_warnings` does not yet release dependents. This is a
+remaining gap if that behavior is desired.
 
 ### Dependency Failure Propagation
 
 When a dependency is in a non-releasing terminal state:
 
 - Mark dependent as `ToolResultSubtaskStatusCanceled` (if dependency canceled)
-  or `ToolResultSubtaskStatusBlocked` (if dependency failed/blocked with
-  explicit policy-block reason).
+  or `ToolResultSubtaskStatusBlocked` (if dependency failed/blocked).
 - Do not start the dependent.
 - Include the dependency task ID and failure reason in the reducer output.
 
@@ -961,407 +761,246 @@ When a dependency is in a non-releasing terminal state:
 
 For task nodes with `run_in_background == true`:
 
-- Mark runtime status as `RuntimeLaunched` immediately.
-- Update to `RuntimeRunning` once the background goroutine is confirmed active.
-- Return child session ID and background agent ID in the node result.
+- Mark runtime status as `running` immediately.
+- Return child session ID in the node result.
 - Do not release dependents.
 - Reducer includes a clear background section with polling instructions.
 
 ## Prompt Contract
 
-Subagent system prompts (via `buildDelegationPromptPrefix` or subagent template)
-must include:
+Subagent system prompts include instructions to:
 
-- You are a child worker with a bounded task.
-- Use only the tools you have been given; do not attempt to call tools not in
-  your tool list.
-- Do not assume access to parent context that has not been explicitly provided.
-- Complete your task by calling `subagent_finish` exactly once as your final
-  action.
-- Report all files you touched in `files_touched`.
-- Report test commands run and their outcomes in `test_results`.
-- If you cannot complete the task, call `subagent_finish` with `blocked` or
-  `failed` and explain the reason in `error`.
-- For partial work that is worth preserving, use `completed_with_warnings`.
+- Use only the tools provided; do not attempt to call tools outside your list.
+- Complete your task by calling `yield` exactly once as your final action.
+- Report all files touched.
+- Report test commands run and outcomes.
+- If you cannot complete the task, call `yield` with `blocked` or `failed`.
+- For partial work worth preserving, use `completed_with_warnings`.
 
-Runtime enforcement is primary. Prompt instructions are secondary defense only.
+Runtime enforcement is primary (via `ShapeToolsForSubagent`). Prompt
+instructions are secondary defense only.
 
 ## Configuration
 
-### SubagentRuntimeConfig
-
-Add to the top-level config struct or under a `subagents`/`subagent_runtime`
-key:
+### SubagentRuntimeConfig (internal/config/config.go:989)
 
 ```go
-// SubagentRuntimeConfig controls subagent execution behavior independently
-// of Auto Mode policy.
 type SubagentRuntimeConfig struct {
-    // StructuredCompletionRequired requires built-in subagents to call
-    // subagent_finish. When false, raw text fallback is always allowed.
-    StructuredCompletionRequired bool `json:"structured_completion_required,omitempty"`
-
-    // MissingFinishPolicy controls what happens when a subagent does not call
-    // subagent_finish. Valid values: "warn", "fail", "retry_then_warn",
-    // "retry_then_fail".
-    MissingFinishPolicy string `json:"missing_finish_policy,omitempty"`
-
-    // DefaultRetryPolicy controls retry behavior for child tasks.
-    // Valid values: "never", "read_only_only", "idempotent", "isolated".
-    DefaultRetryPolicy string `json:"default_retry_policy,omitempty"`
-
-    // MaxConcurrency is the maximum number of concurrently running child tasks.
-    MaxConcurrency int `json:"max_concurrency,omitempty"`
-
-    // AllowRecursiveAgents allows child agents to spawn their own children.
-    // Default false.
-    AllowRecursiveAgents bool `json:"allow_recursive_agents,omitempty"`
-
-    // DefaultIsolation is the default isolation mode for child tasks.
-    // Valid values: "none", "worktree", "external_sandbox", "managed_sandbox".
-    DefaultIsolation string `json:"default_isolation,omitempty"`
-
-    // SafeSummary controls whether the parent-visible reducer uses only
-    // structured finish summaries instead of raw child output.
-    SafeSummary bool `json:"safe_summary,omitempty"`
+    StructuredCompletionRequired bool   `json:"structured_completion_required,omitempty"`
+    MissingFinishPolicy          string `json:"missing_finish_policy,omitempty"`
+    DefaultRetryPolicy           string `json:"default_retry_policy,omitempty"`
+    MaxConcurrency               int    `json:"max_concurrency,omitempty"`
+    AllowRecursiveAgents         bool   `json:"allow_recursive_agents,omitempty"`
+    DefaultIsolation             string `json:"default_isolation,omitempty"`
+    SafeSummary                  bool   `json:"safe_summary,omitempty"`
 }
 ```
 
-Example `crush.json` section:
+Configurable via `crush.json` under the `"subagents"` key. Defaults are set
+in `EffectiveSubagentRuntime()`:
+- `StructuredCompletionRequired`: true
+- `MaxConcurrency`: 4
+- `AllowRecursiveAgents`: false
+- `DefaultIsolation`: "none"
+- `SafeSummary`: true
 
-```json
-{
-  "subagents": {
-    "structured_completion_required": true,
-    "missing_finish_policy": "retry_then_warn",
-    "default_retry_policy": "read_only_only",
-    "max_concurrency": 4,
-    "allow_recursive_agents": false,
-    "default_isolation": "none",
-    "safe_summary": true
-  }
-}
-```
+Implementation notes:
+- `MissingFinishPolicy` is consumed by `applySubagentRuntimeConfig` at runtime.
+- `AllowRecursiveAgents` is consumed by `applySubagentRuntimeConfig` — when true
+  and the agent is not read-only, `CanSpawn` is set to true if the agent has no
+  explicit `Spawns` config (legacy fallback).
+- `DefaultRetryPolicy` exists in config but is **not consumed** at runtime.
+- `SafeSummary` exists in config but is **not consumed** (structured finish is
+  already preferred when available).
+- `MaxConcurrency` has a TODO to be wired into the task graph semaphore.
 
-Agent profile definitions may expose mode and profile constraints:
+Agent tool lists are configured via the `"agents"` section with `"mode": "subagent"`
+and `"allowed_tools"` lists. Profile kind is derived from the canonical agent ID.
 
-```json
-{
-  "agents": {
-    "explore": {
-      "mode": "subagent",
-      "profile": "explore",
-      "tools": ["view", "grep", "glob", "bash", "lsp_definition", "lsp_references", "lsp_hover", "lsp_document_symbols", "lsp_workspace_symbols", "subtask_result"],
-      "can_spawn": false,
-      "result_schema": "subagent_summary"
-    },
-    "general": {
-      "mode": "subagent",
-      "profile": "general",
-      "can_spawn": false
-    }
-  }
-}
-```
+## Historical Implementation Plan
 
-## Implementation Plan
+The P0–P4 plan below is a **historical record** of the original design intent.
+Completed items are checked ✅. Items not checked were either not implemented
+or the design was superseded by a different approach.
 
-### P0: Structured Completion and Status Fixes
+### ✅ P0: Structured Completion and Status Fixes (Implemented)
 
-**Already done — do not re-implement:**
-- Dependency release: `coordinator.go:2321` only releases on `completed`.
-- Background `running` does not release dependents.
-- `agent` tool denied for subagents: `tool_registration.go:47`.
-- `ToolResultSubtaskStatus` base values.
+**Status: Mostly complete.** The tool is named `yield` (not `subagent_finish`).
 
-**New files:**
-- `internal/agent/tools/subagent_finish.go`
-- `internal/agent/tools/subagent_finish.md`
+**Completed work items:**
+- ✅ `ToolResultSubtaskStatusCompletedWithWarnings` and `ToolResultSubtaskStatusBlocked`
+  added to `message/auto_mode.go`.
+- ✅ `ToolResultSubagentFinish` type and helpers (`ParseToolResultSubagentFinish`,
+  `WithSubagentFinish`) exist in `auto_mode.go`.
+- ✅ `ToolResultYield` type and helpers (`ParseToolResultYield`, `WithYield`) exist.
+- ✅ `yield` tool (`internal/agent/tools/yield.go`) validates terminal status,
+  requires `error` for failed/blocked, requires `data`/`payload` for success.
+- ✅ Duplicate yield calls rejected per session.
+- ✅ Missing-finish reminder loop (`ensureSubagentYield`) with configurable policy.
+- ✅ `AgentID`, `Warnings`, `Error`, `Attempts` fields in `subagentResult`.
 
-**Modified files:**
-- `internal/message/auto_mode.go` — add `ToolResultSubtaskStatusCompletedWithWarnings`,
-  `ToolResultSubtaskStatusBlocked`, `ToolResultSubagentFinish` type and helpers
-- `internal/agent/coordinator.go` — extraction logic, missing-finish loop,
-  `statusReleasesDependents` function, `taskGraphNodeResult` field additions
-
-**Work items:**
-
-1. Define `SubagentFinishParams`, `SubagentTerminalStatus` in
-   `subagent_finish.go`.
-2. Register `subagent_finish` tool only when `isSubAgent == true`. Gate
-   registration in `registerAgentTools`.
-3. Validate `status` is terminal; reject `pending`/`in_progress`/`running`.
-   Require `error` for `failed` and `blocked`. Require `summary` for success
-   statuses when `Data` is absent.
-4. Store `ToolResultSubagentFinish` in tool result metadata via
-   `WithSubagentFinish`.
-5. In `coordinator.go` after `params.Agent.Run(...)`: scan child messages for
-   `SubagentFinish()` metadata before falling back to `subAgentResponseText`.
-6. Add `statusReleasesDependents` function and update the dependency check at
-   `coordinator.go:2321` to use it (adding `completed_with_warnings`).
-7. Add missing-finish reminder loop (max 2 reminders, configurable).
-8. Add `Finish`, `Warnings`, `Error`, `AgentID`, `Attempts` fields to
-   `taskGraphNodeResult`.
-
-**Verification:**
-
-```sh
-go test ./internal/agent ./internal/message
-```
+**Not implemented from original P0 plan:**
+- ❌ `statusReleasesDependents` function was never created. Dependency check
+  remains `!= ToolResultSubtaskStatusCompleted`.
 
 ---
 
-### P1: SubagentRuntimeContext
+### ✅ P1: SubagentRuntimeContext (Implemented)
 
-**New files:**
-- `internal/agent/subagent_runtime.go`
+**Status: Complete.**
 
-**Modified files:**
-- `internal/agent/coordinator.go`
-- `internal/agent/agent_tool.go`
-- `internal/agent/taskgraph_execution_test.go`
-
-**Work items:**
-
-1. Define `SubagentRuntimeContext`, `SubagentProfile`, `SubagentToolProfile`,
-   `SubagentWorkspacePolicy`, `SubagentResultContract`, `MissingFinishPolicy`,
-   `SubagentIsolation`, `SubagentIsolationKind`, `ApprovalAuthority`,
-   `SubagentEventSink`, `SubagentEvent`, `SubagentEventType` in
-   `subagent_runtime.go`.
-2. Build `SubagentRuntimeContext` at the start of `runSubAgentDirect` before
-   calling `buildAgent`. Move scattered child-session setup inputs into it.
-3. Add event sink adapter that wraps `c.timeline` pubsub with
-   `SubagentEventSink`.
-4. Emit `SubagentEventStarted` before child run; `SubagentEventFinish`,
-   `SubagentEventFailed`, or `SubagentEventCanceled` after.
-5. Preserve public `agent` tool schema and `tasks[]` interface unchanged.
-
-**Verification:**
-
-```sh
-go test ./internal/agent
-```
+- ✅ `internal/agent/subagent_runtime.go` exists with all core types:
+  `SubagentRuntimeContext`, `SubagentProfile`, `SubagentToolProfile`,
+  `SubagentWorkspacePolicy`, `SubagentResultContract`, `MissingFinishPolicy`,
+  `SubagentIsolation`, `SubagentIsolationKind`, `SubagentEventSink`,
+  `SubagentEvent`, `SubagentEventType`.
+- ✅ `buildSubagentRuntimeContext` builds the context before child session starts.
+- ✅ `coordinatorSubagentEventSink` wraps `timeline.Service`.
+- ✅ Events emitted for start, progress, finish, failed, canceled, blocked.
+- ❌ `ApprovalAuthority` type was **not implemented** — its role is fulfilled by
+  `WorkerIdentity` on the escalation bridge.
 
 ---
 
-### P2: Permission Derivation and Tool Shaping
+### ✅ P2: Permission Derivation and Tool Shaping (Implemented)
 
-**Context:** The explore agent's `AllowedTools` config and
-`BashToolOptions{DisableBackground: true}` shape already exist. P2 adds the
-formal derivation algorithm and `ShapeToolsForSubagent` as runtime enforcement
-on top.
+**Status: Complete.**
 
-**New files:**
-- `internal/agent/subagent_permissions.go`
-- `internal/agent/subagent_tools.go`
-- `internal/agent/subagent_permissions_test.go`
-- `internal/agent/subagent_tools_test.go`
-
-**Modified files:**
-- `internal/autopermission/service.go` — removed dead helpers
-  (`isSafeReadOnlyBashSegment`, `isSafeReadOnlyGitCommand`,
-  `safeNullRedirectPattern`, `classifyPluginDecision`)
-- `internal/agent/tool_registration.go`
-- `internal/agent/coordinator.go`
-
-**Work items:**
-
-1. Define `ParentPermissionContext`, `DerivedSubagentPermissions` in
-   `subagent_permissions.go`.
-2. Implement `DeriveSubagentPermissions` with deny-wins intersection algorithm.
-3. Define built-in profile defaults for `coordinator`, `explore`, `general`,
-   `review`.
-4. Implement `ShapeToolsForSubagent` in `subagent_tools.go`.
-5. Call `ShapeToolsForSubagent` inside tool registry construction when
-   `isSubAgent == true`.
-6. Add tests: parent-deny propagation, read-only profile enforcement, explore
-   cannot receive edit/write, general does not receive `agent` by default.
-
-**Verification:**
-
-```sh
-go test ./internal/agent ./internal/permission ./internal/config
-```
+- ✅ `internal/agent/subagent_permissions.go` — `ParentPermissionContext`,
+  `DerivedSubagentPermissions`, `DeriveSubagentPermissions` with deny-wins
+  intersection algorithm.
+- ✅ `internal/agent/subagent_tools.go` — `ShapeToolsForSubagent` and
+  `shapeDeferredHintsForSubagent`.
+- ✅ `ShapeToolsForSubagent` called in tool registry construction for subagents.
+- ✅ `subagent_permissions_test.go` and agent_tool tests exist.
+- ❌ `Rules []permission.Rule` field in `ParentPermissionContext` was not
+  implemented (no `permission.Rule` import).
 
 ---
 
-### P3: Safe Summaries, Retry Safety, and Event Forwarding
+### ❌ P3: Safe Summaries, Retry Safety, and Event Forwarding (Partial)
 
-**Modified files:**
-- `internal/agent/coordinator.go`
-- `internal/agent/subagent_runtime.go`
-- `internal/autopermission/service.go`
-- `internal/agent/taskgraph_execution_test.go`
+**Status: Partially implemented.** Event forwarding and safe summaries work;
+retry safety was not built.
 
-**Work items:**
+**Completed:**
+- ✅ `reduceResultToChildSession` exists (coordinator.go:2898).
+- ✅ `subagentReducerMessages` builds `ToolResultReducer` from results.
+- ✅ `SubagentEventSink` events published for all lifecycle transitions.
 
-1. Implement `reduceNodeToChildSession` using `subagent_finish` metadata as
-   primary source.
-2. Add `SubagentRetryPolicy`, `ShouldRetrySubagent`, `SideEffectSummary` to
-   `subagent_runtime.go`.
-3. Populate `SideEffectSummary` from file tracker, finish metadata, and approval
-   bridge records.
-4. Replace unconditional retry logic with `ShouldRetrySubagent` gating.
-5. Route child approval requests through `ApprovalAuthority.SessionID` with
-   task metadata in the request payload.
-6. Emit lifecycle events through `SubagentEventSink` for all transitions.
-
-**Verification:**
-
-```sh
-go test ./internal/agent ./internal/autopermission ./internal/message
-```
+**Not implemented:**
+- ❌ `SubagentRetryPolicy` and `ShouldRetrySubagent` — not in code.
+- ❌ `SideEffectSummary` — not in code.
+- ❌ Retry gating via side effects — not implemented.
+- ❌ `ApprovalAuthority.SessionID` routing — `WorkerIdentity` on escalation
+  bridge is used instead.
 
 ---
 
-### P4: Isolation Capabilities
+### ❌ P4: Isolation Capabilities (Not Implemented)
 
-**New files:**
-- `internal/agent/subagent_isolation.go`
+**Status: Not implemented.**
 
-**Work items:**
+- `SubagentIsolationProvider` interface was never created.
+- Only `SubagentIsolationNone` is functionally wired (isolation kind parsed
+  from config, worktree isolation is available via `prepareSubagentWorkspace`).
+- `external_sandbox` and `managed_sandbox` remain enum constants with no
+  provider implementation.
 
-1. Define `SubagentIsolationProvider` interface:
-   ```go
-   type SubagentIsolationProvider interface {
-       Kind() SubagentIsolationKind
-       Available() bool
-       Prepare(ctx context.Context, runtime SubagentRuntimeContext) (SubagentIsolation, error)
-       Cleanup(ctx context.Context, isolation SubagentIsolation) error
-   }
-   ```
-2. Implement `noneIsolationProvider` (no-op, always available).
-3. Optionally implement `worktreeIsolationProvider` using git worktree.
-4. Consult `SubagentIsolation.Available` in `ShouldRetrySubagent`.
-5. Leave `external_sandbox` and `managed_sandbox` as future providers.
+---
 
-**Verification:**
-
-```sh
-go test ./internal/agent ./...
-```
-
-## Test Matrix
+## Test Matrix (Historical Reference)
 
 ### Completion
 
-| Test | Expectation |
-|---|---|
-| Child calls `subagent_finish(completed)` | Parent records `ToolResultSubtaskStatusCompleted` |
-| Child calls `subagent_finish(failed)` | Parent records `ToolResultSubtaskStatusFailed` |
-| Child calls `subagent_finish(completed_with_warnings)` | Parent records `ToolResultSubtaskStatusCompletedWithWarnings` |
-| Child calls `subagent_finish(blocked)` | Parent records `ToolResultSubtaskStatusBlocked` |
-| Child returns without finish; reminder succeeds | Parent records completed via reminder |
-| Child returns without finish; reminder fails; policy=warn | Parent records `completed_with_warnings` with fallback text |
-| Child returns without finish; reminder fails; policy=fail | Parent records `failed` |
-| Duplicate `subagent_finish` calls | Second call returns error; first result is preserved |
-| Cleanup warning after valid `subagent_finish(completed)` | Status `completed_with_warnings`, not downgraded to `failed` |
+| Test | Status | Notes |
+|---|---|---|
+| Child calls `yield(completed)` | ✅ Implemented | Via `ensureSubagentYield` |
+| Child calls `yield(failed)` | ✅ Implemented | |
+| Child calls `yield(completed_with_warnings)` | ✅ Implemented | |
+| Child calls `yield(blocked)` | ✅ Implemented | |
+| Child returns without yield; reminder succeeds | ✅ Implemented | Missing-finish loop |
+| Child returns without yield; reminder fails; policy=warn | ✅ Implemented | |
+| Child returns without yield; reminder fails; policy=fail | ✅ Implemented | |
+| Duplicate `yield` calls | ✅ Implemented | Error on second call |
+| Cleanup warning after valid yield(completed) | ✅ Implemented | |
 
 ### Status and Dependency
 
-| Test | Expectation |
+| Test | Status |
 |---|---|
-| Background task produces `running` | Status is `running` |
-| `running` dependency check | Does NOT release dependent tasks |
-| `completed` dependency | Releases dependent tasks |
-| `completed_with_warnings` dependency | Releases dependent tasks (after P0) |
-| `failed` dependency | Dependent is canceled with reason |
-| `canceled` dependency | Dependent is canceled with reason |
-| `blocked` dependency | Dependent is blocked with reason |
-
-Note: `coordinator.go:2321` already correctly handles the current `completed`-only
-case. The test for `completed_with_warnings` requires P0 to add the new status
-value.
+| Background task produces `running` | ✅ |
+| `running` dependency check | ✅ (only `completed` releases) |
+| `completed` dependency | ✅ |
+| `completed_with_warnings` dependency | ❌ Not wired in dependency checker |
+| `failed` dependency | ✅ Dependent canceled with reason |
+| `canceled` dependency | ✅ |
+| `blocked` dependency | ✅ |
 
 ### Permission and Tools
 
-| Test | Expectation |
+| Test | Status |
 |---|---|
-| Explore profile | Does not receive `edit`, `write`, `download` |
-| Review profile | Does not receive mutating tools |
-| General profile without `CanSpawn` | Does not receive `agent` |
-| Parent denied tool + child profile allows tool | Tool is denied in child |
-| Parent explicit allowlist + child profile broader | Child allowlist is restricted to parent intersection |
-| Unknown plugin tool + read-only profile | Tool not exposed to child |
+| Explore profile receives no edit/write/download | ✅ |
+| Review profile receives no mutating tools | ✅ |
+| General without CanSpawn receives no agent | ✅ |
+| Parent denied + child allows = denied | ✅ |
+| Parent explicit allowlist restricts child | ✅ |
+| Non-builtin tools preserved for subagent | ✅ |
 
 ### Approval and Event Forwarding
 
-| Test | Expectation |
-|---|---|
-| Child permission request | Uses parent `ApprovalAuthority.SessionID` |
-| Approval request payload | Includes `task_id` and `child_session_id` |
-| Parent denial | Visible in child result `Error` field and parent reducer |
-| Lifecycle events | `started`, `finish`, `failed`, `canceled` events published |
+| Test | Status | Notes |
+|---|---|---|
+| Child permission request uses parent authority | ✅ | Via `WorkerIdentity` |
+| Approval request includes task_id | ✅ | In `WorkerIdentity` |
+| Lifecycle events published | ✅ | Via `SubagentEventSink` |
 
 ### Retry
 
-| Test | Expectation |
-|---|---|
-| Explore transient provider failure | Retries up to `MaxAttempts` |
-| General no side effects | Retries up to `MaxAttempts` |
-| General after files touched | No retry without isolation |
-| Isolated general task | Retries according to policy |
-| Canceled task | Never retried |
-| Blocked task | Never retried |
-| Retry attempt count | Recorded in `Attempts` field of final result |
+Not implemented (entire retry section is not built).
 
 ### Safe Summary
 
-| Test | Expectation |
+| Test | Status |
 |---|---|
-| Structured finish present | Summary from `subagent_finish.summary` |
-| No structured finish | Sanitized fallback text only (no raw command output) |
-| `subtask_result` call | Returns full child assistant text with pagination |
-| Parent reducer | Does not include raw bash output or tool traces |
+| Structured yield present → summary from yield | ✅ |
+| No structured yield → sanitized fallback | ✅ |
+| `subtask_result` returns full transcript | ✅ |
+| Parent reducer excludes raw bash output | ✅ |
 
-## Migration Strategy
+## Migration Strategy (Historical Reference)
 
-1. Add `ToolResultSubagentFinish` metadata and `subagent_finish` tool without
-   removing existing `ToolResultSubtaskResult` or `ToolResultReducer` metadata.
-   Both can coexist.
-2. Update built-in agent system prompts to reference `subagent_finish` as the
-   preferred completion path.
-3. Allow raw text fallback for existing custom agents during a compatibility
-   period (controlled by `AllowRawTextFallback: true` in their result
-   contract).
-4. Make `explore` strict first: it is read-only, easiest to validate, and the
-   most safety-critical.
-5. Make `general` strict after retry/side-effect tracking is available and
-   tested.
-6. Keep the public `agent` tool schema stable until the runtime behavior is
-   proven and documented.
-7. Consider renaming or relocating `internal/message/auto_mode.go` types after
-   P3, once the subagent metadata no longer feels like "auto mode" state.
-   This is not required before GA.
+1. ✅ `ToolResultSubagentFinish` metadata and `yield` tool coexist with
+   `ToolResultSubtaskResult` and `ToolResultReducer`.
+2. ✅ System prompts reference `yield` as the completion path.
+3. ✅ Raw text fallback available for custom agents via
+   `SubagentResultContract.AllowRawTextFallback`.
+4. ✅ Explore agent is read-only restricted via tool profile shaping.
+5. ❌ General-agent strictness with retry/side-effect tracking not implemented.
+6. ✅ Agent tool schema has remained stable.
+7. ❌ Renaming `auto_mode.go` types was not done (and not required).
 
-## Open Questions
+## Resolved Design Decisions
 
-The following questions have recommended answers:
+The following questions from the original design were resolved during
+implementation:
 
-1. **Should public status add `blocked`, `launched`, and
-   `completed_with_warnings`, or keep them internal?**
-   Answer: Add `completed_with_warnings` and `blocked` to the public
-   `ToolResultSubtaskStatus` enum in P0 since they are directly surfaced in
-   parent tool results and reducer output. Keep `launched` as internal
-   `SubagentRuntimeStatus` only; it folds into `running` for public transport.
+1. **Public status values:** `completed_with_warnings` and `blocked` were added
+   to `ToolResultSubtaskStatus`. No internal `SubagentRuntimeStatus` type was
+   created — the code uses `ToolResultSubtaskStatus` directly.
 
-2. **Should `subagent_finish` be mandatory for custom user-defined subagents
-   from day one?**
-   Answer: Require for built-ins first. Warn for custom agents. Make strictness
-   configurable via `SubagentRuntimeConfig.StructuredCompletionRequired`.
+2. **Completion tool name:** Named `yield` (not `subagent_finish`). The
+   `ToolResultSubagentFinish` type exists as a parallel metadata representation.
 
-3. **Should `explore` be allowed to run safe read-only bash?**
-   Answer: Allow read-only bash through `BashToolOptions` restriction and
-   `AllowedTools` filtering. Full bash hiding is acceptable for `explore`.
-   `DerivedSubagentPermissions` enforces the read-only profile at the
+3. **Explore read-only bash:** Allowed via `BashToolOptions{DisableBackground: true}`
+   and `AllowedTools` filtering. `DerivedSubagentPermissions` enforces at the
    permission layer.
 
-4. **Should worktree isolation be enabled by default for write-capable parallel
-   subagents after P4?**
-   Answer: Do not enable by default until cleanup and merge UX are solid.
-   Make it opt-in via `default_isolation: "worktree"` config.
+4. **Worktree isolation:** Available but not enabled by default. Opt-in via
+   `default_isolation: "worktree"` config. Not yet backed by an isolation provider
+   interface.
 
-5. **Should child result schema validation support JSON Schema, JTD, or only a
-   fixed built-in schema?**
-   Answer: Start with a fixed built-in schema (`subagent_summary`) in P0–P1.
-   Add pluggable schema support as a P4+ follow-on.
+5. **Output schema validation:** Implemented via `yield` tool's `OutputSchema`
+   option. Supports JSON Schema compiled via `jsonschema` library. Payload
+   validation applied with one retry on failure to prevent infinite loops.
