@@ -18,8 +18,8 @@ func (t sessionCompactionTrigger) Purpose() plugin.ChatTransformPurpose {
 	}
 }
 
-func proactiveCompactionTrigger(model Model, contextUsed, maxOutputTokens int64) sessionCompactionTrigger {
-	if shouldAutoSummarize(model, contextUsed, maxOutputTokens) {
+func (a *sessionAgent) proactiveCompactionTrigger(model Model, contextUsed, maxOutputTokens int64, sessionID string) sessionCompactionTrigger {
+	if a.shouldAutoSummarizeWithCooldown(model, contextUsed, maxOutputTokens, sessionID) {
 		return sessionCompactionTriggerProactive
 	}
 	return sessionCompactionTriggerNone

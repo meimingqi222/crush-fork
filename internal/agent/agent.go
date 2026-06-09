@@ -242,6 +242,10 @@ type sessionAgent struct {
 	activeRequests *csync.Map[string, context.CancelFunc]
 	pausedQueues   *csync.Map[string, bool]
 
+	// lastSummarizeTime tracks when each session was last compacted.
+	// Used to prevent immediate re-summarization after compaction.
+	lastSummarizeTime *csync.Map[string, time.Time]
+
 	extractionMu         sync.Mutex
 	pendingExtractions   map[string][]pendingExtraction
 	nextExtractionID     uint64
@@ -354,6 +358,7 @@ func NewSessionAgent(
 		messageQueue:           csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:         csync.NewMap[string, context.CancelFunc](),
 		pausedQueues:           csync.NewMap[string, bool](),
+		lastSummarizeTime:      csync.NewMap[string, time.Time](),
 		pendingExtractions:     make(map[string][]pendingExtraction),
 		sessionMemoryEnabled:   opts.EnableSessionMemory,
 		memoryEngineEnabled:    opts.MemoryEngineEnabled,
@@ -553,7 +558,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if !preflightState.EstimateReduced {
 			estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
 		}
-		trigger := proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens)
+		trigger := a.proactiveCompactionTrigger(largeModel, estimatedInput, call.MaxOutputTokens, call.SessionID)
 		budget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
 		slog.Info("Auto-summarize preflight decision",
 			"session_id", call.SessionID,
@@ -1353,7 +1358,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					// prevent double summarization in the same Run call.
 					// Context-window-exceeded errors are handled separately and
 					// will still trigger recovery summarization.
-					shouldStepSummarize := shouldAutoSummarize(largeModel, projectedPromptTokens, call.MaxOutputTokens)
+					// Also apply cooldown after compaction to prevent immediate re-summarization.
+					shouldStepSummarize := a.shouldAutoSummarizeWithCooldown(largeModel, projectedPromptTokens, call.MaxOutputTokens, call.SessionID)
 					budget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
 					slog.Debug("Auto-summarize step decision",
 						"session_id", call.SessionID,
@@ -1637,7 +1643,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 		if err != nil && isRetriableError(err) && !a.disableAutoSummarize {
 			observedPromptTokens := max(currentSession.LastInputTokens(), estimatedPromptTokens)
-			if shouldAutoSummarize(largeModel, observedPromptTokens, call.MaxOutputTokens) {
+			if a.shouldAutoSummarizeWithCooldown(largeModel, observedPromptTokens, call.MaxOutputTokens, call.SessionID) {
 				slog.Warn("Near context limit during transient failure; forcing summarization to recover",
 					"error", err,
 					"session_id", call.SessionID,
@@ -2793,27 +2799,41 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	a.updateSessionUsage(summaryModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens, false)
 
-	// Override LastPromptTokens to reflect the post-compaction context size
-	// instead of the summary input size. The summary input includes all
-	// messages being compacted (close to the context window limit), which
-	// would cause auto-resume Run() calls to re-trigger summarization
-	// immediately. After compaction the effective context is just the
-	// summary message itself, so use the output token count as a
-	// reasonable proxy for the reduced prompt size.
-	if resp.TotalUsage.OutputTokens > 0 {
-		currentSession.LastPromptTokens = resp.TotalUsage.OutputTokens
-	}
-
 	currentSession.SummaryMessageID = summaryMessage.ID
 	_, err = a.sessions.Save(genCtx, currentSession)
-	if err == nil && a.hookManager != nil {
-		a.hookManager.RunPostCompact(ctx, sessionID)
+	if err == nil {
+		// Record compaction time to prevent immediate re-summarization.
+		a.lastSummarizeTime.Set(sessionID, time.Now())
+		if a.hookManager != nil {
+			a.hookManager.RunPostCompact(ctx, sessionID)
+		}
 	}
 	// Compact 后生成 session working memory，供后续 turn 快速恢复上下文。
 	if err == nil && a.enableSessionMemory() {
 		a.asyncUpdateSessionMemory(ctx, sessionID)
 	}
 	return err
+}
+
+// shouldAutoSummarizeWithCooldown wraps shouldAutoSummarize with a cooldown period
+// after compaction to prevent immediate re-summarization. This is the root-cause fix
+// for the issue where LastPromptTokens reflects the pre-compaction input size.
+func (a *sessionAgent) shouldAutoSummarizeWithCooldown(model Model, contextUsed, maxOutputTokens int64, sessionID string) bool {
+	// Tests may create sessionAgent without initializing lastSummarizeTime.
+	if a == nil || a.lastSummarizeTime == nil {
+		return shouldAutoSummarize(model, contextUsed, maxOutputTokens)
+	}
+	const cooldown = 30 * time.Second
+	if lastTime, ok := a.lastSummarizeTime.Get(sessionID); ok {
+		if time.Since(lastTime) < cooldown {
+			slog.Debug("Skipping auto-summarize due to cooldown after compaction",
+				"session_id", sessionID,
+				"elapsed", time.Since(lastTime),
+				"cooldown", cooldown)
+			return false
+		}
+	}
+	return shouldAutoSummarize(model, contextUsed, maxOutputTokens)
 }
 
 func (a *sessionAgent) RespondAsBackground(ctx context.Context, from, message string) (string, error) {
