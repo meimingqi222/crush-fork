@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -242,7 +243,9 @@ func ToPromptXML(skills []*Skill) string {
 		fmt.Fprintf(&sb, "    <description>%s</description>\n", escape(s.Description))
 		// Use skill:// virtual URL instead of absolute filesystem path.
 		// This hides the physical location and enables portable skill references.
-		fmt.Fprintf(&sb, "    <location>skill://%s</location>\n", escape(s.Name))
+		// url.PathEscape encodes spaces and special characters in the skill name
+		// so the resulting URL can be correctly resolved by ResolveSkillURL.
+		fmt.Fprintf(&sb, "    <location>skill://%s</location>\n", escape(url.PathEscape(s.Name)))
 
 		// Write when_to_use if present
 		if s.WhenToUse != "" {

@@ -56,7 +56,7 @@ func NewReferencesTool(lspManager *lsp.Manager) fantasy.AgentTool {
 			}
 			workingDir := cmp.Or(params.Path, effectiveWorkingDir)
 
-			result, err := runGrepSearch(ctx, GrepParams{Pattern: params.Symbol, LiteralText: true}, workingDir, 100)
+			result, err := runGrepSearch(ctx, GrepParams{Pattern: params.Symbol, LiteralText: true}, workingDir, 100, 0, 0)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to search for symbol: %s", err)), nil
 			}

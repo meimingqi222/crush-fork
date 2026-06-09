@@ -42,6 +42,7 @@ import (
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/charmbracelet/crush/internal/userinput"
@@ -172,6 +173,10 @@ type coordinator struct {
 	// transcriptTurnCounts tracks turn counts per session for transcript backend.
 	transcriptTurnCounts   map[string]int
 	transcriptTurnCountsMu sync.Mutex
+
+	// skillsCache caches discovered skills to avoid repeated I/O overhead.
+	skillsCache   map[string][]*skills.Skill
+	skillsCacheMu sync.Mutex
 }
 
 func NewCoordinator(
@@ -308,6 +313,30 @@ func (c *coordinator) plugins() *plugin.Runtime {
 		return c.pluginRuntime
 	}
 	return plugin.DefaultRuntime()
+}
+
+// getDiscoveredSkills returns cached skills for the given paths, discovering
+// them on first call. This avoids repeated I/O overhead when multiple agents
+// register tools within the same coordinator lifetime.
+func (c *coordinator) getDiscoveredSkills(skillsPaths []string) []*skills.Skill {
+	if len(skillsPaths) == 0 {
+		return nil
+	}
+
+	pathsKey := strings.Join(skillsPaths, ",")
+
+	c.skillsCacheMu.Lock()
+	defer c.skillsCacheMu.Unlock()
+
+	if c.skillsCache == nil {
+		c.skillsCache = make(map[string][]*skills.Skill)
+	}
+	if cached, ok := c.skillsCache[pathsKey]; ok {
+		return cached
+	}
+	discovered := skills.Discover(skillsPaths)
+	c.skillsCache[pathsKey] = discovered
+	return discovered
 }
 
 // SetMemoryEngine attaches the memory engine to the coordinator.
@@ -2235,6 +2264,7 @@ func (c *coordinator) activateDeferredTools(ctx context.Context, toolNames []str
 		for name := range activated {
 			names = append(names, name)
 		}
+		slices.Sort(names)
 		return names
 	}
 	return c.activateDeferredToolsForSession(sessionID, toolNames)
@@ -3153,7 +3183,7 @@ func subagentToolResultArtifacts(toolResult message.ToolResult) []string {
 		ShellID string `json:"shell_id"`
 	}
 	switch toolResult.Name {
-	case tools.BashToolName, tools.JobOutputToolName, tools.JobWaitToolName, tools.JobKillToolName:
+	case tools.BashToolName, tools.JobToolName:
 		if strings.TrimSpace(toolResult.Metadata) == "" {
 			return nil
 		}

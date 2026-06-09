@@ -7,9 +7,9 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 )
 
+const maxDeferredToolHintLength = 96
+
 // collectDeferredToolHints collects deferred tool entries for prompt inclusion.
-// Unlike the previous implementation, this does not limit the number of entries
-// since we only output tool names (minimal token cost, similar to Claude Code).
 func collectDeferredToolHints(entries map[string]tools.RegistryEntry, disabledSet map[string]struct{}) []tools.RegistryEntry {
 	if len(entries) == 0 {
 		return nil
@@ -35,9 +35,9 @@ func collectDeferredToolHints(entries map[string]tools.RegistryEntry, disabledSe
 	return hints
 }
 
-// appendDeferredToolsPromptSection appends a section listing deferred tool names.
-// Following Claude Code's approach, we only list tool names (not descriptions/hints)
-// to minimize token usage while keeping all tools discoverable via tool_search.
+// appendDeferredToolsPromptSection appends a compact deferred tool discovery section.
+// It includes short hints so the model can decide whether tool_search is relevant
+// without paying the cost of full tool schemas up front.
 //
 // Unlike the previous unconditional approach, the guidance now includes scenario
 // qualifiers to reduce tool_search misuse: LLMs should only call tool_search
@@ -48,10 +48,9 @@ func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools
 		return basePrompt
 	}
 
-	// Build tool name list (only names, minimal token cost)
-	names := make([]string, len(deferredEntries))
+	toolLines := make([]string, len(deferredEntries))
 	for i, entry := range deferredEntries {
-		names[i] = entry.Name
+		toolLines[i] = "- " + entry.Name + " — " + deferredToolPromptHint(entry)
 	}
 
 	lines := []string{
@@ -68,7 +67,8 @@ func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools
 		"2. The tool will be activated and available in your NEXT response",
 		"3. Call the tool with the correct parameters from the schema",
 		"",
-		"Available tools: " + strings.Join(names, ", "),
+		"Available tools:",
+		strings.Join(toolLines, "\n"),
 		"</available_deferred_tools>",
 	}
 
@@ -78,4 +78,38 @@ func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools
 		return section
 	}
 	return trimmedBase + "\n\n" + section
+}
+
+func deferredToolPromptHint(entry tools.RegistryEntry) string {
+	hint := strings.TrimSpace(entry.Metadata.SearchHint)
+	if hint == "" && len(entry.Metadata.SearchTags) > 0 {
+		tags := make([]string, 0, len(entry.Metadata.SearchTags))
+		for _, tag := range entry.Metadata.SearchTags {
+			tag = strings.TrimSpace(tag)
+			if tag == "" {
+				continue
+			}
+			tags = append(tags, tag)
+		}
+		hint = strings.Join(tags, ", ")
+	}
+	if hint == "" {
+		hint = strings.TrimSpace(entry.Description)
+	}
+	if hint == "" {
+		hint = strings.TrimSpace(entry.Source)
+	}
+	if hint == "" {
+		return "Use tool_search for details"
+	}
+	return truncateDeferredToolHint(hint)
+}
+
+func truncateDeferredToolHint(hint string) string {
+	hint = strings.Join(strings.Fields(hint), " ")
+	runes := []rune(hint)
+	if len(runes) <= maxDeferredToolHintLength {
+		return hint
+	}
+	return strings.TrimSpace(string(runes[:maxDeferredToolHintLength-1])) + "…"
 }

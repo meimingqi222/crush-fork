@@ -11,49 +11,47 @@ import (
 func builtinToolMetadata(name string) tools.ToolMetadata {
 	switch name {
 	case AgentToolName:
-		return tools.ToolMetadata{RiskHint: "delegation", SearchHint: "delegate independent work to subagents", SearchTags: []string{"subagent", "taskgraph"}}
+		return tools.ToolMetadata{RiskHint: "delegation", SearchHint: "delegate independent work to subagents", SearchTags: []string{"subagent", "delegate", "parallel", "worker", "task"}}
 	case tools.ToolSearchToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "load deferred tool definitions and activate them for this run", SearchTags: []string{"discover", "registry", "deferred", "select"}, Direct: true}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "load deferred tool definitions and activate them for this run", SearchTags: []string{"discover-tools", "activate-tools", "tool-registry", "deferred-tools", "select-tool"}, Direct: true}
 	case tools.AgenticFetchToolName:
-		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "network", SearchHint: "research web content", SearchTags: []string{"web", "search", "fetch"}}
+		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "network", SearchHint: "research web content", SearchTags: []string{"web-research", "web-search", "url", "fetch", "internet"}}
 	case tools.BashToolName:
-		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "execute shell commands", SearchTags: []string{"shell", "command"}}
-	case tools.JobOutputToolName, tools.JobWaitToolName, tools.JobKillToolName:
-		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "inspect or control background shell jobs", SearchTags: []string{"shell", "background"}}
+		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "execute shell commands", SearchTags: []string{"terminal", "shell-command", "command-line", "script", "process"}}
+	case tools.JobToolName:
+		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "inspect or control background shell jobs", SearchTags: []string{"background-job", "process", "terminal", "shell"}}
 	case tools.DownloadToolName:
-		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "network", SearchHint: "download URL to local file", SearchTags: []string{"network", "file"}}
+		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "network", SearchHint: "download URL to local file", SearchTags: []string{"url-download", "http", "fetch", "file"}}
 	case tools.EditToolName, tools.WriteToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "modify local files", SearchTags: []string{"file", "edit"}, Direct: true}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "modify local files", SearchTags: []string{"file-edit", "file-write", "patch", "modify"}, Direct: true}
 	case tools.ReadToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "read local files or URL content", SearchTags: []string{"read", "filesystem", "network", "http"}, Direct: true}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "read local files or URL content", SearchTags: []string{"file-read", "url-read", "filesystem", "http", "content"}, Direct: true}
 	case tools.GlobToolName, tools.GrepToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect local files", SearchTags: []string{"read", "filesystem"}, Direct: true}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect local files", SearchTags: []string{"file-search", "pattern", "filesystem", "code-search"}, Direct: true}
 	case tools.SourcegraphToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "search public repositories", SearchTags: []string{"code-search", "network", "deferred"}, Exposure: tools.ToolExposureDeferred, Direct: true}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "network", SearchHint: "search public repositories", SearchTags: []string{"code-search", "repository-search", "cross-repo", "sourcegraph", "symbols"}, Exposure: tools.ToolExposureDeferred, Direct: true}
 	case tools.RetainToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "retain a memory event in the event log", SearchTags: []string{"memory", "state", "event"}}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "retain a memory event in the event log", SearchTags: []string{"memory", "event-log", "state", "remember"}}
 	case tools.RecallToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "recall materialized memory summaries and events", SearchTags: []string{"memory", "read", "recall"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "recall materialized memory summaries and events", SearchTags: []string{"memory", "recall", "history", "summary"}}
 	case tools.ReflectToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "reflect on memories across sessions", SearchTags: []string{"memory", "read", "synthesis"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "reflect on memories across sessions", SearchTags: []string{"memory", "reflection", "synthesis", "cross-session"}}
 	case tools.MemoryStatusToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory engine pipeline status", SearchTags: []string{"memory", "status", "observability"}}
 	case tools.TodosToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track structured task progress", SearchTags: []string{"task", "progress"}, Direct: true}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track structured task progress", SearchTags: []string{"todo", "task-list", "planning", "progress"}, Direct: true}
 	case tools.SendMessageToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "send mailbox messages to running task graph tasks", SearchTags: []string{"mailbox", "taskgraph"}, Direct: true}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "send mailbox messages to running task graph tasks", SearchTags: []string{"mailbox", "taskgraph", "message", "subagent"}, Direct: true}
 	case tools.TaskStopToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "request task cancellation through mailbox protocol", SearchTags: []string{"mailbox", "taskgraph", "cancel"}, Direct: true}
-	case tools.DiagnosticsToolName, tools.ReferencesToolName, tools.LSPDeclarationToolName, tools.LSPDefinitionToolName, tools.LSPImplementationToolName, tools.LSPTypeDefinitionToolName, tools.LSPHoverToolName, tools.LSPDocumentSymbolsToolName, tools.LSPWorkspaceSymbolsToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "query language-server code intelligence", SearchTags: []string{"lsp", "code-intelligence"}, Direct: true}
-	case tools.LSPCodeActionToolName, tools.LSPRenameToolName, tools.LSPFormatToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "apply language-server powered workspace edits", SearchTags: []string{"lsp", "code-intelligence", "edit"}}
-	case tools.LSPRestartToolName:
-		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "restart language-server clients", SearchTags: []string{"lsp", "lifecycle"}}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "request task cancellation through mailbox protocol", SearchTags: []string{"mailbox", "taskgraph", "cancel", "stop-task"}, Direct: true}
+	case tools.LSPToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "query language-server code intelligence", SearchTags: []string{"lsp", "code-intelligence", "symbols", "definitions", "references", "diagnostics"}, Direct: true}
 	case tools.RequestUserInputToolName, tools.PlanExitToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan", "interaction"}, Direct: true}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan-mode", "user-input", "interaction", "approval"}, Direct: true}
 	case tools.YieldToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "metadata"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "result", "metadata"}}
+	case tools.CrushToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect Crush instance status and logs", SearchTags: []string{"crush", "status", "logs", "debug", "diagnostics"}}
 	default:
 		return tools.ToolMetadata{RiskHint: "execute"}
 	}

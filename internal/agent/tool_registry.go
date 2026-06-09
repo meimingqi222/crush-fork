@@ -121,15 +121,7 @@ func isFantasyToolParallelSafe(tool fantasy.AgentTool) bool {
 	case agenttools.ReadToolName,
 		agenttools.GlobToolName,
 		agenttools.GrepToolName,
-		agenttools.DiagnosticsToolName,
-		agenttools.ReferencesToolName,
-		agenttools.LSPDeclarationToolName,
-		agenttools.LSPDefinitionToolName,
-		agenttools.LSPImplementationToolName,
-		agenttools.LSPTypeDefinitionToolName,
-		agenttools.LSPHoverToolName,
-		agenttools.LSPDocumentSymbolsToolName,
-		agenttools.LSPWorkspaceSymbolsToolName,
+		agenttools.LSPToolName,
 		agenttools.ToolSearchToolName:
 		return true
 	default:

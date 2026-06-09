@@ -402,7 +402,11 @@ func NewToolSearchTool(registry Registry, activateDeferred DeferredToolActivator
 
 			// BM25 keyword search: only meaningful when there are deferred tools.
 			if totalDeferred == 0 {
-				return fantasy.NewTextResponse(`{"query":"","match_count":0,"total_tools":0}`), nil
+				return marshalToolSearchResponse(ToolSearchResponse{
+					Query:      query,
+					MatchCount: 0,
+					TotalTools: 0,
+				})
 			}
 
 			// BM25 keyword search over deferred tools only.

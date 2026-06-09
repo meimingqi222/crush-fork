@@ -23,8 +23,9 @@ const GlobToolName = "glob"
 var globDescription []byte
 
 type GlobParams struct {
-	Pattern string `json:"pattern" description:"The glob pattern to match files against"`
-	Path    string `json:"path,omitempty" description:"The directory to search in. Defaults to the current working directory."`
+	Pattern  string   `json:"pattern,omitempty" description:"A single glob pattern to match files against. Use patterns for multiple patterns."`
+	Patterns []string `json:"patterns,omitempty" description:"Multiple glob patterns to search for in a single call (e.g. [\"**/*.ts\", \"**/*.tsx\"]). Preferred over multiple separate calls."`
+	Path     string   `json:"path,omitempty" description:"The directory to search in. Defaults to the current working directory."`
 }
 
 type GlobResponseMetadata struct {
@@ -37,26 +38,51 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 		GlobToolName,
 		string(globDescription),
 		func(ctx context.Context, params GlobParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			if params.Pattern == "" {
-				return fantasy.NewTextErrorResponse("pattern is required"), nil
+			// Build effective pattern list from both Pattern and Patterns fields.
+			var effectivePatterns []string
+			if params.Pattern != "" {
+				effectivePatterns = append(effectivePatterns, params.Pattern)
+			}
+			effectivePatterns = append(effectivePatterns, params.Patterns...)
+			if len(effectivePatterns) == 0 {
+				return fantasy.NewTextErrorResponse("pattern or patterns is required"), nil
 			}
 
 			// Use session-specific working directory from context if available.
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 			searchPath := filepath.FromSlash(cmp.Or(params.Path, effectiveWorkingDir))
 
-			files, truncated, err := globFiles(ctx, params.Pattern, searchPath, 100)
-			if err != nil {
-				slog.Warn("Glob search failed", "error", err, "pattern", params.Pattern, "path", searchPath)
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("error finding files: %s", err)), nil
+			var allFiles []string
+			truncated := false
+			perPatternLimit := 100
+			for _, pat := range effectivePatterns {
+				files, patTruncated, err := globFiles(ctx, pat, searchPath, perPatternLimit)
+				if err != nil {
+					slog.Warn("Glob search failed", "error", err, "pattern", pat, "path", searchPath)
+					continue
+				}
+				allFiles = append(allFiles, files...)
+				if patTruncated {
+					truncated = true
+				}
+			}
+
+			// Deduplicate files while preserving order.
+			seen := make(map[string]struct{})
+			unique := make([]string, 0, len(allFiles))
+			for _, f := range allFiles {
+				if _, ok := seen[f]; !ok {
+					seen[f] = struct{}{}
+					unique = append(unique, f)
+				}
 			}
 
 			var output string
-			if len(files) == 0 {
+			if len(unique) == 0 {
 				output = "No files found"
 			} else {
-				normalizeFilePaths(files)
-				output = strings.Join(files, "\n")
+				normalizeFilePaths(unique)
+				output = strings.Join(unique, "\n")
 				if truncated {
 					output += "\n\n(Results are truncated. Consider using a more specific path or pattern.)"
 				}
@@ -65,7 +91,7 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextResponse(output),
 				GlobResponseMetadata{
-					NumberOfFiles: len(files),
+					NumberOfFiles: len(unique),
 					Truncated:     truncated,
 				},
 			), nil

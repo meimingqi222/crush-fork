@@ -38,7 +38,7 @@ func TestIsReadOnlyAgent(t *testing.T) {
 		},
 		{
 			name:         "read-only tools with sourcegraph returns true",
-			allowedTools: []string{"sourcegraph", "read", "grep", "lsp_definition", "lsp_workspace_symbols"},
+			allowedTools: []string{"sourcegraph", "read", "grep", "lsp"},
 			expected:     true,
 		},
 		{

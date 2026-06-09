@@ -61,7 +61,7 @@ func TestAppendDeferredToolsPromptSection(t *testing.T) {
 	result := appendDeferredToolsPromptSection(base, entries)
 	require.Contains(t, result, "<available_deferred_tools>")
 	require.Contains(t, result, "tool_search")
-	require.Contains(t, result, "sourcegraph")
+	require.Contains(t, result, "- sourcegraph — search public repositories")
 	require.True(t, strings.HasPrefix(result, base))
 }
 
@@ -77,7 +77,50 @@ func TestAppendDeferredToolsPromptSectionMultipleTools(t *testing.T) {
 
 	result := appendDeferredToolsPromptSection("Base", entries)
 
-	// All tool names should be present (no 24-line limit)
-	require.Contains(t, result, "mcp_notion_read, mcp_notion_write, mcp_slack_send, sourcegraph")
-	require.NotContains(t, result, "... and") // No truncation message
+	// All tool names should be present (no 24-line limit).
+	require.Contains(t, result, "- mcp_notion_read — mcp:notion")
+	require.Contains(t, result, "- mcp_notion_write — mcp:notion")
+	require.Contains(t, result, "- mcp_slack_send — mcp:slack")
+	require.Contains(t, result, "- sourcegraph — builtin")
+	require.NotContains(t, result, "... and")
+}
+
+func TestDeferredToolPromptHintFallbackOrder(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "search repositories", deferredToolPromptHint(agenttools.RegistryEntry{
+		Description: "fallback description",
+		Source:      "builtin",
+		Metadata: agenttools.ToolMetadata{
+			SearchHint: "search repositories",
+			SearchTags: []string{"code", "search"},
+		},
+	}))
+	require.Equal(t, "code, search", deferredToolPromptHint(agenttools.RegistryEntry{
+		Description: "fallback description",
+		Source:      "builtin",
+		Metadata: agenttools.ToolMetadata{
+			SearchTags: []string{"code", "", "search"},
+		},
+	}))
+	require.Equal(t, "fallback description", deferredToolPromptHint(agenttools.RegistryEntry{
+		Description: "fallback description",
+		Source:      "builtin",
+	}))
+	require.Equal(t, "builtin", deferredToolPromptHint(agenttools.RegistryEntry{
+		Source: "builtin",
+	}))
+	require.Equal(t, "Use tool_search for details", deferredToolPromptHint(agenttools.RegistryEntry{}))
+}
+
+func TestDeferredToolPromptHintTruncatesLongHints(t *testing.T) {
+	t.Parallel()
+
+	longHint := strings.Repeat("a", maxDeferredToolHintLength+10)
+	hint := deferredToolPromptHint(agenttools.RegistryEntry{
+		Metadata: agenttools.ToolMetadata{SearchHint: longHint},
+	})
+
+	require.Len(t, []rune(hint), maxDeferredToolHintLength)
+	require.True(t, strings.HasSuffix(hint, "…"))
 }

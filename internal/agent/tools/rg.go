@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -41,13 +42,19 @@ func getRgCmd(ctx context.Context, globPattern string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
-func getRgSearchCmd(ctx context.Context, pattern, path, include string) *exec.Cmd {
+func getRgSearchCmd(ctx context.Context, pattern, path, include string, contextBefore, contextAfter int) *exec.Cmd {
 	name := getRg()
 	if name == "" {
 		return nil
 	}
 	// Use -n to show line numbers. Note: -0 is not needed with --json mode.
 	args := []string{"--json", "-H", "-n", pattern}
+	if contextBefore > 0 {
+		args = append(args, "-B", fmt.Sprintf("%d", contextBefore))
+	}
+	if contextAfter > 0 {
+		args = append(args, "-A", fmt.Sprintf("%d", contextAfter))
+	}
 	if include != "" {
 		args = append(args, "--glob", include)
 	}

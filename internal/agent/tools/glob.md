@@ -1,7 +1,8 @@
-Fast file pattern matching tool that finds files by name/pattern, returning paths sorted by modification time (newest first).
+Fast file pattern matching tool that finds files by name/pattern, returning paths sorted by modification time (newest first). Supports multiple patterns in a single call.
 
 <usage>
-- Provide glob pattern to match against file paths
+- Provide a single glob pattern, or use patterns array for multiple patterns in one call
+- Using patterns=["**\/*.ts", "**\/*.tsx"] is preferred over two separate calls
 - Optional starting directory (defaults to current working directory)
 - Use Glob for uncertain file-name lookups before read. Do not call read on a path that has only been inferred.
 - Results sorted with most recently modified files first

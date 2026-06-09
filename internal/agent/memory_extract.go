@@ -268,9 +268,7 @@ func (c *coordinator) collectSessionFiles(ctx context.Context, sessionID string)
 		paths = paths[len(paths)-8:]
 	}
 	result := make([]string, len(paths))
-	for i, p := range paths {
-		result[i] = p
-	}
+	copy(result, paths)
 	return result
 }
 

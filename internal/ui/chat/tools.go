@@ -263,14 +263,19 @@ func NewToolMessageItem(
 	case tools.BashToolName:
 		item = NewBashToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "Bash"
-	case tools.JobOutputToolName:
-		item = NewJobOutputToolMessageItem(sty, toolCall, result, canceled)
-		item.(*baseToolMessageItem).displayName = "Job"
-	case tools.JobWaitToolName:
-		item = NewJobWaitToolMessageItem(sty, toolCall, result, canceled)
-		item.(*baseToolMessageItem).displayName = "Job"
-	case tools.JobKillToolName:
-		item = NewJobKillToolMessageItem(sty, toolCall, result, canceled)
+	case tools.JobToolName:
+		var jobAction struct {
+			Action string `json:"action"`
+		}
+		_ = json.Unmarshal([]byte(toolCall.Input), &jobAction)
+		switch jobAction.Action {
+		case "wait":
+			item = NewJobWaitToolMessageItem(sty, toolCall, result, canceled)
+		case "kill":
+			item = NewJobKillToolMessageItem(sty, toolCall, result, canceled)
+		default:
+			item = NewJobOutputToolMessageItem(sty, toolCall, result, canceled)
+		}
 		item.(*baseToolMessageItem).displayName = "Job"
 	case tools.ReadToolName:
 		item = NewReadToolMessageItem(sty, toolCall, result, canceled)
@@ -293,9 +298,25 @@ func NewToolMessageItem(
 	case tools.SourcegraphToolName:
 		item = NewSourcegraphToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "Sourcegraph"
-	case tools.DiagnosticsToolName:
-		item = NewDiagnosticsToolMessageItem(sty, toolCall, result, canceled)
-		item.(*baseToolMessageItem).displayName = "Diagnostics"
+	case tools.LSPToolName:
+		var lspOp struct {
+			Op string `json:"op"`
+		}
+		_ = json.Unmarshal([]byte(toolCall.Input), &lspOp)
+		switch lspOp.Op {
+		case "diagnostics":
+			item = NewDiagnosticsToolMessageItem(sty, toolCall, result, canceled)
+			item.(*baseToolMessageItem).displayName = "Diagnostics"
+		case "references":
+			item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
+			item.(*baseToolMessageItem).displayName = "Find References"
+		case "restart":
+			item = NewLSPRestartToolMessageItem(sty, toolCall, result, canceled)
+			item.(*baseToolMessageItem).displayName = "Restart LSP"
+		default:
+			item = NewGenericToolMessageItem(sty, toolCall, result, canceled)
+			item.(*baseToolMessageItem).displayName = "LSP"
+		}
 	case agent.AgentToolName:
 		item = NewAgentToolMessageItem(sty, toolCall, result, canceled)
 		item.(*AgentToolMessageItem).displayName = "Agent"
@@ -314,12 +335,7 @@ func NewToolMessageItem(
 	case tools.RequestUserInputToolName:
 		item = NewRequestUserInputToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "Request User Input"
-	case tools.ReferencesToolName:
-		item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
-		item.(*baseToolMessageItem).displayName = "Find References"
-	case tools.LSPRestartToolName:
-		item = NewLSPRestartToolMessageItem(sty, toolCall, result, canceled)
-		item.(*baseToolMessageItem).displayName = "Restart LSP"
+
 	default:
 		if IsDockerMCPTool(toolCall.Name) {
 			item = NewDockerMCPToolMessageItem(sty, toolCall, result, canceled)
@@ -1231,8 +1247,15 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			}
 			return strings.Join(parts, "\n")
 		}
-	case tools.DiagnosticsToolName:
-		return "**Project:** diagnostics"
+	case tools.LSPToolName:
+		var lspOp struct {
+			Op string `json:"op"`
+		}
+		_ = json.Unmarshal([]byte(t.toolCall.Input), &lspOp)
+		if lspOp.Op == "diagnostics" {
+			return "**Project:** diagnostics"
+		}
+		return fmt.Sprintf("**Op:** %s", lspOp.Op)
 	case agent.AgentToolName:
 		var params agent.AgentParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
@@ -1284,7 +1307,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.SourcegraphToolName, tools.LSPToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1542,12 +1565,8 @@ func prettifyToolName(name string) string {
 		return "Agent"
 	case tools.BashToolName:
 		return "Bash"
-	case tools.JobOutputToolName:
-		return "Job: Output"
-	case tools.JobWaitToolName:
-		return "Job: Wait"
-	case tools.JobKillToolName:
-		return "Job: Kill"
+	case tools.JobToolName:
+		return "Job"
 	case tools.DownloadToolName:
 		return "Download"
 	case tools.EditToolName:

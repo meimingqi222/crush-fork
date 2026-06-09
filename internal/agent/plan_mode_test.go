@@ -96,17 +96,11 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 	}, filterToolsForRiskPolicy([]string{AgentToolName, tools.AgenticFetchToolName, tools.ReadToolName}, session.CollaborationModePlan, nil))
 
 	require.Equal(t, []string{
-		tools.LSPDefinitionToolName,
-		tools.LSPHoverToolName,
-		tools.LSPDocumentSymbolsToolName,
-		tools.LSPWorkspaceSymbolsToolName,
+		tools.LSPToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy([]string{
-		tools.LSPDefinitionToolName,
-		tools.LSPHoverToolName,
-		tools.LSPDocumentSymbolsToolName,
-		tools.LSPWorkspaceSymbolsToolName,
+		tools.LSPToolName,
 	}, session.CollaborationModePlan, nil))
 }
 
@@ -125,12 +119,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
-		tools.DiagnosticsToolName,
-		tools.ReferencesToolName,
-		tools.LSPDefinitionToolName,
-		tools.LSPHoverToolName,
-		tools.LSPDocumentSymbolsToolName,
-		tools.LSPWorkspaceSymbolsToolName,
+		tools.LSPToolName,
 		tools.SourcegraphToolName,
 	}
 
@@ -146,12 +135,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
-		tools.DiagnosticsToolName,
-		tools.ReferencesToolName,
-		tools.LSPDefinitionToolName,
-		tools.LSPHoverToolName,
-		tools.LSPDocumentSymbolsToolName,
-		tools.LSPWorkspaceSymbolsToolName,
+		tools.LSPToolName,
 		tools.SourcegraphToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModeDefault))
 
@@ -161,11 +145,6 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.GlobToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
-		tools.DiagnosticsToolName,
-		tools.ReferencesToolName,
-		tools.LSPDefinitionToolName,
-		tools.LSPHoverToolName,
-		tools.LSPDocumentSymbolsToolName,
-		tools.LSPWorkspaceSymbolsToolName,
+		tools.LSPToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModePlan))
 }

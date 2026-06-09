@@ -104,12 +104,11 @@ func isTrustedLocalReadOnlyToolResult(toolResult message.ToolResult) bool {
 		return isTrustedLocalReadToolResult(toolResult)
 	case tools.GlobToolName,
 		tools.GrepToolName,
-		tools.DiagnosticsToolName,
-		tools.ReferencesToolName,
+		tools.LSPToolName,
 		tools.RecallToolName,
 		tools.ReflectToolName,
 		tools.MemoryStatusToolName,
-		tools.CrushInfoToolName:
+		tools.CrushToolName:
 		return true
 	case tools.BashToolName:
 		return isTrustedLocalReadOnlyBashToolResult(toolResult)

@@ -70,7 +70,7 @@ func TestGlobIncludePattern(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matches, err := searchFilesWithRegex("package|console|const|export", tempDir, tt.include)
+			matches, err := searchFilesWithRegex("package|console|const|export", tempDir, tt.include, 0, 0)
 			require.NoError(t, err)
 			require.Len(t, matches, tt.want, "include pattern %q should match %d files", tt.include, tt.want)
 		})
@@ -82,7 +82,7 @@ func TestRunGrepSearchFallsBackToLiteralTextOnInvalidRegex(t *testing.T) {
 	tempDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "sample.txt"), []byte("[]fantasy.AgentTool\n"), 0o644))
 
-	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "[]fantasy.AgentTool"}, tempDir, 100)
+	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "[]fantasy.AgentTool"}, tempDir, 100, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, result.matches, 1)
 	require.True(t, result.metadata.LiteralText)
@@ -98,7 +98,7 @@ func TestRunGrepSearchFallsBackToLiteralTextOnUnclosedCharacterClass(t *testing.
 	tempDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "sample.go"), []byte("c.agents[config.AgentCoder] = agent\n"), 0o644))
 
-	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "agents["}, tempDir, 100)
+	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "agents["}, tempDir, 100, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, result.matches, 1)
 	require.True(t, result.metadata.LiteralText)
@@ -110,7 +110,7 @@ func TestRunGrepSearchReportsMissingSearchPath(t *testing.T) {
 	tempDir := t.TempDir()
 	missingDir := filepath.Join(tempDir, "missing")
 
-	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "hello"}, missingDir, 100)
+	result, err := runGrepSearch(t.Context(), GrepParams{Pattern: "hello"}, missingDir, 100, 0, 0)
 	require.NoError(t, err)
 	require.Empty(t, result.matches)
 	require.Equal(t, "path_validation", result.metadata.RecoveredBy)
@@ -146,10 +146,10 @@ func TestGrepWithIgnoreFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".crushignore"), []byte(crushignoreContent), 0o644))
 
 	// Test both implementations
-	for name, fn := range map[string]func(pattern, path, include string) ([]grepMatch, error){
+	for name, fn := range map[string]func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error){
 		"regex": searchFilesWithRegex,
-		"rg": func(pattern, path, include string) ([]grepMatch, error) {
-			return searchWithRipgrep(t.Context(), pattern, path, include)
+		"rg": func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error) {
+			return searchWithRipgrep(t.Context(), pattern, path, include, ctxBefore, ctxAfter)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -159,7 +159,7 @@ func TestGrepWithIgnoreFiles(t *testing.T) {
 				t.Skip("rg is not in $PATH")
 			}
 
-			matches, err := fn("hello world", tempDir, "")
+			matches, err := fn("hello world", tempDir, "", 0, 0)
 			require.NoError(t, err)
 
 			// Convert matches to a set of file paths for easier testing
@@ -206,10 +206,10 @@ func TestSearchImplementations(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".gitignore"), []byte("file4.txt\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".crushignore"), []byte("file5.txt\n"), 0o644))
 
-	for name, fn := range map[string]func(pattern, path, include string) ([]grepMatch, error){
+	for name, fn := range map[string]func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error){
 		"regex": searchFilesWithRegex,
-		"rg": func(pattern, path, include string) ([]grepMatch, error) {
-			return searchWithRipgrep(t.Context(), pattern, path, include)
+		"rg": func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error) {
+			return searchWithRipgrep(t.Context(), pattern, path, include, ctxBefore, ctxAfter)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -219,7 +219,7 @@ func TestSearchImplementations(t *testing.T) {
 				t.Skip("rg is not in $PATH")
 			}
 
-			matches, err := fn("hello world", tempDir, "")
+			matches, err := fn("hello world", tempDir, "", 0, 0)
 			require.NoError(t, err)
 
 			require.Equal(t, len(matches), 4)
@@ -457,10 +457,10 @@ func TestColumnMatch(t *testing.T) {
 	t.Parallel()
 
 	// Test both implementations
-	for name, fn := range map[string]func(pattern, path, include string) ([]grepMatch, error){
+	for name, fn := range map[string]func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error){
 		"regex": searchFilesWithRegex,
-		"rg": func(pattern, path, include string) ([]grepMatch, error) {
-			return searchWithRipgrep(t.Context(), pattern, path, include)
+		"rg": func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error) {
+			return searchWithRipgrep(t.Context(), pattern, path, include, ctxBefore, ctxAfter)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -470,7 +470,7 @@ func TestColumnMatch(t *testing.T) {
 				t.Skip("rg is not in $PATH")
 			}
 
-			matches, err := fn("THIS", "./testdata/", "")
+			matches, err := fn("THIS", "./testdata/", "", 0, 0)
 			require.NoError(t, err)
 			require.Len(t, matches, 1)
 			match := matches[0]
@@ -508,10 +508,10 @@ func TestGrepWithDifferentWorkingDirectory(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, os.Chdir(origDir)) })
 
 	// Both implementations should find matches using the absolute search path.
-	for name, fn := range map[string]func(pattern, path, include string) ([]grepMatch, error){
+	for name, fn := range map[string]func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error){
 		"regex": searchFilesWithRegex,
-		"rg": func(pattern, path, include string) ([]grepMatch, error) {
-			return searchWithRipgrep(t.Context(), pattern, path, include)
+		"rg": func(pattern, path, include string, ctxBefore, ctxAfter int) ([]grepMatch, error) {
+			return searchWithRipgrep(t.Context(), pattern, path, include, ctxBefore, ctxAfter)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -519,7 +519,7 @@ func TestGrepWithDifferentWorkingDirectory(t *testing.T) {
 				t.Skip("rg is not in $PATH")
 			}
 
-			matches, err := fn("package", searchDir, "")
+			matches, err := fn("package", searchDir, "", 0, 0)
 			require.NoError(t, err)
 			require.Len(t, matches, 2, "should find 'package' in both files regardless of CWD")
 		})
@@ -540,7 +540,7 @@ func TestGrepSortingByModTime(t *testing.T) {
 	require.NoError(t, os.WriteFile(file2, []byte("test content"), 0o644))
 
 	// Test regex implementation
-	matches, err := searchFilesWithRegex("test", tempDir, "")
+	matches, err := searchFilesWithRegex("test", tempDir, "", 0, 0)
 	require.NoError(t, err)
 	require.Len(t, matches, 2)
 

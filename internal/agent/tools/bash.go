@@ -25,7 +25,7 @@ type BashParams struct {
 	Description         string `json:"description,omitempty" description:"A brief description of what the command does, try to keep it under 30 characters or so"`
 	Command             string `json:"command" description:"The command to execute"`
 	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in (defaults to current directory)"`
-	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true to run this command in the background. Use job_output for snapshots, job_wait to block until it finishes, and job_kill to terminate it."`
+	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true to run this command in the background. Use the job tool with action=output for snapshots, action=wait to block until it finishes, and action=kill to terminate it."`
 	TimeoutSeconds      *int   `json:"timeout_seconds,omitempty" description:"Maximum time to allow the command to run in the foreground before it is terminated. Defaults to 120 seconds. Set to 0 to disable timeout. Maximum allowed value is 600 seconds."`
 	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Deprecated compatibility field. If provided and timeout_seconds is omitted, its value is interpreted as timeout_seconds."`
 }
@@ -311,7 +311,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 					if output != "" {
 						msg += "\n\nOutput so far:\n" + output
 					}
-					msg += "\n\nUse job_output to check current output, job_wait to wait for completion, or job_kill to terminate it."
+					msg += "\n\nUse the job tool with action=output to check current output, action=wait to wait for completion, or action=kill to terminate it."
 					metadata.Output = msg
 					responseText = msg
 				} else if timedOut {
@@ -384,7 +384,7 @@ func runBackgroundBash(ctx context.Context, call fantasy.ToolCall, params BashPa
 	}
 	appendDeprecationNotes(&metadata, deprecationNotes)
 
-	response := fmt.Sprintf("Background shell started with ID: %s\n\nUse job_output to view a snapshot, job_wait to wait for completion, or job_kill to terminate it.", bgShell.ID)
+	response := fmt.Sprintf("Background shell started with ID: %s\n\nUse the job tool with action=output to view a snapshot, action=wait to wait for completion, or action=kill to terminate it.", bgShell.ID)
 	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 }
 

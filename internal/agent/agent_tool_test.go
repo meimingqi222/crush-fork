@@ -165,9 +165,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	assert.Contains(t, generalNames, "edit")
 	assert.Contains(t, generalNames, tools.SendMessageToolName)
 	assert.Contains(t, generalNames, tools.TaskStopToolName)
-	assert.Contains(t, generalNames, tools.LSPCodeActionToolName)
-	assert.Contains(t, generalNames, tools.LSPRenameToolName)
-	assert.Contains(t, generalNames, tools.LSPFormatToolName)
+	assert.Contains(t, generalNames, tools.LSPToolName)
 	assert.NotContains(t, generalNames, AgentToolName)
 	assert.NotContains(t, generalNames, "request_user_input")
 
@@ -189,7 +187,7 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 	}
 	assert.Contains(t, reviewNames, "bash")
 	assert.Contains(t, reviewNames, "read")
-	assert.Contains(t, reviewNames, tools.ReferencesToolName)
+	assert.Contains(t, reviewNames, tools.LSPToolName)
 	assert.Contains(t, reviewNames, tools.YieldToolName)
 	assert.NotContains(t, reviewNames, "edit")
 	assert.NotContains(t, reviewNames, "write")
@@ -454,15 +452,7 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	assert.Equal(t, []string{
 		"glob",
 		"grep",
-		"lsp_declaration",
-		"lsp_definition",
-		"lsp_diagnostics",
-		"lsp_document_symbols",
-		"lsp_hover",
-		"lsp_implementation",
-		"lsp_references",
-		"lsp_type_definition",
-		"lsp_workspace_symbols",
+		"lsp",
 		"memory_status",
 		"plan_exit",
 		"read",

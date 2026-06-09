@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"charm.land/fantasy"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
@@ -109,9 +110,10 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 	editTool := agenttools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir())
 
 	// Discover skills for URL resolution in read and bash tools.
+	// Use coordinator cache to avoid repeated I/O overhead.
 	var discoveredSkills []*skills.Skill
 	if c.cfg.Config().Options != nil && len(c.cfg.Config().Options.SkillsPaths) > 0 {
-		discoveredSkills = skills.Discover(c.cfg.Config().Options.SkillsPaths)
+		discoveredSkills = c.getDiscoveredSkills(c.cfg.Config().Options.SkillsPaths)
 	}
 
 	bashOpts.SkillList = discoveredSkills
@@ -120,17 +122,14 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewRequestUserInputTool(c.userInput),
 		agenttools.NewPlanExitTool(c.sessions),
 		agenttools.NewBashToolWithSessions(c.sessions, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelName, c.hookManager, bashOpts),
-		agenttools.NewJobOutputTool(),
-		agenttools.NewJobWaitTool(),
-		agenttools.NewJobKillTool(),
+		agenttools.NewJobTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		editTool,
 		agenttools.NewReadTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, discoveredSkills, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),
-		agenttools.NewCrushInfoTool(c.cfg, c.lspManager, c.memoryEngine),
-		agenttools.NewCrushLogsTool(filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
+		agenttools.NewCrushTool(c.cfg, c.lspManager, c.memoryEngine, filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
 		agenttools.NewRetainTool(c.memoryEngineEventStore(), c.permissions, c.cfg.WorkingDir(), c.memoryEngine),
 		agenttools.NewRecallTool(c.memoryEngineRetriever(), c.memoryEngineEventStore()),
 		agenttools.NewReflectTool(c.memoryEngineRetriever()),
@@ -159,19 +158,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 
 	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {
 		lspTools := []fantasy.AgentTool{
-			agenttools.NewDiagnosticsTool(c.lspManager),
-			agenttools.NewReferencesTool(c.lspManager),
-			agenttools.NewLSPDeclarationTool(c.lspManager),
-			agenttools.NewLSPDefinitionTool(c.lspManager),
-			agenttools.NewLSPImplementationTool(c.lspManager),
-			agenttools.NewLSPTypeDefinitionTool(c.lspManager),
-			agenttools.NewLSPHoverTool(c.lspManager),
-			agenttools.NewLSPDocumentSymbolsTool(c.lspManager),
-			agenttools.NewLSPWorkspaceSymbolsTool(c.lspManager),
-			agenttools.NewLSPCodeActionTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
-			agenttools.NewLSPRenameTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
-			agenttools.NewLSPFormatTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
-			agenttools.NewLSPRestartTool(c.lspManager),
+			agenttools.NewLSPTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
 		}
 		for _, tool := range lspTools {
 			register(tool, "builtin", builtinToolMetadata(tool.Info().Name))
@@ -214,13 +201,19 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 }
 
 func metadataForMCPTool(tool *agenttools.Tool) agenttools.ToolMetadata {
+	info := tool.Info()
+	searchHint := strings.TrimSpace(info.Description)
+	if searchHint == "" {
+		searchHint = fmt.Sprintf("invoke external integration tool %s.%s", tool.MCP(), tool.MCPToolName())
+	}
+
 	return agenttools.ToolMetadata{
 		ReadOnly:        false,
 		ConcurrencySafe: false,
 		RiskHint:        "network",
 		Exposure:        agenttools.ToolExposureDeferred,
-		SearchHint:      fmt.Sprintf("invoke MCP tool %s", tool.MCPToolName()),
-		SearchTags:      []string{"mcp", tool.MCP(), tool.MCPToolName()},
+		SearchHint:      searchHint,
+		SearchTags:      []string{tool.MCP(), tool.MCPToolName()},
 	}
 }
 

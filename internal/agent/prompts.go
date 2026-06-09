@@ -255,20 +255,12 @@ func isReadOnlyAgent(agentCfg config.Agent) bool {
 		return false
 	}
 	readOnlyTools := map[string]struct{}{
-		agenttools.GlobToolName:                {},
-		agenttools.GrepToolName:                {},
-		agenttools.ReadToolName:                {},
-		agenttools.SourcegraphToolName:         {},
-		agenttools.ToolSearchToolName:          {},
-		agenttools.DiagnosticsToolName:         {},
-		agenttools.ReferencesToolName:          {},
-		agenttools.LSPDeclarationToolName:      {},
-		agenttools.LSPDefinitionToolName:       {},
-		agenttools.LSPImplementationToolName:   {},
-		agenttools.LSPTypeDefinitionToolName:   {},
-		agenttools.LSPHoverToolName:            {},
-		agenttools.LSPDocumentSymbolsToolName:  {},
-		agenttools.LSPWorkspaceSymbolsToolName: {},
+		agenttools.GlobToolName:        {},
+		agenttools.GrepToolName:        {},
+		agenttools.ReadToolName:        {},
+		agenttools.SourcegraphToolName: {},
+		agenttools.ToolSearchToolName:  {},
+		agenttools.LSPToolName:         {},
 	}
 	for _, tool := range agentCfg.AllowedTools {
 		if _, ok := readOnlyTools[tool]; !ok {
