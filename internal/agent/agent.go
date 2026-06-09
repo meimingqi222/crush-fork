@@ -2793,6 +2793,17 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	a.updateSessionUsage(summaryModel, &currentSession, resp.TotalUsage, openrouterCost, summarizeEstimatedPromptTokens, false)
 
+	// Override LastPromptTokens to reflect the post-compaction context size
+	// instead of the summary input size. The summary input includes all
+	// messages being compacted (close to the context window limit), which
+	// would cause auto-resume Run() calls to re-trigger summarization
+	// immediately. After compaction the effective context is just the
+	// summary message itself, so use the output token count as a
+	// reasonable proxy for the reduced prompt size.
+	if resp.TotalUsage.OutputTokens > 0 {
+		currentSession.LastPromptTokens = resp.TotalUsage.OutputTokens
+	}
+
 	currentSession.SummaryMessageID = summaryMessage.ID
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err == nil && a.hookManager != nil {
