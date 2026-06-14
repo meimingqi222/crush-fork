@@ -250,6 +250,21 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 		return r.store.Query(ctx, filter)
 	}
 
+	// Parse temporal expressions from the query (e.g. "last week", "最近3天")
+	// and apply them as time-range filters.
+	temporalExprs := ParseTemporalExprs(query, time.Now())
+	if len(temporalExprs) > 0 {
+		// Use the broadest temporal range found.
+		earliest := temporalExprs[0].After
+		for _, te := range temporalExprs[1:] {
+			if te.After.Before(earliest) {
+				earliest = te.After
+			}
+		}
+		ts := earliest.Unix()
+		filter.AfterTime = &ts
+	}
+
 	// Try FTS5 search first if db is available.
 	if r.db != nil {
 		// Over-fetch to feed the reranker and to give loose bilingual queries
@@ -263,7 +278,19 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 			events, err = r.ftsSearch(ctx, query, filter, fetchLimit, false)
 		}
 		if err == nil && len(events) > 0 {
-			if r.reranker != nil {
+			// If a reranker with embedding support is available, also run a
+			// vector-based search and fuse the two result sets via RRF for
+			// better recall than either path alone.
+			rrfFused := false
+			if embReranker, ok := r.reranker.(*EmbeddingReranker); ok && embReranker != nil {
+				if vecEvents, verr := r.vectorSearch(ctx, query, filter, fetchLimit, embReranker.embedder); verr == nil && len(vecEvents) > 0 {
+					events = ReciprocalRankFusion([][]MemoryEvent{events, vecEvents}, 60)
+					rrfFused = true
+				}
+			}
+			// Skip reranking when RRF already fused FTS + vector signals,
+			// since reranking would redundantly re-embed all candidates.
+			if !rrfFused && r.reranker != nil {
 				if reranked, rerr := r.reranker.Rerank(ctx, query, events); rerr == nil && len(reranked) > 0 {
 					events = reranked
 				}
@@ -336,7 +363,7 @@ func (r *SummaryRetriever) ftsSearch(ctx context.Context, query string, filter E
 	querySQL := fmt.Sprintf(`
 		SELECT e.id, e.session_id, e.scope, e.kind, e.content, e.summary,
 		       e.source_json, e.source_hash, e.confidence, e.importance,
-		       e.supersedes, e.tags_json, e.watermark, e.created_at, e.updated_at, e.expires_at
+		       e.veracity, e.supersedes, e.tags_json, e.watermark, e.created_at, e.updated_at, e.expires_at
 		FROM memory_events_fts fts
 		JOIN memory_events e ON fts.id = e.id
 		WHERE %s
@@ -374,6 +401,7 @@ func (r *SummaryRetriever) ftsSearch(ctx context.Context, query string, filter E
 			&sourceHash,
 			&event.Confidence,
 			&event.Importance,
+			&event.Veracity,
 			&event.Supersedes,
 			&tagsJSON,
 			&event.Watermark,
@@ -476,6 +504,16 @@ func rankMemoryEvents(query string, events []MemoryEvent) []MemoryEvent {
 		}
 		score += evt.Importance
 		score += evt.Confidence * 0.25
+		// Weibull recency decay: prefer recent memories, with per-kind
+		// decay rates so that preferences outlast working memory.
+		if !evt.UpdatedAt.IsZero() {
+			age := time.Since(evt.UpdatedAt)
+			if age < 0 {
+				age = 0
+			}
+			params := weibullParamsForKind(evt.Kind)
+			score += params.Decay(age.Hours())
+		}
 		scored = append(scored, scoredMemoryEvent{event: evt, score: score})
 	}
 	sort.SliceStable(scored, func(i, j int) bool {
@@ -557,4 +595,56 @@ func truncateContent(content string, maxLen int) string {
 		return content
 	}
 	return string(runes[:maxLen]) + "…"
+}
+
+// vectorSearch performs embedding-based retrieval: it embeds the query,
+// then scores all candidate events by cosine similarity and returns the
+// top-k results.  This complements FTS5's lexical matching for the RRF
+// fusion path.
+func (r *SummaryRetriever) vectorSearch(ctx context.Context, query string, filter EventFilter, limit int, embedder Embedder) ([]MemoryEvent, error) {
+	if embedder == nil {
+		return nil, nil
+	}
+
+	queryVec, err := embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embedding query for vector search: %w", err)
+	}
+
+	// Fetch a broad candidate set from the store.
+	broadFilter := filter
+	broadFilter.Limit = 500
+	candidates, err := r.store.Query(ctx, broadFilter)
+	if err != nil || len(candidates) == 0 {
+		return nil, err
+	}
+
+	type vecScored struct {
+		evt   MemoryEvent
+		score float64
+	}
+	vscored := make([]vecScored, 0, len(candidates))
+	for _, evt := range candidates {
+		text := embeddingEventText(evt)
+		vec, err := embedder.Embed(ctx, text)
+		if err != nil {
+			continue
+		}
+		sim := dotProduct(queryVec, vec)
+		vscored = append(vscored, vecScored{evt: evt, score: sim})
+	}
+
+	sort.SliceStable(vscored, func(i, j int) bool {
+		return vscored[i].score > vscored[j].score
+	})
+
+	if len(vscored) > limit {
+		vscored = vscored[:limit]
+	}
+
+	result := make([]MemoryEvent, 0, len(vscored))
+	for _, s := range vscored {
+		result = append(result, s.evt)
+	}
+	return result, nil
 }

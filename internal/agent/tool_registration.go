@@ -133,6 +133,8 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewRetainTool(c.memoryEngineEventStore(), c.permissions, c.cfg.WorkingDir(), c.memoryEngine),
 		agenttools.NewRecallTool(c.memoryEngineRetriever(), c.memoryEngineEventStore()),
 		agenttools.NewReflectTool(c.memoryEngineRetriever()),
+		agenttools.NewGraphQueryTool(c.memoryEngineTripleStore()),
+		agenttools.NewTripleQueryTool(c.memoryEngineTripleStore()),
 		agenttools.NewMemoryStatusTool(c.memoryEngine),
 		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),

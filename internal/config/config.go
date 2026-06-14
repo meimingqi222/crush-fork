@@ -371,6 +371,13 @@ type MemoryConfig struct {
 	// that keeps materialized views up to date during long sessions.
 	BackgroundMaterialize *MemoryBackgroundMaterializeConfig `json:"background_materialize,omitempty" jsonschema:"description=Background materializer configuration"`
 
+	// BackgroundConsolidation controls the periodic background consolidator
+	// that merges episodic events into durable cross-session memory during
+	// long-running sessions, instead of only on session close. Enabled by
+	// default for the local backend; hindsight delegates to its remote
+	// service. Set enabled=false to opt out of periodic consolidation.
+	BackgroundConsolidation *MemoryBackgroundConsolidationConfig `json:"background_consolidation,omitempty" jsonschema:"description=Background consolidator configuration"`
+
 	// CompactionRecall controls active recall during pre-compaction so the
 	// summary prompt receives the most relevant past memories.
 	CompactionRecall *MemoryCompactionRecallConfig `json:"compaction_recall,omitempty" jsonschema:"description=Compaction-time recall configuration"`
@@ -441,6 +448,43 @@ func (c *MemoryBackgroundMaterializeConfig) GetEveryNTurns() int {
 		return 10
 	}
 	return c.EveryNTurns
+}
+
+// MemoryBackgroundConsolidationConfig configures periodic background
+// consolidation. Unlike session-close consolidation (which only fires when a
+// session is deleted), this runs on a timer so long-running sessions still
+// merge episodic events into durable memory. Enabled by default for the local
+// backend; the default interval (600s) exceeds the consolidation lease TTL
+// (180s) to avoid contending with other instances. App wiring gates this to
+// the local backend only (hindsight delegates consolidation remotely).
+type MemoryBackgroundConsolidationConfig struct {
+	Enabled     *bool  `json:"enabled,omitempty" jsonschema:"description=Enable background consolidator,default=true"`
+	IntervalSec int    `json:"interval_seconds,omitempty" jsonschema:"description=Background consolidation interval in seconds (must exceed 180),default=600"`
+	_           string `json:"-"`
+}
+
+// IsEnabled returns true unless explicitly disabled. Background consolidation
+// is essential for the local backend: without it, episodic events are only
+// consolidated when a session is deleted — never on quit, Ctrl+C, or terminal
+// close. Users who want to opt out set enabled=false.
+func (c *MemoryBackgroundConsolidationConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// GetIntervalSeconds returns the configured interval (>0) with default 600s.
+// Values below the 180s lease TTL are clamped up to 180s to avoid contention.
+func (c *MemoryBackgroundConsolidationConfig) GetIntervalSeconds() int {
+	const minInterval = 180
+	if c == nil || c.IntervalSec <= 0 {
+		return 600
+	}
+	if c.IntervalSec < minInterval {
+		return minInterval
+	}
+	return c.IntervalSec
 }
 
 // MemoryCompactionRecallConfig configures pre-compaction recall.
@@ -517,8 +561,15 @@ func (c *MemoryRerankerConfig) GetMaxCandidates() int {
 // MemoryEmbeddingsConfig configures the local embedding reranker.
 type MemoryEmbeddingsConfig struct {
 	Enabled    *bool  `json:"enabled,omitempty" jsonschema:"description=Enable local embedding reranker,default=false"`
-	Backend    string `json:"backend,omitempty" jsonschema:"description=Embedding backend,enum=hashing,default=hashing"`
+	Backend    string `json:"backend,omitempty" jsonschema:"description=Embedding backend,enum=hashing,enum=provider,default=hashing"`
 	Dimensions int    `json:"dimensions,omitempty" jsonschema:"description=Hashing embedding dimensions,default=384"`
+	// ProviderAPIURL is the base URL for the embedding API (e.g.
+	// "https://api.openai.com/v1").  Only used when Backend is "provider".
+	ProviderAPIURL string `json:"provider_api_url,omitempty" jsonschema:"description=Base URL for provider embedding API (OpenAI-compatible)"`
+	// ProviderAPIKey is the bearer token for the embedding API.
+	ProviderAPIKey string `json:"provider_api_key,omitempty" jsonschema:"description=API key for provider embedding API"`
+	// ProviderModel is the embedding model name (default: text-embedding-3-small).
+	ProviderModel string `json:"provider_model,omitempty" jsonschema:"description=Embedding model name for provider backend,default=text-embedding-3-small"`
 }
 
 // IsEnabled returns false unless explicitly enabled.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,7 +130,7 @@ func TestConsolidator_SingleConsolidation(t *testing.T) {
 	require.Equal(t, MemoryScopeProject, evt.Scope)
 	require.Equal(t, "Use SQLite for event storage", evt.Content)
 	require.Equal(t, "Storage decision", evt.Summary)
-	require.Equal(t, 0.9, evt.Confidence)
+	require.Equal(t, 0.924, evt.Confidence)
 	require.Equal(t, 0.8, evt.Importance)
 	require.Equal(t, []string{"database", "sqlite", tagConsolidatedOutput}, evt.Tags)
 	require.Equal(t, fixedClock(), evt.CreatedAt)
@@ -255,8 +256,9 @@ func TestConsolidator_DefaultValues(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 
-	// Zero confidence/importance should get defaults
-	require.Equal(t, 0.7, events[0].Confidence)
+	// Zero confidence/importance should get defaults, then Bayesian update
+	// applies: 0.7 + (1-0.7) * 0.8 * 0.3 = 0.772
+	require.Equal(t, 0.772, events[0].Confidence)
 	require.Equal(t, 0.5, events[0].Importance)
 	// Empty scope should default to project
 	require.Equal(t, MemoryScopeProject, events[0].Scope)
@@ -604,7 +606,7 @@ func TestEngine_TriggerConsolidationAppendsToStore(t *testing.T) {
 	require.Len(t, all, 2, "store should contain both source and consolidated events")
 }
 
-func TestEngine_OnSessionClosedTriggersConsolidation(t *testing.T) {
+func TestEngine_OnSessionDeletedTriggersConsolidation(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t)
 	eng := New(db, Config{Enabled: true})
@@ -633,13 +635,13 @@ func TestEngine_OnSessionClosedTriggersConsolidation(t *testing.T) {
 	})
 	eng.SetConsolidator(con)
 
-	err = eng.OnSessionClosed(ctx, "sess-close-test")
+	err = eng.OnSessionDeleted(ctx, "sess-close-test")
 	require.NoError(t, err)
-	require.Equal(t, 1, callCount, "OnSessionClosed should trigger consolidation")
+	require.Equal(t, 1, callCount, "OnSessionDeleted should trigger consolidation")
 	require.NotNil(t, eng.lastConsolidationRun)
 }
 
-func TestEngine_OnSessionClosedDisabled(t *testing.T) {
+func TestEngine_OnSessionDeletedDisabled(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t)
 	eng := New(db, Config{Enabled: false})
@@ -654,9 +656,100 @@ func TestEngine_OnSessionClosedDisabled(t *testing.T) {
 	})
 	eng.SetConsolidator(con)
 
-	err := eng.OnSessionClosed(context.Background(), "sess-disabled")
+	err := eng.OnSessionDeleted(context.Background(), "sess-disabled")
 	require.NoError(t, err)
 	require.Equal(t, 0, callCount, "should not consolidate when engine is disabled")
+}
+
+// TestEngine_Flush runs a final consolidation + materialization pass, as used
+// on process shutdown (quit, Ctrl+C, terminal close).
+func TestEngine_Flush(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	ctx := context.Background()
+
+	require.NoError(t, eng.store.Append(ctx, testEvent(MemoryScopeSession, MemoryKindDecision, "flush decision")))
+
+	callCount := 0
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			callCount++
+			return []ConsolidatedEvent{
+				{Kind: MemoryKindDecision, Scope: MemoryScopeProject, Content: "flushed", Confidence: 0.8, Importance: 0.6},
+			}, nil
+		},
+		clock: fixedClock,
+	}))
+
+	eng.Flush(ctx)
+	require.Equal(t, 1, callCount, "Flush should trigger consolidation")
+	require.NotNil(t, eng.lastConsolidationRun)
+}
+
+// TestEngine_FlushDisabled verifies Flush is a no-op on a disabled engine.
+func TestEngine_FlushDisabled(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: false})
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			t.Error("consolidator should not be invoked on a disabled engine")
+			return nil, nil
+		},
+	}))
+
+	eng.Flush(context.Background()) // must not panic and must not consolidate
+}
+
+// TestEngine_FlushCancelled verifies that Flush returns promptly when its
+// context is cancelled mid-consolidation (simulating a second Ctrl+C during
+// shutdown). The slow consolidator blocks until ctx is done; Flush should
+// return shortly after, not wait for the consolidator's own logic.
+func TestEngine_FlushCancelled(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true})
+	ctx := context.Background()
+
+	require.NoError(t, eng.store.Append(ctx, testEvent(MemoryScopeSession, MemoryKindDecision, "cancel decision")))
+
+	consolidateStarted := make(chan struct{})
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(c context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			close(consolidateStarted)
+			<-c.Done() // block until cancelled
+			return nil, c.Err()
+		},
+		clock: fixedClock,
+	}))
+
+	flushCtx, flushCancel := context.WithCancel(context.Background())
+
+	// Run Flush in a goroutine; cancel the context once consolidation starts.
+	done := make(chan struct{})
+	go func() {
+		eng.Flush(flushCtx)
+		close(done)
+	}()
+
+	select {
+	case <-consolidateStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consolidation never started")
+	}
+
+	flushCancel()
+
+	select {
+	case <-done:
+		// Flush returned — good.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Flush did not return after context cancellation")
+	}
 }
 
 func TestEngine_TriggerConsolidationDegradedMode(t *testing.T) {
@@ -682,4 +775,187 @@ func TestEngine_TriggerConsolidationDegradedMode(t *testing.T) {
 	err = eng.TriggerConsolidation(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 0, callCount, "should skip consolidation in degraded mode")
+}
+
+// TestBackgroundConsolidator_NoOpWithoutInterval verifies that
+// StartBackgroundConsolidator is a no-op when the configured interval is 0,
+// matching the background materializer behavior.
+func TestBackgroundConsolidator_NoOpWithoutInterval(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true}) // ConsolidationInterval defaults to 0
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			t.Error("consolidator should not be invoked")
+			return nil, nil
+		},
+		clock: fixedClock,
+	}))
+
+	eng.StartBackgroundConsolidator(context.Background())
+	require.False(t, eng.consBgStarted, "loop should not start with zero interval")
+	require.Nil(t, eng.LastBackgroundConsolidation(), "no pass should have run")
+
+	require.NoError(t, eng.Close())
+}
+
+// TestBackgroundConsolidator_NoOpWhenDisabled verifies the loop starts but
+// does nothing when the engine is disabled.
+func TestBackgroundConsolidator_NoOpWhenDisabled(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{
+		Enabled:               false,
+		ConsolidationInterval: 50 * time.Millisecond,
+	})
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			t.Error("consolidator should not be invoked on a disabled engine")
+			return nil, nil
+		},
+		clock: fixedClock,
+	}))
+
+	eng.StartBackgroundConsolidator(context.Background())
+	require.True(t, eng.consBgStarted, "loop should start even when disabled (no-op per pass)")
+
+	require.NoError(t, eng.Close())
+	require.False(t, eng.consBgStarted, "loop should be stopped after Close")
+}
+
+// TestBackgroundConsolidator_NoOpInDegradedMode verifies the loop is started
+// but skips every pass while the engine is in degraded mode.
+func TestBackgroundConsolidator_NoOpInDegradedMode(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{
+		Enabled:               true,
+		ConsolidationInterval: 30 * time.Millisecond,
+	})
+	eng.SetDegraded(true, "background model unavailable")
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			t.Error("consolidator should not be invoked in degraded mode")
+			return nil, nil
+		},
+		clock: fixedClock,
+	}))
+
+	eng.StartBackgroundConsolidator(context.Background())
+	require.True(t, eng.consBgStarted, "loop should start even in degraded mode")
+
+	// Wait long enough for at least one tick.
+	time.Sleep(120 * time.Millisecond)
+	require.Nil(t, eng.LastBackgroundConsolidation(), "degraded mode should skip all passes")
+
+	require.NoError(t, eng.Close())
+}
+
+// TestBackgroundConsolidator_PeriodicTrigger verifies the background loop
+// periodically calls TriggerConsolidation and records each successful pass.
+func TestBackgroundConsolidator_PeriodicTrigger(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{
+		Enabled:               true,
+		ConsolidationInterval: 30 * time.Millisecond,
+	})
+	ctx := context.Background()
+
+	// Seed an event so consolidation has something to process.
+	require.NoError(t, eng.store.Append(ctx, testEvent(MemoryScopeSession, MemoryKindDecision, "bg decision")))
+
+	var mu sync.Mutex
+	callCount := 0
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(_ context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			mu.Lock()
+			callCount++
+			mu.Unlock()
+			return []ConsolidatedEvent{
+				{Kind: MemoryKindDecision, Scope: MemoryScopeProject, Content: "bg consolidated", Confidence: 0.8, Importance: 0.6},
+			}, nil
+		},
+		clock: fixedClock,
+	}))
+
+	eng.StartBackgroundConsolidator(context.Background())
+	require.True(t, eng.consBgStarted, "loop should start")
+
+	// Wait until at least one full pass completes: the consolidator runs AND
+	// the pass records its timestamp. Checking only callCount is racy because
+	// the count increments inside TriggerConsolidation before
+	// runConsolidationPass sets lastConsBgRun.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return callCount >= 1 && eng.LastBackgroundConsolidation() != nil
+	}, 2*time.Second, 10*time.Millisecond, "consolidator should run and record a completed pass")
+
+	require.NoError(t, eng.Close())
+	require.False(t, eng.consBgStarted, "loop should be stopped after Close")
+}
+
+// TestBackgroundConsolidator_CloseIsIdempotent verifies that closing the
+// engine (which stops the loop) can be called without panic even if the
+// loop never started.
+func TestBackgroundConsolidator_CloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{Enabled: true, ConsolidationInterval: 50 * time.Millisecond})
+
+	require.NotPanics(t, func() {
+		require.NoError(t, eng.Close())
+		require.NoError(t, eng.Close())
+	})
+}
+
+// TestBackgroundConsolidator_StopInterruptsInFlightPass verifies that Close
+// does not block for backgroundPassTimeout when a pass is mid-flight. The
+// loop cancels the pass context on stop, so a slow consolidator is
+// interrupted quickly instead of running to its full timeout.
+func TestBackgroundConsolidator_StopInterruptsInFlightPass(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	eng := New(db, Config{
+		Enabled:               true,
+		ConsolidationInterval: 20 * time.Millisecond,
+	})
+	ctx := context.Background()
+
+	require.NoError(t, eng.store.Append(ctx, testEvent(MemoryScopeSession, MemoryKindDecision, "slow decision")))
+
+	passEntered := make(chan struct{})
+	eng.SetConsolidator(newMockConsolidator(mockConsolidatorDeps{
+		getExistingFn: defaultExistingFn(nil),
+		analyzeFn: func(c context.Context, _, _ string) ([]ConsolidatedEvent, error) {
+			close(passEntered)
+			// Block until the pass context is cancelled by stop.
+			<-c.Done()
+			return nil, c.Err()
+		},
+		clock: fixedClock,
+	}))
+
+	eng.StartBackgroundConsolidator(context.Background())
+
+	// Wait until a pass is actually in-flight.
+	select {
+	case <-passEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consolidator pass never started")
+	}
+
+	// Close should return promptly — well under backgroundPassTimeout —
+	// because the loop cancels the in-flight pass on stop.
+	start := time.Now()
+	require.NoError(t, eng.Close())
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, 15*time.Second,
+		"Close blocked %s on an in-flight pass; stop should cancel it quickly", elapsed)
 }

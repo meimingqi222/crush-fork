@@ -33,6 +33,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 		source_hash TEXT NOT NULL DEFAULT '',
 		confidence REAL NOT NULL DEFAULT 0.5 CHECK (confidence >= 0.0 AND confidence <= 1.0),
 		importance REAL NOT NULL DEFAULT 0.5 CHECK (importance >= 0.0 AND importance <= 1.0),
+		veracity TEXT NOT NULL DEFAULT 'unknown',
 		supersedes TEXT,
 		tags_json TEXT NOT NULL DEFAULT '[]',
 		watermark INTEGER NOT NULL,
@@ -45,6 +46,51 @@ func setupTestDB(t *testing.T) *sql.DB {
 	CREATE INDEX IF NOT EXISTS idx_memory_events_scope_kind ON memory_events (scope, kind);
 	CREATE INDEX IF NOT EXISTS idx_memory_events_session ON memory_events (session_id);
 	CREATE INDEX IF NOT EXISTS idx_memory_events_created_at ON memory_events (created_at);
+	CREATE INDEX IF NOT EXISTS idx_memory_events_veracity ON memory_events (veracity);
+
+	CREATE TABLE IF NOT EXISTS memory_conflicts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		fact_a_id TEXT NOT NULL,
+		fact_b_id TEXT NOT NULL,
+		conflict_type TEXT NOT NULL DEFAULT 'contradiction',
+		resolution TEXT,
+		resolved_at INTEGER,
+		created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+		updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+	);
+	CREATE INDEX IF NOT EXISTS idx_memory_conflicts_unresolved
+		ON memory_conflicts (fact_a_id, fact_b_id)
+		WHERE resolution IS NULL;
+
+	CREATE TABLE IF NOT EXISTS memory_triples (
+		id TEXT PRIMARY KEY,
+		subject TEXT NOT NULL,
+		predicate TEXT NOT NULL,
+		object TEXT NOT NULL,
+		confidence REAL NOT NULL DEFAULT 1.0,
+		veracity TEXT NOT NULL DEFAULT 'unknown',
+		valid_from INTEGER NOT NULL,
+		valid_to INTEGER,
+		source_event_id TEXT,
+		scope TEXT NOT NULL DEFAULT 'project',
+		created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+		updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+		superseded_by TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_triples_spo ON memory_triples (subject, predicate, object);
+	CREATE INDEX IF NOT EXISTS idx_triples_subject ON memory_triples (subject);
+	CREATE INDEX IF NOT EXISTS idx_triples_source ON memory_triples (source_event_id);
+
+	CREATE TABLE IF NOT EXISTS memory_edges (
+		source_id TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		edge_type TEXT NOT NULL,
+		weight REAL NOT NULL DEFAULT 0.5,
+		created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+		PRIMARY KEY (source_id, target_id, edge_type)
+	);
+	CREATE INDEX IF NOT EXISTS idx_edges_source ON memory_edges (source_id);
+	CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges (target_id);
 
 	CREATE TABLE IF NOT EXISTS memory_sources (
 		id TEXT PRIMARY KEY,

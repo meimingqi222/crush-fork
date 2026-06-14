@@ -33,12 +33,27 @@ Rules:
 - Extract only durable knowledge. Prefer stable decisions, project context, confirmed workflows.
 - Do NOT save transient task state, one-off logs, or temporary file contents.
 - Each event should be self-contained and meaningful on its own.
+- Preserve exact literal values BYTE-FOR-BYTE. Connection strings, DSNs, host:port pairs,
+  version numbers, file paths, environment variables, and commit hashes must be
+  copied verbatim — never paraphrased or truncated. Summarizing "the user gave a DB config"
+  LOSES the value; keep "postgres://localhost:5432/mydb" as-is.
+- NEVER persist secrets: API keys, tokens, passwords, or private credentials must NOT be
+  saved to memory at all. Redact them to a placeholder (e.g. "API key set via env var X")
+  and note where/how they are configured, but never store the secret value itself.
 - scope: "session" for temporary context, "project" for lasting project knowledge, "user" for personal preferences.
 - confidence: 0.0-1.0 indicating how sure you are this is correct.
 - importance: 0.0-1.0 indicating how valuable this memory is for future work.
+- veracity: How this fact was established:
+  - "stated": The user explicitly stated this (highest trust).
+  - "inferred": You inferred this from context (medium trust).
+  - "tool": A tool output confirmed this (lower trust).
+  - "unknown": Cannot determine the source (default).
+- triples: Optional knowledge-graph triples in subject-predicate-object form. Extract structured
+  relationships like "project X uses framework Y" or "user prefers tool Z". Only extract triples
+  when the relationship is clear and unambiguous.
 
 Return a JSON array of objects with this exact shape:
-[{"kind":"decision|preference|procedure|pitfall|reference|task_state","scope":"session|project|user","content":"Detailed description","summary":"Brief summary","confidence":0.8,"importance":0.6,"tags":["relevant","tags"]}]
+[{"kind":"decision|preference|procedure|pitfall|reference|task_state","scope":"session|project|user","content":"Detailed description","summary":"Brief summary","confidence":0.8,"importance":0.6,"veracity":"stated|inferred|tool|unknown","tags":["relevant","tags"],"triples":[{"subject":"X","predicate":"uses","object":"Y"}]}]
 
 Return [] if nothing worth saving.`
 
@@ -48,11 +63,21 @@ Rules:
 - Keep only stable knowledge that should survive across sessions.
 - Merge duplicates and prefer concise, self-contained memories.
 - Do not preserve working memory, transient task progress, logs, or temporary files.
+- Preserve exact literal values BYTE-FOR-BYTE. Connection strings, DSNs, host:port pairs,
+  version numbers, file paths, environment variables, and commit hashes must survive
+  consolidation unchanged — never paraphrase or truncate them, even when merging duplicates.
+- NEVER persist secrets: API keys, tokens, passwords, or private credentials must be
+  stripped from any merged memory. Redact to a placeholder (e.g. "API key set via env var X")
+  and keep how/where it is configured, but never the secret value itself.
 - Use scope "project" for repository/project knowledge, "user" for user preferences, and "global" only for broadly reusable facts.
 - If a new memory replaces an existing one, set supersedes to the existing event ID.
+- veracity: How this consolidated fact was established:
+  - "stated": Directly stated by the user.
+  - "inferred": Inferred from multiple observations.
+  - "unknown": Cannot determine the source.
 
 Return a JSON array of objects with this exact shape:
-[{"kind":"decision|preference|procedure|pitfall|reference","scope":"project|user|global","content":"Detailed durable memory","summary":"Brief summary","confidence":0.8,"importance":0.6,"tags":["relevant","tags"],"supersedes":"optional-existing-id"}]
+[{"kind":"decision|preference|procedure|pitfall|reference","scope":"project|user|global","content":"Detailed durable memory","summary":"Brief summary","confidence":0.8,"importance":0.6,"veracity":"stated|inferred|unknown","tags":["relevant","tags"],"supersedes":"optional-existing-id"}]
 
 Return [] if nothing worth saving.`
 
@@ -182,6 +207,17 @@ func parseExtractedEvents(content string) ([]engine.ExtractedEvent, error) {
 		if e.Importance <= 0 {
 			e.Importance = 0.5
 		}
+		if e.Veracity == "" {
+			e.Veracity = engine.MemoryVeracityUnknown
+		}
+		// Filter out triples with missing fields.
+		validTriples := e.Triples[:0]
+		for _, tr := range e.Triples {
+			if tr.Subject != "" && tr.Predicate != "" && tr.Object != "" {
+				validTriples = append(validTriples, tr)
+			}
+		}
+		e.Triples = validTriples
 		result = append(result, e)
 	}
 

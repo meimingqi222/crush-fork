@@ -18,14 +18,15 @@ const tagConsolidatedOutput = "consolidated_output"
 // LLM to flag when a new consolidated event replaces an older one, enabling
 // automatic deduplication and versioning of memory.
 type ConsolidatedEvent struct {
-	Kind       MemoryKind  `json:"kind"`
-	Scope      MemoryScope `json:"scope"`
-	Content    string      `json:"content"`
-	Summary    string      `json:"summary,omitempty"`
-	Confidence float64     `json:"confidence"`
-	Importance float64     `json:"importance"`
-	Tags       []string    `json:"tags,omitempty"`
-	Supersedes *string     `json:"supersedes,omitempty"`
+	Kind       MemoryKind     `json:"kind"`
+	Scope      MemoryScope    `json:"scope"`
+	Content    string         `json:"content"`
+	Summary    string         `json:"summary,omitempty"`
+	Confidence float64        `json:"confidence"`
+	Importance float64        `json:"importance"`
+	Veracity   MemoryVeracity `json:"veracity,omitempty"`
+	Tags       []string       `json:"tags,omitempty"`
+	Supersedes *string        `json:"supersedes,omitempty"`
 }
 
 // LLMConsolidator implements Consolidator by using user-provided callbacks
@@ -83,30 +84,41 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, events []MemoryEvent)
 	result := make([]MemoryEvent, 0, len(consolidated))
 	for i, ce := range consolidated {
 		eventID := fmt.Sprintf("con-%s-%d", string(ce.Kind), now.UnixNano()+int64(i))
+		veracity := NormalizeVeracity(string(ce.Veracity))
+		confidence := ce.Confidence
+		if confidence <= 0 {
+			confidence = 0.7
+		}
+		// Apply Bayesian update: if the veracity label is strong (e.g.
+		// "stated"), boost confidence; if weak (e.g. "inferred"), nudge
+		// it less.  This replaces raw LLM self-assessment with an
+		// evidence-weighted adjustment.
+		confidence = BayesianUpdate(confidence, veracity)
+
+		importance := ce.Importance
+		if importance <= 0 {
+			importance = 0.5
+		}
+		scope := ce.Scope
+		if scope == "" {
+			scope = MemoryScopeProject
+		}
 		event := MemoryEvent{
 			ID:      eventID,
-			Scope:   ce.Scope,
+			Scope:   scope,
 			Kind:    ce.Kind,
 			Content: ce.Content,
 			Summary: ce.Summary,
 			Source: MemorySourceRef{
 				SessionID: "",
 			},
-			Confidence: ce.Confidence,
-			Importance: ce.Importance,
+			Confidence: confidence,
+			Importance: importance,
+			Veracity:   veracity,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 			Supersedes: ce.Supersedes,
 			Tags:       append(ce.Tags, tagConsolidatedOutput),
-		}
-		if event.Confidence <= 0 {
-			event.Confidence = 0.7
-		}
-		if event.Importance <= 0 {
-			event.Importance = 0.5
-		}
-		if event.Scope == "" {
-			event.Scope = MemoryScopeProject
 		}
 		result = append(result, event)
 	}

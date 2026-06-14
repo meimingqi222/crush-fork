@@ -58,8 +58,8 @@ func (s *sqliteEventStore) Append(ctx context.Context, event MemoryEvent) error 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO memory_events
 			(id, session_id, scope, kind, content, summary, source_json, source_hash,
-			 confidence, importance, supersedes, tags_json, watermark, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			 confidence, importance, veracity, supersedes, tags_json, watermark, created_at, updated_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			COALESCE((SELECT MAX(watermark) FROM memory_events) + 1, 1), ?, ?, ?)`,
 		event.ID,
 		event.Source.SessionID,
@@ -71,6 +71,7 @@ func (s *sqliteEventStore) Append(ctx context.Context, event MemoryEvent) error 
 		sourceHash,
 		event.Confidence,
 		event.Importance,
+		string(event.Veracity),
 		event.Supersedes,
 		string(tagsJSON),
 		createdAt,
@@ -144,7 +145,7 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 	}
 	query := fmt.Sprintf(`
 		SELECT id, session_id, scope, kind, content, summary, source_json, source_hash,
-		       confidence, importance, supersedes, tags_json, watermark, created_at, updated_at, expires_at
+		       confidence, importance, veracity, supersedes, tags_json, watermark, created_at, updated_at, expires_at
 		FROM memory_events
 		%s
 		ORDER BY watermark %s
@@ -179,6 +180,7 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 			&sourceHash,
 			&event.Confidence,
 			&event.Importance,
+			&event.Veracity,
 			&event.Supersedes,
 			&tagsJSON,
 			&event.Watermark,
@@ -216,7 +218,7 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 func (s *sqliteEventStore) GetByID(ctx context.Context, id string) (*MemoryEvent, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, scope, kind, content, summary, source_json, source_hash,
-		       confidence, importance, supersedes, tags_json, watermark, created_at, updated_at, expires_at
+		       confidence, importance, veracity, supersedes, tags_json, watermark, created_at, updated_at, expires_at
 		FROM memory_events
 		WHERE id = ?`, id)
 
@@ -240,6 +242,7 @@ func (s *sqliteEventStore) GetByID(ctx context.Context, id string) (*MemoryEvent
 		&sourceHash,
 		&event.Confidence,
 		&event.Importance,
+		&event.Veracity,
 		&event.Supersedes,
 		&tagsJSON,
 		&event.Watermark,
