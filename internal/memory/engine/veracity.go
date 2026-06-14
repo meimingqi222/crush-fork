@@ -192,16 +192,23 @@ func (d *ConflictDetector) ResolveConflict(conflictID int64, winningID string) e
 	}
 	defer tx.Rollback()
 
-	// Supersede the losing event.
+	// Mark the losing event as superseded by the winner. Per the system-wide
+	// supersedes convention (see FilterLatestNonSuperseded and the
+	// consolidator), the WINNER's supersedes field points at the LOSER's ID.
+	// The loser's own supersedes stays NULL — it is the event being retired,
+	// not the one doing the superseding. Setting it the other way around
+	// (supersedes=winningID on the loser) inverts the relationship and causes
+	// FilterLatestNonSuperseded to return the losing event instead of the
+	// winner.
 	_, err = tx.Exec(`
 		UPDATE memory_events SET supersedes = ?, updated_at = ? WHERE id = ?
-	`, winningID, now, losingID)
+	`, losingID, now, winningID)
 	if err != nil {
 		return fmt.Errorf("superseding losing event %s: %w", losingID, err)
 	}
 
 	// Mark the conflict as resolved.
-	resolution := fmt.Sprintf("superseded_by_%s", winningID)
+	resolution := fmt.Sprintf("superseded_%s", losingID)
 	_, err = tx.Exec(`
 		UPDATE memory_conflicts
 		SET resolution = ?, resolved_at = ?, updated_at = ?
