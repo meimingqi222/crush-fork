@@ -204,7 +204,7 @@ func (d *ConflictDetector) ResolveConflict(conflictID int64, winningID string) e
 		UPDATE memory_events SET supersedes = ?, updated_at = ? WHERE id = ?
 	`, losingID, now, winningID)
 	if err != nil {
-		return fmt.Errorf("superseding losing event %s: %w", losingID, err)
+		return fmt.Errorf("setting supersedes on winning event %s: %w", winningID, err)
 	}
 
 	// Mark the conflict as resolved.
