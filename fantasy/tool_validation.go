@@ -626,11 +626,11 @@ func cloneAnyMap(m map[string]any) map[string]any {
 func cloneDefaultValue(value any) any {
 	cloned, err := json.Marshal(value)
 	if err != nil {
-		return value
+		panic(fmt.Sprintf("failed to marshal value for cloning: %v", err))
 	}
 	var out any
 	if err := json.Unmarshal(cloned, &out); err != nil {
-		return value
+		panic(fmt.Sprintf("failed to unmarshal cloned value: %v", err))
 	}
 	return out
 }
