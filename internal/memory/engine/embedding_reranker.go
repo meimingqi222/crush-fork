@@ -58,9 +58,13 @@ func (h *HashingEmbedder) Embed(ctx context.Context, text string) ([]float64, er
 // EmbeddingReranker reranks lexical candidates by local embedding similarity,
 // then blends in the existing heuristic score to avoid overfitting to weak
 // hash collisions. It only sees the candidate slice provided by Retrieve().
+// When the candidate set is large enough, MMR is applied to promote diversity
+// and avoid returning semantically redundant results.
 type EmbeddingReranker struct {
 	embedder  Embedder
 	heuristic *HeuristicReranker
+	mmrLambda float64 // MMR diversity parameter (0.0=pure diversity, 1.0=pure relevance)
+	mmrTopK   int     // Apply MMR when candidates exceed this threshold
 }
 
 func NewEmbeddingReranker(embedder Embedder) *EmbeddingReranker {
@@ -70,7 +74,22 @@ func NewEmbeddingReranker(embedder Embedder) *EmbeddingReranker {
 	return &EmbeddingReranker{
 		embedder:  embedder,
 		heuristic: NewHeuristicReranker(),
+		mmrLambda: 0.7,
+		mmrTopK:   15,
 	}
+}
+
+// WithMMR configures the MMR diversity parameters.
+// lambda controls relevance vs diversity (default 0.7).
+// topKThreshold is the candidate count above which MMR is applied (default 15).
+func (r *EmbeddingReranker) WithMMR(lambda float64, topKThreshold int) *EmbeddingReranker {
+	if lambda > 0 {
+		r.mmrLambda = lambda
+	}
+	if topKThreshold > 0 {
+		r.mmrTopK = topKThreshold
+	}
+	return r
 }
 
 func (r *EmbeddingReranker) Name() string {
@@ -116,6 +135,17 @@ func (r *EmbeddingReranker) Rerank(ctx context.Context, query string, candidates
 	for _, sc := range scoredCandidates {
 		out = append(out, sc.evt)
 	}
+
+	// Apply MMR when the candidate set is large enough to benefit from
+	// diversity selection.  This prevents returning a cluster of
+	// semantically similar results when the user's query is broad.
+	if len(out) > r.mmrTopK && r.mmrLambda > 0 {
+		mmrResult, mmrErr := MMRSelect(ctx, queryVec, out, r.embedder, r.mmrLambda, r.mmrTopK)
+		if mmrErr == nil && len(mmrResult) > 0 {
+			out = mmrResult
+		}
+	}
+
 	return out, nil
 }
 

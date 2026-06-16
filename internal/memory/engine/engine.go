@@ -30,6 +30,8 @@ type Engine struct {
 	materializers      []Materializer
 	retriever          Retriever
 	transcriptRetainer TranscriptRetainer
+	tripleStore        *TripleStore
+	conflictDetector   *ConflictDetector
 
 	lastExtractionRun         *time.Time
 	lastConsolidationRun      *time.Time
@@ -60,6 +62,17 @@ type Engine struct {
 	bgStarted     bool
 	bgMu          sync.Mutex
 	lastBgRun     *time.Time
+
+	// Background consolidation: a separate ticker that periodically runs
+	// TriggerConsolidation so long-running sessions merge episodic events
+	// into durable memory before session close. Uses its own field set so
+	// the two background loops can start/stop independently.
+	consBgInterval time.Duration
+	consBgStop     chan struct{}
+	consBgDone     chan struct{}
+	consBgStarted  bool
+	consBgMu       sync.Mutex
+	lastConsBgRun  *time.Time
 }
 
 const consolidationCheckpointView = "_pipeline_consolidation"
@@ -76,6 +89,11 @@ type Config struct {
 	// the given number of idle turns even before BackgroundInterval elapses.
 	// Set to 0 to disable turn-counter triggering.
 	BackgroundEveryNTurns int
+
+	// ConsolidationInterval enables a periodic background consolidator when
+	// > 0. Unlike session-close consolidation, this runs on a timer so
+	// long-running sessions still merge episodic events into durable memory.
+	ConsolidationInterval time.Duration
 }
 
 // New creates a new memory Engine with the given SQLite database and config.
@@ -97,6 +115,9 @@ func New(db *sql.DB, cfg Config) *Engine {
 		workingMemoryThrottle: throttle,
 		bgInterval:            cfg.BackgroundInterval,
 		bgEveryNTurns:         cfg.BackgroundEveryNTurns,
+		consBgInterval:        cfg.ConsolidationInterval,
+		tripleStore:           NewTripleStore(db),
+		conflictDetector:      NewConflictDetector(db),
 	}
 }
 
@@ -128,8 +149,9 @@ func (e *Engine) SetExtractor(extractor Extractor) {
 }
 
 // SetConsolidator sets the Consolidator component for the engine. When set,
-// consolidation runs automatically on session close and can be triggered
-// manually via TriggerConsolidation.
+// consolidation runs automatically on session deletion (OnSessionDeleted),
+// on shutdown (Flush), and via the background consolidator, and can be
+// triggered manually via TriggerConsolidation.
 func (e *Engine) SetConsolidator(consolidator Consolidator) {
 	e.consolidator = consolidator
 }
@@ -143,6 +165,17 @@ func (e *Engine) SetMaterializer(m Materializer) {
 // SetRetriever sets the Retriever component for query-based memory recall.
 func (e *Engine) SetRetriever(r Retriever) {
 	e.retriever = r
+}
+
+// TripleStore returns the engine's triple store for structured fact queries.
+func (e *Engine) TripleStore() *TripleStore {
+	return e.tripleStore
+}
+
+// ConflictDetector returns the engine's conflict detector for contradiction
+// management.
+func (e *Engine) ConflictDetector() *ConflictDetector {
+	return e.conflictDetector
 }
 
 // Retriever returns the attached Retriever, or nil if not set.
@@ -260,6 +293,24 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		"events_consolidated", len(consolidated),
 		"watermark", e.lastConsolidatedWatermark,
 	)
+
+	// Run conflict detection after consolidation to catch contradictions
+	// among the newly consolidated events.
+	if e.conflictDetector != nil {
+		if n, err := e.conflictDetector.DetectConflicts(); err != nil {
+			slog.Warn("Post-consolidation conflict detection failed", "error", err)
+		} else if n > 0 {
+			slog.Debug("Detected memory conflicts", "count", n)
+		}
+	}
+	if e.tripleStore != nil {
+		if n, err := e.tripleStore.DetectTripleConflicts(ctx); err != nil {
+			slog.Warn("Post-consolidation triple conflict detection failed", "error", err)
+		} else if n > 0 {
+			slog.Debug("Detected triple conflicts", "count", n)
+		}
+	}
+
 	return nil
 }
 
@@ -409,6 +460,9 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 			e.pipelineMu.Lock()
 			e.lastExtractionRun = &now
 			e.pipelineMu.Unlock()
+
+			// Store any triples extracted alongside the events.
+			e.storeExtractedTriples(ctx, extracted)
 		}
 	}
 
@@ -449,9 +503,14 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 	return nil
 }
 
-// OnSessionClosed cleans up engine session state and triggers consolidation
-// of any unprocessed episodic events from the closed session.
-func (e *Engine) OnSessionClosed(ctx context.Context, sessionID string) error {
+// OnSessionDeleted cleans up engine session state and runs a final
+// consolidation + materialization pass for the deleted session's events.
+//
+// This fires ONLY when a session is explicitly deleted (e.g. via the sessions
+// dialog). It does NOT fire on quit, Ctrl+C, or terminal close — those paths
+// call Flush before Close instead. The name reflects this: it is a
+// deletion-side-effect hook, not a general "session ended" hook.
+func (e *Engine) OnSessionDeleted(ctx context.Context, sessionID string) error {
 	if !e.enabled {
 		return nil
 	}
@@ -460,15 +519,52 @@ func (e *Engine) OnSessionClosed(ctx context.Context, sessionID string) error {
 	e.sessionMu.Unlock()
 
 	if err := e.TriggerConsolidation(ctx); err != nil {
-		slog.Warn("Session-end consolidation failed", "error", err, "session_id", sessionID)
+		slog.Warn("Session-deletion consolidation failed", "error", err, "session_id", sessionID)
 	}
 
 	if err := e.TriggerMaterialization(ctx); err != nil {
-		slog.Warn("Session-end materialization failed", "error", err, "session_id", sessionID)
+		slog.Warn("Session-deletion materialization failed", "error", err, "session_id", sessionID)
 	}
 
 	slog.Debug("Memory engine cleaned up session state", "session_id", sessionID)
 	return nil
+}
+
+// Flush runs a consolidation + materialization pass on demand. It is a public
+// API for callers that want to force a memory refresh (e.g. a future explicit
+// "remember now" command), but it is NOT called during normal process shutdown.
+//
+// Shutdown intentionally does not call Flush: episodic events are already
+// persisted to SQLite by AfterTurnIdle on every turn, and the background
+// consolidator (enabled by default) merges them into durable memory on a
+// timer. A fresh LLM consolidation at exit would block the user for 30-45s for
+// little gain — it only advances the materialized views, which the next run's
+// ticker refreshes anyway. This matches oh-my-pi and MiMo-Code.
+//
+// The caller MUST pass a context with a timeout generous enough for a
+// background LLM call (consolidation can take 30-45s). Cancellation is handled
+// gracefully: a cancelled context aborts consolidation with a Debug log.
+func (e *Engine) Flush(ctx context.Context) {
+	if !e.enabled {
+		return
+	}
+	// Consolidation is the expensive step (LLM call). If the caller cancels,
+	// abort without noisy warnings — cancellation is an expected outcome.
+	if err := e.TriggerConsolidation(ctx); err != nil {
+		if ctx.Err() != nil {
+			slog.Debug("Flush consolidation cancelled", "reason", ctx.Err())
+			return
+		}
+		slog.Warn("Flush consolidation failed", "error", err)
+	}
+	// Materialization is cheap (no LLM) and safe to run from a fresh context
+	// so a consolidation cancel still surfaces whatever was already
+	// consolidated. This is a no-op when there is nothing new to materialize.
+	matCtx, matCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer matCancel()
+	if err := e.TriggerMaterialization(matCtx); err != nil {
+		slog.Warn("Shutdown materialization failed", "error", err)
+	}
 }
 
 // OnBeforeCompaction flushes Working Memory and records a compaction
@@ -714,9 +810,47 @@ func (e *Engine) queryViewStatuses(ctx context.Context) ([]MaterializedViewStatu
 	return views, rows.Err()
 }
 
+// storeExtractedTriples writes any triples embedded in extracted events to the
+// TripleStore.  This runs after extraction so that knowledge-graph triples are
+// persisted alongside the flat event stream without requiring the caller to
+// handle triple storage explicitly.
+func (e *Engine) storeExtractedTriples(ctx context.Context, events []MemoryEvent) {
+	if e.tripleStore == nil {
+		return
+	}
+	for _, evt := range events {
+		if len(evt.Triples) == 0 {
+			continue
+		}
+		for _, tr := range evt.Triples {
+			if tr.Subject == "" || tr.Predicate == "" || tr.Object == "" {
+				continue
+			}
+			triple := Triple{
+				Subject:       tr.Subject,
+				Predicate:     tr.Predicate,
+				Object:        tr.Object,
+				Confidence:    evt.Confidence,
+				Veracity:      evt.Veracity,
+				SourceEventID: evt.ID,
+				Scope:         evt.Scope,
+				ValidFrom:     evt.CreatedAt,
+			}
+			if err := e.tripleStore.AddTriple(ctx, triple); err != nil {
+				slog.Warn("Failed to store extracted triple",
+					"error", err,
+					"subject", tr.Subject,
+					"predicate", tr.Predicate,
+					"object", tr.Object)
+			}
+		}
+	}
+}
+
 // Close releases all resources held by the engine.
 func (e *Engine) Close() error {
 	e.stopBackground()
+	e.stopConsolidation()
 	if e.store != nil {
 		return e.store.Close()
 	}

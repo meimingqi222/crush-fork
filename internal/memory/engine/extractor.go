@@ -15,13 +15,23 @@ type Transcript struct {
 // ExtractedEvent is the structured output from LLM analysis of a session
 // transcript. It maps directly to MemoryEvent fields.
 type ExtractedEvent struct {
-	Kind       MemoryKind  `json:"kind"`
-	Scope      MemoryScope `json:"scope"`
-	Content    string      `json:"content"`
-	Summary    string      `json:"summary,omitempty"`
-	Confidence float64     `json:"confidence"`
-	Importance float64     `json:"importance"`
-	Tags       []string    `json:"tags,omitempty"`
+	Kind       MemoryKind     `json:"kind"`
+	Scope      MemoryScope    `json:"scope"`
+	Content    string         `json:"content"`
+	Summary    string         `json:"summary,omitempty"`
+	Confidence float64        `json:"confidence"`
+	Importance float64        `json:"importance"`
+	Veracity   MemoryVeracity `json:"veracity,omitempty"`
+	Tags       []string       `json:"tags,omitempty"`
+	Triples    []ExtractedTriple `json:"triples,omitempty"`
+}
+
+// ExtractedTriple represents a knowledge-graph triple extracted from
+// conversation alongside an event.
+type ExtractedTriple struct {
+	Subject   string `json:"subject"`
+	Predicate string `json:"predicate"`
+	Object    string `json:"object"`
 }
 
 // LLMExtractor implements Extractor by using user-provided callbacks for
@@ -53,6 +63,7 @@ func NewLLMExtractor(
 
 // Extract implements Extractor. It fetches the session transcript, runs LLM
 // analysis, wraps each result with provenance data, and returns MemoryEvents.
+// The caller is responsible for storing any triples from the extracted events.
 func (e *LLMExtractor) Extract(ctx context.Context, sessionID string) ([]MemoryEvent, error) {
 	transcript, err := e.getTranscript(ctx, sessionID)
 	if err != nil {
@@ -76,6 +87,13 @@ func (e *LLMExtractor) Extract(ctx context.Context, sessionID string) ([]MemoryE
 	events := make([]MemoryEvent, 0, len(extracted))
 	for i, ee := range extracted {
 		eventID := fmt.Sprintf("ext-%s-%d", sessionID, now.UnixNano()+int64(i))
+		veracity := NormalizeVeracity(string(ee.Veracity))
+		confidence := ee.Confidence
+		if confidence <= 0 {
+			confidence = 0.5
+		}
+		// Apply Bayesian update for veracity-weighted confidence.
+		confidence = BayesianUpdate(confidence, veracity)
 		events = append(events, MemoryEvent{
 			ID:      eventID,
 			Scope:   ee.Scope,
@@ -87,11 +105,13 @@ func (e *LLMExtractor) Extract(ctx context.Context, sessionID string) ([]MemoryE
 				MessageIDs: transcript.MessageIDs,
 				Files:      files,
 			},
-			Confidence: ee.Confidence,
+			Confidence: confidence,
 			Importance: ee.Importance,
+			Veracity:   veracity,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 			Tags:       ee.Tags,
+			Triples:    ee.Triples,
 		})
 	}
 

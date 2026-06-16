@@ -10,9 +10,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -107,15 +109,15 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		runtimeService.DeleteSession(sessionID)
 		if app != nil && app.AgentCoordinator != nil {
 			if coord, ok := app.AgentCoordinator.(interface {
-				onSessionClosed(context.Context, string)
+				onSessionDeleted(context.Context, string)
 			}); ok {
-				coord.onSessionClosed(context.Background(), sessionID)
+				coord.onSessionDeleted(context.Background(), sessionID)
 				return
 			}
 		}
 		if memoryEngine != nil {
-			if err := memoryEngine.OnSessionClosed(context.Background(), sessionID); err != nil {
-				slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
+			if err := memoryEngine.OnSessionDeleted(context.Background(), sessionID); err != nil {
+				slog.Warn("Memory engine OnSessionDeleted failed", "error", err, "session_id", sessionID)
 			}
 		}
 	}, session.CollaborationModeDefault)
@@ -226,11 +228,16 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 			bgInterval = time.Duration(memCfg.BackgroundMaterialize.GetIntervalSeconds()) * time.Second
 			bgEveryNTurns = memCfg.BackgroundMaterialize.GetEveryNTurns()
 		}
+		var consBgInterval time.Duration
+		if backend == "local" && memCfg.BackgroundConsolidation.IsEnabled() {
+			consBgInterval = time.Duration(memCfg.BackgroundConsolidation.GetIntervalSeconds()) * time.Second
+		}
 		eng := engine.New(conn, engine.Config{
 			Enabled:               true,
 			Backend:               backend,
 			BackgroundInterval:    bgInterval,
 			BackgroundEveryNTurns: bgEveryNTurns,
+			ConsolidationInterval: consBgInterval,
 		})
 		startupMaterialization := true
 
@@ -307,11 +314,21 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		// the configured interval is 0 (e.g. hindsight backend has none).
 		eng.StartBackgroundMaterializer(context.Background())
 
+		// Start the background consolidator goroutine. It is a no-op when
+		// the configured interval is 0 (e.g. hindsight backend has none,
+		// since it delegates consolidation to its remote service). For the
+		// local backend, background consolidation is enabled by default so
+		// long-running sessions merge episodic events into durable memory
+		// on a timer instead of only on session close.
+		eng.StartBackgroundConsolidator(context.Background())
+
 		memoryEngine = eng
 		app.MemoryEngine = eng
-		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
-			return eng.Close()
-		})
+		// Note: eng.Close() is called from the serial section of Shutdown()
+		// (before the parallel cleanup that closes the DB), NOT from
+		// cleanupFuncs. This ordering guarantees the background loops have
+		// fully stopped before conn.Close() runs, avoiding a race where an
+		// in-flight pass uses a closed DB connection.
 	}
 
 	// TODO: remove the concept of agent config, most likely.
@@ -873,6 +890,14 @@ func buildLocalMemoryReranker(memCfg *config.MemoryConfig) engine.Reranker {
 		switch memCfg.Embeddings.BackendName() {
 		case "hashing", "":
 			return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(memCfg.Embeddings.GetDimensions()))
+		case "provider":
+			embedder := engine.NewProviderEmbedder(engine.ProviderEmbedderConfig{
+				APIURL:     memCfg.Embeddings.ProviderAPIURL,
+				APIKey:     memCfg.Embeddings.ProviderAPIKey,
+				Model:      memCfg.Embeddings.ProviderModel,
+				Dimensions: memCfg.Embeddings.GetDimensions(),
+			})
+			return engine.NewEmbeddingReranker(embedder)
 		default:
 			slog.Warn("Memory embedding backend not implemented, falling back to hashing",
 				"backend", memCfg.Embeddings.BackendName())
@@ -931,9 +956,26 @@ func (app *App) Subscribe(program *tea.Program) {
 }
 
 // Shutdown performs a graceful shutdown of the application.
+//
+// Intentionally does NOT run a final memory consolidation on exit: episodic
+// events are already persisted to SQLite by AfterTurnIdle on every turn, and
+// the background consolidator (enabled by default) merges them into durable
+// memory on a timer. A fresh LLM consolidation call at exit would block the
+// user for 30-45s for little gain — it only advances the materialized views
+// (MEMORY.md, mental_models) which the next run's ticker refreshes anyway.
+// This matches oh-my-pi and MiMo-Code, which both treat consolidation as a
+// background task and never block exit on it.
+//
+// A second SIGINT during shutdown cancels the in-flight cleanup, so the user
+// can always force a faster exit by pressing Ctrl+C again.
 func (app *App) Shutdown() {
 	start := time.Now()
 	defer func() { slog.Debug("Shutdown took " + time.Since(start).String()) }()
+
+	// Root context for the entire shutdown. Cancelled by a second
+	// SIGINT/SIGTERM so cleanup tasks abort promptly if the user wants out.
+	shutdownRootCtx, stopSignalCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignalCancel()
 
 	// First, cancel all agents and wait for them to finish. This must complete
 	// before closing the DB so agents can finish writing their state.
@@ -941,11 +983,21 @@ func (app *App) Shutdown() {
 		app.AgentCoordinator.CancelAll()
 	}
 
+	// Tear down the engine serially before the parallel cleanup closes the DB
+	// connection. Close() stops the background goroutines, cancelling any
+	// in-flight pass so it returns quickly (no LLM call on this path).
+	if app.MemoryEngine != nil {
+		if err := app.MemoryEngine.Close(); err != nil {
+			slog.Warn("Memory engine close failed", "error", err)
+		}
+	}
+
 	// Now run remaining cleanup tasks in parallel.
 	var wg sync.WaitGroup
 
-	// Shared shutdown context for all timeout-bounded cleanup.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Shared context for all timeout-bounded cleanup. Also derived from
+	// shutdownRootCtx so it respects a second Ctrl+C.
+	shutdownCtx, cancel := context.WithTimeout(shutdownRootCtx, 5*time.Second)
 	defer cancel()
 
 	// Send exit event

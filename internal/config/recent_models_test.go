@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/stretchr/testify/require"
 )
 
@@ -294,4 +296,114 @@ func TestRecordRecentModel_TypeIsolation(t *testing.T) {
 	require.Len(t, small, 1)
 	require.Equal(t, "anthropic", small[0].(map[string]any)["provider"])
 	require.Equal(t, "claude", small[0].(map[string]any)["model"])
+}
+
+// newConfigWithProviders builds a Config with a single provider that has one
+// model, for prune tests.
+func newConfigWithProviderModels() *Config {
+	cfg := &Config{
+		Providers:    csync.NewMap[string, ProviderConfig](),
+		RecentModels: map[SelectedModelType][]SelectedModel{},
+	}
+	cfg.Providers.Set("openai", ProviderConfig{
+		Models: []catwalk.Model{
+			{ID: "gpt-4o"},
+			{ID: "gpt-4o-mini"},
+		},
+	})
+	return cfg
+}
+
+// TestPruneStaleRecentModels_RemovesInvalid verifies that entries whose
+// provider was removed or whose model is not listed under the provider are
+// dropped, while valid entries survive.
+func TestPruneStaleRecentModels_RemovesInvalid(t *testing.T) {
+	t.Parallel()
+
+	cfg := newConfigWithProviderModels()
+	cfg.RecentModels[SelectedModelTypeLarge] = []SelectedModel{
+		{Provider: "openai", Model: "gpt-4o"},      // valid
+		{Provider: "deleted-provider", Model: "x"}, // provider gone
+		{Provider: "openai", Model: "nonexistent"}, // model not listed
+		{Provider: "", Model: "empty-provider"},    // empty provider
+	}
+
+	cfg.pruneStaleRecentModels()
+
+	got := cfg.RecentModels[SelectedModelTypeLarge]
+	require.Len(t, got, 1, "only the valid entry should remain")
+	require.Equal(t, SelectedModel{Provider: "openai", Model: "gpt-4o"}, got[0])
+}
+
+// TestPruneStaleRecentModels_PreservesValidEntries verifies that multiple
+// valid entries across types are all kept.
+func TestPruneStaleRecentModels_PreservesValidEntries(t *testing.T) {
+	t.Parallel()
+
+	cfg := newConfigWithProviderModels()
+	validLarge := []SelectedModel{
+		{Provider: "openai", Model: "gpt-4o"},
+		{Provider: "openai", Model: "gpt-4o-mini"},
+	}
+	validSmall := []SelectedModel{
+		{Provider: "openai", Model: "gpt-4o-mini"},
+	}
+	cfg.RecentModels[SelectedModelTypeLarge] = validLarge
+	cfg.RecentModels[SelectedModelTypeSmall] = validSmall
+
+	cfg.pruneStaleRecentModels()
+
+	require.Equal(t, validLarge, cfg.RecentModels[SelectedModelTypeLarge])
+	require.Equal(t, validSmall, cfg.RecentModels[SelectedModelTypeSmall])
+}
+
+// TestPruneStaleRecentModels_DeletesEmptyType verifies that when all entries
+// for a type are invalid, the type key is removed entirely (not left as an
+// empty slice).
+func TestPruneStaleRecentModels_DeletesEmptyType(t *testing.T) {
+	t.Parallel()
+
+	cfg := newConfigWithProviderModels()
+	cfg.RecentModels[SelectedModelTypeLarge] = []SelectedModel{
+		{Provider: "openai", Model: "gpt-4o"}, // valid
+	}
+	cfg.RecentModels[SelectedModelTypeSmall] = []SelectedModel{
+		{Provider: "ghost", Model: "x"}, // all invalid
+	}
+
+	cfg.pruneStaleRecentModels()
+
+	_, largeOk := cfg.RecentModels[SelectedModelTypeLarge]
+	require.True(t, largeOk, "large type with valid entries should remain")
+	require.Len(t, cfg.RecentModels[SelectedModelTypeLarge], 1)
+
+	_, smallOk := cfg.RecentModels[SelectedModelTypeSmall]
+	require.False(t, smallOk, "small type with only invalid entries should be deleted")
+}
+
+// TestPruneStaleRecentModels_NilSafe verifies no panic when Providers or
+// RecentModels is nil/empty.
+func TestPruneStaleRecentModels_NilSafe(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil providers", func(t *testing.T) {
+		cfg := &Config{RecentModels: map[SelectedModelType][]SelectedModel{
+			SelectedModelTypeLarge: {{Provider: "x", Model: "y"}},
+		}}
+		require.NotPanics(t, func() { cfg.pruneStaleRecentModels() })
+	})
+
+	t.Run("nil recent models", func(t *testing.T) {
+		cfg := newConfigWithProviderModels()
+		cfg.RecentModels = nil
+		require.NotPanics(t, func() { cfg.pruneStaleRecentModels() })
+	})
+
+	t.Run("empty providers", func(t *testing.T) {
+		cfg := &Config{
+			Providers:    csync.NewMap[string, ProviderConfig](),
+			RecentModels: map[SelectedModelType][]SelectedModel{},
+		}
+		require.NotPanics(t, func() { cfg.pruneStaleRecentModels() })
+	})
 }

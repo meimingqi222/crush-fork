@@ -142,7 +142,7 @@ func TestExtractor_SingleTurnExtraction(t *testing.T) {
 	require.Equal(t, MemoryScopeProject, evt.Scope)
 	require.Equal(t, "Use SQLite for storage", evt.Content)
 	require.Equal(t, "Storage decision", evt.Summary)
-	require.Equal(t, 0.9, evt.Confidence)
+	require.Equal(t, 0.924, evt.Confidence) // BayesianUpdate(0.9, "stated") = 0.9 + (1-0.9)*0.8*0.3 = 0.924
 	require.Equal(t, 0.7, evt.Importance)
 	require.Equal(t, []string{"database", "sqlite"}, evt.Tags)
 	require.Equal(t, fixedClock(), evt.CreatedAt)

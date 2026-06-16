@@ -431,7 +431,58 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 		}
 	}
 
+	// Drop recent-model entries whose provider or model was removed from
+	// config. This runs after providers and models are fully resolved, using
+	// the same validation as the model-switch path, so stale entries never
+	// reach the /model dialog or the switch handler.
+	c.pruneStaleRecentModels()
+
 	return nil
+}
+
+// pruneStaleRecentModels drops recent-model entries whose provider or model is
+// no longer configured. Uses the same validation as the model-switch path
+// (coordinator.lookupCatwalkModel) so load-time pruning and switch-time
+// rejection agree on what is valid. Safe to call when Providers or
+// RecentModels is empty/nil — it is a no-op in those cases.
+func (c *Config) pruneStaleRecentModels() {
+	if c.RecentModels == nil || c.Providers == nil || c.Providers.Len() == 0 {
+		return
+	}
+	for modelType, recents := range c.RecentModels {
+		var pruned []SelectedModel
+		for _, sel := range recents {
+			if c.isModelConfigured(sel) {
+				pruned = append(pruned, sel)
+			}
+		}
+		if len(pruned) != len(recents) {
+			if len(pruned) == 0 {
+				delete(c.RecentModels, modelType)
+			} else {
+				c.RecentModels[modelType] = pruned
+			}
+		}
+	}
+}
+
+// isModelConfigured reports whether the provider exists in the configured
+// providers map and the model is listed under it. Mirrors
+// coordinator.lookupCatwalkModel's validation exactly.
+func (c *Config) isModelConfigured(sel SelectedModel) bool {
+	if c.Providers == nil || sel.Provider == "" || sel.Model == "" {
+		return false
+	}
+	providerCfg, ok := c.Providers.Get(sel.Provider)
+	if !ok {
+		return false
+	}
+	for _, candidate := range providerCfg.Models {
+		if candidate.ID == sel.Model {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) setDefaults(workingDir, projectDataDir string) {

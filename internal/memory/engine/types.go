@@ -25,6 +25,24 @@ const (
 	MemoryKindWorkingMemory MemoryKind = "working_memory"
 )
 
+// MemoryVeracity defines how a memory fact was established.  Higher-weight
+// veracity labels produce larger Bayesian confidence updates during
+// consolidation.
+type MemoryVeracity string
+
+const (
+	// MemoryVeracityStated means the user explicitly stated this fact.
+	MemoryVeracityStated MemoryVeracity = "stated"
+	// MemoryVeracityInferred means the LLM inferred this from context.
+	MemoryVeracityInferred MemoryVeracity = "inferred"
+	// MemoryVeracityTool means a tool output confirmed this fact.
+	MemoryVeracityTool MemoryVeracity = "tool"
+	// MemoryVeracityImported means this fact was imported from an external source.
+	MemoryVeracityImported MemoryVeracity = "imported"
+	// MemoryVeracityUnknown means the source is unclear.
+	MemoryVeracityUnknown MemoryVeracity = "unknown"
+)
+
 // MemorySourceRef describes the origin of a memory event.
 type MemorySourceRef struct {
 	SessionID  string   `json:"session_id"`
@@ -44,12 +62,14 @@ type MemoryEvent struct {
 	Source     MemorySourceRef `json:"source"`
 	Confidence float64         `json:"confidence"`
 	Importance float64         `json:"importance"`
+	Veracity   MemoryVeracity  `json:"veracity,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
 	UpdatedAt  time.Time       `json:"updated_at"`
 	Supersedes *string         `json:"supersedes,omitempty"`
 	Tags       []string        `json:"tags,omitempty"`
 	Watermark  int64           `json:"watermark"`
 	ExpiresAt  *time.Time      `json:"expires_at,omitempty"`
+	Triples    []ExtractedTriple `json:"triples,omitempty"`
 }
 
 // FilterLatestNonSuperseded returns the most recent event that has not been

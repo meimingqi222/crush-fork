@@ -201,8 +201,9 @@ type MemoryEngineHooks struct {
 	OnBeforeCompaction func(ctx context.Context, sessionID string) string
 	// AfterTurnIdle is called after each successful LLM turn.
 	AfterTurnIdle func(ctx context.Context, sessionID string)
-	// OnSessionClosed is called when a session is closed/deleted.
-	OnSessionClosed func(ctx context.Context, sessionID string)
+	// OnSessionDeleted is called when a session is explicitly deleted. It
+	// does NOT fire on quit/Ctrl+C/terminal close — those use Engine.Flush.
+	OnSessionDeleted func(ctx context.Context, sessionID string)
 }
 
 type deferredToolRuntime interface {

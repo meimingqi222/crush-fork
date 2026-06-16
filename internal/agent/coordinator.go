@@ -377,6 +377,15 @@ func (c *coordinator) memoryEngineRetriever() engine.Retriever {
 	return c.memoryEngine.Retriever()
 }
 
+// memoryEngineTripleStore returns the engine's TripleStore, or nil if the
+// engine is not configured or disabled.
+func (c *coordinator) memoryEngineTripleStore() *engine.TripleStore {
+	if c.memoryEngine == nil || !c.memoryEngine.Enabled() {
+		return nil
+	}
+	return c.memoryEngine.TripleStore()
+}
+
 // transcriptAfterTurn handles transcript window retention for the transcript backend.
 // It increments the turn counter and retains the transcript window every N turns.
 func (c *coordinator) transcriptAfterTurn(ctx context.Context, sessionID string) {
@@ -422,13 +431,15 @@ func (c *coordinator) clearTranscriptTurnCountForSession(sessionID string) {
 	delete(c.transcriptTurnCounts, sessionID)
 }
 
-// onSessionClosed cleans up coordinator and memory-engine state for a session.
-func (c *coordinator) onSessionClosed(ctx context.Context, sessionID string) {
+// onSessionDeleted cleans up coordinator and memory-engine state for a session.
+// Fires only when a session is explicitly deleted (not on quit/Ctrl+C —
+// those paths use Engine.Flush before Close).
+func (c *coordinator) onSessionDeleted(ctx context.Context, sessionID string) {
 	c.clearTranscriptTurnCountForSession(sessionID)
 	c.backgroundAgents.RemoveForSession(sessionID)
 	if c.memoryEngine != nil {
-		if err := c.memoryEngine.OnSessionClosed(ctx, sessionID); err != nil {
-			slog.Warn("Memory engine OnSessionClosed failed", "error", err, "session_id", sessionID)
+		if err := c.memoryEngine.OnSessionDeleted(ctx, sessionID); err != nil {
+			slog.Warn("Memory engine OnSessionDeleted failed", "error", err, "session_id", sessionID)
 		}
 	}
 }
@@ -487,8 +498,8 @@ func (c *coordinator) memoryEngineHooks() *MemoryEngineHooks {
 			}
 			return rescue.Rendered
 		},
-		OnSessionClosed: func(ctx context.Context, sessionID string) {
-			c.onSessionClosed(ctx, sessionID)
+		OnSessionDeleted: func(ctx context.Context, sessionID string) {
+			c.onSessionDeleted(ctx, sessionID)
 		},
 	}
 }

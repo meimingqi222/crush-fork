@@ -90,20 +90,16 @@ func (h *HeuristicReranker) scoreEvent(now time.Time, terms []string, evt Memory
 	score += kindPriority(evt.Kind)
 	score += scopePriority(evt.Scope)
 
-	// Recency decay: full weight within 7 days, halves each additional 7d.
+	// Weibull decay: each MemoryKind has its own (k, eta) parameters so
+	// that long-lived knowledge (preferences, decisions) retains weight
+	// much longer than transient state (working memory, task state).
 	if !evt.UpdatedAt.IsZero() {
 		age := now.Sub(evt.UpdatedAt)
 		if age < 0 {
 			age = 0
 		}
-		weeks := age.Hours() / (24 * 7)
-		if weeks < 0 {
-			weeks = 0
-		}
-		decay := 1.0
-		for w := 0.0; w < weeks && decay > 0.0625; w += 1.0 {
-			decay *= 0.7
-		}
+		params := weibullParamsForKind(evt.Kind)
+		decay := params.Decay(age.Hours())
 		score += decay
 	}
 	return score
