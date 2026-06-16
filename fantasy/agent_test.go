@@ -1463,11 +1463,13 @@ func TestToolCallRepair(t *testing.T) {
 		require.NotNil(t, result)
 		require.Len(t, result.Steps, 1) // Only one step
 
-		// Check that tool call was marked as invalid
+		// Check that tool call was marked as invalid. Default repair does not
+		// fabricate missing required fields — it leaves them invalid so the
+		// model receives the error and retries.
 		toolCalls := result.Steps[0].Content.ToolCalls()
 		require.Len(t, toolCalls, 1)
 		require.True(t, toolCalls[0].Invalid) // Should be invalid
-		require.Contains(t, toolCalls[0].ValidationError.Error(), "missing required parameter: value")
+		require.Contains(t, toolCalls[0].ValidationError.Error(), "validation failed for tool")
 	})
 
 	t.Run("Invalid tool call with successful repair", func(t *testing.T) {
@@ -1525,6 +1527,95 @@ func TestToolCallRepair(t *testing.T) {
 		require.Equal(t, `{"value": "repaired"}`, toolCalls[0].Input) // Should have repaired input
 	})
 
+	t.Run("Default repair coerces string-encoded number", func(t *testing.T) {
+		t.Parallel()
+		model := &mockLanguageModel{
+			generateFunc: func(ctx context.Context, call Call) (*Response, error) {
+				return &Response{
+					Content: ResponseContent{
+						TextContent{Text: "Response"},
+						ToolCallContent{
+							ToolCallID: "call1",
+							ToolName:   "test_tool",
+							Input:      `{"count": "42"}`,
+						},
+					},
+					Usage:        Usage{TotalTokens: 10},
+					FinishReason: FinishReasonStop,
+				}, nil
+			},
+		}
+
+		tool := &mockTool{
+			name:        "test_tool",
+			description: "Test tool",
+			parameters: map[string]any{
+				"count": map[string]any{"type": "integer"},
+			},
+			required: []string{"count"},
+		}
+
+		agent := NewAgent(model, WithTools(tool), WithStopConditions(StepCountIs(2)))
+
+		result, err := agent.Generate(context.Background(), AgentCall{
+			Prompt: "test prompt",
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Len(t, result.Steps, 1)
+
+		toolCalls := result.Steps[0].Content.ToolCalls()
+		require.Len(t, toolCalls, 1)
+		require.False(t, toolCalls[0].Invalid)
+		require.Contains(t, toolCalls[0].Input, `"count":42`)
+	})
+
+	t.Run("Default repair leaves missing required fields invalid", func(t *testing.T) {
+		t.Parallel()
+		model := &mockLanguageModel{
+			generateFunc: func(ctx context.Context, call Call) (*Response, error) {
+				return &Response{
+					Content: ResponseContent{
+						TextContent{Text: "Response"},
+						ToolCallContent{
+							ToolCallID: "call1",
+							ToolName:   "test_tool",
+							Input:      `{"description": "test"}`,
+						},
+					},
+					Usage:        Usage{TotalTokens: 10},
+					FinishReason: FinishReasonStop,
+				}, nil
+			},
+		}
+
+		tool := &mockTool{
+			name:        "test_tool",
+			description: "Test tool",
+			parameters: map[string]any{
+				"command":     map[string]any{"type": "string", "description": "The command to execute"},
+				"description": map[string]any{"type": "string"},
+			},
+			required: []string{"command"},
+		}
+
+		agent := NewAgent(model, WithTools(tool), WithStopConditions(StepCountIs(2)))
+
+		result, err := agent.Generate(context.Background(), AgentCall{
+			Prompt: "test prompt",
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Len(t, result.Steps, 1)
+
+		toolCalls := result.Steps[0].Content.ToolCalls()
+		require.Len(t, toolCalls, 1)
+		require.True(t, toolCalls[0].Invalid)
+		require.Contains(t, toolCalls[0].ValidationError.Error(), "Received arguments:")
+	})
+
 	t.Run("Invalid tool call with failed repair", func(t *testing.T) {
 		t.Parallel()
 		model := &mockLanguageModel{
@@ -1568,11 +1659,12 @@ func TestToolCallRepair(t *testing.T) {
 		require.NotNil(t, result)
 		require.Len(t, result.Steps, 1) // Only one step
 
-		// Check that tool call was marked as invalid since repair failed
+		// Check that tool call was marked as invalid since custom repair failed
+		// and default repair does not inject missing required fields.
 		toolCalls := result.Steps[0].Content.ToolCalls()
 		require.Len(t, toolCalls, 1)
 		require.True(t, toolCalls[0].Invalid) // Should be invalid
-		require.Contains(t, toolCalls[0].ValidationError.Error(), "missing required parameter: value")
+		require.Contains(t, toolCalls[0].ValidationError.Error(), "validation failed for tool")
 	})
 
 	t.Run("Nonexistent tool call", func(t *testing.T) {
@@ -2265,14 +2357,14 @@ func TestAgent_ValidateToolCall_ExecutableProviderTool(t *testing.T) {
 	}
 
 	// Valid JSON should pass even without required fields.
-	err := a.validateToolCall(ToolCallContent{
+	_, err := a.validateToolCall(ToolCallContent{
 		ToolName: "computer",
 		Input:    `{"action":"screenshot"}`,
 	}, []AgentTool{}, []ExecutableProviderTool{execTool})
 	require.NoError(t, err)
 
 	// Invalid JSON should still fail.
-	err = a.validateToolCall(ToolCallContent{
+	_, err = a.validateToolCall(ToolCallContent{
 		ToolName: "computer",
 		Input:    `not-json`,
 	}, []AgentTool{}, []ExecutableProviderTool{execTool})

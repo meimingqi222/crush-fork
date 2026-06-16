@@ -154,3 +154,118 @@ func TestYieldToolAllowsParentYieldAfterSubagentYield(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
 }
+
+// exploreOutputSchema returns the same schema used in config.go for the
+// explore subagent, used by repair tests.
+func exploreOutputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{
+				"type":        "string",
+				"description": "Brief summary of findings and conclusions.",
+			},
+			"files": map[string]any{
+				"type":        "array",
+				"description": "Files examined with relevant code references.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":        map[string]any{"type": "string"},
+						"description": map[string]any{"type": "string"},
+					},
+					"required": []string{"path", "description"},
+				},
+			},
+			"architecture": map[string]any{
+				"type":        "string",
+				"description": "Brief explanation of how the discovered pieces connect.",
+			},
+		},
+		"required": []any{"summary", "files"},
+	}
+}
+
+func TestRepairPayloadInjectsMissingRequiredString(t *testing.T) {
+	t.Parallel()
+
+	// Payload has "files" but is missing required "summary".
+	payload := json.RawMessage(`{"files":[{"path":"foo.go","description":"found it"}]}`)
+	repaired, err := repairPayloadAgainstSchema(payload, exploreOutputSchema())
+	require.NoError(t, err)
+	require.NotNil(t, repaired)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(repaired, &result))
+	// "summary" should have been injected as empty string.
+	require.Contains(t, result, "summary")
+	require.Equal(t, "", result["summary"])
+	// "files" should be preserved.
+	require.NotNil(t, result["files"])
+}
+
+func TestRepairPayloadInjectsMissingRequiredArray(t *testing.T) {
+	t.Parallel()
+
+	// Payload has "summary" but is missing required "files" (array).
+	payload := json.RawMessage(`{"summary":"everything is fine"}`)
+	repaired, err := repairPayloadAgainstSchema(payload, exploreOutputSchema())
+	require.NoError(t, err)
+	require.NotNil(t, repaired)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(repaired, &result))
+	require.Contains(t, result, "files")
+	arr, ok := result["files"].([]any)
+	require.True(t, ok, "files should be an array")
+	require.Empty(t, arr)
+}
+
+func TestRepairPayloadRemovesUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	// Payload has extra "random" field not in schema.
+	payload := json.RawMessage(`{"summary":"ok","files":[],"random":"garbage"}`)
+	repaired, err := repairPayloadAgainstSchema(payload, exploreOutputSchema())
+	require.NoError(t, err)
+	require.NotNil(t, repaired)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(repaired, &result))
+	_, hasRandom := result["random"]
+	require.False(t, hasRandom, "unknown field 'random' should be removed")
+	require.Contains(t, result, "summary")
+	require.Contains(t, result, "files")
+}
+
+func TestRepairPayloadCoercesStringToNumber(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"count": map[string]any{"type": "number"},
+			"name":  map[string]any{"type": "string"},
+		},
+		"required": []any{"name", "count"},
+	}
+
+	payload := json.RawMessage(`{"name":"test","count":"42"}`)
+	repaired, err := repairPayloadAgainstSchema(payload, schema)
+	require.NoError(t, err)
+	require.NotNil(t, repaired)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(repaired, &result))
+	require.Equal(t, 42.0, result["count"])
+}
+
+func TestRepairPayloadReturnsNilWhenNoChangesNeeded(t *testing.T) {
+	t.Parallel()
+
+	// Payload is already complete — no repair needed.
+	payload := json.RawMessage(`{"summary":"all good","files":[],"architecture":"flat"}`)
+	repaired, err := repairPayloadAgainstSchema(payload, exploreOutputSchema())
+	require.NoError(t, err)
+	require.Nil(t, repaired, "no repair needed when payload already conforms")
+}

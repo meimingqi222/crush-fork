@@ -1023,39 +1023,54 @@ func (a *agent) prepareTools(tools []AgentTool, providerDefinedTools []ProviderD
 	return preparedTools
 }
 
-// validateAndRepairToolCall validates a tool call and attempts repair if validation fails.
+// validateAndRepairToolCall validates a tool call and attempts repair if
+// validation fails. Repair is attempted in two stages: first the caller-
+// provided repairFunc (if any), then the built-in schema-driven repair
+// pipeline (null normalization, type coercion, unrecognized-key removal).
 func (a *agent) validateAndRepairToolCall(ctx context.Context, toolCall ToolCallContent, availableTools []AgentTool, execProviderTools []ExecutableProviderTool, systemPrompt string, messages []Message, repairFunc RepairToolCallFunction) ToolCallContent {
-	if err := a.validateToolCall(toolCall, availableTools, execProviderTools); err == nil {
-		return toolCall
-	} else { //nolint: revive
-		if repairFunc != nil {
-			repairOptions := ToolCallRepairOptions{
-				OriginalToolCall: toolCall,
-				ValidationError:  err,
-				AvailableTools:   availableTools,
-				SystemPrompt:     systemPrompt,
-				Messages:         messages,
-			}
+	validated, err := a.validateToolCall(toolCall, availableTools, execProviderTools)
+	if err == nil {
+		return validated
+	}
 
-			if repairedToolCall, repairErr := repairFunc(ctx, repairOptions); repairErr == nil && repairedToolCall != nil {
-				if validateErr := a.validateToolCall(*repairedToolCall, availableTools, execProviderTools); validateErr == nil {
-					return *repairedToolCall
-				}
+	repairOptions := ToolCallRepairOptions{
+		OriginalToolCall: toolCall,
+		ValidationError:  err,
+		AvailableTools:   availableTools,
+		SystemPrompt:     systemPrompt,
+		Messages:         messages,
+	}
+
+	// Try caller-provided repair function first.
+	if repairFunc != nil {
+		if repairedToolCall, repairErr := repairFunc(ctx, repairOptions); repairErr == nil && repairedToolCall != nil {
+			if validated, validateErr := a.validateToolCall(*repairedToolCall, availableTools, execProviderTools); validateErr == nil {
+				return validated
 			}
 		}
-
-		invalidToolCall := toolCall
-		invalidToolCall.Invalid = true
-		invalidToolCall.ValidationError = err
-		return invalidToolCall
 	}
+
+	// Fall back to built-in schema-driven repair.
+	if repairedToolCall, repairErr := repairToolArguments(repairOptions); repairErr == nil && repairedToolCall != nil {
+		if validated, validateErr := a.validateToolCall(*repairedToolCall, availableTools, execProviderTools); validateErr == nil {
+			return validated
+		}
+	}
+
+	invalidToolCall := toolCall
+	invalidToolCall.Invalid = true
+	invalidToolCall.ValidationError = err
+	return invalidToolCall
 }
 
-// validateToolCall validates a tool call against available tools and their schemas.
-// Both availableTools and execProviderTools must already be filtered by the
-// caller (e.g. via activeTools); this function trusts that the slices
+// validateToolCall validates a tool call against available tools and their
+// schemas. Both availableTools and execProviderTools must already be filtered
+// by the caller (e.g. via activeTools); this function trusts that the slices
 // represent exactly the tools permitted for the current step.
-func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []AgentTool, execProviderTools []ExecutableProviderTool) error {
+//
+// When normalization changes the arguments, the returned ToolCallContent carries
+// the updated JSON input.
+func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []AgentTool, execProviderTools []ExecutableProviderTool) (ToolCallContent, error) {
 	var tool AgentTool
 	for _, t := range availableTools {
 		if t.Info().Name == toolCall.ToolName {
@@ -1072,29 +1087,36 @@ func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []Agen
 			if ept.GetName() == toolCall.ToolName {
 				var input map[string]any
 				if err := json.Unmarshal([]byte(toolCall.Input), &input); err != nil {
-					return fmt.Errorf("invalid JSON input: %w", err)
+					return toolCall, fmt.Errorf("invalid JSON input: %w", err)
 				}
-				return nil
+				return toolCall, nil
 			}
 		}
-		return fmt.Errorf("tool not found: %s", toolCall.ToolName)
+		return toolCall, fmt.Errorf("tool not found: %s", toolCall.ToolName)
 	}
 
-	// Validate JSON parsing
 	var input map[string]any
 	if err := json.Unmarshal([]byte(toolCall.Input), &input); err != nil {
-		return fmt.Errorf("invalid JSON input: %w", err)
+		return toolCall, fmt.Errorf("invalid JSON input: %w", err)
 	}
 
-	// Basic schema validation (check required fields)
-	// TODO: more robust schema validation using JSON Schema or similar
-	toolInfo := tool.Info()
-	for _, required := range toolInfo.Required {
-		if _, exists := input[required]; !exists {
-			return fmt.Errorf("missing required parameter: %s", required)
-		}
+	normalized, err := validateAndNormalizeToolArguments(tool.Info(), input)
+	if err != nil {
+		return toolCall, err
 	}
-	return nil
+
+	if mapsEqual(input, normalized) {
+		return toolCall, nil
+	}
+
+	repairedInput, err := json.Marshal(normalized)
+	if err != nil {
+		return toolCall, fmt.Errorf("failed to marshal normalized arguments: %w", err)
+	}
+
+	updated := toolCall
+	updated.Input = string(repairedInput)
+	return updated, nil
 }
 
 func (a *agent) createPrompt(system, prompt string, messages []Message, files ...FilePart) (Prompt, error) {

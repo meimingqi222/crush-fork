@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -131,6 +133,22 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 				} else {
 					result := compiledSchema.Validate(dataValue)
 					if !result.IsValid() {
+						// Try to auto-repair the payload (inject missing required
+						// string fields, remove unrecognized fields, coerce types).
+						if repaired, repairErr := repairPayloadAgainstSchema(params.Payload, cfg.outputSchema); repairErr == nil && repaired != nil {
+							params.Payload = repaired
+							// Re-validate the repaired payload.
+							var repairedValue any
+							if json.Unmarshal(repaired, &repairedValue) == nil {
+								repairedResult := compiledSchema.Validate(repairedValue)
+								if repairedResult.IsValid() {
+									// Repair succeeded, proceed with repaired payload.
+									result = repairedResult
+								}
+							}
+						}
+					}
+					if !result.IsValid() {
 						// First failure: return error to allow retry.
 						if attempts == 0 {
 							errors := result.DetailedErrors()
@@ -169,4 +187,159 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 			return response, nil
 		},
 	)
+}
+
+// repairPayloadAgainstSchema attempts to fix a JSON payload that failed schema
+// validation by injecting default values for missing required fields and
+// removing fields not defined in the schema.
+//
+// The schema is expected to be a JSON Schema object (map[string]any) with
+// "properties" and "required" keys, as produced by json.Marshal on a struct
+// or a hand-written map.
+//
+// Repair strategies:
+//   - Missing required string fields: inject ""
+//   - Missing required array fields: inject []
+//   - Missing required number fields: inject 0
+//   - Missing required boolean fields: inject false
+//   - Missing required object fields: inject {}
+//   - Unrecognized fields (not in schema properties): remove
+//   - String-to-number/boolean coercion for mismatched types
+func repairPayloadAgainstSchema(payload json.RawMessage, schema any) (json.RawMessage, error) {
+	if len(payload) == 0 || schema == nil {
+		return nil, nil
+	}
+
+	// Marshal schema to a map.
+	schemaBytes, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
+	}
+	var schemaMap map[string]any
+	if err := json.Unmarshal(schemaBytes, &schemaMap); err != nil {
+		return nil, err
+	}
+
+	// Parse payload as a map.
+	var payloadMap map[string]any
+	if err := json.Unmarshal(payload, &payloadMap); err != nil {
+		return nil, err
+	}
+
+	modified := false
+	properties, _ := schemaMap["properties"].(map[string]any)
+
+	// Inject defaults for missing required fields.
+	if requiredList, ok := schemaMap["required"].([]any); ok {
+		for _, req := range requiredList {
+			reqName, ok := req.(string)
+			if !ok {
+				continue
+			}
+			if _, exists := payloadMap[reqName]; exists {
+				continue
+			}
+			// Field is missing — determine type from schema.
+			propSchema, hasSchema := properties[reqName].(map[string]any)
+			if !hasSchema {
+				// No schema for this field, inject empty string as safe default.
+				payloadMap[reqName] = ""
+				modified = true
+				continue
+			}
+			propType, _ := propSchema["type"].(string)
+			switch propType {
+			case "string":
+				payloadMap[reqName] = ""
+			case "array":
+				payloadMap[reqName] = []any{}
+			case "number", "integer":
+				payloadMap[reqName] = 0
+			case "boolean":
+				payloadMap[reqName] = false
+			case "object":
+				payloadMap[reqName] = map[string]any{}
+			default:
+				payloadMap[reqName] = ""
+			}
+			modified = true
+		}
+	}
+
+	// Remove fields not defined in schema properties (if properties exist).
+	if properties != nil {
+		for key := range payloadMap {
+			if _, known := properties[key]; !known {
+				delete(payloadMap, key)
+				modified = true
+			}
+		}
+	}
+
+	// Type coercion: fix mismatched types for known properties.
+	if properties != nil {
+		for key, val := range payloadMap {
+			propSchema, ok := properties[key].(map[string]any)
+			if !ok {
+				continue
+			}
+			expectedType, _ := propSchema["type"].(string)
+			if coerced, ok := coercePayloadValue(val, expectedType); ok {
+				payloadMap[key] = coerced
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
+		return nil, nil
+	}
+
+	return json.Marshal(payloadMap)
+}
+
+// coercePayloadValue attempts to coerce a value to the expected JSON Schema
+// type. Returns the coerced value and true if coercion was performed,
+// or the original value and false if no coercion was needed or possible.
+func coercePayloadValue(val any, expectedType string) (any, bool) {
+	switch expectedType {
+	case "number", "integer":
+		switch v := val.(type) {
+		case string:
+			if n, err := strconv.ParseFloat(v, 64); err == nil {
+				return n, true
+			}
+		case bool:
+			if v {
+				return 1.0, true
+			}
+			return 0.0, true
+		}
+	case "boolean":
+		if v, ok := val.(string); ok {
+			lower := strings.ToLower(v)
+			if slices.Contains([]string{"true", "1", "yes"}, lower) {
+				return true, true
+			}
+			if slices.Contains([]string{"false", "0", "no", ""}, lower) {
+				return false, true
+			}
+		}
+	case "string":
+		switch v := val.(type) {
+		case float64:
+			return fmt.Sprintf("%v", v), true
+		case bool:
+			return fmt.Sprintf("%v", v), true
+		}
+	case "array":
+		if _, ok := val.([]any); !ok {
+			return []any{val}, true
+		}
+	case "object":
+		if _, ok := val.(map[string]any); !ok {
+			return map[string]any{"value": val}, true
+		}
+	}
+	return val, false
 }
