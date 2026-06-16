@@ -36,9 +36,11 @@ type flatIssue struct {
 // can flow through to tools that reject disabled arguments. Nested object
 // schemas may still declare additionalProperties: false.
 func buildToolInputSchema(toolInfo ToolInfo) map[string]any {
+	// Deep clone Parameters to prevent schema.Normalize from mutating the tool's
+	// internal state.
 	inputSchema := map[string]any{
 		"type":       "object",
-		"properties": toolInfo.Parameters,
+		"properties": cloneDefaultValue(toolInfo.Parameters),
 		"required":   toolInfo.Required,
 	}
 	schema.Normalize(inputSchema)

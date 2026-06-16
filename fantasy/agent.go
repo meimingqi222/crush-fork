@@ -999,9 +999,11 @@ func (a *agent) prepareTools(tools []AgentTool, providerDefinedTools []ProviderD
 			continue
 		}
 		info := tool.Info()
+		// Deep clone Parameters to prevent schema.Normalize from mutating the
+		// tool's internal state.
 		inputSchema := map[string]any{
 			"type":       "object",
-			"properties": info.Parameters,
+			"properties": cloneDefaultValue(info.Parameters),
 			"required":   info.Required,
 		}
 		schema.Normalize(inputSchema)
