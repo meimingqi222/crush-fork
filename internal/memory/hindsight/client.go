@@ -140,11 +140,7 @@ func truncateRecallQuery(query string, maxChars int) string {
 	if len(runes) <= maxChars {
 		return query
 	}
-	truncated := runes[:maxChars]
-	for len(truncated) > 0 && truncated[len(truncated)-1] == '\uFFFD' {
-		truncated = truncated[:len(truncated)-1]
-	}
-	return string(truncated)
+	return string(runes[:maxChars])
 }
 
 // Reflect synthesizes across memories to answer query.
