@@ -16,14 +16,19 @@ import (
 
 // SummaryRetriever implements the Retriever interface by reading from
 // materialized views (memory_summary.md, mental_models/*.md, rollouts/*.md)
-// and the EventStore. It is the primary recall path for prompt injection.
+// and the EventStore. It is the primary recall path for prompt injection,
+// using polyphonic retrieval with four voices (FTS, vector, temporal,
+// triple/graph) fused via weighted Reciprocal Rank Fusion.
 type SummaryRetriever struct {
-	store         EventStore
-	db            *sql.DB
-	outputDir     string
-	reranker      Reranker
-	mentalMaxLen  int // max bytes from mental_models layer when budget unset
-	maxCandidates int
+	store             EventStore
+	db                *sql.DB
+	tripleStore       *TripleStore
+	embeddingPipeline *EmbeddingPipeline
+	outputDir         string
+	reranker          Reranker
+	voiceWeights      VoiceWeights
+	mentalMaxLen      int // max bytes from mental_models layer when budget unset
+	maxCandidates     int
 }
 
 // NewSummaryRetriever creates a SummaryRetriever that reads materialized
@@ -36,6 +41,7 @@ func NewSummaryRetriever(store EventStore, db *sql.DB, outputDir string) *Summar
 		outputDir:     outputDir,
 		mentalMaxLen:  4096,
 		maxCandidates: 30,
+		voiceWeights:  DefaultVoiceWeights(),
 	}
 }
 
@@ -44,6 +50,26 @@ func NewSummaryRetriever(store EventStore, db *sql.DB, outputDir string) *Summar
 // truncating to limit. Pass nil to disable.
 func (r *SummaryRetriever) WithReranker(rr Reranker) *SummaryRetriever {
 	r.reranker = rr
+	return r
+}
+
+// WithTripleStore connects a TripleStore for the graph/fact retrieval voice.
+func (r *SummaryRetriever) WithTripleStore(ts *TripleStore) *SummaryRetriever {
+	r.tripleStore = ts
+	return r
+}
+
+// WithEmbeddingPipeline connects an EmbeddingPipeline for cached vector lookups.
+func (r *SummaryRetriever) WithEmbeddingPipeline(p *EmbeddingPipeline) *SummaryRetriever {
+	r.embeddingPipeline = p
+	return r
+}
+
+// WithVoiceWeights overrides the default polyphonic RRF voice weights.
+func (r *SummaryRetriever) WithVoiceWeights(vw VoiceWeights) *SummaryRetriever {
+	if vw.Vector > 0 || vw.FTS > 0 || vw.Temporal > 0 || vw.Triple > 0 {
+		r.voiceWeights = vw
+	}
 	return r
 }
 
@@ -215,9 +241,15 @@ func (r *SummaryRetriever) Reflect(ctx context.Context, query string, opts map[s
 	return b.String(), nil
 }
 
-// Retrieve returns the most relevant memory events for a given context.
+// Retrieve returns the most relevant memory events for a given context using
+// polyphonic retrieval with four voices fused via weighted Reciprocal Rank Fusion:
+//
+//  1. FTS voice    – lexical BM25 match (weight: voiceWeights.FTS)
+//  2. Vector voice – semantic embedding similarity (weight: voiceWeights.Vector)
+//  3. Temporal voice – Weibull-recency weighted ranking (weight: voiceWeights.Temporal)
+//  4. Triple/graph voice – fact triples & linked memory graph (weight: voiceWeights.Triple)
+//
 // opts may include "scope", "kind", "session_id", "limit" to filter results.
-// Uses FTS5 full-text search with BM25 ranking for better accuracy.
 func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[string]any) ([]MemoryEvent, error) {
 	limit := 20
 	if configuredLimit, ok := opts["limit"].(int); ok && configuredLimit > 0 {
@@ -231,8 +263,10 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 		maxCandidates = configuredMaxCandidates
 	}
 
+	sessionID, _ := opts["session_id"].(string)
+
 	filter := EventFilter{
-		Limit: limit,
+		Limit: maxCandidates * 2,
 	}
 	if scope, ok := opts["scope"].(string); ok && scope != "" {
 		s := MemoryScope(scope)
@@ -242,19 +276,25 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 		k := MemoryKind(kind)
 		filter.Kind = &k
 	}
-	if sessionID, ok := opts["session_id"].(string); ok && sessionID != "" {
+	if sessionID != "" {
 		filter.SessionID = &sessionID
 	}
 
 	if strings.TrimSpace(query) == "" {
-		return r.store.Query(ctx, filter)
+		events, err := r.store.Query(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		if len(events) > limit {
+			events = events[:limit]
+		}
+		return events, nil
 	}
 
 	// Parse temporal expressions from the query (e.g. "last week", "最近3天")
 	// and apply them as time-range filters.
 	temporalExprs := ParseTemporalExprs(query, time.Now())
 	if len(temporalExprs) > 0 {
-		// Use the broadest temporal range found.
 		earliest := temporalExprs[0].After
 		for _, te := range temporalExprs[1:] {
 			if te.After.Before(earliest) {
@@ -265,65 +305,211 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 		filter.AfterTime = &ts
 	}
 
-	// Try FTS5 search first if db is available.
+	fetchLimit := maxCandidates * 2
+	var voices []RankedList
+
+	// --- Voice 1: FTS (lexical) ---
 	if r.db != nil {
-		// Over-fetch to feed the reranker and to give loose bilingual queries
-		// enough candidates without scanning the whole event store.
-		fetchLimit := limit
-		if fetchLimit < maxCandidates {
-			fetchLimit = maxCandidates
+		ftsEvents, err := r.ftsSearch(ctx, query, filter, fetchLimit, true)
+		if err != nil || len(ftsEvents) == 0 {
+			ftsEvents, _ = r.ftsSearch(ctx, query, filter, fetchLimit, false)
 		}
-		events, err := r.ftsSearch(ctx, query, filter, fetchLimit, true)
-		if err == nil && len(events) == 0 {
-			events, err = r.ftsSearch(ctx, query, filter, fetchLimit, false)
+		if len(ftsEvents) > 0 {
+			voices = append(voices, RankedList{Events: ftsEvents, Weight: r.voiceWeights.FTS})
 		}
-		if err == nil && len(events) > 0 {
-			// If a reranker with embedding support is available, also run a
-			// vector-based search and fuse the two result sets via RRF for
-			// better recall than either path alone.
-			rrfFused := false
-			if embReranker, ok := r.reranker.(*EmbeddingReranker); ok && embReranker != nil {
-				if vecEvents, verr := r.vectorSearch(ctx, query, filter, fetchLimit, embReranker.embedder); verr == nil && len(vecEvents) > 0 {
-					events = ReciprocalRankFusion([][]MemoryEvent{events, vecEvents}, 60)
-					rrfFused = true
-				}
-			}
-			// Skip reranking when RRF already fused FTS + vector signals,
-			// since reranking would redundantly re-embed all candidates.
-			if !rrfFused && r.reranker != nil {
-				if reranked, rerr := r.reranker.Rerank(ctx, query, events); rerr == nil && len(reranked) > 0 {
-					events = reranked
-				}
-			}
-			if len(events) > limit {
-				events = events[:limit]
-			}
-			return events, nil
-		}
-		// Fallback to keyword matching if FTS fails or returns no results.
 	}
 
-	// Fallback: in-memory keyword matching.
-	filter.Limit = 1000
-	events, err := r.store.Query(ctx, filter)
-	if err != nil {
-		return nil, err
+	// --- Voice 2: Vector (semantic) ---
+	if embReranker, ok := r.reranker.(*EmbeddingReranker); ok && embReranker != nil && embReranker.embedder != nil {
+		if vecEvents, verr := r.vectorSearch(ctx, query, filter, fetchLimit, embReranker.embedder); verr == nil && len(vecEvents) > 0 {
+			voices = append(voices, RankedList{Events: vecEvents, Weight: r.voiceWeights.Vector})
+		}
 	}
 
-	ranked := rankMemoryEvents(query, events)
-	if len(ranked) == 0 && len(events) > 0 {
-		ranked = events
+	// --- Voice 3: Temporal (recency via Weibull decay) ---
+	broadFilter := filter
+	broadFilter.Limit = 500
+	allEvents, err := r.store.Query(ctx, broadFilter)
+	if err == nil && len(allEvents) > 0 {
+		temporalRanked := TemporalVoiceRank(allEvents, time.Now(), fetchLimit, sessionID)
+		if len(temporalRanked) > 0 {
+			voices = append(voices, RankedList{Events: temporalRanked, Weight: r.voiceWeights.Temporal})
+		}
+	} else {
+		// Fallback to keyword ranking if broad query fails
+		filter.Limit = 1000
+		events, kerr := r.store.Query(ctx, filter)
+		if kerr == nil && len(events) > 0 {
+			keywordRanked := rankMemoryEvents(query, events)
+			voices = append(voices, RankedList{Events: keywordRanked, Weight: r.voiceWeights.Temporal * 0.5})
+		}
 	}
+
+	// --- Voice 4: Triple / graph facts ---
+	if r.tripleStore != nil && r.db != nil {
+		tripleEvents := r.tripleGraphSearch(ctx, query, filter, fetchLimit)
+		if len(tripleEvents) > 0 {
+			voices = append(voices, RankedList{Events: tripleEvents, Weight: r.voiceWeights.Triple})
+		}
+	}
+
+	// --- Fuse all voices with weighted RRF ---
+	var events []MemoryEvent
+	if len(voices) > 0 {
+		events = WeightedReciprocalRankFusion(voices, 60)
+	} else {
+		// Fallback when DB is unavailable: in-memory keyword ranking.
+		filter.Limit = 1000
+		events, err = r.store.Query(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		events = rankMemoryEvents(query, events)
+	}
+
+	// Apply a final light heuristic rerank to blend edge signals (scope/kind
+	// priority) that RRF alone does not capture.  Skip embedding rerank since
+	// vector voice already contributed its signal.
 	if r.reranker != nil {
-		if reranked, rerr := r.reranker.Rerank(ctx, query, ranked); rerr == nil && len(reranked) > 0 {
-			ranked = reranked
+		if hr, ok := r.reranker.(*HeuristicReranker); ok && hr != nil {
+			if reranked, rerr := hr.Rerank(ctx, query, events); rerr == nil && len(reranked) > 0 {
+				events = reranked
+			}
 		}
 	}
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+
+	if len(events) > limit {
+		events = events[:limit]
+	}
+	return events, nil
+}
+
+// tripleGraphSearch retrieves events by matching query terms against stored
+// triples (subject/predicate/object), then expands via graph edges up to 2 hops.
+// It forms the graph/fact voice of polyphonic recall.
+func (r *SummaryRetriever) tripleGraphSearch(ctx context.Context, query string, filter EventFilter, limit int) []MemoryEvent {
+	if r.tripleStore == nil {
+		return nil
+	}
+	terms := expandedQueryTerms(query)
+	if len(terms) == 0 {
+		return nil
 	}
 
-	return ranked, nil
+	// Collect matching triples (subject OR predicate OR object hit).
+	seenTriples := make(map[string]Triple)
+	seedIDs := make([]string, 0, 32)
+	for _, term := range terms {
+		// Search by subject (exact term match for now; LIKE-based is enough
+		// since our triple store is relatively small).
+		rows, err := r.db.QueryContext(ctx, `
+			SELECT id, subject, predicate, object, confidence, veracity,
+			       valid_from, source_event_id, scope, created_at, updated_at
+			FROM memory_triples
+			WHERE (subject LIKE ? OR predicate LIKE ? OR object LIKE ?)
+			  AND superseded_by IS NULL
+			  AND (valid_to IS NULL OR valid_to = 0 OR valid_to > strftime('%s','now'))
+			ORDER BY confidence DESC, created_at DESC
+			LIMIT ?
+		`, "%"+term+"%", "%"+term+"%", "%"+term+"%", limit/2)
+		if err != nil {
+			slog.Debug("Triple voice search failed", "term", term, "error", err)
+			continue
+		}
+		for rows.Next() {
+			var t Triple
+			var validFrom, createdAt, updatedAt int64
+			var sourceEventID sql.NullString
+			if err := rows.Scan(
+				&t.ID, &t.Subject, &t.Predicate, &t.Object,
+				&t.Confidence, &t.Veracity, &validFrom,
+				&sourceEventID, &t.Scope, &createdAt, &updatedAt,
+			); err != nil {
+				continue
+			}
+			t.ValidFrom = time.Unix(validFrom, 0)
+			t.CreatedAt = time.Unix(createdAt, 0)
+			t.UpdatedAt = time.Unix(updatedAt, 0)
+			if sourceEventID.Valid {
+				t.SourceEventID = sourceEventID.String
+				if t.SourceEventID != "" {
+					seedIDs = append(seedIDs, t.SourceEventID)
+				}
+			}
+			seenTriples[t.ID] = t
+		}
+		rows.Close()
+	}
+
+	// Expand seeds via graph edges (2 hops) to find linked memories.
+	linkedEvents, _, _ := r.tripleStore.GraphQuery(ctx, seedIDs, 2, []EdgeType{EdgeRelatedTo, EdgeRefines, EdgeDependsOn})
+
+	// Also fetch the source events that produced the matched triples.
+	idSet := make(map[string]bool)
+	for _, id := range seedIDs {
+		idSet[id] = true
+	}
+	for _, evt := range linkedEvents {
+		idSet[evt.ID] = true
+	}
+	allIDs := make([]string, 0, len(idSet))
+	for id := range idSet {
+		allIDs = append(allIDs, id)
+	}
+
+	// Apply scope/kind/session filters from the original EventFilter and
+	// return events ordered by confidence/importance/recency.
+	if len(allIDs) == 0 {
+		return nil
+	}
+
+	// Fetch all source events and filter manually (simpler than building SQL).
+	broad := EventFilter{Limit: 500}
+	allEvents, err := r.store.Query(ctx, broad)
+	if err != nil {
+		return nil
+	}
+
+	type scored struct {
+		evt   MemoryEvent
+		score float64
+	}
+	scoredList := make([]scored, 0, len(allIDs))
+	now := time.Now()
+	for _, evt := range allEvents {
+		if !idSet[evt.ID] {
+			continue
+		}
+		if filter.Scope != nil && evt.Scope != *filter.Scope {
+			continue
+		}
+		if filter.Kind != nil && evt.Kind != *filter.Kind {
+			continue
+		}
+		if filter.SessionID != nil && evt.Source.SessionID != *filter.SessionID {
+			continue
+		}
+		age := now.Sub(evt.UpdatedAt)
+		if age < 0 {
+			age = 0
+		}
+		decay := weibullParamsForKind(evt.Kind).Decay(age.Hours())
+		score := evt.Confidence*2.0 + evt.Importance + decay
+		score *= 0.3 + 0.7*VeracityWeightFor(evt.Veracity)
+		scoredList = append(scoredList, scored{evt: evt, score: score})
+	}
+
+	sort.SliceStable(scoredList, func(i, j int) bool {
+		return scoredList[i].score > scoredList[j].score
+	})
+	if len(scoredList) > limit {
+		scoredList = scoredList[:limit]
+	}
+	result := make([]MemoryEvent, 0, len(scoredList))
+	for _, s := range scoredList {
+		result = append(result, s.evt)
+	}
+	return result
 }
 
 // ftsSearch uses SQLite FTS5 for full-text search with BM25 ranking.
@@ -504,6 +690,8 @@ func rankMemoryEvents(query string, events []MemoryEvent) []MemoryEvent {
 		}
 		score += evt.Importance
 		score += evt.Confidence * 0.25
+		// Veracity weight scales the score based on how the fact was established.
+		score *= 0.3 + 0.7*VeracityWeightFor(evt.Veracity)
 		// Weibull recency decay: prefer recent memories, with per-kind
 		// decay rates so that preferences outlast working memory.
 		if !evt.UpdatedAt.IsZero() {
@@ -599,8 +787,9 @@ func truncateContent(content string, maxLen int) string {
 
 // vectorSearch performs embedding-based retrieval: it embeds the query,
 // then scores all candidate events by cosine similarity and returns the
-// top-k results.  This complements FTS5's lexical matching for the RRF
-// fusion path.
+// top-k results. Pre-computed embeddings are read from the embedding
+// store when available; missing ones are computed on-demand and cached.
+// This complements FTS5's lexical matching for the RRF fusion path.
 func (r *SummaryRetriever) vectorSearch(ctx context.Context, query string, filter EventFilter, limit int, embedder Embedder) ([]MemoryEvent, error) {
 	if embedder == nil {
 		return nil, nil
@@ -619,16 +808,34 @@ func (r *SummaryRetriever) vectorSearch(ctx context.Context, query string, filte
 		return nil, err
 	}
 
+	// Use embedding pipeline for batch embedding with cache lookup when available.
+	var candidateVecs map[string][]float64
+	if r.embeddingPipeline != nil {
+		candidateVecs, err = r.embeddingPipeline.EmbedEvents(ctx, candidates)
+		if err != nil {
+			slog.Debug("Batch embedding via pipeline failed, falling back to direct", "error", err)
+			candidateVecs = nil
+		}
+	}
+
 	type vecScored struct {
 		evt   MemoryEvent
 		score float64
 	}
 	vscored := make([]vecScored, 0, len(candidates))
 	for _, evt := range candidates {
-		text := embeddingEventText(evt)
-		vec, err := embedder.Embed(ctx, text)
-		if err != nil {
-			continue
+		var vec []float64
+		if candidateVecs != nil {
+			vec = candidateVecs[evt.ID]
+		}
+		if vec == nil {
+			// Fallback: embed directly if no cache hit.
+			text := embeddingEventText(evt)
+			v, verr := embedder.Embed(ctx, text)
+			if verr != nil {
+				continue
+			}
+			vec = v
 		}
 		sim := dotProduct(queryVec, vec)
 		vscored = append(vscored, vecScored{evt: evt, score: sim})

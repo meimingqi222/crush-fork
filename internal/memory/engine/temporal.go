@@ -2,6 +2,7 @@ package engine
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -154,11 +155,30 @@ func startOfWeek(t time.Time) time.Time {
 	return startOfDay(t.AddDate(0, 0, -(weekday - 1)))
 }
 
+// RankedList represents a single retrieval voice's result list with an
+// associated fusion weight.  Used by WeightedReciprocalRankFusion.
+type RankedList struct {
+	Events []MemoryEvent
+	Weight float64
+}
+
 // ReciprocalRankFusion merges multiple ranked lists into a single ranking
-// using the RRF algorithm.  Each list's rank positions contribute a score
-// of 1/(k + rank) where k is a smoothing constant (default 60).
-// This is useful for combining FTS5 and vector search results.
+// using the unweighted RRF algorithm.  Each list's rank positions contribute
+// a score of 1/(k + rank) where k is a smoothing constant (default 60).
+// For weighted polyphonic fusion use WeightedReciprocalRankFusion.
 func ReciprocalRankFusion(lists [][]MemoryEvent, k int64) []MemoryEvent {
+	weighted := make([]RankedList, len(lists))
+	for i, l := range lists {
+		weighted[i] = RankedList{Events: l, Weight: 1.0}
+	}
+	return WeightedReciprocalRankFusion(weighted, k)
+}
+
+// WeightedReciprocalRankFusion merges multiple ranked lists with per-list
+// weights into a single ranking.  Each position contributes weight/(k+rank),
+// matching Mnemopi's polyphonic recall fusion where voices (vector, FTS,
+// temporal, triple) have distinct influence on the final order.
+func WeightedReciprocalRankFusion(lists []RankedList, k int64) []MemoryEvent {
 	if k <= 0 {
 		k = 60
 	}
@@ -170,16 +190,19 @@ func ReciprocalRankFusion(lists [][]MemoryEvent, k int64) []MemoryEvent {
 	events := make(map[string]MemoryEvent)
 
 	for _, list := range lists {
-		for rank, evt := range list {
+		w := list.Weight
+		if w <= 0 {
+			w = 1.0
+		}
+		for rank, evt := range list.Events {
 			id := evt.ID
-			scores[id] += 1.0 / float64(k+int64(rank+1))
+			scores[id] += w / float64(k+int64(rank+1))
 			if _, exists := events[id]; !exists {
 				events[id] = evt
 			}
 		}
 	}
 
-	// Sort by RRF score descending.
 	type scored struct {
 		id    string
 		score float64
@@ -189,7 +212,7 @@ func ReciprocalRankFusion(lists [][]MemoryEvent, k int64) []MemoryEvent {
 		scoredList = append(scoredList, scored{id: id, score: score})
 	}
 
-	// Simple insertion sort (small N).
+	// Insertion sort by score descending.
 	for i := 1; i < len(scoredList); i++ {
 		for j := i; j > 0 && scoredList[j].score > scoredList[j-1].score; j-- {
 			scoredList[j], scoredList[j-1] = scoredList[j-1], scoredList[j]
@@ -199,6 +222,55 @@ func ReciprocalRankFusion(lists [][]MemoryEvent, k int64) []MemoryEvent {
 	result := make([]MemoryEvent, 0, len(scoredList))
 	for _, s := range scoredList {
 		result = append(result, events[s.id])
+	}
+	return result
+}
+
+// TemporalVoiceRank ranks events purely by Weibull time-decay recency.
+// It is used as one of the four polyphonic voices, ensuring very recent
+// memories always receive a boost independent of lexical or semantic match.
+// Events with ineligible kinds (working_memory, task_state) are filtered out
+// for cross-session recall but included when sessionScoped is true.
+func TemporalVoiceRank(events []MemoryEvent, now time.Time, limit int, sessionID string) []MemoryEvent {
+	if limit <= 0 {
+		limit = 30
+	}
+	type scored struct {
+		evt   MemoryEvent
+		score float64
+	}
+	scoredList := make([]scored, 0, len(events))
+	for _, evt := range events {
+		// Filter out pure transient state unless we're looking at the current session.
+		if sessionID == "" || evt.Source.SessionID != sessionID {
+			switch evt.Kind {
+			case MemoryKindWorkingMemory, MemoryKindTaskState, MemoryKindRequest:
+				continue
+			}
+		}
+		age := now.Sub(evt.UpdatedAt)
+		if age < 0 {
+			age = 0
+		}
+		params := weibullParamsForKind(evt.Kind)
+		recency := params.Decay(age.Hours())
+		// Blend with importance so high-importance older memories still surface.
+		score := recency*0.7 + evt.Importance*0.3 + evt.Confidence*0.1
+		// Veracity weight scales the score based on fact source reliability.
+		score *= 0.3 + 0.7*VeracityWeightFor(evt.Veracity)
+		scoredList = append(scoredList, scored{evt: evt, score: score})
+	}
+
+	sort.SliceStable(scoredList, func(i, j int) bool {
+		return scoredList[i].score > scoredList[j].score
+	})
+
+	if len(scoredList) > limit {
+		scoredList = scoredList[:limit]
+	}
+	result := make([]MemoryEvent, 0, len(scoredList))
+	for _, s := range scoredList {
+		result = append(result, s.evt)
 	}
 	return result
 }

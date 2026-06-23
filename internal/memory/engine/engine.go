@@ -53,6 +53,15 @@ type Engine struct {
 	// reranker (optional) applied during Retrieve and compaction recall.
 	reranker Reranker
 
+	// proactiveLinker automatically builds related_to/refines edges between
+	// new memories and semantically similar existing ones.
+	proactiveLinker *ProactiveLinker
+
+	// embeddingStore persists pre-computed embedding vectors to avoid
+	// re-embedding all candidates on every recall query.
+	embeddingStore    *EmbeddingStore
+	embeddingPipeline *EmbeddingPipeline
+
 	// Background materialization
 	bgInterval    time.Duration
 	bgEveryNTurns int
@@ -106,7 +115,7 @@ func New(db *sql.DB, cfg Config) *Engine {
 	if backend == "" {
 		backend = "local"
 	}
-	return &Engine{
+	e := &Engine{
 		store:                 NewSQLiteEventStore(db),
 		db:                    db,
 		enabled:               cfg.Enabled,
@@ -118,7 +127,11 @@ func New(db *sql.DB, cfg Config) *Engine {
 		consBgInterval:        cfg.ConsolidationInterval,
 		tripleStore:           NewTripleStore(db),
 		conflictDetector:      NewConflictDetector(db),
+		embeddingStore:        NewEmbeddingStore(db),
 	}
+	e.proactiveLinker = NewProactiveLinker(e.store, e.tripleStore, nil)
+	e.embeddingPipeline = NewEmbeddingPipeline(e.store, e.embeddingStore, nil)
+	return e
 }
 
 // EventStore returns the engine's event store.
@@ -170,6 +183,12 @@ func (e *Engine) SetRetriever(r Retriever) {
 // TripleStore returns the engine's triple store for structured fact queries.
 func (e *Engine) TripleStore() *TripleStore {
 	return e.tripleStore
+}
+
+// EmbeddingPipeline returns the engine's embedding pipeline for cached
+// vector lookups and background embedding computation.
+func (e *Engine) EmbeddingPipeline() *EmbeddingPipeline {
+	return e.embeddingPipeline
 }
 
 // ConflictDetector returns the engine's conflict detector for contradiction
@@ -275,6 +294,20 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 		if err := e.store.Append(ctx, evt); err != nil {
 			slog.Warn("Failed to append consolidated event", "error", err)
 		}
+	}
+
+	// Enqueue consolidated events for background embedding.
+	if e.embeddingPipeline != nil && len(consolidated) > 0 {
+		ids := make([]string, 0, len(consolidated))
+		for _, evt := range consolidated {
+			ids = append(ids, evt.ID)
+		}
+		e.embeddingPipeline.Enqueue(ids...)
+	}
+
+	// Proactively link consolidated memories to related existing memories.
+	if e.proactiveLinker != nil && len(consolidated) > 0 {
+		go e.proactiveLinker.LinkEvents(context.Background(), consolidated)
 	}
 
 	if len(consolidated) > 0 {
@@ -471,6 +504,21 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 			slog.Warn("Failed to append memory event", "error", err, "session_id", sessionID)
 		}
 	}
+
+	// Enqueue newly extracted events for background embedding.
+	if e.embeddingPipeline != nil && len(events) > 0 {
+		ids := make([]string, 0, len(events))
+		for _, evt := range events {
+			ids = append(ids, evt.ID)
+		}
+		e.embeddingPipeline.Enqueue(ids...)
+	}
+
+	// Proactively link newly extracted memories to related existing memories.
+	if e.proactiveLinker != nil && len(events) > 0 {
+		go e.proactiveLinker.LinkEvents(context.Background(), events)
+	}
+
 	if hasMaterializableEvents(events) {
 		if err := e.TriggerMaterialization(ctx); err != nil {
 			slog.Warn("Turn-end memory materialization failed", "error", err, "session_id", sessionID)

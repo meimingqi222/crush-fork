@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +158,31 @@ func TestRetrieverReflectDoesNotFallbackToLocal(t *testing.T) {
 	require.Equal(t, "Remote synthesis only.", text)
 	require.Equal(t, []string{"project:crush-abc123"}, gotReq.Tags)
 	require.Equal(t, "any", gotReq.TagsMatch)
+}
+
+func TestRetrieverRetrieveTruncatesLongQuery(t *testing.T) {
+	t.Parallel()
+
+	longQuery := strings.Repeat("a", recallQueryHardLimit+100)
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/default/banks/crush/memories/recall", r.URL.Path)
+		var req RecallRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		gotQuery = req.Query
+
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{
+				{"id": "remote-1", "text": "Short query result.", "type": "reference"},
+			},
+		}))
+	}))
+	defer server.Close()
+
+	retriever := NewRetriever(NewClient(server.URL, "", ""))
+	_, err := retriever.Retrieve(context.Background(), longQuery, nil)
+	require.NoError(t, err)
+	require.Len(t, gotQuery, recallQueryHardLimit)
 }
 
 func TestRetrieverLoadMentalModels(t *testing.T) {

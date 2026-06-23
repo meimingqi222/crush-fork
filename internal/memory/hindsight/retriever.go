@@ -127,6 +127,24 @@ func (r *Retriever) MentalModelsLoadedAt() time.Time {
 	return r.mentalModelsLoadedAt
 }
 
+// recallQueryHardLimit caps any recall query at the retriever boundary. The
+// Hindsight recall API rejects queries above 500 tokens; ~1500 runes is a
+// last-resort safety net for callers that bypass the agent-layer truncation
+// (e.g. an LLM invoking the recall tool with an oversized query).
+const recallQueryHardLimit = 1500
+
+// truncateRecallQueryHardLimit tail-truncates a recall query to the hard rune
+// limit. Callers in the agent package already trim intelligently (preserving
+// the latest prompt); this only guards the transport layer so a request never
+// leaves the process over the token cap.
+func truncateRecallQueryHardLimit(query string) string {
+	runes := []rune(query)
+	if len(runes) <= recallQueryHardLimit {
+		return query
+	}
+	return string(runes[len(runes)-recallQueryHardLimit:])
+}
+
 // Recall implements engine.Retriever by asking Hindsight for broad project and
 // user context suitable for automatic prompt injection.
 func (r *Retriever) Recall(ctx context.Context, opts map[string]any) (string, error) {
@@ -139,6 +157,7 @@ func (r *Retriever) Recall(ctx context.Context, opts map[string]any) (string, er
 		req.Tags = tags
 		req.TagsMatch = match
 	}
+	req.Query = truncateRecallQueryHardLimit(req.Query)
 
 	remoteResults, err := r.client.Recall(ctx, req)
 	if err != nil {
@@ -171,6 +190,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, opts map[string]
 	if query == "" {
 		query = "project context, recent work, decisions, pitfalls, procedures, and user preferences"
 	}
+	query = truncateRecallQueryHardLimit(query)
 
 	req := RecallRequest{
 		Query:     query,

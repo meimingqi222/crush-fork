@@ -24,6 +24,15 @@ import (
 
 const defaultBankID = "crush"
 
+// Hindsight's /memories/recall endpoint rejects queries above 500 tokens.
+// We truncate client-side using a conservative chars-per-token estimate so
+// long user prompts or composed recall queries do not fail the request.
+const (
+	maxRecallQueryTokens     = 500
+	recallQueryCharsPerToken = 4
+	maxRecallQueryChars      = maxRecallQueryTokens * recallQueryCharsPerToken
+)
+
 // Client is a thin HTTP client for the Hindsight REST API.
 // It is safe for concurrent use.
 type Client struct {
@@ -109,6 +118,7 @@ type RecallResult struct {
 
 // Recall queries the remote bank for memories relevant to query.
 func (c *Client) Recall(ctx context.Context, req RecallRequest) ([]RecallResult, error) {
+	req.Query = truncateRecallQuery(req.Query, maxRecallQueryChars)
 	var resp struct {
 		Results []RecallResult `json:"results"`
 	}
@@ -116,6 +126,25 @@ func (c *Client) Recall(ctx context.Context, req RecallRequest) ([]RecallResult,
 		return nil, err
 	}
 	return resp.Results, nil
+}
+
+// truncateRecallQuery trims a query to maxChars while preserving valid UTF-8.
+// It keeps the prefix because the most relevant terms are usually at the
+// start of a user prompt or composed recall query.
+func truncateRecallQuery(query string, maxChars int) string {
+	if maxChars <= 0 {
+		return query
+	}
+	query = strings.TrimSpace(query)
+	runes := []rune(query)
+	if len(runes) <= maxChars {
+		return query
+	}
+	truncated := runes[:maxChars]
+	for len(truncated) > 0 && truncated[len(truncated)-1] == '\uFFFD' {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return string(truncated)
 }
 
 // Reflect synthesizes across memories to answer query.

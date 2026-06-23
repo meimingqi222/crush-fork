@@ -131,16 +131,56 @@ func tokenize(s string) []string {
 
 func kindPriority(k MemoryKind) float64 {
 	switch k {
+	// Highest priority: stable, user-signaled knowledge
+	case MemoryKindCorrection:
+		return 1.5
+	case MemoryKindConstraint:
+		return 1.4
+	case MemoryKindProfile:
+		return 1.3
+	case MemoryKindIdentity:
+		return 1.2
 	case MemoryKindDecision:
 		return 1.0
 	case MemoryKindPreference:
-		return 0.8
+		return 0.9
 	case MemoryKindPitfall:
+		return 0.8
+	case MemoryKindLesson:
 		return 0.7
 	case MemoryKindProcedure:
+		return 0.6
+	case MemoryKindSkill:
+		return 0.55
+	case MemoryKindTeam:
 		return 0.5
+	case MemoryKindProject:
+		return 0.5
+	case MemoryKindPattern:
+		return 0.45
+	case MemoryKindFact:
+		return 0.4
 	case MemoryKindReference:
 		return 0.3
+	case MemoryKindApproach:
+		return 0.3
+	case MemoryKindOutcome:
+		return 0.25
+	case MemoryKindAttempt:
+		return 0.2
+	case MemoryKindContext:
+		return 0.15
+	case MemoryKindEvent:
+		return 0.1
+	case MemoryKindConversation:
+		return 0.05
+	case MemoryKindRequest:
+		return 0.0
+	// Working/task state: very low priority for long-term recall
+	case MemoryKindWorkingMemory:
+		return -0.2
+	case MemoryKindTaskState:
+		return -0.5
 	default:
 		return 0.0
 	}

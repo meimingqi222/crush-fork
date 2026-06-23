@@ -291,14 +291,16 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 					memCfg.Rollout.GetMinEvents(),
 				))
 			}
-			summaryRetriever := engine.NewSummaryRetriever(eng.EventStore(), conn, writer.OutputDir())
+			summaryRetriever := engine.NewSummaryRetriever(eng.EventStore(), conn, writer.OutputDir()).
+				WithTripleStore(eng.TripleStore())
 			if memCfg.Reranker.GetMaxCandidates() > 0 {
 				summaryRetriever.WithMaxCandidates(memCfg.Reranker.GetMaxCandidates())
 			}
 			if rerank := buildLocalMemoryReranker(memCfg); rerank != nil {
-				summaryRetriever.WithReranker(rerank)
 				eng.SetReranker(rerank)
+				summaryRetriever.WithReranker(rerank)
 			}
+			summaryRetriever.WithEmbeddingPipeline(eng.EmbeddingPipeline())
 			eng.SetRetriever(summaryRetriever)
 		}
 

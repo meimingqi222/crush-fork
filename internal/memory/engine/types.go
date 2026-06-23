@@ -13,16 +13,43 @@ const (
 )
 
 // MemoryKind defines the kind/category of a memory event.
+// Each kind has dedicated Weibull decay parameters tuned to its expected
+// retention horizon, inspired by cognitive psychology and the Mnemopi
+// multi-type memory taxonomy.
 type MemoryKind string
 
 const (
-	MemoryKindPreference    MemoryKind = "preference"
-	MemoryKindDecision      MemoryKind = "decision"
-	MemoryKindProcedure     MemoryKind = "procedure"
-	MemoryKindPitfall       MemoryKind = "pitfall"
-	MemoryKindReference     MemoryKind = "reference"
-	MemoryKindTaskState     MemoryKind = "task_state"
-	MemoryKindWorkingMemory MemoryKind = "working_memory"
+	// Long-lived stable knowledge (months to years).
+	MemoryKindProfile    MemoryKind = "profile"     // User/team profile and identity
+	MemoryKindIdentity   MemoryKind = "identity"    // Identity information
+	MemoryKindPreference MemoryKind = "preference"  // User preferences and style
+	MemoryKindCorrection MemoryKind = "correction"  // Explicit corrections or do/don't rules
+	MemoryKindConstraint MemoryKind = "constraint"  // Hard constraints and requirements
+	MemoryKindTeam       MemoryKind = "team"        // Team composition and conventions
+
+	// Medium-term knowledge (weeks to months).
+	MemoryKindSkill     MemoryKind = "skill"     // Acquired skills and capabilities
+	MemoryKindProject   MemoryKind = "project"   // Project context and structure
+	MemoryKindProcedure MemoryKind = "procedure" // Workflows and procedures
+	MemoryKindPitfall   MemoryKind = "pitfall"   // Pitfalls, gotchas, anti-patterns
+	MemoryKindLesson    MemoryKind = "lesson"    // Lessons learned
+	MemoryKindPattern   MemoryKind = "pattern"   // Recurring patterns observed
+
+	// Shorter-term knowledge (days to weeks).
+	MemoryKindFact      MemoryKind = "fact"      // Isolated factual knowledge
+	MemoryKindReference MemoryKind = "reference" // Reference material lookups
+	MemoryKindDecision  MemoryKind = "decision"  // Architectural/design decisions
+	MemoryKindApproach  MemoryKind = "approach"  // Approach taken for a problem
+	MemoryKindAttempt   MemoryKind = "attempt"   // Attempted solutions
+	MemoryKindOutcome   MemoryKind = "outcome"   // Outcomes of actions
+	MemoryKindContext   MemoryKind = "context"   // Situational context
+	MemoryKindEvent     MemoryKind = "event"     // Notable events
+	MemoryKindConversation MemoryKind = "conversation" // Conversation segments
+
+	// Transient state (hours to days).
+	MemoryKindRequest       MemoryKind = "request"        // User requests
+	MemoryKindWorkingMemory MemoryKind = "working_memory" // Session working memory
+	MemoryKindTaskState     MemoryKind = "task_state"     // Active task state
 )
 
 // MemoryVeracity defines how a memory fact was established.  Higher-weight
@@ -41,6 +68,8 @@ const (
 	MemoryVeracityImported MemoryVeracity = "imported"
 	// MemoryVeracityUnknown means the source is unclear.
 	MemoryVeracityUnknown MemoryVeracity = "unknown"
+	// MemoryVeracityFalse means the fact has been contradicted or superseded.
+	MemoryVeracityFalse MemoryVeracity = "false"
 )
 
 // MemorySourceRef describes the origin of a memory event.

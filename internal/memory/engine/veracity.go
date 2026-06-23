@@ -9,13 +9,42 @@ import (
 
 // VeracityWeight maps each MemoryVeracity to a weight used during Bayesian
 // confidence updates.  Higher weights mean the source is more trustworthy
-// and produces larger confidence increments.
+// and produces larger confidence increments. These weights are optimized
+// for confidence accumulation, not recall scoring.
 var VeracityWeight = map[MemoryVeracity]float64{
 	MemoryVeracityStated:   1.0,
-	MemoryVeracityInferred: 0.7,
-	MemoryVeracityTool:     0.5,
 	MemoryVeracityImported: 0.6,
 	MemoryVeracityUnknown:  0.8,
+	MemoryVeracityInferred: 0.7,
+	MemoryVeracityTool:     0.5,
+	MemoryVeracityFalse:    0.0,
+}
+
+// RecallVeracityWeight maps each MemoryVeracity to a scoring multiplier used
+// during polyphonic recall ranking. Weights follow mnemopi's scheme where
+// explicitly stated facts rank highest, tool/inferred facts are discounted,
+// and contradicted facts receive zero weight:
+//
+//	stated (1.0) > imported (0.6) > unknown (0.5) > inferred (0.4) > tool (0.3) > false (0.0)
+var RecallVeracityWeight = map[MemoryVeracity]float64{
+	MemoryVeracityStated:   1.0,
+	MemoryVeracityImported: 0.6,
+	MemoryVeracityUnknown:  0.5,
+	MemoryVeracityInferred: 0.4,
+	MemoryVeracityTool:     0.3,
+	MemoryVeracityFalse:    0.0,
+}
+
+// VeracityWeightFor returns the weight for a given veracity value, handling
+// empty strings and unknown values by defaulting to unknown weight.
+func VeracityWeightFor(v MemoryVeracity) float64 {
+	if v == "" {
+		return RecallVeracityWeight[MemoryVeracityUnknown]
+	}
+	if w, ok := RecallVeracityWeight[v]; ok {
+		return w
+	}
+	return RecallVeracityWeight[MemoryVeracityUnknown]
 }
 
 // ValidVeracity returns true if the given string is a recognized veracity label.

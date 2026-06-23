@@ -84,7 +84,7 @@ var ErrUnresolvedModel = errors.New("selected model is unavailable in provider c
 const maxModelSwitchSummaries = 2
 const (
 	mentalModelTTL     = 5 * time.Minute
-	recallContextTurns = 2
+	recallContextTurns = 1
 )
 
 type Coordinator interface {
@@ -460,7 +460,11 @@ func (c *coordinator) memoryEngineHooks() *MemoryEngineHooks {
 				if retriever := c.memoryEngine.Retriever(); retriever != nil {
 					recent := buildRecentConversation(ctx, c.messages, sessionID, 3)
 					if recent != "" {
-						events, err := retriever.Retrieve(ctx, recent, map[string]any{"session_id": sessionID, "limit": 6})
+						// No current prompt at compaction time: pass empty latest so
+						// composeRecallQuery returns the recent block verbatim and
+						// truncateRecallQuery tail-truncates under the token limit.
+						rescueQuery := truncateRecallQuery(composeRecallQuery("", recent), "", maxAutoRecallQueryChars)
+						events, err := retriever.Retrieve(ctx, rescueQuery, map[string]any{"session_id": sessionID, "limit": 6})
 						if err == nil && len(events) > 0 {
 							var b strings.Builder
 							b.WriteString("<memory_rescue>\n")
@@ -761,13 +765,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 				}
 
 				// Expand all user queries with conversation context to preserve semantic continuity in turns.
-				query := strings.TrimSpace(prompt)
+				// composeRecallQuery frames the recent turns as "Prior context:" and
+				// truncateRecallQuery (called inside buildAutoRecallBlock for the
+				// hindsight backend) keeps the query under Hindsight's token limit.
 				recent := buildRecentConversation(prefetchCtx, c.messages, sessionID, recallContextTurns)
-				if recent != "" {
-					query = recent + "\n\nUser: " + query
-				}
 
-				recall = buildAutoRecallBlock(prefetchCtx, retriever, query, sessionID, c.memoryEngine.Backend())
+				recall = buildAutoRecallBlock(prefetchCtx, retriever, strings.TrimSpace(prompt), recent, sessionID, c.memoryEngine.Backend())
 			}
 		}
 		memoryPrefetch.Settle(recall)

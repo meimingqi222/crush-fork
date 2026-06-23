@@ -142,9 +142,24 @@ func renderCompactionRescue(rescue *CompactionRescue, maxBytes int) string {
 }
 
 // SetReranker installs an optional Reranker used by Retrieve and by
-// PrepareCompactionRescue when UseReranker is true.
+// PrepareCompactionRescue when UseReranker is true. It also updates
+// the proactive memory linker and embedding pipeline if an EmbeddingReranker is provided.
 func (e *Engine) SetReranker(r Reranker) {
 	e.reranker = r
+	// Update proactive linker embedder if this is an EmbeddingReranker.
+	if e.proactiveLinker == nil {
+		e.proactiveLinker = NewProactiveLinker(e.store, e.tripleStore, nil)
+	}
+	if e.embeddingPipeline == nil {
+		e.embeddingPipeline = NewEmbeddingPipeline(e.store, e.embeddingStore, nil)
+	}
+	var embedder Embedder
+	if embR, ok := r.(*EmbeddingReranker); ok && embR != nil {
+		embedder = embR.embedder
+	}
+	e.proactiveLinker.SetEmbedder(embedder)
+	e.proactiveLinker.SetEmbeddingPipeline(e.embeddingPipeline)
+	e.embeddingPipeline.SetEmbedder(embedder)
 }
 
 // Reranker returns the installed Reranker, or nil if none.

@@ -120,9 +120,10 @@ func (r *EmbeddingReranker) Rerank(ctx context.Context, query string, candidates
 		}
 		similarity := dotProduct(queryVec, vec)
 		heuristicScore := r.heuristic.scoreEvent(now, terms, evt) + exactTermBoost(rawTerms, evt)
+		veracityMul := 0.3 + 0.7*VeracityWeightFor(evt.Veracity)
 		scoredCandidates = append(scoredCandidates, scored{
 			evt:   evt,
-			score: similarity*6.0 + heuristicScore,
+			score: (similarity*6.0 + heuristicScore) * veracityMul,
 		})
 	}
 	sort.SliceStable(scoredCandidates, func(i, j int) bool {
@@ -150,13 +151,30 @@ func (r *EmbeddingReranker) Rerank(ctx context.Context, query string, candidates
 }
 
 func embeddingEventText(evt MemoryEvent) string {
-	return strings.Join([]string{
+	return joinNonEmpty("\n",
 		evt.Summary,
 		evt.Content,
 		string(evt.Scope),
 		string(evt.Kind),
-		strings.Join(evt.Tags, " "),
-	}, " ")
+		joinNonEmpty(" ", evt.Tags...),
+	)
+}
+
+func joinNonEmpty(sep string, parts ...string) string {
+	var nonEmpty []string
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	result := nonEmpty[0]
+	for i := 1; i < len(nonEmpty); i++ {
+		result += sep + nonEmpty[i]
+	}
+	return result
 }
 
 func embeddingFeatures(text string) []string {
