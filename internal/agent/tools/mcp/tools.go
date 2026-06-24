@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
+	"net"
 	"slices"
 	"strings"
 
@@ -33,7 +36,13 @@ type ToolResult struct {
 	AdditionalMedia []ToolMedia
 }
 
-var allTools = csync.NewMap[string, []*Tool]()
+var (
+	allTools          = csync.NewMap[string, []*Tool]()
+	callToolOnSession = func(ctx context.Context, session *ClientSession, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+		return session.CallTool(ctx, params)
+	}
+	reconnectClient = Reconnect
+)
 
 // Tools returns all available MCP tools.
 func Tools() iter.Seq2[string, []*Tool] {
@@ -51,14 +60,11 @@ func RunTool(ctx context.Context, cfg *config.ConfigStore, name, toolName string
 	if err != nil {
 		return ToolResult{}, err
 	}
-	result, err := c.CallTool(ctx, &mcp.CallToolParams{
+	result, err := callToolWithRetry(ctx, cfg, name, c, &mcp.CallToolParams{
 		Name:      toolName,
 		Arguments: args,
 	})
 	if err != nil {
-		if prev, ok := states.Get(name); ok {
-			updateState(name, stateForError(err), err, nil, prev.Counts)
-		}
 		return ToolResult{}, err
 	}
 
@@ -67,6 +73,54 @@ func RunTool(ctx context.Context, cfg *config.ConfigStore, name, toolName string
 	}
 
 	return resultFromMCPContent(result.Content), nil
+}
+
+func callToolWithRetry(ctx context.Context, cfg *config.ConfigStore, name string, session *ClientSession, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	result, err := callToolOnSession(ctx, session, params)
+	if err == nil || !shouldRetryToolCall(ctx, err) {
+		if err != nil {
+			updateStateForToolCallError(name, err)
+		}
+		return result, err
+	}
+
+	firstErr := err
+	updateStateForToolCallError(name, firstErr)
+
+	if err := reconnectClient(ctx, cfg, name); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, errors.Join(firstErr, err)
+	}
+
+	session, ok := sessions.Get(name)
+	if !ok {
+		return nil, firstErr
+	}
+
+	result, err = callToolOnSession(ctx, session, params)
+	if err != nil {
+		updateStateForToolCallError(name, err)
+	}
+	return result, err
+}
+
+func updateStateForToolCallError(name string, err error) {
+	if prev, ok := states.Get(name); ok {
+		updateState(name, stateForError(err), err, nil, prev.Counts)
+	}
+}
+
+func shouldRetryToolCall(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, mcp.ErrConnectionClosed) || errors.Is(err, mcp.ErrSessionMissing) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 func resultFromMCPContent(content []mcp.Content) ToolResult {

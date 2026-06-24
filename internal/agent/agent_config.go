@@ -8,6 +8,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/stringext"
 )
 
 func applyRuntimeConfig(call *SessionAgentCall, runtimeConfig sessionAgentRuntimeConfig) {
@@ -103,4 +104,33 @@ func pluralizeRetryAttempt(retryAttempt int) string {
 		return "time"
 	}
 	return "times"
+}
+
+// providerErrorTitle returns a human-readable title for a provider error.
+// It overrides the HTTP status text when the message indicates an upstream
+// aggregator failure (no available route / all accounts exhausted) rather
+// than a genuine client-side rate limit, so the displayed title matches the
+// actual failure reason instead of the misleading "Too Many Requests".
+func providerErrorTitle(providerErr *fantasy.ProviderError) string {
+	if providerErr != nil && providerErr.Title != "" {
+		msg := strings.ToLower(providerErr.Message)
+		for _, pattern := range noRoutePatterns {
+			if strings.Contains(msg, pattern) {
+				return "No available route"
+			}
+		}
+		return stringext.Capitalize(providerErr.Title)
+	}
+	return ""
+}
+
+// noRoutePatterns are message fragments emitted by upstream aggregators
+// (e.g. copilot-api, openrouter) when they have no account/route available
+// to serve a request. These are typically returned with HTTP 429 even
+// though the failure is server-side, not a client rate limit.
+var noRoutePatterns = []string{
+	"no available route",
+	"all accounts exhausted",
+	"no available model",
+	"no upstream available",
 }

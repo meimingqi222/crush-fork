@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,6 +185,85 @@ func TestResultFromMCPContent(t *testing.T) {
 		require.Equal(t, ToolMedia{Type: "image", MediaType: "image/jpeg", Data: []byte(base64.StdEncoding.EncodeToString([]byte{0xFF, 0xD8, 0xFF}))}, result.AdditionalMedia[0])
 		require.Equal(t, ToolMedia{Type: "media", MediaType: "audio/wav", Data: []byte("BAUG")}, result.AdditionalMedia[1])
 	})
+}
+
+func TestCallToolWithRetryReconnectsOnce(t *testing.T) {
+	store := loadTestStore(t)
+	const name = "retry-mcp"
+
+	originalCallToolOnSession := callToolOnSession
+	originalReconnectClient := reconnectClient
+	t.Cleanup(func() {
+		callToolOnSession = originalCallToolOnSession
+		reconnectClient = originalReconnectClient
+		states.Del(name)
+		sessions.Del(name)
+		allTools.Del(name)
+	})
+
+	updateState(name, StateConnected, nil, &ClientSession{}, Counts{Tools: 1})
+
+	callCount := 0
+	callToolOnSession = func(ctx context.Context, session *ClientSession, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
+		callCount++
+		require.Equal(t, "test-tool", params.Name)
+		if callCount == 1 {
+			return nil, fmt.Errorf("transport failed: %w", sdkmcp.ErrConnectionClosed)
+		}
+		return &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "ok"}}}, nil
+	}
+
+	reconnectCount := 0
+	reconnectClient = func(ctx context.Context, cfg *config.ConfigStore, gotName string) error {
+		reconnectCount++
+		require.Same(t, store, cfg)
+		require.Equal(t, name, gotName)
+		session := &ClientSession{}
+		sessions.Set(name, session)
+		updateState(name, StateConnected, nil, session, Counts{Tools: 1})
+		return nil
+	}
+
+	result, err := callToolWithRetry(context.Background(), store, name, &ClientSession{}, &sdkmcp.CallToolParams{Name: "test-tool"})
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Content[0].(*sdkmcp.TextContent).Text)
+	require.Equal(t, 2, callCount)
+	require.Equal(t, 1, reconnectCount)
+}
+
+func TestCallToolWithRetryDoesNotRetryCanceledContext(t *testing.T) {
+	store := loadTestStore(t)
+	const name = "canceled-mcp"
+
+	originalCallToolOnSession := callToolOnSession
+	originalReconnectClient := reconnectClient
+	t.Cleanup(func() {
+		callToolOnSession = originalCallToolOnSession
+		reconnectClient = originalReconnectClient
+		states.Del(name)
+		sessions.Del(name)
+		allTools.Del(name)
+	})
+
+	updateState(name, StateConnected, nil, &ClientSession{}, Counts{Tools: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	callCount := 0
+	callToolOnSession = func(ctx context.Context, session *ClientSession, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
+		callCount++
+		return nil, errors.Join(ctx.Err(), sdkmcp.ErrConnectionClosed)
+	}
+
+	reconnectClient = func(ctx context.Context, cfg *config.ConfigStore, gotName string) error {
+		t.Fatal("reconnect should not be called")
+		return nil
+	}
+
+	_, err := callToolWithRetry(ctx, store, name, &ClientSession{}, &sdkmcp.CallToolParams{Name: "test-tool"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, callCount)
 }
 
 func loadTestStore(t *testing.T) *config.ConfigStore {

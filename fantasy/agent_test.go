@@ -478,6 +478,74 @@ func TestAgent_Generate_MultipleSteps(t *testing.T) {
 	require.Len(t, toolResults, 0)
 }
 
+func TestAgent_Generate_RegularToolRunErrorContinuesLoop(t *testing.T) {
+	t.Parallel()
+
+	tool := &mockTool{
+		name:        "flaky_tool",
+		description: "Fails during execution",
+		parameters:  map[string]any{},
+		executeFunc: func(ctx context.Context, call ToolCall) (ToolResponse, error) {
+			return ToolResponse{}, errors.New("tool process crashed")
+		},
+	}
+
+	callCount := 0
+	model := &mockLanguageModel{
+		generateFunc: func(ctx context.Context, call Call) (*Response, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				return &Response{
+					Content: []Content{
+						ToolCallContent{
+							ToolCallID: "call-1",
+							ToolName:   "flaky_tool",
+							Input:      `{}`,
+						},
+					},
+					Usage:        Usage{TotalTokens: 10},
+					FinishReason: FinishReasonToolCalls,
+				}, nil
+			case 2:
+				require.Len(t, call.Prompt, 3)
+				require.Equal(t, MessageRoleTool, call.Prompt[2].Role)
+				toolResultPart, ok := call.Prompt[2].Content[0].(ToolResultPart)
+				require.True(t, ok)
+				errorResult, ok := toolResultPart.Output.(ToolResultOutputContentError)
+				require.True(t, ok)
+				require.EqualError(t, errorResult.Error, "tool process crashed")
+
+				return &Response{
+					Content:      []Content{TextContent{Text: "recovered"}},
+					Usage:        Usage{TotalTokens: 5},
+					FinishReason: FinishReasonStop,
+				}, nil
+			default:
+				t.Fatalf("Unexpected call count: %d", callCount)
+				return nil, nil
+			}
+		},
+	}
+
+	agent := NewAgent(model, WithTools(tool), WithStopConditions(StepCountIs(3)))
+	result, err := agent.Generate(context.Background(), AgentCall{
+		Prompt: "use the flaky tool",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 2, callCount)
+	require.Len(t, result.Steps, 2)
+	require.Equal(t, "recovered", result.Response.Content.Text())
+
+	toolResults := result.Steps[0].Content.ToolResults()
+	require.Len(t, toolResults, 1)
+	errorResult, ok := toolResults[0].Result.(ToolResultOutputContentError)
+	require.True(t, ok)
+	require.EqualError(t, errorResult.Error, "tool process crashed")
+}
+
 // Test basic text generation
 func TestAgent_Generate_BasicText(t *testing.T) {
 	t.Parallel()

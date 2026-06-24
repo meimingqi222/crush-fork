@@ -724,10 +724,12 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 	// Find the run function — either from a regular AgentTool or an
 	// executable provider tool.
 	var runTool func(ctx context.Context, call ToolCall) (ToolResponse, error)
+	isExecutableProviderTool := false
 	if tool, exists := toolMap[toolCall.ToolName]; exists {
 		runTool = tool.Run
 	} else if ept, ok := execProviderToolMap[toolCall.ToolName]; ok {
 		runTool = ept.Run
+		isExecutableProviderTool = true
 	}
 	if runTool == nil {
 		result.Result = ToolResultOutputContentError{
@@ -754,7 +756,7 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 		if toolResultCallback != nil {
 			_ = toolResultCallback(result)
 		}
-		return result, true
+		return result, isExecutableProviderTool
 	}
 
 	result.ClientMetadata = toolResult.Metadata

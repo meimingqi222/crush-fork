@@ -603,8 +603,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if !call.NonInteractive && shouldGenerateSessionTitle(currentSession.Title) {
 		titlePrompt := titlePromptFromCallOrHistory(call.Prompt, msgs)
 		if titlePrompt != "" {
-			titleCtx := copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent)
+			titleCtx, titleCancel := context.WithTimeout(
+				copilot.ContextWithInitiatorType(context.Background(), copilot.InitiatorAgent),
+				30*time.Second,
+			)
 			wg.Go(func() {
+				defer titleCancel()
 				a.generateTitle(titleCtx, call.SessionID, titlePrompt, &sessionLock)
 			})
 		}
@@ -2111,7 +2115,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			} else {
 				currentAssistant.AddFinish(
 					message.FinishReasonError,
-					cmp.Or(stringext.Capitalize(providerErr.Title), defaultTitle),
+					cmp.Or(providerErrorTitle(providerErr), defaultTitle),
 					withRetryFailureDetails(providerErr.Message, retryAttempt),
 				)
 			}

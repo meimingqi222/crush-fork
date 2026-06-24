@@ -187,46 +187,86 @@ func (r *SummaryRetriever) readMentalModels() string {
 // about past sessions, decisions, or project history. It queries the
 // EventStore and returns a formatted synthesis. Does NOT write to LTM.
 func (r *SummaryRetriever) Reflect(ctx context.Context, query string, opts map[string]any) (string, error) {
-	// Build query filter from opts.
-	filter := EventFilter{
-		Limit: 50,
-	}
-	if scope, ok := opts["scope"].(string); ok && scope != "" {
-		s := MemoryScope(scope)
-		filter.Scope = &s
-	}
-	if kind, ok := opts["kind"].(string); ok && kind != "" {
-		k := MemoryKind(kind)
-		filter.Kind = &k
-	}
-	if sessionID, ok := opts["session_id"].(string); ok && sessionID != "" {
-		filter.SessionID = &sessionID
+	reflectLimit := 10
+	if configuredLimit, ok := opts["limit"].(int); ok && configuredLimit > 0 {
+		reflectLimit = configuredLimit
 	}
 
-	events, err := r.store.Query(ctx, filter)
-	if err != nil {
-		return "", fmt.Errorf("reflecting on memory: %w", err)
+	retrieveOpts := make(map[string]any, len(opts)+2)
+	for k, v := range opts {
+		retrieveOpts[k] = v
 	}
+	retrieveOpts["limit"] = reflectLimit
+	retrieveOpts["max_candidates"] = max(100, reflectLimit*5)
+
+	var events []MemoryEvent
+	if query != "" && strings.TrimSpace(query) != "" {
+		// When a specific query is given, use full polyphonic retrieval (FTS +
+		// vector + temporal + triple) to find memories relevant to the topic,
+		// matching mnemopi's recall() behavior. This avoids the old behavior
+		// of ignoring the query and returning the top-N by importance only.
+		recalled, err := r.Retrieve(ctx, query, retrieveOpts)
+		if err != nil {
+			return "", fmt.Errorf("reflecting on memory: %w", err)
+		}
+		events = recalled
+	} else {
+		// When no query is given (open-ended reflection like "what do I know?"),
+		// fall back to importance-ordered global selection, but boosted by
+		// recency so very old low-decay memories don't dominate.
+		filter := EventFilter{Limit: reflectLimit * 5}
+		if scope, ok := opts["scope"].(string); ok && scope != "" {
+			s := MemoryScope(scope)
+			filter.Scope = &s
+		}
+		if kind, ok := opts["kind"].(string); ok && kind != "" {
+			k := MemoryKind(kind)
+			filter.Kind = &k
+		}
+		if sessionID, ok := opts["session_id"].(string); ok && sessionID != "" {
+			filter.SessionID = &sessionID
+		}
+		all, err := r.store.Query(ctx, filter)
+		if err != nil {
+			return "", fmt.Errorf("reflecting on memory: %w", err)
+		}
+		type scored struct {
+			evt   MemoryEvent
+			score float64
+		}
+		now := time.Now()
+		scoredList := make([]scored, 0, len(all))
+		for _, evt := range all {
+			age := now.Sub(evt.UpdatedAt)
+			if age < 0 {
+				age = 0
+			}
+			recency := weibullParamsForKind(evt.Kind).Decay(age.Hours())
+			s := evt.Importance*0.6 + recency*0.3 + evt.Confidence*0.1
+			s *= VeracityWeightFor(evt.Veracity)
+			scoredList = append(scoredList, scored{evt: evt, score: s})
+		}
+		sort.SliceStable(scoredList, func(i, j int) bool {
+			return scoredList[i].score > scoredList[j].score
+		})
+		events = make([]MemoryEvent, 0, min(reflectLimit, len(scoredList)))
+		for i := 0; i < len(scoredList) && i < reflectLimit; i++ {
+			events = append(events, scoredList[i].evt)
+		}
+	}
+
 	if len(events) == 0 {
 		return "", nil
 	}
 
-	// Sort by importance descending.
-	sorted := make([]MemoryEvent, len(events))
-	copy(sorted, events)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Importance > sorted[j].Importance
-	})
-	if len(sorted) > 10 {
-		sorted = sorted[:10]
-	}
-
 	// Format as a cross-memory synthesis.
 	var b strings.Builder
-	if query != "" {
+	if query != "" && strings.TrimSpace(query) != "" {
 		b.WriteString(fmt.Sprintf("Memory synthesis for: %s\n\n", query))
+	} else {
+		b.WriteString("Most salient memories:\n\n")
 	}
-	for _, evt := range sorted {
+	for _, evt := range events {
 		summary := evt.Summary
 		if summary == "" {
 			summary = truncateContent(evt.Content, 200)

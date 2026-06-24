@@ -3,6 +3,7 @@ package agent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -136,11 +137,13 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	titleCtx := copilot.ContextWithInitiatorType(ctx, copilot.InitiatorAgent)
 	resp, err := agent.Stream(titleCtx, streamCall)
 	if err == nil {
-		// We successfully generated a title with the small model.
 		slog.Debug("Generated title with small model")
 	} else {
-		// It didn't work. Let's try with the big model.
-		slog.Error("Error generating title with small model; trying big model", "err", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			slog.Debug("Title generation cancelled (small model)", "err", err)
+		} else {
+			slog.Warn("Error generating title with small model; trying big model", "err", err)
+		}
 		model = largeModel
 		agent = newAgent(model.Model, titlePrompt)
 		streamedTitle.Reset()
@@ -148,32 +151,32 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		if err == nil {
 			slog.Debug("Generated title with large model")
 		} else {
-			// Welp, the large model didn't work either. Use the default
-			// session name and return.
-			slog.Error("Error generating title with large model", "err", err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				slog.Debug("Title generation cancelled (large model)", "err", err)
+			} else {
+				slog.Warn("Error generating title with large model", "err", err)
+			}
 			if sessionLock != nil {
 				sessionLock.Lock()
 				defer sessionLock.Unlock()
 			}
-			saveErr := a.sessions.Rename(ctx, sessionID, DefaultSessionName)
+			saveErr := a.sessions.Rename(context.Background(), sessionID, DefaultSessionName)
 			if saveErr != nil {
-				slog.Error("Failed to save session title", "error", saveErr)
+				slog.Warn("Failed to save session title", "error", saveErr)
 			}
 			return
 		}
 	}
 
 	if resp == nil {
-		// Actually, we didn't get a response so we can't. Use the default
-		// session name and return.
 		slog.Error("Response is nil; can't generate title")
 		if sessionLock != nil {
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
 		}
-		saveErr := a.sessions.Rename(ctx, sessionID, DefaultSessionName)
+		saveErr := a.sessions.Rename(context.Background(), sessionID, DefaultSessionName)
 		if saveErr != nil {
-			slog.Error("Failed to save session title", "error", saveErr)
+			slog.Warn("Failed to save session title", "error", saveErr)
 		}
 		return
 	}
@@ -221,9 +224,9 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		sessionLock.Lock()
 		defer sessionLock.Unlock()
 	}
-	saveErr := a.sessions.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens, completionTokens, cost)
+	saveErr := a.sessions.UpdateTitleAndUsage(context.Background(), sessionID, title, promptTokens, completionTokens, cost)
 	if saveErr != nil {
-		slog.Error("Failed to save session title and usage", "error", saveErr)
+		slog.Warn("Failed to save session title and usage", "error", saveErr)
 		return
 	}
 }

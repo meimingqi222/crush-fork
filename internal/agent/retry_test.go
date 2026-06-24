@@ -166,3 +166,37 @@ func TestWithRetryFailureDetails(t *testing.T) {
 		)
 	})
 }
+
+func TestProviderErrorTitle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns No available route for aggregator exhaustion messages", func(t *testing.T) {
+		t.Parallel()
+		for _, msg := range []string{
+			"No available route for model",
+			"All accounts exhausted",
+			"no available model: claude-sonnet",
+			"no upstream available",
+		} {
+			providerErr := &fantasy.ProviderError{Title: "too many requests", Message: msg}
+			require.Equal(t, "No available route", providerErrorTitle(providerErr), "message: %q", msg)
+		}
+	})
+
+	t.Run("capitalizes HTTP status text for genuine rate limits", func(t *testing.T) {
+		t.Parallel()
+		providerErr := &fantasy.ProviderError{Title: "too many requests", Message: "rate limit exceeded"}
+		require.Equal(t, "Too Many Requests", providerErrorTitle(providerErr))
+	})
+
+	t.Run("returns empty when title is empty", func(t *testing.T) {
+		t.Parallel()
+		providerErr := &fantasy.ProviderError{Message: "no available route for model"}
+		require.Equal(t, "", providerErrorTitle(providerErr))
+	})
+
+	t.Run("returns empty for nil error", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, "", providerErrorTitle(nil))
+	})
+}
