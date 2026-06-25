@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
@@ -11,8 +12,35 @@ const (
 	transcriptWindowMaxRunes = 12_000
 )
 
+// memoryTagPatterns are regex patterns for memory-related XML blocks that must
+// be stripped from transcript content before retention. Without stripping,
+// previously injected memory blocks (recall results, mental models) would be
+// retained back into Hindsight, creating a positive feedback loop where
+// memories are repeatedly re-transcribed, amplified, and self-referenced.
+//
+// Mirrors oh-my-pi's stripMemoryTags approach, extended with crush's
+// <system-reminder> wrapper that frames auto-recall injections.
+var memoryTagPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`),
+	regexp.MustCompile(`(?s)<hindsight_memories>.*?</hindsight_memories>`),
+	regexp.MustCompile(`(?s)<mental_models>.*?</mental_models>`),
+	regexp.MustCompile(`(?s)<relevant_memories>.*?</relevant_memories>`),
+	regexp.MustCompile(`(?s)<memories>.*?</memories>`),
+}
+
+// stripMemoryTags removes memory-related XML blocks from content. This prevents
+// previously injected recall/mental-model blocks from being retained back into
+// the memory backend, which would create a feedback loop.
+func stripMemoryTags(content string) string {
+	for _, re := range memoryTagPatterns {
+		content = re.ReplaceAllString(content, "")
+	}
+	return content
+}
+
 // buildTranscriptWindow constructs a transcript window from recent messages.
 // It truncates to transcriptWindowMaxRunes to keep the retained window bounded.
+// Memory injection tags are stripped to prevent feedback loops on retain.
 func buildTranscriptWindow(msgs []message.Message) string {
 	var lines []string
 	totalRunes := 0
@@ -23,11 +51,11 @@ func buildTranscriptWindow(msgs []message.Message) string {
 		var line string
 		switch msg.Role {
 		case message.User:
-			if text := strings.TrimSpace(msg.Content().Text); text != "" {
+			if text := strings.TrimSpace(stripMemoryTags(msg.Content().Text)); text != "" {
 				line = "USER: " + text
 			}
 		case message.Assistant:
-			if text := strings.TrimSpace(msg.Content().Text); text != "" {
+			if text := strings.TrimSpace(stripMemoryTags(msg.Content().Text)); text != "" {
 				line = "ASSISTANT: " + text
 			}
 		}

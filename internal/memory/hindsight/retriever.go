@@ -145,11 +145,24 @@ func truncateRecallQueryHardLimit(query string) string {
 	return string(runes[len(runes)-recallQueryHardLimit:])
 }
 
+// defaultRecallQuery is the fallback query used when no explicit query is
+// provided via opts. It requests broad project and user context suitable for
+// automatic prompt injection.
+const defaultRecallQuery = "project context, recent work, decisions, pitfalls, procedures, and user preferences"
+
 // Recall implements engine.Retriever by asking Hindsight for broad project and
-// user context suitable for automatic prompt injection.
+// user context suitable for automatic prompt injection. When opts contains a
+// "query" key, that query is used instead of the default broad-context string,
+// so the recall is targeted to the current user prompt rather than generic.
 func (r *Retriever) Recall(ctx context.Context, opts map[string]any) (string, error) {
+	query := defaultRecallQuery
+	if q, ok := opts["query"].(string); ok {
+		if trimmed := strings.TrimSpace(q); trimmed != "" {
+			query = trimmed
+		}
+	}
 	req := RecallRequest{
-		Query:     "project context, recent work, decisions, pitfalls, procedures, and user preferences",
+		Query:     query,
 		Budget:    "mid",
 		MaxTokens: 1024,
 	}
@@ -188,7 +201,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, opts map[string]
 		return nil, nil
 	}
 	if query == "" {
-		query = "project context, recent work, decisions, pitfalls, procedures, and user preferences"
+		query = defaultRecallQuery
 	}
 	query = truncateRecallQueryHardLimit(query)
 

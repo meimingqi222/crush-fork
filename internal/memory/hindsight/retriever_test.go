@@ -57,6 +57,78 @@ func TestRetrieverUsesRemoteOnlyRecall(t *testing.T) {
 	require.Contains(t, recall, "Prefer concise answers.")
 }
 
+func TestRetrieverRecallUsesQueryFromOpts(t *testing.T) {
+	t.Parallel()
+
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RecallRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		gotQuery = req.Query
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{
+				{"id": "mem-1", "text": "Result.", "type": "decision"},
+			},
+		}))
+	}))
+	defer server.Close()
+
+	retriever := NewRetriever(NewClient(server.URL, "", ""))
+	_, err := retriever.Recall(context.Background(), map[string]any{
+		"session_id": "sess-1",
+		"query":      "how to configure SQLite WAL mode",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "how to configure SQLite WAL mode", gotQuery)
+}
+
+func TestRetrieverRecallFallsBackToDefaultQuery(t *testing.T) {
+	t.Parallel()
+
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RecallRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		gotQuery = req.Query
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{
+				{"id": "mem-1", "text": "Result.", "type": "decision"},
+			},
+		}))
+	}))
+	defer server.Close()
+
+	retriever := NewRetriever(NewClient(server.URL, "", ""))
+	_, err := retriever.Recall(context.Background(), map[string]any{"session_id": "sess-1"})
+	require.NoError(t, err)
+	require.Equal(t, defaultRecallQuery, gotQuery)
+}
+
+func TestRetrieverRecallIgnoresEmptyQueryOpt(t *testing.T) {
+	t.Parallel()
+
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RecallRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		gotQuery = req.Query
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{
+				{"id": "mem-1", "text": "Result.", "type": "decision"},
+			},
+		}))
+	}))
+	defer server.Close()
+
+	retriever := NewRetriever(NewClient(server.URL, "", ""))
+	_, err := retriever.Recall(context.Background(), map[string]any{
+		"session_id": "sess-1",
+		"query":      "   ",
+	})
+	require.NoError(t, err)
+	require.Equal(t, defaultRecallQuery, gotQuery)
+}
+
 func TestRetrieverRetrieveQueriesHindsight(t *testing.T) {
 	t.Parallel()
 

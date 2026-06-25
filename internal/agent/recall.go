@@ -44,7 +44,13 @@ func buildAutoRecallBlock(ctx context.Context, retriever engine.Retriever, promp
 			return ""
 		}
 	}
-	recall, err := retriever.Recall(ctx, map[string]any{"session_id": sessionID})
+	// Pass the composed query to Recall so the fallback path is also targeted
+	// to the current user prompt rather than using a generic hardcoded string.
+	recallOpts := map[string]any{"session_id": sessionID}
+	if query != "" {
+		recallOpts["query"] = query
+	}
+	recall, err := retriever.Recall(ctx, recallOpts)
 	if err != nil {
 		return ""
 	}
