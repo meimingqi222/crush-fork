@@ -1,0 +1,46 @@
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: false
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  review_status: true
+  review_details: false
+  commit_status: true
+  fail_commit_status: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        Follow the project conventions in AGENTS.md in the repo root:
+        use gofumpt formatting, explicit error returns, snake_case JSON tags,
+        capital-letter log messages, and context.Context as first param.
+    - path: "internal/agent/**"
+      instructions: |
+        Each tool has both a .go implementation and a .md description file.
+        System prompts are Go templates in internal/agent/templates/.
+    - path: "internal/ui/**"
+      instructions: |
+        Read internal/ui/AGENTS.md before reviewing TUI changes.
+
+  tools:
+    golangci-lint:
+      enabled: true
+
+chat:
+  auto_reply: false
