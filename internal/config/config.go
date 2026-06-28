@@ -1045,6 +1045,30 @@ type SubagentRuntimeConfig struct {
 	AllowRecursiveAgents         bool   `json:"allow_recursive_agents,omitempty" jsonschema:"description=Allow child agents to spawn children,default=false"` // TODO: not yet consumed at runtime; recursive agents blocked at tool_registration.go
 	DefaultIsolation             string `json:"default_isolation,omitempty" jsonschema:"description=Default child isolation mode,enum=none,enum=worktree,enum=external_sandbox,enum=managed_sandbox,default=none"`
 	SafeSummary                  bool   `json:"safe_summary,omitempty" jsonschema:"description=Prefer structured finish summaries over raw child output,default=true"` // TODO: not yet consumed at runtime; structured finish is already preferred when available
+
+	// SoftRequestBudget caps the number of LLM request steps a single
+	// subagent run may take before a "wrap up" steer is injected. A
+	// positive value overrides the default; 0 (or unset) keeps the default.
+	// Set DisableRequestBudget=true to turn the budget off entirely. The
+	// hard cap is SoftRequestBudget * HardRequestBudgetMultiplier; once
+	// exceeded the run is aborted.
+	SoftRequestBudget int `json:"soft_request_budget,omitempty" jsonschema:"description=Soft cap on LLM request steps per subagent run; 0 uses default=90; set disable_request_budget=true to turn off,default=90"`
+	// DisableRequestBudget turns off the soft/hard request-step budget
+	// for subagents entirely. Use this when you want subagents to run
+	// unbounded (e.g. for long-running batch jobs).
+	DisableRequestBudget bool `json:"disable_request_budget,omitempty" jsonschema:"description=Disable the soft/hard request-step budget for subagents,default=false"`
+	// HardRequestBudgetMultiplier scales the soft budget into a hard cap.
+	// Must be >= 1.0; values < 1.0 are clamped to 1.0 at effective-config
+	// resolution time. Hard cap = ceil(SoftRequestBudget * multiplier).
+	HardRequestBudgetMultiplier float64 `json:"hard_request_budget_multiplier,omitempty" jsonschema:"description=Multiplier applied to soft_request_budget to compute the hard abort ceiling,default=1.5"`
+
+	// MaxRuntimeMs is a hard wall-clock limit per subagent run, in
+	// milliseconds. 0 disables it. Defense-in-depth against provider-side
+	// stream hangs that escape the inference-layer watchdog — a stuck
+	// stream keeps completedStepsThisRun from advancing, so the step
+	// budget never fires. This cap triggers a normal abort with a
+	// 'timed out' reason so partial output is still salvaged.
+	MaxRuntimeMs int `json:"max_runtime_ms,omitempty" jsonschema:"description=Hard wall-clock limit per subagent run in ms; 0 disables,default=0"`
 }
 
 type RedactConfig struct {
@@ -1090,6 +1114,11 @@ func (c *Config) EffectiveSubagentRuntime() SubagentRuntimeConfig {
 		AllowRecursiveAgents:         false,
 		DefaultIsolation:             "none",
 		SafeSummary:                  true,
+		// Default soft/hard budget for subagent runs. Mirrors oh-my-pi's
+		// default of ~90 steps before a "wrap up" steer, with 1.5x scaling
+		// to the hard abort ceiling. 0 = disabled (caller may override).
+		SoftRequestBudget:           90,
+		HardRequestBudgetMultiplier: 1.5,
 	}
 	if c == nil || c.Subagents == nil {
 		return cfg
@@ -1114,6 +1143,32 @@ func (c *Config) EffectiveSubagentRuntime() SubagentRuntimeConfig {
 	}
 	if c.Subagents.SafeSummary == false {
 		cfg.SafeSummary = false
+	}
+	// Explicit user overrides for the request-step budget. A positive
+	// SoftRequestBudget replaces the default; zero/unset keeps the default.
+	// DisableRequestBudget=true turns the budget off entirely (the soft
+	// and hard caps both become 0, which the agent treats as "disabled").
+	if c.Subagents.DisableRequestBudget {
+		cfg.SoftRequestBudget = 0
+		cfg.HardRequestBudgetMultiplier = 0
+	} else {
+		if c.Subagents.SoftRequestBudget > 0 {
+			cfg.SoftRequestBudget = c.Subagents.SoftRequestBudget
+		}
+		if c.Subagents.HardRequestBudgetMultiplier > 0 {
+			// Clamp below 1.0 so the hard cap is never tighter than the soft
+			// cap (which would make the soft steer useless).
+			mult := c.Subagents.HardRequestBudgetMultiplier
+			if mult < 1.0 {
+				mult = 1.0
+			}
+			cfg.HardRequestBudgetMultiplier = mult
+		}
+	}
+	// MaxRuntimeMs wall-clock cap. A positive value overrides the default
+	// (0 = disabled).
+	if c.Subagents.MaxRuntimeMs > 0 {
+		cfg.MaxRuntimeMs = c.Subagents.MaxRuntimeMs
 	}
 	return cfg
 }

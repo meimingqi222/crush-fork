@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -167,6 +168,11 @@ type coordinator struct {
 	// agentRegistry tracks all running agents for IRC peer discovery.
 	agentRegistry *AgentRegistry
 
+	// lifecycle manages the keep-alive window for completed subagents so a
+	// follow-up agent tool call with ExistingSessionID can reuse the live
+	// SessionAgent instance instead of rebuilding one from disk history.
+	lifecycle *subagentLifecycleManager
+
 	// mainAgentID is the ID of the main (coder) agent in the registry.
 	mainAgentID string
 
@@ -253,6 +259,7 @@ func NewCoordinator(
 
 	c.agentRegistry = GlobalAgentRegistry()
 	c.mainAgentID = "0-Main"
+	c.lifecycle = newSubagentLifecycleManager(c.agentRegistry, &c.childSessionAgents)
 	c.agentRegistry.Register(AgentRef{
 		ID:          c.mainAgentID,
 		DisplayName: "Main",
@@ -1464,7 +1471,52 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 		PermissionMode:     permissionMode,
 		AllowedToolNames:   allowedToolNames,
 		Tools:              append([]fantasy.AgentTool(nil), toolSet...),
+		// The soft/hard request-step budget is only enforced on subagents.
+		// The main agent runs unbounded so interactive sessions are never
+		// force-aborted. Values come from EffectiveSubagentRuntime(); the
+		// hard cap is ceil(soft * multiplier).
+		RequestStepBudget: requestStepBudgetFor(isSubAgent, c.cfg.Config().EffectiveSubagentRuntime()),
+		HardRequestBudget: hardRequestBudgetFor(isSubAgent, c.cfg.Config().EffectiveSubagentRuntime()),
+		MaxRuntimeMs:      maxRuntimeMsFor(isSubAgent, c.cfg.Config().EffectiveSubagentRuntime()),
 	}, nil
+}
+
+// requestStepBudgetFor returns the soft step budget for the run, or 0 if the
+// budget is disabled (main agent or user-configured disable).
+func requestStepBudgetFor(isSubAgent bool, rc config.SubagentRuntimeConfig) int {
+	if !isSubAgent {
+		return 0
+	}
+	return rc.SoftRequestBudget
+}
+
+// hardRequestBudgetFor returns the hard step ceiling for the run, or 0 if the
+// budget is disabled. Computed as ceil(soft * multiplier).
+func hardRequestBudgetFor(isSubAgent bool, rc config.SubagentRuntimeConfig) int {
+	if !isSubAgent {
+		return 0
+	}
+	if rc.SoftRequestBudget <= 0 {
+		return 0
+	}
+	mult := rc.HardRequestBudgetMultiplier
+	if mult < 1.0 {
+		mult = 1.0
+	}
+	hard := int(math.Ceil(float64(rc.SoftRequestBudget) * mult))
+	if hard <= rc.SoftRequestBudget {
+		hard = rc.SoftRequestBudget + 1
+	}
+	return hard
+}
+
+// maxRuntimeMsFor returns the wall-clock cap for the run, or 0 if disabled.
+// Only enforced on subagents — the main interactive agent runs unbounded.
+func maxRuntimeMsFor(isSubAgent bool, rc config.SubagentRuntimeConfig) int {
+	if !isSubAgent {
+		return 0
+	}
+	return rc.MaxRuntimeMs
 }
 
 func shouldPersistRuntimeOnAgent(ctx context.Context, isSubAgent bool) bool {
@@ -2499,6 +2551,10 @@ type subAgentParams struct {
 	SkipHandoffReview         bool
 	SkipStructuredFinishCheck bool
 	IrcAgentID                string
+	// AgentID is the registry ID (e.g. "0-Main::explore") for this subagent.
+	// Used by the lifecycle manager to adopt/park the registry entry on
+	// successful completion. Empty when the subagent was not registered.
+	AgentID string
 	// PrecomputedContext, when non-empty, is used as the parent context
 	// prefix instead of calling buildSubagentHandoffSummary. This allows
 	// the batch path to compute context once and share it across tasks.
@@ -2613,6 +2669,10 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 	// tasks in the batch via PrecomputedContext.
 	batchContextPrefix := assembleSubagentPrompt(parentContext, baseContext, "")
 
+	// Deduplicate task names within this batch so that two tasks sharing the
+	// same name do not collide in the AgentRegistry or as IRC peer IDs.
+	idAllocator := newSubagentIDAllocator()
+
 	// Prepare each task synchronously: build the subagent, register it,
 	// drain mailbox messages, and assemble the runtime parameters.
 	for i, t := range params.Tasks {
@@ -2636,7 +2696,15 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			description = defaultSubagentDescription(subagentType, t.Assignment)
 		}
 
-		agentID := fmt.Sprintf("%s::%s", c.mainAgentID, t.Name)
+		// Deduplicate the display name within this batch (so two tasks
+		// named "explore" show up as "explore" and "explore-2"), then append
+		// a short random suffix to the registry ID so concurrent batches
+		// cannot collide on the same key. Without the suffix, a follow-up
+		// batch reusing the same task name would register the same agentID,
+		// and the prior batch's lifecycle Park() could Unregister the new
+		// entry out from under it.
+		uniqueName := idAllocator.Alloc(t.Name)
+		agentID := fmt.Sprintf("%s::%s-%s", c.mainAgentID, uniqueName, generateAgentID())
 		c.agentRegistry.Register(AgentRef{
 			ID:          agentID,
 			DisplayName: description,
@@ -2688,6 +2756,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			AgentBackground:    agentCfg.Background,
 			SkipHandoffReview:  true,
 			IrcAgentID:         agentID,
+			AgentID:            agentID,
 			PrecomputedContext: batchContextPrefix,
 		}
 	}
@@ -2783,13 +2852,29 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		if prepared[i].AgentID != "" {
 			switch result.Status {
 			case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings:
-				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusCompleted)
+				// Keep the registry entry Idle and arm a keep-alive timer so
+				// a follow-up agent tool call with ExistingSessionID can
+				// reuse the live SessionAgent (warm revive). The lifecycle
+				// manager parks the entry when the TTL fires.
+				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusIdle)
+				if c.lifecycle != nil && result.ChildSessionID != "" {
+					c.lifecycle.Adopt(result.ChildSessionID, prepared[i].AgentID, defaultSubagentAdoptTTL)
+				}
 			case message.ToolResultSubtaskStatusCanceled,
 				message.ToolResultSubtaskStatusFailed,
 				message.ToolResultSubtaskStatusBlocked:
+				// Failed/canceled subagents have no revive value: revoke any
+				// pending keep-alive timer, clear the childSessionAgents
+				// entry and unregister immediately.
 				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusAborted)
+				if c.lifecycle != nil && result.ChildSessionID != "" {
+					c.lifecycle.Revoke(result.ChildSessionID)
+				}
+				if result.ChildSessionID != "" {
+					c.childSessionAgents.Delete(result.ChildSessionID)
+				}
+				c.agentRegistry.Unregister(prepared[i].AgentID)
 			}
-			c.agentRegistry.Unregister(prepared[i].AgentID)
 		}
 	}
 
@@ -3246,7 +3331,13 @@ func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentPa
 	if policy == "" {
 		policy = MissingFinishWarn
 	}
-	shouldRetry := policy == MissingFinishRetryThenWarn || policy == MissingFinishRetryThenFail
+	// If the run was force-aborted by the hard request-step budget, the
+	// model already had a soft-steer chance to yield and ignored it.
+	// Retrying "call yield now" is wasted tokens — the model showed it
+	// won't comply. Skip the retry loop and go straight to the synthetic
+	// yield with whatever partial output we have.
+	shouldRetry := (policy == MissingFinishRetryThenWarn || policy == MissingFinishRetryThenFail) &&
+		!c.childSessionWasBudgetAborted(ctx, childSessionID)
 	if shouldRetry {
 		for range 2 {
 			_, runErr := params.Agent.Run(ctx, SessionAgentCall{
@@ -3287,6 +3378,28 @@ func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentPa
 			Error:  "yield was not called",
 		}, true
 	}
+}
+
+// childSessionWasBudgetAborted reports whether the most recent assistant
+// message on the child session ended with FinishReasonBudgetExceeded. Used
+// to skip fruitless yield retries when the model already ignored the soft
+// steer.
+func (c *coordinator) childSessionWasBudgetAborted(ctx context.Context, childSessionID string) bool {
+	if c.messages == nil {
+		return false
+	}
+	msgs, err := c.messages.List(ctx, childSessionID)
+	if err != nil {
+		return false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if msg.Role != message.Assistant || msg.IsSummaryMessage {
+			continue
+		}
+		return msg.FinishReason() == message.FinishReasonBudgetExceeded
+	}
+	return false
 }
 
 func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
@@ -3340,8 +3453,22 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	}
 	defer c.clearDeferredToolActivationsForSession(subSession.ID)
 
+	// Cancel any pending keep-alive timer from a previous run on this child
+	// session, so the stale timer cannot later evict the freshly-stored
+	// SessionAgent we are about to install.
+	if c.lifecycle != nil {
+		c.lifecycle.Revoke(subSession.ID)
+	}
 	c.childSessionAgents.Store(subSession.ID, params.Agent)
-	defer c.childSessionAgents.Delete(subSession.ID)
+	// keepAlive is flipped to true on the success path so the deferred
+	// cleanup skips evicting the SessionAgent — the lifecycle manager owns
+	// its keep-alive window from that point on.
+	keepAlive := false
+	defer func() {
+		if !keepAlive {
+			c.childSessionAgents.Delete(subSession.ID)
+		}
+	}()
 
 	if params.SessionSetup != nil {
 		params.SessionSetup(subSession.ID)
@@ -3582,6 +3709,18 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	)
 	if hasYield {
 		response = withSubagentYieldToolResponseMetadata(response, yieldResult)
+	}
+	// On a clean completion (no error, non-failed status) keep the
+	// SessionAgent live in childSessionAgents for a keep-alive window so a
+	// follow-up agent tool call targeting ExistingSessionID can warm-revive
+	// instead of rebuilding from disk. The lifecycle manager arms a TTL
+	// timer that will park the entry when it expires.
+	if status != message.ToolResultSubtaskStatusFailed &&
+		status != message.ToolResultSubtaskStatusCanceled &&
+		status != message.ToolResultSubtaskStatusBlocked &&
+		c.lifecycle != nil && params.AgentID != "" {
+		c.lifecycle.Adopt(subSession.ID, params.AgentID, defaultSubagentAdoptTTL)
+		keepAlive = true
 	}
 	return response, nil
 }
@@ -4559,6 +4698,14 @@ func (c *coordinator) runBackgroundTaskNode(
 			AgentIsolation:    agentCfg.Isolation,
 			AgentBackground:   agentCfg.Background,
 			SkipHandoffReview: true,
+			// AgentID is the background-agent registry ID ("a-xxxx"). Passing
+			// it here lets the lifecycle manager keep the SessionAgent live
+			// in childSessionAgents for the keep-alive window so a follow-up
+			// messenger command warm-revives instead of rebuilding from
+			// disk. The lifecycle's Park() will call agentRegistry.Unregister
+			// with this ID, but background agents are not registered in
+			// agentRegistry so the call is a harmless no-op.
+			AgentID: agentID,
 		}
 		response, runErr := c.runSubAgentDirect(attemptCtx, runParams)
 		cancel()

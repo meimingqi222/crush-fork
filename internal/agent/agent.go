@@ -313,6 +313,21 @@ type sessionAgentRuntimeConfig struct {
 	PermissionMode     session.PermissionMode
 	AllowedToolNames   []string
 	Tools              []fantasy.AgentTool
+
+	// RequestStepBudget, when > 0, enables the soft/hard step budget for
+	// this run. The agent injects a "wrap up" steer message after
+	// RequestStepBudget completed steps and stops the run after
+	// HardRequestBudget steps (computed by the caller as
+	// ceil(RequestStepBudget * HardRequestBudgetMultiplier)). A zero value
+	// disables the budget entirely (used for the main agent).
+	RequestStepBudget int
+	HardRequestBudget int
+	// MaxRuntimeMs, when > 0, is a hard wall-clock cap on the entire
+	// runStream attempt. If the deadline fires before the stream loop
+	// exits naturally, the run is aborted with FinishReasonBudgetExceeded
+	// and the salvage snapshot is attached. Defense-in-depth against
+	// provider stream hangs that don't advance completedStepsThisRun.
+	MaxRuntimeMs int
 }
 
 type sessionAgentRuntimeConfigContextKey struct{}
@@ -445,6 +460,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	runtimeConfig, err := a.refreshCallConfigIfNeeded(genCtx, &call)
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply a wall-clock deadline to the run when configured. This catches
+	// stream hangs that don't advance completedStepsThisRun (provider bugs,
+	// thinking-mode loops, network stalls) which the step budget cannot
+	// see. The deadline fires as a context.DeadlineExceeded error and is
+	// handled in the cancel/error path below, where salvage + budget
+	// finish reason are attached. Only enabled for subagents.
+	if runtimeConfig != nil && runtimeConfig.MaxRuntimeMs > 0 {
+		var wallCancel context.CancelFunc
+		genCtx, wallCancel = context.WithTimeout(genCtx, time.Duration(runtimeConfig.MaxRuntimeMs)*time.Millisecond)
+		defer wallCancel()
 	}
 	slog.Debug("[PERF] sessionAgent: initial setup done", "duration", time.Since(start), "session_id", call.SessionID)
 
@@ -694,6 +721,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Anthropic `redacted_thinking` content block, so subsequent
 	// prepareStep invocations strip those blocks from the history.
 	var stripRedactedThinking bool
+	// softSteerInjected tracks whether the soft request-budget steer
+	// message has already been injected during this run. We keep it at
+	// run scope (not sessionAgentRuntimeConfig) because the runtime config
+	// is refreshed per step and would otherwise reset the flag.
+	var softSteerInjected bool
+	// hardBudgetExceeded records that the run was force-aborted by the
+	// hard request-step ceiling. Surfaced in the run result so callers
+	// (e.g. the coordinator) can distinguish natural completion from
+	// budget-driven abort.
+	var hardBudgetExceeded bool
 	// inStepCompactionBase holds the compacted messages produced by the
 	// ChatMessagesTransform plugin during a PrepareStep call. On each
 	// subsequent step we prepend this base instead of the full fantasy-
@@ -703,6 +740,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// or after that index are the "new" messages appended since.
 	var inStepCompactionBase []fantasy.Message
 	var inStepCompactionOffset int
+	// salvage captures the trailing assistant text streamed during this run.
+	// When the run is canceled mid-stream the snapshot is attached to the
+	// synthetic tool result returned to the parent so partial work is not
+	// lost. It is reset at the start of each stream attempt.
+	salvage := newSalvageBuffer(salvageMaxRunes)
 	runStream := func(providerOptions fantasy.ProviderOptions, billFirstStepAsUser bool) (*fantasy.AgentResult, error) {
 		prefetchedRecallInjected := prefetchedRecallReady
 		injectedInPrepareStep := false
@@ -718,6 +760,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		runToolUses = 0
 		runLastTool = ""
 		firstRequestStep = billFirstStepAsUser
+		// Reset budget flags so a retry starts fresh — each stream attempt
+		// gets its own soft-steer window and hard-abort ceiling.
+		softSteerInjected = false
+		hardBudgetExceeded = false
+		// Reset salvage so a retry does not surface stale text from the
+		// previous failed attempt.
+		salvage.reset()
 
 		if err := a.plugins().TriggerChatBeforeRequest(genCtx, plugin.ChatBeforeRequestInput{
 			SessionID: call.SessionID,
@@ -1001,6 +1050,29 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
 				}
 
+				// Soft request-step budget steer. Inject a "wrap up"
+				// user message exactly once, on the first step whose
+				// completed-step count crosses the soft cap. The hard
+				// ceiling is enforced separately via StopWhen so the
+				// model still gets one final turn to yield.
+				if stepRuntimeConfig != nil && stepRuntimeConfig.RequestStepBudget > 0 &&
+					!softSteerInjected && completedStepsThisRun >= stepRuntimeConfig.RequestStepBudget {
+					softSteerInjected = true
+					steer := fmt.Sprintf(
+						"[budget] You have used %d steps and reached your request budget for this task. "+
+							"Wrap up now: finish the current tool call if any, then summarize what you have done and call `yield` with your final result. "+
+							"Do not start new sub-tasks — the run will be aborted soon if you do not yield.",
+						completedStepsThisRun,
+					)
+					prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(steer))
+					slog.Warn("Subagent soft request budget reached; injected wrap-up steer",
+						"session_id", call.SessionID,
+						"completed_steps", completedStepsThisRun,
+						"soft_budget", stepRuntimeConfig.RequestStepBudget,
+						"hard_budget", stepRuntimeConfig.HardRequestBudget,
+					)
+				}
+
 				// Defensive structural merge: collapse any consecutive
 				// same-role fantasy messages into a single message before
 				// handing off to provider serialization. Even though
@@ -1162,6 +1234,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 
 				currentAssistant.AppendContent(text)
+				// Mirror trailing assistant text into the salvage buffer so
+				// cancel-time error synthesis can surface partial output
+				// instead of just a generic cancellation message.
+				salvage.append(text)
 				return a.messages.Update(genCtx, *currentAssistant)
 			},
 			OnToolInputStart: func(id string, toolName string) error {
@@ -1394,6 +1470,28 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				func(steps []fantasy.StepResult) bool {
 					return hasRepeatedToolCalls(steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
 				},
+				// Hard request-step budget ceiling. Aborts the stream loop
+				// once completedStepsThisRun crosses the hard cap. The soft
+				// steer (injected in PrepareStep) gives the model one last
+				// chance to yield naturally; this StopWhen fires only when
+				// the model ignores the steer and keeps going.
+				func(_ []fantasy.StepResult) bool {
+					if runtimeConfig == nil || runtimeConfig.HardRequestBudget <= 0 {
+						return false
+					}
+					if completedStepsThisRun < runtimeConfig.HardRequestBudget {
+						return false
+					}
+					hardBudgetExceeded = true
+					slog.Warn("Subagent hard request budget exceeded; aborting run",
+						"session_id", call.SessionID,
+						"completed_steps", completedStepsThisRun,
+						"hard_budget", runtimeConfig.HardRequestBudget,
+						"model", largeModel.ModelCfg.Model,
+						"provider", largeModel.ModelCfg.Provider,
+					)
+					return true
+				},
 			},
 		})
 
@@ -1420,7 +1518,33 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 
 		if err == nil {
+			// When the run was force-aborted by the hard request-step
+			// budget, override the finish reason so callers can tell this
+			// wasn't a natural completion. Keep the model's last assistant
+			// text/tool calls intact — the parent agent may still salvage
+			// partial work from them.
+			if hardBudgetExceeded && currentAssistant != nil {
+				currentAssistant.AddFinish(message.FinishReasonBudgetExceeded, "Request budget exceeded", "")
+				if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
+					slog.Warn("Failed to persist budget-exceeded finish reason", "session_id", call.SessionID, "error", updateErr)
+				}
+			}
 			hydrateAgentResultFromAssistantMessage(result, currentAssistant)
+			// When the run was force-aborted by the hard request-step
+			// budget, the model's last assistant message is frequently a
+			// bare tool call with no summary text. Attach the salvage
+			// snapshot so the parent agent has something to work with
+			// instead of an empty result.
+			if hardBudgetExceeded && result != nil {
+				if snippet := salvage.snapshot(); snippet != "" {
+					salvagePart := fantasy.TextContent{Text: snippet}
+					result.Response.Content = append(fantasy.ResponseContent{salvagePart}, result.Response.Content...)
+					if len(result.Steps) > 0 {
+						last := &result.Steps[len(result.Steps)-1]
+						last.Content = append(fantasy.ResponseContent{salvagePart}, last.Content...)
+					}
+				}
+			}
 		}
 		if hookErr := a.plugins().TriggerChatAfterResponse(genCtx, plugin.ChatAfterResponseInput{
 			SessionID: call.SessionID,
@@ -1528,7 +1652,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			}
 		}
 
-		if err == nil && shouldRetryForTextualToolCallProtocol(currentAssistant) {
+		// When force-aborted by the hard request-step budget, do not enter
+		// the textual-tool-call / empty-stream retry paths: the model already
+		// had its soft-steer chance, and retrying would reset
+		// completedStepsThisRun and hand it a fresh budget, defeating the
+		// hard cap. Fall through to the err == nil block below which tags
+		// the finish reason and attaches the salvage snapshot.
+		if err == nil && !hardBudgetExceeded && shouldRetryForTextualToolCallProtocol(currentAssistant) {
 			if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
 				return nil, cleanupErr
 			}
@@ -1575,7 +1705,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			continue
 		}
 
-		if err == nil && shouldRetryForEmptyStreamResponse(currentAssistant) {
+		if err == nil && !hardBudgetExceeded && shouldRetryForEmptyStreamResponse(currentAssistant) {
 			if cleanupErr := a.cleanupFailedAttempt(ctx, currentAssistant, currentStepToolMessageIDs); cleanupErr != nil {
 				return nil, cleanupErr
 			}
@@ -1980,10 +2110,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	if err != nil {
 		isCancelErr := errors.Is(err, context.Canceled)
+		// When the wall-clock deadline we set above fires, treat it like a
+		// cancel for salvage purposes (so partial assistant text is surfaced
+		// to the parent) but tag it with FinishReasonBudgetExceeded so
+		// callers know it was a budget-driven abort, not a user action.
+		isWallClockTimeout := runtimeConfig != nil && runtimeConfig.MaxRuntimeMs > 0 && errors.Is(err, context.DeadlineExceeded)
 		isPermissionErr := permission.IsPermissionError(err)
 		permissionErr, hasPermissionErr := permission.AsPermissionError(err)
 		failureKind := "error"
-		if isCancelErr {
+		if isCancelErr || isWallClockTimeout {
 			failureKind = "canceled"
 		} else if isPermissionErr {
 			failureKind = "permission_denied"
@@ -1999,7 +2134,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			"model", largeModel.ModelCfg.Model,
 			"provider", largeModel.ModelCfg.Provider,
 		}
-		if isCancelErr {
+		if isCancelErr || isWallClockTimeout {
 			slog.Warn("Agent run interrupted", logArgs...)
 		} else {
 			slog.Error("Agent run failed", logArgs...)
@@ -2049,8 +2184,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				continue
 			}
 			content := "There was an error while executing the tool"
-			if isCancelErr {
-				content = "Error: user cancelled assistant tool calling"
+			if isCancelErr || isWallClockTimeout {
+				if isWallClockTimeout {
+					content = "Error: wall-clock budget exceeded, run aborted"
+				} else {
+					content = "Error: user cancelled assistant tool calling"
+				}
+				// When the run was interrupted mid-stream (user cancel or
+				// wall-clock timeout), surface any partial assistant text
+				// captured by the salvage buffer so the parent agent (or user)
+				// can read what was produced just before the interruption.
+				// This is far more useful than a bare cancel message and lets
+				// the parent salvage partial progress.
+				if snippet := salvage.snapshot(); snippet != "" {
+					label := "cancellation"
+					if isWallClockTimeout {
+						label = "timeout"
+					}
+					content += "\n\nPartial output before " + label + ":\n" + snippet
+				}
 			} else if isPermissionErr {
 				if hasPermissionErr && permissionErr.Kind == permission.PermissionErrorKindPolicyDenied {
 					content = cmp.Or(permissionErr.Message, "Permission blocked by safety policy")
@@ -2084,7 +2236,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		var providerErr *fantasy.ProviderError
 		const defaultTitle = "Provider Error"
 		linkStyle := lipgloss.NewStyle().Foreground(charmtone.Guac).Underline(true)
-		if isCancelErr {
+		if isWallClockTimeout {
+			currentAssistant.AddFinish(message.FinishReasonBudgetExceeded, "Wall-clock budget exceeded", "")
+		} else if isCancelErr {
 			currentAssistant.AddFinish(message.FinishReasonCanceled, "User canceled request", "")
 		} else if isPermissionErr {
 			if hasPermissionErr && permissionErr.Kind == permission.PermissionErrorKindPolicyDenied {
