@@ -34,6 +34,11 @@ const (
 	FinishReasonCanceled         FinishReason = "canceled"
 	FinishReasonError            FinishReason = "error"
 	FinishReasonPermissionDenied FinishReason = "permission_denied"
+	// FinishReasonBudgetExceeded marks a run that was force-aborted by the
+	// soft/hard request-step budget. Distinct from generic error so callers
+	// can skip fruitless yield retries — the model already had its steer
+	// chance and ignored it.
+	FinishReasonBudgetExceeded FinishReason = "budget_exceeded"
 
 	// Should never happen
 	FinishReasonUnknown FinishReason = "unknown"

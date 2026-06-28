@@ -133,6 +133,11 @@ func TestEffectiveSubagentRuntimeDefaults(t *testing.T) {
 	require.Equal(t, 4, runtime.MaxConcurrency)
 	require.Equal(t, "none", runtime.DefaultIsolation)
 	require.True(t, runtime.SafeSummary)
+	// Budget defaults: soft=90, multiplier=1.5, wall-clock disabled.
+	require.Equal(t, 90, runtime.SoftRequestBudget)
+	require.Equal(t, 1.5, runtime.HardRequestBudgetMultiplier)
+	require.Equal(t, 0, runtime.MaxRuntimeMs)
+	require.False(t, runtime.DisableRequestBudget)
 }
 
 func TestEffectiveSubagentRuntimeOverrides(t *testing.T) {
@@ -154,6 +159,54 @@ func TestEffectiveSubagentRuntimeOverrides(t *testing.T) {
 	require.True(t, runtime.AllowRecursiveAgents)
 	require.Equal(t, "worktree", runtime.DefaultIsolation)
 	require.False(t, runtime.SafeSummary)
+}
+
+func TestEffectiveSubagentRuntimeBudgetOverrides(t *testing.T) {
+	t.Parallel()
+
+	// Explicit soft budget and multiplier override defaults.
+	runtime := (&Config{Subagents: &SubagentRuntimeConfig{
+		SoftRequestBudget:           50,
+		HardRequestBudgetMultiplier: 2.0,
+		MaxRuntimeMs:                60000,
+	}}).EffectiveSubagentRuntime()
+	require.Equal(t, 50, runtime.SoftRequestBudget)
+	require.Equal(t, 2.0, runtime.HardRequestBudgetMultiplier)
+	require.Equal(t, 60000, runtime.MaxRuntimeMs)
+}
+
+func TestEffectiveSubagentRuntimeDisableBudget(t *testing.T) {
+	t.Parallel()
+
+	// DisableRequestBudget zeroes the soft and hard budgets even when
+	// explicit SoftRequestBudget is set.
+	runtime := (&Config{Subagents: &SubagentRuntimeConfig{
+		SoftRequestBudget:    50,
+		DisableRequestBudget: true,
+	}}).EffectiveSubagentRuntime()
+	require.Equal(t, 0, runtime.SoftRequestBudget)
+	require.Equal(t, 0.0, runtime.HardRequestBudgetMultiplier)
+}
+
+func TestEffectiveSubagentRuntimeSoftBudgetZeroKeepsDefault(t *testing.T) {
+	t.Parallel()
+
+	// SoftRequestBudget=0 (unset) keeps the default 90 — it does NOT
+	// disable the budget.
+	runtime := (&Config{Subagents: &SubagentRuntimeConfig{
+		MaxConcurrency: 4,
+	}}).EffectiveSubagentRuntime()
+	require.Equal(t, 90, runtime.SoftRequestBudget)
+}
+
+func TestEffectiveSubagentRuntimeMaxRuntimeMsZeroDisabled(t *testing.T) {
+	t.Parallel()
+
+	// MaxRuntimeMs=0 (unset) means wall-clock cap is disabled.
+	runtime := (&Config{Subagents: &SubagentRuntimeConfig{
+		MaxRuntimeMs: 0,
+	}}).EffectiveSubagentRuntime()
+	require.Equal(t, 0, runtime.MaxRuntimeMs)
 }
 
 func TestConfig_LoadFromBytesMemoryEnabledExplicitFalse(t *testing.T) {
