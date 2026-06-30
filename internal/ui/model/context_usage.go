@@ -106,7 +106,7 @@ func contextWindowForUsageMessage(msg message.Message, cfg *config.Config, selec
 		if providerCfg, ok := cfg.Providers.Get(msg.Provider); ok {
 			for _, candidate := range providerCfg.Models {
 				if candidate.ID == msg.Model {
-					return agent.EffectiveContextWindow(candidate)
+					return agent.EffectiveContextWindow(candidate.Model)
 				}
 			}
 		}

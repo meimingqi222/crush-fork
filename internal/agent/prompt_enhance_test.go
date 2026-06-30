@@ -60,10 +60,12 @@ func TestEnhancePromptModelPrefersSmallConfiguredModel(t *testing.T) {
 		Type:    openaicompat.Name,
 		BaseURL: "http://localhost:1", // not actually dialed during model selection
 		APIKey:  "test-key",
-		Models: []catwalk.Model{{
-			ID:               testModelID,
-			ContextWindow:    64_000,
-			DefaultMaxTokens: 2_048,
+		Models: []config.ProviderModel{{
+			Model: catwalk.Model{
+				ID:               testModelID,
+				ContextWindow:    64_000,
+				DefaultMaxTokens: 2_048,
+			},
 		}},
 	}
 	cfg.Config().Providers.Set(testProviderID, wantProviderCfg)
@@ -439,11 +441,13 @@ func TestEnhancePromptSendsInitialMessagesWithoutPrompt(t *testing.T) {
 		Type:    openaicompat.Name,
 		BaseURL: server.URL,
 		APIKey:  "test-api-key",
-		Models: []catwalk.Model{{
-			ID:               smallCfg.Model,
-			Name:             "Small Test Model",
-			ContextWindow:    64_000,
-			DefaultMaxTokens: 2_048,
+		Models: []config.ProviderModel{{
+			Model: catwalk.Model{
+				ID:               smallCfg.Model,
+				Name:             "Small Test Model",
+				ContextWindow:    64_000,
+				DefaultMaxTokens: 2_048,
+			},
 		}},
 	})
 

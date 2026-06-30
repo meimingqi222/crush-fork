@@ -96,6 +96,16 @@ func TestHandleAgentNotificationSubagentAutoWakeup(t *testing.T) {
 	require.NoError(t, err)
 	ui.session = &sess
 
+	var capturedPrompt string
+	mockCoord := &mockRunCoordinator{
+		Coordinator: ui.com.App.AgentCoordinator,
+		runFunc: func(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+			capturedPrompt = prompt
+			return nil, nil
+		},
+	}
+	ui.com.App.AgentCoordinator = mockCoord
+
 	cmd := ui.handleAgentNotification(notify.Notification{
 		SessionID:    sess.ID,
 		SessionTitle: "demo",
@@ -108,6 +118,7 @@ func TestHandleAgentNotificationSubagentAutoWakeup(t *testing.T) {
 	runCmdRecursively(cmd)
 	require.Len(t, backend.notifications, 1)
 	require.Contains(t, backend.notifications[0].Message, "Subagent task sub-1 completed")
+	require.Equal(t, "<subagent_report>All completed successfully</subagent_report>", capturedPrompt)
 }
 
 func TestHandleAgentNotificationSubagentQueued(t *testing.T) {

@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
@@ -98,13 +100,17 @@ func TestBashTool_DefaultAutoBackgroundThreshold(t *testing.T) {
 }
 
 func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
+	oldTimeoutUnit := bashTimeoutUnit
+	bashTimeoutUnit = 10 * time.Millisecond
+	t.Cleanup(func() { bashTimeoutUnit = oldTimeoutUnit })
+
 	workingDir := t.TempDir()
 	tool := newBashToolForTest(workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
 		Description:         "custom threshold",
-		Command:             "sleep 1.5 && echo done",
+		Command:             "sleep 0.2 && echo done",
 		AutoBackgroundAfter: 1,
 	})
 
@@ -178,17 +184,7 @@ func TestPublishShellRuntime_UsesDetachedToolRuntimeContext(t *testing.T) {
 
 func TestBashTool_HookPassthroughFallsBackToOriginalCommand(t *testing.T) {
 	workingDir := t.TempDir()
-	rewriteHook := helperBinary(t, "rewrite-hook", `package main
-import (
-	"fmt"
-	"os"
-)
-func main() {
-	if len(os.Args) < 2 {
-		os.Exit(1)
-	}
-	fmt.Print("false")
-}`)
+	rewriteHook := helperScript(t, "rewrite-hook", "false")
 
 	enabled := true
 	hookMgr, err := hooks.NewManager([]hooks.HookConfig{
@@ -252,24 +248,23 @@ func runBashTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, para
 	return resp
 }
 
-func helperBinary(t *testing.T, name, src string) string {
+func helperScript(t *testing.T, name, output string) string {
 	t.Helper()
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go toolchain not found, skipping")
-	}
 
 	dir := t.TempDir()
-	srcFile := filepath.Join(dir, "main.go")
-	require.NoError(t, os.WriteFile(srcFile, []byte(src), 0o644))
-
-	binName := name
 	if runtime.GOOS == "windows" {
-		binName += ".exe"
+		path := filepath.Join(dir, name+".bat")
+		require.NoError(t, os.WriteFile(path, []byte("@echo off\r\n<nul set /p ="+output+"\r\n"), 0o644))
+		return path
 	}
-	binPath := filepath.Join(dir, binName)
-	out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binPath, srcFile).CombinedOutput()
-	require.NoError(t, err, "build helper binary: %s", out)
-	return binPath
+
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf %s "+shellQuote(output)+"\n"), 0o755))
+	return path
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func TestRestrictedGitBashTool_AllowsReadOnlyGitCommands(t *testing.T) {

@@ -306,9 +306,13 @@ func newConfigWithProviderModels() *Config {
 		RecentModels: map[SelectedModelType][]SelectedModel{},
 	}
 	cfg.Providers.Set("openai", ProviderConfig{
-		Models: []catwalk.Model{
-			{ID: "gpt-4o"},
-			{ID: "gpt-4o-mini"},
+		Models: []ProviderModel{
+			{
+				Model: catwalk.Model{ID: "gpt-4o"},
+			},
+			{
+				Model: catwalk.Model{ID: "gpt-4o-mini"},
+			},
 		},
 	})
 	return cfg

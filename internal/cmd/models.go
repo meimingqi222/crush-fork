@@ -61,7 +61,7 @@ crush models gpt5`,
 			}
 			var found bool
 			for _, model := range provider.Models {
-				if !filter(provider, model) {
+				if !filter(provider, model.Model) {
 					continue
 				}
 				providerModels[providerID] = append(providerModels[providerID], model.ID)

@@ -227,7 +227,42 @@ type ProviderConfig struct {
 	ExtraParams map[string]string `json:"-"`
 
 	// The provider models
-	Models []catwalk.Model `json:"models,omitempty" jsonschema:"description=List of models available from this provider"`
+	Models []ProviderModel `json:"models,omitempty" jsonschema:"description=List of models available from this provider"`
+}
+
+// ProviderModel extends catwalk.Model with Crush-specific provider options.
+type ProviderModel struct {
+	catwalk.Model
+	// UseResponsesAPI forces this model to use the OpenAI Responses API
+	// (/v1/responses) instead of Chat Completions.
+	UseResponsesAPI bool `json:"use_responses_api,omitempty" jsonschema:"description=Force this model to use the OpenAI Responses API instead of Chat Completions,default=false"`
+}
+
+// ProviderModelID creates a provider model with only an ID set.
+func ProviderModelID(id string) ProviderModel {
+	return ProviderModel{Model: catwalk.Model{ID: id}}
+}
+
+// ProviderModelsFromCatwalk converts known-provider models into ProviderModel values.
+func ProviderModelsFromCatwalk(models []catwalk.Model) []ProviderModel {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]ProviderModel, len(models))
+	for i, model := range models {
+		out[i] = ProviderModel{Model: model}
+	}
+	return out
+}
+
+// ModelUseResponsesAPI reports whether a configured model should use the Responses API.
+func (pc *ProviderConfig) ModelUseResponsesAPI(modelID string) bool {
+	for _, model := range pc.Models {
+		if model.ID == modelID {
+			return model.UseResponsesAPI
+		}
+	}
+	return false
 }
 
 // ToProvider converts the [ProviderConfig] to a [catwalk.Provider].
@@ -241,20 +276,7 @@ func (pc *ProviderConfig) ToProvider() catwalk.Provider {
 
 	// Convert models
 	for i, model := range pc.Models {
-		provider.Models[i] = catwalk.Model{
-			ID:                     model.ID,
-			Name:                   model.Name,
-			CostPer1MIn:            model.CostPer1MIn,
-			CostPer1MOut:           model.CostPer1MOut,
-			CostPer1MInCached:      model.CostPer1MInCached,
-			CostPer1MOutCached:     model.CostPer1MOutCached,
-			ContextWindow:          model.ContextWindow,
-			DefaultMaxTokens:       model.DefaultMaxTokens,
-			CanReason:              model.CanReason,
-			ReasoningLevels:        model.ReasoningLevels,
-			DefaultReasoningEffort: model.DefaultReasoningEffort,
-			SupportsImages:         model.SupportsImages,
-		}
+		provider.Models[i] = model.Model
 	}
 
 	return provider
@@ -1192,7 +1214,8 @@ func (c *Config) GetModel(provider, model string) *catwalk.Model {
 	if providerConfig, ok := c.Providers.Get(provider); ok {
 		for _, m := range providerConfig.Models {
 			if m.ID == model {
-				return &m
+				cm := m.Model
+				return &cm
 			}
 		}
 	}

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -74,8 +73,15 @@ func TestCrushInfo_HighValueSections(t *testing.T) {
 	}
 
 	cfg.Providers = csync.NewMap[string, config.ProviderConfig]()
-	cfg.Providers.Set("zeta", config.ProviderConfig{Models: []catwalk.Model{{ID: "zeta-1"}}})
-	cfg.Providers.Set("alpha", config.ProviderConfig{Models: []catwalk.Model{{ID: "alpha-1"}, {ID: "alpha-2"}}})
+	cfg.Providers.Set("zeta", config.ProviderConfig{
+		Models: []config.ProviderModel{config.ProviderModelID("zeta-1")},
+	})
+	cfg.Providers.Set("alpha", config.ProviderConfig{
+		Models: []config.ProviderModel{
+			config.ProviderModelID("alpha-1"),
+			config.ProviderModelID("alpha-2"),
+		},
+	})
 
 	cfg.LSP = config.LSPs{
 		"gopls":         {Disabled: false},
@@ -158,7 +164,7 @@ func TestCrushInfo_NoSecretsLeak(t *testing.T) {
 	cfg.Providers = csync.NewMap[string, config.ProviderConfig]()
 	cfg.Providers.Set("openai", config.ProviderConfig{
 		APIKey: "sk-super-secret-key-12345",
-		Models: []catwalk.Model{{ID: "gpt-4o"}},
+		Models: []config.ProviderModel{config.ProviderModelID("gpt-4o")},
 	})
 
 	output := buildCrushInfo(context.Background(), store, nil, nil)

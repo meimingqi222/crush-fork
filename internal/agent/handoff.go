@@ -161,19 +161,21 @@ func (c *coordinator) selectedModelWithOverride(
 		return Model{}, config.ProviderConfig{}, errModelProviderNotConfigured
 	}
 
-	var catwalkModel *catwalk.Model
+	var catwalkModel catwalk.Model
+	var foundModel bool
 	for i := range providerCfg.Models {
 		if providerCfg.Models[i].ID == selectedModel.Model {
-			catwalkModel = &providerCfg.Models[i]
+			catwalkModel = providerCfg.Models[i].Model
+			foundModel = true
 			break
 		}
 	}
-	if catwalkModel == nil {
+	if !foundModel {
 		return Model{}, config.ProviderConfig{}, errTargetModelNotFound
 	}
 
 	thinkingDisabled := selectedModel.Think != nil && !*selectedModel.Think
-	provider, err := c.buildProvider(providerCfg, *catwalkModel, isSubAgent, thinkingDisabled)
+	provider, err := c.buildProvider(providerCfg, catwalkModel, isSubAgent, thinkingDisabled)
 	if err != nil {
 		return Model{}, config.ProviderConfig{}, err
 	}
@@ -190,7 +192,7 @@ func (c *coordinator) selectedModelWithOverride(
 
 	return Model{
 		Model:      languageModel,
-		CatwalkCfg: *catwalkModel,
+		CatwalkCfg: catwalkModel,
 		ModelCfg:   selectedModel,
 	}, providerCfg, nil
 }

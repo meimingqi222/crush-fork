@@ -426,13 +426,15 @@ func TestConfig_configureProvidersWithOverride(t *testing.T) {
 	cfg.Providers.Set("openai", ProviderConfig{
 		APIKey:  "xyz",
 		BaseURL: "https://api.openai.com/v2",
-		Models: []catwalk.Model{
+		Models: []ProviderModel{
 			{
-				ID:   "test-model",
-				Name: "Updated",
+				Model: catwalk.Model{
+					ID:   "test-model",
+					Name: "Updated",
+				},
 			},
 			{
-				ID: "another-model",
+				Model: catwalk.Model{ID: "another-model"},
 			},
 		},
 	})
@@ -455,6 +457,40 @@ func TestConfig_configureProvidersWithOverride(t *testing.T) {
 	require.False(t, pc.ResponsesWebSocket)
 }
 
+func TestConfig_configureProvidersPreservesUseResponsesAPI(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Providers: csync.NewMap[string, ProviderConfig](),
+	}
+	cfg.Providers.Set("copilot-responses", ProviderConfig{
+		Type:    catwalk.TypeOpenAI,
+		BaseURL: "http://localhost:4141/v1",
+		APIKey:  "test-key",
+		Models: []ProviderModel{{
+			Model: catwalk.Model{
+				ID: "grok-composer-2.5-fast",
+			},
+			UseResponsesAPI: true,
+		}},
+	})
+	cfg.setDefaults("/tmp", "")
+
+	err := cfg.configureProviders(
+		testStore(cfg),
+		env.NewFromMap(nil),
+		NewEnvironmentVariableResolver(env.NewFromMap(nil)),
+		nil,
+	)
+	require.NoError(t, err)
+
+	pc, ok := cfg.Providers.Get("copilot-responses")
+	require.True(t, ok)
+	require.Len(t, pc.Models, 1)
+	require.True(t, pc.Models[0].UseResponsesAPI)
+	require.True(t, pc.ModelUseResponsesAPI("grok-composer-2.5-fast"))
+}
+
 func TestConfig_configureProvidersWithOverrideKeepsResponsesWebSocket(t *testing.T) {
 	knownProviders := []catwalk.Provider{
 		{
@@ -474,10 +510,12 @@ func TestConfig_configureProvidersWithOverrideKeepsResponsesWebSocket(t *testing
 		APIKey:             "xyz",
 		BaseURL:            "https://api.openai.com/v2",
 		ResponsesWebSocket: true,
-		Models: []catwalk.Model{
+		Models: []ProviderModel{
 			{
-				ID:   "test-model",
-				Name: "Updated",
+				Model: catwalk.Model{
+					ID:   "test-model",
+					Name: "Updated",
+				},
 			},
 		},
 	})
@@ -512,9 +550,9 @@ func TestConfig_configureProvidersWithNewProvider(t *testing.T) {
 			"custom": {
 				APIKey:  "xyz",
 				BaseURL: "https://api.someendpoint.com/v2",
-				Models: []catwalk.Model{
+				Models: []ProviderModel{
 					{
-						ID: "test-model",
+						Model: catwalk.Model{ID: "test-model"},
 					},
 				},
 			},
@@ -1029,8 +1067,8 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 			Providers: csync.NewMapFrom(map[string]ProviderConfig{
 				"custom": {
 					BaseURL: "https://api.custom.com/v1",
-					Models: []catwalk.Model{{
-						ID: "test-model",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "test-model"},
 					}},
 				},
 				"openai": {
@@ -1055,8 +1093,8 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 			Providers: csync.NewMapFrom(map[string]ProviderConfig{
 				"custom": {
 					APIKey: "test-key",
-					Models: []catwalk.Model{{
-						ID: "test-model",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "test-model"},
 					}},
 				},
 			}),
@@ -1079,7 +1117,7 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 				"custom": {
 					APIKey:  "test-key",
 					BaseURL: "https://api.custom.com/v1",
-					Models:  []catwalk.Model{},
+					Models:  []ProviderModel{},
 				},
 			}),
 		}
@@ -1102,8 +1140,8 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 					APIKey:  "test-key",
 					BaseURL: "https://api.custom.com/v1",
 					Type:    "unsupported",
-					Models: []catwalk.Model{{
-						ID: "test-model",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "test-model"},
 					}},
 				},
 			}),
@@ -1127,8 +1165,8 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 					APIKey:  "test-key",
 					BaseURL: "https://api.custom.com/v1",
 					Type:    catwalk.TypeOpenAI,
-					Models: []catwalk.Model{{
-						ID: "test-model",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "test-model"},
 					}},
 				},
 			}),
@@ -1155,8 +1193,8 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 					APIKey:  "test-key",
 					BaseURL: "https://api.anthropic.com/v1",
 					Type:    catwalk.TypeAnthropic,
-					Models: []catwalk.Model{{
-						ID: "claude-3-sonnet",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "claude-3-sonnet"},
 					}},
 				},
 			}),
@@ -1185,8 +1223,8 @@ func TestConfig_configureProvidersCustomProviderValidation(t *testing.T) {
 					BaseURL: "https://api.custom.com/v1",
 					Type:    catwalk.TypeOpenAI,
 					Disable: true,
-					Models: []catwalk.Model{{
-						ID: "test-model",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "test-model"},
 					}},
 				},
 			}),
@@ -1456,10 +1494,12 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 				"custom": {
 					APIKey:  "test-key",
 					BaseURL: "https://api.custom.com/v1",
-					Models: []catwalk.Model{
+					Models: []ProviderModel{
 						{
-							ID:               "model",
-							DefaultMaxTokens: 600,
+							Model: catwalk.Model{
+								ID:               "model",
+								DefaultMaxTokens: 600,
+							},
 						},
 					},
 				},
@@ -1505,7 +1545,7 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 				"custom": {
 					APIKey:  "test-key",
 					BaseURL: "https://api.custom.com/v1",
-					Models:  []catwalk.Model{},
+					Models:  []ProviderModel{},
 				},
 			}),
 		}
@@ -1542,10 +1582,12 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 				"custom": {
 					APIKey:  "test-key",
 					BaseURL: "https://api.custom.com/v1",
-					Models: []catwalk.Model{
+					Models: []ProviderModel{
 						{
-							ID:               "large-model",
-							DefaultMaxTokens: 1000,
+							Model: catwalk.Model{
+								ID:               "large-model",
+								DefaultMaxTokens: 1000,
+							},
 						},
 					},
 				},
@@ -1629,8 +1671,8 @@ func TestConfig_configureProvidersDisableDefaultProviders(t *testing.T) {
 				"my-llm": {
 					APIKey:  "$MY_API_KEY",
 					BaseURL: "https://my-llm.example.com/v1",
-					Models: []catwalk.Model{{
-						ID: "my-model",
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "my-model"},
 					}},
 				},
 			}),
@@ -1716,7 +1758,7 @@ func TestConfig_configureProvidersDisableDefaultProviders(t *testing.T) {
 				"my-llm": {
 					APIKey:  "test-key",
 					BaseURL: "https://my-llm.example.com/v1",
-					Models:  []catwalk.Model{}, // No models.
+					Models:  []ProviderModel{}, // No models.
 				},
 			}),
 		}
@@ -1739,7 +1781,9 @@ func TestConfig_configureProvidersDisableDefaultProviders(t *testing.T) {
 			Providers: csync.NewMapFrom(map[string]ProviderConfig{
 				"my-llm": {
 					APIKey: "test-key",
-					Models: []catwalk.Model{{ID: "model"}},
+					Models: []ProviderModel{{
+						Model: catwalk.Model{ID: "model"},
+					}},
 					// No BaseURL.
 				},
 			}),

@@ -555,7 +555,7 @@ func (m *Models) setProviderItems() error {
 
 			group := NewModelGroup(t, name, true)
 			for _, model := range p.Models {
-				item := NewModelItem(t, provider, model, m.modelType, false, model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider)
+				item := NewModelItem(t, provider, model.Model, m.modelType, false, model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider)
 				group.AppendItems(item)
 				itemsMap[item.ID()] = item
 				if model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider {
@@ -627,7 +627,7 @@ func (m *Models) setProviderItems() error {
 					continue
 				}
 				model.Name = cmp.Or(model.Name, model.ID)
-				displayProvider.Models = append(displayProvider.Models, model)
+				displayProvider.Models = append(displayProvider.Models, model.Model)
 				modelIndex[model.ID] = len(displayProvider.Models) - 1
 			}
 		}

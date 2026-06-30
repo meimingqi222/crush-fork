@@ -30,6 +30,7 @@ type options struct {
 	project              string
 	name                 string
 	useResponsesAPI      bool
+	forceResponsesModels map[string]struct{}
 	headers              map[string]string
 	userAgent            string
 	client               option.HTTPClient
@@ -134,6 +135,25 @@ func WithUseResponsesAPI() Option {
 	}
 }
 
+// WithForceResponsesModel configures a model ID to use the Responses API even when it
+// is not in the built-in OpenAI Responses model whitelist.
+func WithForceResponsesModel(modelID string) Option {
+	return func(o *options) {
+		if modelID == "" {
+			return
+		}
+		if o.forceResponsesModels == nil {
+			o.forceResponsesModels = make(map[string]struct{})
+		}
+		o.forceResponsesModels[modelID] = struct{}{}
+	}
+}
+
+// ShouldUseResponsesAPI reports whether a model should use the Responses API.
+func ShouldUseResponsesAPI(modelID string, force bool) bool {
+	return force || IsResponsesModel(modelID)
+}
+
 // WithUserAgent sets an explicit User-Agent header, overriding the default and any
 // value set via WithHeaders.
 func WithUserAgent(ua string) Option {
@@ -179,7 +199,11 @@ func (o *provider) LanguageModel(_ context.Context, modelID string) (fantasy.Lan
 
 	client := openai.NewClient(openaiClientOptions...)
 
-	if o.options.useResponsesAPI && IsResponsesModel(modelID) {
+	forceResponses := false
+	if o.options.forceResponsesModels != nil {
+		_, forceResponses = o.options.forceResponsesModels[modelID]
+	}
+	if o.options.useResponsesAPI && ShouldUseResponsesAPI(modelID, forceResponses) {
 		// Not supported for responses API
 		objectMode := o.options.objectMode
 		if objectMode == fantasy.ObjectModeJSON {

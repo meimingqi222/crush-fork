@@ -974,12 +974,16 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg
 				}
 			}
 		}
-		if openai.IsResponsesModel(model.CatwalkCfg.ID) {
+		useResponsesAPI := openai.ShouldUseResponsesAPI(
+			model.CatwalkCfg.ID,
+			providerCfg.ModelUseResponsesAPI(model.CatwalkCfg.ID),
+		)
+		if useResponsesAPI {
 			if thinkingDisabled {
 				// Clear Responses API reasoning params from provider config.
 				delete(mergedOptions, "reasoning_summary")
 				delete(mergedOptions, "include")
-			} else if openai.IsResponsesReasoningModel(model.CatwalkCfg.ID) {
+			} else if openai.IsResponsesReasoningModel(model.CatwalkCfg.ID) || model.CatwalkCfg.CanReason {
 				_, hasSummary := mergedOptions["reasoning_summary"]
 				if !hasSummary {
 					mergedOptions["reasoning_summary"] = "auto"
@@ -1695,7 +1699,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	var largeFound bool
 	for i := range largeProviderCfg.Models {
 		if largeProviderCfg.Models[i].ID == largeModelCfg.Model {
-			largeCatwalkModel = largeProviderCfg.Models[i]
+			largeCatwalkModel = largeProviderCfg.Models[i].Model
 			largeFound = true
 			break
 		}
@@ -1704,7 +1708,7 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 	var smallFound bool
 	for i := range smallProviderCfg.Models {
 		if smallProviderCfg.Models[i].ID == smallModelCfg.Model {
-			smallCatwalkModel = smallProviderCfg.Models[i]
+			smallCatwalkModel = smallProviderCfg.Models[i].Model
 			smallFound = true
 			break
 		}
@@ -1838,10 +1842,13 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 	return provider, err
 }
 
-func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, copilotService, useCopilotClient, isSubAgent, responsesWebSocket bool) (fantasy.Provider, error) {
+func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, modelID string, useResponsesAPI, copilotService, useCopilotClient, isSubAgent, responsesWebSocket bool) (fantasy.Provider, error) {
 	opts := []openai.Option{
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
+	}
+	if useResponsesAPI {
+		opts = append(opts, openai.WithForceResponsesModel(modelID))
 	}
 
 	// Set HTTP client based on provider and debug mode.
@@ -1907,6 +1914,8 @@ func (c *coordinator) buildOpenaiCompatProvider(
 	headers map[string]string,
 	extraBody map[string]any,
 	providerID string,
+	modelID string,
+	useResponsesAPI bool,
 	useCopilotClient bool,
 	isSubAgent bool,
 	copilotService bool,
@@ -1920,9 +1929,6 @@ func (c *coordinator) buildOpenaiCompatProvider(
 	// Set HTTP client based on provider and debug mode.
 	var httpClient *http.Client
 	if providerID == string(catwalk.InferenceProviderCopilot) || useCopilotClient {
-		if providerID == string(catwalk.InferenceProviderCopilot) {
-			opts = append(opts, openaicompat.WithUseResponsesAPI())
-		}
 		// Copilot client already applies reasoning field normalization internally.
 		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
 	} else if copilotService {
@@ -1944,6 +1950,12 @@ func (c *coordinator) buildOpenaiCompatProvider(
 			Transport: copilot.NewReasoningNormalizingTransport(inner),
 		}
 	}
+	if providerID == string(catwalk.InferenceProviderCopilot) || useResponsesAPI {
+		opts = append(opts, openaicompat.WithUseResponsesAPI())
+	}
+	if useResponsesAPI {
+		opts = append(opts, openaicompat.WithForceResponsesModel(modelID))
+	}
 	opts = append(opts, openaicompat.WithHTTPClient(wrapOpenAIStreamingHTTPClient(httpClient, responsesWebSocket)))
 
 	if len(headers) > 0 {
@@ -1957,11 +1969,14 @@ func (c *coordinator) buildOpenaiCompatProvider(
 	return openaicompat.New(opts...)
 }
 
-func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[string]string, options map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[string]string, modelID string, useResponsesAPI bool, options map[string]string) (fantasy.Provider, error) {
 	opts := []azure.Option{
 		azure.WithBaseURL(baseURL),
 		azure.WithAPIKey(apiKey),
 		azure.WithUseResponsesAPI(),
+	}
+	if useResponsesAPI {
+		opts = append(opts, azure.WithForceResponsesModel(modelID))
 	}
 	var httpClient *http.Client
 	if c.cfg.Config().Options.Debug {
@@ -2089,9 +2104,11 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 		slog.Warn("Failed to resolve Base URL template", "provider", providerCfg.ID, "error", err)
 	}
 
+	useResponsesAPI := providerCfg.ModelUseResponsesAPI(model.ID)
+
 	switch providerCfg.Type {
 	case openai.Name:
-		return c.buildOpenaiProvider(baseURL, apiKey, headers, providerCfg.CopilotService, providerCfg.UseCopilotClient, isSubAgent, providerCfg.ResponsesWebSocket)
+		return c.buildOpenaiProvider(baseURL, apiKey, headers, model.ID, useResponsesAPI, providerCfg.CopilotService, providerCfg.UseCopilotClient, isSubAgent, providerCfg.ResponsesWebSocket)
 	case anthropic.Name:
 		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, providerCfg.UseCopilotClient, isSubAgent)
 	case openrouter.Name:
@@ -2099,7 +2116,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 	case vercel.Name:
 		return c.buildVercelProvider(baseURL, apiKey, headers)
 	case azure.Name:
-		return c.buildAzureProvider(baseURL, apiKey, headers, providerCfg.ExtraParams)
+		return c.buildAzureProvider(baseURL, apiKey, headers, model.ID, useResponsesAPI, providerCfg.ExtraParams)
 	case bedrock.Name:
 		return c.buildBedrockProvider(apiKey, headers)
 	case google.Name:
@@ -2119,6 +2136,8 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model cat
 			headers,
 			providerCfg.ExtraBody,
 			providerCfg.ID,
+			model.ID,
+			useResponsesAPI,
 			providerCfg.UseCopilotClient,
 			isSubAgent,
 			providerCfg.CopilotService,
@@ -2494,7 +2513,7 @@ func (c *coordinator) lookupCatwalkModel(selectedModel config.SelectedModel) (ca
 
 	for _, candidate := range providerCfg.Models {
 		if candidate.ID == selectedModel.Model {
-			return candidate, nil
+			return candidate.Model, nil
 		}
 	}
 

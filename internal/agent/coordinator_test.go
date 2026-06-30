@@ -133,6 +133,8 @@ func TestRunSubAgent(t *testing.T) {
 	providerCfg := config.ProviderConfig{ID: providerID}
 
 	t.Run("happy path", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -181,6 +183,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("auto mode blocks delegation when handoff review cannot run", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 		coord.cfg.Config().Models[config.SelectedModelTypeAutoClassifier] = config.SelectedModel{
@@ -213,6 +217,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -249,6 +255,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("session creation failure with canceled context", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -274,6 +282,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("provider not configured", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -297,6 +307,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("agent run error returns error response", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -331,6 +343,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("agent run error prefers persisted child assistant error details", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -364,6 +378,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("falls back to persisted child session assistant content", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -397,6 +413,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("uses persisted yield metadata when available", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -440,6 +458,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("uses yield data over assistant content when both are present", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -487,6 +507,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("uses yield data when subagent calls yield", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -531,6 +553,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("missing finish policy warns when finish is absent", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 		coord.cfg.Config().Subagents = &config.SubagentRuntimeConfig{StructuredCompletionRequired: true, MissingFinishPolicy: "warn"}
@@ -559,6 +583,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("returns guidance text when neither result nor child session has content", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -584,6 +610,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("does not fall back to earlier assistant text when latest assistant is empty", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -626,6 +654,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("session setup callback is invoked", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -654,6 +684,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("propagates subagent lifecycle policy in context", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -684,6 +716,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("propagates approval metadata in worker identity", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -713,6 +747,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("falls back from worktree isolation and propagates workspace cwd", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -754,6 +790,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("clears inherited parent runtime config before subagent run", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -786,6 +824,8 @@ func TestRunSubAgent(t *testing.T) {
 	})
 
 	t.Run("cost propagation to parent session", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
@@ -1175,13 +1215,15 @@ func TestPrepareModelSwitch(t *testing.T) {
 	const providerID = "test-provider"
 	providerCfg := config.ProviderConfig{
 		ID: providerID,
-		Models: []catwalk.Model{
-			{ID: "big", Name: "Big", ContextWindow: 1_000_000, DefaultMaxTokens: 32_000},
-			{ID: "small", Name: "Small", ContextWindow: 200_000, DefaultMaxTokens: 8_000},
+		Models: []config.ProviderModel{
+			{Model: catwalk.Model{ID: "big", Name: "Big", ContextWindow: 1_000_000, DefaultMaxTokens: 32_000}},
+			{Model: catwalk.Model{ID: "small", Name: "Small", ContextWindow: 200_000, DefaultMaxTokens: 8_000}},
 		},
 	}
 
 	t.Run("summarizes before switching to smaller active model", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Name: config.AgentCoder, Model: config.SelectedModelTypeLarge}
@@ -1209,6 +1251,8 @@ func TestPrepareModelSwitch(t *testing.T) {
 	})
 
 	t.Run("fails when summarization cannot shrink session enough", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Name: config.AgentCoder, Model: config.SelectedModelTypeLarge}
@@ -1231,6 +1275,8 @@ func TestPrepareModelSwitch(t *testing.T) {
 	})
 
 	t.Run("ignores inactive model slot switches", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Name: config.AgentCoder, Model: config.SelectedModelTypeLarge}
@@ -1262,10 +1308,10 @@ func TestBuildAgentModels_ContextWindowOverride(t *testing.T) {
 	providerCfg := config.ProviderConfig{
 		ID:   providerID,
 		Type: catwalk.TypeOpenAICompat,
-		Models: []catwalk.Model{
-			{ID: "big", Name: "Big", ContextWindow: 200_000, DefaultMaxTokens: 32_000},
-			{ID: "small", Name: "Small", ContextWindow: 128_000, DefaultMaxTokens: 8_000},
-			{ID: "review", Name: "Review", ContextWindow: 512_000, DefaultMaxTokens: 16_000},
+		Models: []config.ProviderModel{
+			{Model: catwalk.Model{ID: "big", Name: "Big", ContextWindow: 200_000, DefaultMaxTokens: 32_000}},
+			{Model: catwalk.Model{ID: "small", Name: "Small", ContextWindow: 128_000, DefaultMaxTokens: 8_000}},
+			{Model: catwalk.Model{ID: "review", Name: "Review", ContextWindow: 512_000, DefaultMaxTokens: 16_000}},
 		},
 	}
 	cfg.Config().Providers.Set(providerID, providerCfg)
@@ -1331,11 +1377,13 @@ func TestFilterAttachmentsForModelSupport(t *testing.T) {
 
 func TestResolveCoderModelSupportsImages(t *testing.T) {
 	t.Run("returns image support flag from configured coder model", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
 			ID: "test-provider",
-			Models: []catwalk.Model{
-				{ID: "vision-model", SupportsImages: true},
+			Models: []config.ProviderModel{
+				{Model: catwalk.Model{ID: "vision-model", SupportsImages: true}},
 			},
 		})
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}
@@ -1350,11 +1398,13 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 	})
 
 	t.Run("returns false when configured model does not support images", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
 			ID: "test-provider",
-			Models: []catwalk.Model{
-				{ID: "text-model", SupportsImages: false},
+			Models: []config.ProviderModel{
+				{Model: catwalk.Model{ID: "text-model", SupportsImages: false}},
 			},
 		})
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}
@@ -1369,10 +1419,12 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 	})
 
 	t.Run("returns error when selected model is missing from provider config", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{
 			ID:     "test-provider",
-			Models: []catwalk.Model{{ID: "other-model", SupportsImages: false}},
+			Models: []config.ProviderModel{{Model: catwalk.Model{ID: "other-model", SupportsImages: false}}},
 		})
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}
 		coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
@@ -1420,6 +1472,8 @@ func runGit(t *testing.T, dir string, args ...string) {
 
 func TestUpdateParentSessionCost(t *testing.T) {
 	t.Run("accumulates cost correctly", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		cfg, err := config.Init(env.workingDir, "", false)
 		require.NoError(t, err)
@@ -1445,6 +1499,8 @@ func TestUpdateParentSessionCost(t *testing.T) {
 	})
 
 	t.Run("accumulates multiple child costs", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		cfg, err := config.Init(env.workingDir, "", false)
 		require.NoError(t, err)
@@ -1476,6 +1532,8 @@ func TestUpdateParentSessionCost(t *testing.T) {
 	})
 
 	t.Run("child session not found", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		cfg, err := config.Init(env.workingDir, "", false)
 		require.NoError(t, err)
@@ -1490,6 +1548,8 @@ func TestUpdateParentSessionCost(t *testing.T) {
 	})
 
 	t.Run("parent session not found", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		cfg, err := config.Init(env.workingDir, "", false)
 		require.NoError(t, err)
@@ -1506,6 +1566,8 @@ func TestUpdateParentSessionCost(t *testing.T) {
 	})
 
 	t.Run("zero cost handled correctly", func(t *testing.T) {
+		t.Parallel()
+
 		env := testEnv(t)
 		cfg, err := config.Init(env.workingDir, "", false)
 		require.NoError(t, err)
@@ -1768,6 +1830,29 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 		require.Equal(t, openai.ReasoningEffortHigh, *opts.ReasoningEffort)
 	})
 
+	t.Run("openai: use_responses_api forces Responses provider options", func(t *testing.T) {
+		t.Parallel()
+
+		model := Model{
+			CatwalkCfg: catwalk.Model{
+				ID:        "grok-composer-2.5-fast",
+				CanReason: true,
+			},
+		}
+		providerCfg := config.ProviderConfig{
+			Type: openai.Name,
+			Models: []config.ProviderModel{{
+				Model: catwalk.Model{
+					ID: "grok-composer-2.5-fast",
+				},
+				UseResponsesAPI: true,
+			}},
+		}
+		options, _, _, _, _, _ := mergeCallOptions(model, providerCfg)
+		_, ok := options[openai.Name].(*openai.ResponsesProviderOptions)
+		require.True(t, ok)
+	})
+
 	t.Run("openai-compat: no reasoning_effort when Think is false", func(t *testing.T) {
 		t.Parallel()
 		model := Model{
@@ -1931,7 +2016,7 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 	providerCfg := config.ProviderConfig{
 		ID:     "test-provider",
 		Type:   catwalk.TypeOpenAICompat,
-		Models: []catwalk.Model{{ID: "test-model"}},
+		Models: []config.ProviderModel{config.ProviderModelID("test-model")},
 	}
 
 	tests := []struct {

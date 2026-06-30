@@ -295,7 +295,7 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 			Disable:      false,
 			ExtraHeaders: make(map[string]string),
 			ExtraParams:  make(map[string]string),
-			Models:       foundProvider.Models,
+			Models:       ProviderModelsFromCatwalk(foundProvider.Models),
 		}
 		setKeyOrToken()
 	} else {

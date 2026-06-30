@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/crush/internal/imageutil"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -84,20 +83,9 @@ func TestAttachmentFromClipboardPathCompressesBeforeSizeLimit(t *testing.T) {
 func oversizedCompressibleJPEG(t *testing.T) []byte {
 	t.Helper()
 
-	for _, size := range []int{2800, 3200, 3600} {
-		data := buildJPEG(t, size)
-		if int64(len(data)) <= common.MaxAttachmentSize {
-			continue
-		}
-		result, err := imageutil.CompressImage(data, "image/jpeg", imageutil.DefaultCompressionConfig())
-		require.NoError(t, err)
-		if int64(len(result.Data)) <= common.MaxAttachmentSize {
-			return data
-		}
-	}
-
-	t.Skip("unable to generate oversized but compressible image fixture")
-	return nil
+	data := buildJPEG(t, 1800)
+	require.Greater(t, int64(len(data)), common.MaxAttachmentSize)
+	return data
 }
 
 func buildJPEG(t *testing.T, size int) []byte {

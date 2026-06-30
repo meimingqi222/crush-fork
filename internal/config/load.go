@@ -205,6 +205,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 	for _, p := range knownProviders {
 		knownProviderNames[string(p.ID)] = true
 		config, configExists := c.Providers.Get(string(p.ID))
+		providerModels := ProviderModelsFromCatwalk(p.Models)
 		// if the user configured a known provider we need to allow it to override a couple of parameters
 		if configExists {
 			if config.BaseURL != "" {
@@ -214,7 +215,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 				p.APIKey = config.APIKey
 			}
 			if len(config.Models) > 0 {
-				models := []catwalk.Model{}
+				models := []ProviderModel{}
 				seen := make(map[string]bool)
 
 				for _, model := range config.Models {
@@ -235,10 +236,10 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 					if model.Name == "" {
 						model.Name = model.ID
 					}
-					models = append(models, model)
+					models = append(models, ProviderModel{Model: model})
 				}
 
-				p.Models = models
+				providerModels = models
 			}
 		}
 
@@ -271,7 +272,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			ExtraBody:          config.ExtraBody,
 			ExtraParams:        make(map[string]string),
 			ResponsesWebSocket: config.ResponsesWebSocket,
-			Models:             p.Models,
+			Models:             providerModels,
 		}
 
 		switch {
@@ -425,7 +426,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 	if devData := GetModelsDevData(); len(devData) > 0 {
 		for id, pc := range c.Providers.Seq2() {
 			for i := range pc.Models {
-				EnrichModel(&pc.Models[i], devData)
+				EnrichModel(&pc.Models[i].Model, devData)
 			}
 			c.Providers.Set(id, pc)
 		}

@@ -59,6 +59,9 @@ const (
 	BashNoOutput    = "no output"
 )
 
+// bashTimeoutUnit is overridden in tests to avoid waiting real seconds.
+var bashTimeoutUnit = time.Second
+
 //go:embed bash.tpl
 var bashDescriptionTmpl []byte
 
@@ -400,7 +403,7 @@ func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkin
 
 	var timer <-chan time.Time
 	if timeoutSeconds > 0 {
-		t := time.NewTimer(time.Duration(timeoutSeconds) * time.Second)
+		t := time.NewTimer(time.Duration(timeoutSeconds) * bashTimeoutUnit)
 		defer t.Stop()
 		timer = t.C
 	}

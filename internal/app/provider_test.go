@@ -3,7 +3,6 @@ package app
 import (
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
 )
@@ -74,14 +73,20 @@ func TestParseModelStr(t *testing.T) {
 func setupMockProviders() map[string]config.ProviderConfig {
 	return map[string]config.ProviderConfig{
 		"openai": {
-			ID:     "openai",
-			Name:   "OpenAI",
-			Models: []catwalk.Model{{ID: "gpt-4o"}, {ID: "gpt-4o-mini"}},
+			ID:   "openai",
+			Name: "OpenAI",
+			Models: []config.ProviderModel{
+				config.ProviderModelID("gpt-4o"),
+				config.ProviderModelID("gpt-4o-mini"),
+			},
 		},
 		"anthropic": {
-			ID:     "anthropic",
-			Name:   "Anthropic",
-			Models: []catwalk.Model{{ID: "claude-3-sonnet"}, {ID: "claude-3-opus"}},
+			ID:   "anthropic",
+			Name: "Anthropic",
+			Models: []config.ProviderModel{
+				config.ProviderModelID("claude-3-sonnet"),
+				config.ProviderModelID("claude-3-opus"),
+			},
 		},
 	}
 }
@@ -91,15 +96,15 @@ func setupMockProvidersWithSlashes() map[string]config.ProviderConfig {
 		"synthetic": {
 			ID:   "synthetic",
 			Name: "Synthetic",
-			Models: []catwalk.Model{
-				{ID: "moonshot/kimi-k2"},
-				{ID: "deepseek/deepseek-chat"},
+			Models: []config.ProviderModel{
+				config.ProviderModelID("moonshot/kimi-k2"),
+				config.ProviderModelID("deepseek/deepseek-chat"),
 			},
 		},
 		"openai": {
 			ID:     "openai",
 			Name:   "OpenAI",
-			Models: []catwalk.Model{{ID: "gpt-4o"}},
+			Models: []config.ProviderModel{config.ProviderModelID("gpt-4o")},
 		},
 	}
 }
@@ -161,11 +166,11 @@ func TestFindModels(t *testing.T) {
 				return map[string]config.ProviderConfig{
 					"openai": {
 						ID:     "openai",
-						Models: []catwalk.Model{{ID: "shared-model"}},
+						Models: []config.ProviderModel{config.ProviderModelID("shared-model")},
 					},
 					"anthropic": {
 						ID:     "anthropic",
-						Models: []catwalk.Model{{ID: "shared-model"}},
+						Models: []config.ProviderModel{config.ProviderModelID("shared-model")},
 					},
 				}
 			},

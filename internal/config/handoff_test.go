@@ -9,6 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func openAIProviderModels() []ProviderModel {
+	return []ProviderModel{
+		{Model: catwalk.Model{ID: "gpt-5", DefaultMaxTokens: 32000}},
+		{Model: catwalk.Model{ID: "gpt-5-mini", DefaultMaxTokens: 16000}},
+	}
+}
+
 func TestConfigureSelectedModels_DefaultsBackgroundToLarge(t *testing.T) {
 	t.Parallel()
 
@@ -34,10 +41,7 @@ func TestConfigureSelectedModels_DefaultsBackgroundToLarge(t *testing.T) {
 		ID:     "openai",
 		Name:   "OpenAI",
 		APIKey: "test-key",
-		Models: []catwalk.Model{
-			{ID: "gpt-5", DefaultMaxTokens: 32000},
-			{ID: "gpt-5-mini", DefaultMaxTokens: 16000},
-		},
+		Models: openAIProviderModels(),
 	})
 
 	resolver := NewEnvironmentVariableResolver(env.NewFromMap(map[string]string{}))
@@ -80,11 +84,9 @@ func TestConfigureSelectedModels_UsesExplicitBackground(t *testing.T) {
 		ID:     "openai",
 		Name:   "OpenAI",
 		APIKey: "test-key",
-		Models: []catwalk.Model{
-			{ID: "gpt-5", DefaultMaxTokens: 32000},
-			{ID: "gpt-5-mini", DefaultMaxTokens: 16000},
-			{ID: "gpt-4.1", DefaultMaxTokens: 12000},
-		},
+		Models: append(openAIProviderModels(), ProviderModel{
+			Model: catwalk.Model{ID: "gpt-4.1", DefaultMaxTokens: 12000},
+		}),
 	})
 
 	envMap := env.NewFromMap(map[string]string{})
@@ -128,11 +130,9 @@ func TestConfigureSelectedModels_MigratesLegacyHandoffToBackground(t *testing.T)
 		ID:     "openai",
 		Name:   "OpenAI",
 		APIKey: "test-key",
-		Models: []catwalk.Model{
-			{ID: "gpt-5", DefaultMaxTokens: 32000},
-			{ID: "gpt-5-mini", DefaultMaxTokens: 16000},
-			{ID: "gpt-4.1", DefaultMaxTokens: 12000},
-		},
+		Models: append(openAIProviderModels(), ProviderModel{
+			Model: catwalk.Model{ID: "gpt-4.1", DefaultMaxTokens: 12000},
+		}),
 	})
 
 	envMap := env.NewFromMap(map[string]string{})
@@ -178,11 +178,9 @@ func TestConfigureSelectedModels_UsesExplicitAutoClassifier(t *testing.T) {
 		ID:     "openai",
 		Name:   "OpenAI",
 		APIKey: "test-key",
-		Models: []catwalk.Model{
-			{ID: "gpt-5", DefaultMaxTokens: 32000},
-			{ID: "gpt-5-mini", DefaultMaxTokens: 16000},
-			{ID: "gpt-4.1-mini", DefaultMaxTokens: 8000},
-		},
+		Models: append(openAIProviderModels(), ProviderModel{
+			Model: catwalk.Model{ID: "gpt-4.1-mini", DefaultMaxTokens: 8000},
+		}),
 	})
 
 	envMap := env.NewFromMap(map[string]string{})

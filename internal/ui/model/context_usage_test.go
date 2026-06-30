@@ -18,9 +18,11 @@ func TestLatestAssistantUsageSnapshotUsesLastAssistantUsageModel(t *testing.T) {
 	cfg := &config.Config{Providers: csync.NewMap[string, config.ProviderConfig]()}
 	cfg.Providers.Set("anthropic", config.ProviderConfig{
 		ID: "anthropic",
-		Models: []catwalk.Model{{
-			ID:            "claude-sonnet-4-5",
-			ContextWindow: 200_000,
+		Models: []config.ProviderModel{{
+			Model: catwalk.Model{
+				ID:            "claude-sonnet-4-5",
+				ContextWindow: 200_000,
+			},
 		}},
 	})
 
