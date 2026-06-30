@@ -826,6 +826,20 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 	}
 	migrateLegacyAutoClassifierSelection(c.Models)
 	autoClassifier := resolveConfiguredModel(store, c, SelectedModelTypeAutoClassifier, resolveAutoClassifierFallback(c, backgroundModelConfigured, background, small, large))
+
+	// Validate vision model: warn if configured but the model can't be found
+	// or doesn't support images. Don't clear the selection — the user may
+	// have configured it intentionally under a provider that supports the
+	// model via its endpoint even if the model isn't explicitly listed.
+	if visionModel, ok := c.Models[SelectedModelTypeVision]; ok {
+		model := c.GetModel(visionModel.Provider, visionModel.Model)
+		if model == nil {
+			slog.Warn("Vision model not found in any provider", "provider", visionModel.Provider, "model", visionModel.Model)
+		} else if !model.SupportsImages {
+			slog.Warn("Configured vision model does not support images", "provider", visionModel.Provider, "model", visionModel.Model)
+		}
+	}
+
 	c.Models[SelectedModelTypeLarge] = large
 	c.Models[SelectedModelTypeSmall] = small
 	c.Models[SelectedModelTypeBackground] = background
@@ -1170,11 +1184,6 @@ func isPathWithin(path, parent string) bool {
 	}
 	parentWithSep := parent + string(filepath.Separator)
 	return strings.HasPrefix(path, parentWithSep)
-}
-
-func globalWorkspaceDataDir(workingDir string) string {
-	root := filepath.Dir(GlobalConfigData())
-	return filepath.Join(root, "workspaces", workspaceDataDirName(workingDir))
 }
 
 func workspaceIdentityDir(workingDir string) string {

@@ -19,6 +19,7 @@ type (
 	agentMemoryContextKey     string
 	agentIsolationContextKey  string
 	agentBackgroundContextKey string
+	visionServiceKey          string
 )
 
 type sessionLookupService interface {
@@ -43,6 +44,8 @@ const (
 	AgentMemoryContextKey     agentMemoryContextKey     = "agent_memory"
 	AgentIsolationContextKey  agentIsolationContextKey  = "agent_isolation"
 	AgentBackgroundContextKey agentBackgroundContextKey = "agent_background"
+	// VisionServiceContextKey is the key for the vision helper service in the context.
+	VisionServiceContextKey visionServiceKey = "vision_service"
 )
 
 // getContextValue is a generic helper that retrieves a typed value from context.
@@ -107,4 +110,20 @@ func GetAgentIsolationFromContext(ctx context.Context) string {
 
 func GetAgentBackgroundFromContext(ctx context.Context) bool {
 	return getContextValue(ctx, AgentBackgroundContextKey, false)
+}
+
+// VisionDescriber is the interface implemented by the vision helper service.
+// Tools use it to describe images when the main model does not support vision.
+type VisionDescriber interface {
+	// DescribeImage sends the image data to a vision-capable model and returns
+	// a text description. The optional prompt customizes the description request.
+	DescribeImage(ctx context.Context, data []byte, mimeType string, prompt string) (string, error)
+	// IsAvailable returns true when a vision helper model is configured.
+	IsAvailable() bool
+}
+
+// GetVisionServiceFromContext retrieves the vision helper service from the context.
+// Returns nil when no vision helper is configured.
+func GetVisionServiceFromContext(ctx context.Context) VisionDescriber {
+	return getContextValue(ctx, VisionServiceContextKey, VisionDescriber(nil))
 }

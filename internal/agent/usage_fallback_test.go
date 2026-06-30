@@ -215,7 +215,10 @@ func TestUpdateSessionUsagePreservesOmittedCountersForPartialUsage(t *testing.T)
 
 	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false)
 
-	require.Equal(t, int64(912), currentSession.PromptTokens)
+	// PromptTokens reflects the current step's input tokens, not a cumulative
+	// sum, so it is set to the reported input count rather than added to the
+	// previous value.
+	require.Equal(t, int64(789), currentSession.PromptTokens)
 	require.Equal(t, int64(456), currentSession.CompletionTokens)
 }
 

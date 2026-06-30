@@ -264,6 +264,9 @@ type sessionAgent struct {
 	memoryEngineRetriever engine.Retriever
 	memoryEngineBackend   string
 	dataDirectory         string
+
+	// visionService describes images when the primary model lacks vision.
+	visionService *VisionService
 }
 
 type SessionAgentOptions struct {
@@ -297,6 +300,9 @@ type SessionAgentOptions struct {
 	MemoryEngineBackend    string
 	RetryWaitFunc          func(context.Context, time.Duration) error
 	DataDirectory          string
+
+	// VisionService describes images when the primary model lacks vision.
+	VisionService *VisionService
 }
 
 type sessionAgentRuntimeConfig struct {
@@ -383,6 +389,7 @@ func NewSessionAgent(
 		memoryEngineRetriever:  opts.MemoryEngineRetriever,
 		memoryEngineBackend:    opts.MemoryEngineBackend,
 		dataDirectory:          opts.DataDirectory,
+		visionService:          opts.VisionService,
 	}
 }
 
@@ -673,6 +680,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}
 
+	if !largeModel.CatwalkCfg.SupportsImages && a.visionService != nil && a.visionService.IsAvailable() {
+		systemPrompt += "\n\n" + describeImageToolSystemPromptNote()
+	}
+
 	requestState, err := a.buildChatRequestState(genCtx, chatRequestStateInput{
 		SessionID:      call.SessionID,
 		Agent:          "session",
@@ -807,8 +818,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// or as a System Message in PrepareStep when asynchronously settled.
 
 		var stepMessages []fantasy.Message
+		userPrompt := message.PromptWithTextAttachments(call.Prompt, call.Attachments)
+		if !largeModel.CatwalkCfg.SupportsImages {
+			hasVision := a.visionService != nil && a.visionService.IsAvailable()
+			userPrompt = promptWithImageAttachmentPlaceholdersForMessage(call.Prompt, call.Attachments, userMessage.ID, hasVision)
+		}
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
-			Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
+			Prompt:           userPrompt,
 			Files:            requestState.Files,
 			Messages:         initialMessages,
 			ProviderOptions:  providerOptions,
@@ -1084,9 +1100,35 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// on Anthropic with thinking enabled.
 				prepared.Messages = mergeConsecutiveSameRoleFantasyMessages(prepared.Messages)
 
+				// Create the assistant message before potentially slow
+				// vision-image processing so the TUI can render a
+				// loading spinner instead of appearing frozen during
+				// the vision model round-trip.
+				{
+					var assistantMsg message.Message
+					assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
+						Role:                   message.Assistant,
+						Parts:                  []message.ContentPart{},
+						Model:                  largeModel.ModelCfg.Model,
+						Provider:               largeModel.ModelCfg.Provider,
+						ActivatedDeferredTools: a.currentActivatedDeferredTools(call.SessionID),
+					})
+					if err != nil {
+						return callContext, prepared, err
+					}
+					currentAssistant = &assistantMsg
+					currentStepToolMessageIDs = nil
+					currentStepToolResultChars = 0
+					allRunMessageIDs = append(allRunMessageIDs, assistantMsg.ID)
+				}
+
 				prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
 				if !largeModel.CatwalkCfg.SupportsImages {
-					prepared.Messages = stripImagePartsFromFantasyMessages(prepared.Messages)
+					if a.visionService != nil && a.visionService.IsAvailable() {
+						prepared.Messages = stripImagePartsFromFantasyMessagesWithVision(prepared.Messages, a.visionService)
+					} else {
+						prepared.Messages = stripImagePartsFromFantasyMessages(prepared.Messages)
+					}
 				}
 
 				lastSystemRoleInx := 0
@@ -1122,26 +1164,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					}
 				}
 
-				var assistantMsg message.Message
-				assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
-					Role:                   message.Assistant,
-					Parts:                  []message.ContentPart{},
-					Model:                  largeModel.ModelCfg.Model,
-					Provider:               largeModel.ModelCfg.Provider,
-					ActivatedDeferredTools: a.currentActivatedDeferredTools(call.SessionID),
-				})
-				if err != nil {
-					return callContext, prepared, err
-				}
-				callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
+				callContext = context.WithValue(callContext, tools.MessageIDContextKey, currentAssistant.ID)
 				callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.SupportsImages)
 				callContext = context.WithValue(callContext, tools.ModelNameContextKey, largeModel.CatwalkCfg.Name)
 				callContext = context.WithValue(callContext, tools.SessionServiceContextKey, a.sessions)
 				callContext = context.WithValue(callContext, tools.MessageServiceContextKey, a.messages)
-				currentAssistant = &assistantMsg
-				currentStepToolMessageIDs = nil
-				currentStepToolResultChars = 0
-				allRunMessageIDs = append(allRunMessageIDs, assistantMsg.ID)
+				if a.visionService != nil && !largeModel.CatwalkCfg.SupportsImages {
+					callContext = context.WithValue(callContext, tools.VisionServiceContextKey, a.visionService)
+				}
 
 				// For follow-up steps (e.g., tool result steps), prepared.Messages already
 				// contains the user message from the initial request, so we should not

@@ -51,9 +51,19 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 		// so the display reflects live growth without dropping below known history.
 		if usage.Provisional {
 			usage.OutputTokens = max(usage.OutputTokens, sess.CompletionTokens)
+			// During streaming the current exchange has not been committed to
+			// session totals yet. Use the live provisional usage but floor it
+			// at the last known exchange total so the display never drops
+			// below the confirmed context length.
 			usage.TotalTokens = max(usage.TotalTokens, sess.LastTotalTokens())
 		} else {
 			usage.OutputTokens = sess.CompletionTokens
+			// For finished messages the latest assistant message's usage is
+			// the authoritative current context length: it is the total input
+			// (including history) plus output for the last exchange. Session
+			// cumulative totals double-count history across multi-step runs,
+			// so they must not be used for the context-usage percentage.
+			usage.TotalTokens = sess.LastTotalTokens()
 		}
 		return usage
 	}

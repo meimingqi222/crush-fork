@@ -735,16 +735,16 @@ func (a *AssistantMessageItem) ToggleExpanded() bool {
 }
 
 // HandleMouseClick implements MouseClickable.
-func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) bool {
+func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) (bool, tea.Cmd) {
 	if btn != ansi.MouseLeft {
-		return false
+		return false, nil
 	}
 	// Check if the click is within the thinking box.
 	if a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight {
 		a.thinkingExpanded = !a.thinkingExpanded
 		// Preserve the thinking glamour cache — only truncation/boxing changes.
 		a.invalidateContentCache()
-		return true
+		return true, nil
 	}
 	// Check if the click is within the summary box.
 	summaryEnd := a.summaryBoxStart + a.summaryBoxHeight
@@ -752,9 +752,9 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 		a.summaryExpanded = !a.summaryExpanded
 		a.invalidateSummaryCache()
 		a.invalidateContentCache()
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // HandleKeyEvent implements KeyEventHandler.

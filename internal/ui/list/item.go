@@ -3,6 +3,7 @@ package list
 import (
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -39,8 +40,9 @@ type Highlightable interface {
 // MouseClickable represents an item that can handle mouse click events.
 type MouseClickable interface {
 	// HandleMouseClick processes a mouse click event at the given coordinates.
-	// It returns true if the event was handled, false otherwise.
-	HandleMouseClick(btn ansi.MouseButton, x, y int) bool
+	// It returns true if the event was handled, false otherwise, and an
+	// optional command to execute (e.g., opening an external application).
+	HandleMouseClick(btn ansi.MouseButton, x, y int) (bool, tea.Cmd)
 }
 
 // ViewportRenderable is an optional interface for items that can render

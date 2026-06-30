@@ -190,6 +190,10 @@ func (f *fakeMessageService) ListAllUserMessages(_ context.Context) ([]message.M
 }
 func (f *fakeMessageService) Delete(_ context.Context, _ string) error                { return nil }
 func (f *fakeMessageService) DeleteSessionMessages(_ context.Context, _ string) error { return nil }
+func (f *fakeMessageService) Count(_ context.Context, _ string) (int64, error)        { return 0, nil }
+func (f *fakeMessageService) ListPage(_ context.Context, _ string, _, _ int) ([]message.Message, error) {
+	return nil, nil
+}
 
 type fakeCoordinator struct {
 	runResult   *fantasy.AgentResult

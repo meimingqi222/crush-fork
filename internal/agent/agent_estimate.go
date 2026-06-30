@@ -320,8 +320,20 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	promptTokens := normalizedUsage.PromptTokens()
 
 	session.CompletionTokens += usage.OutputTokens
-	session.PromptTokens += promptTokens
-	session.LastPromptTokens = promptTokens
+	// PromptTokens tracks the current context length (the full input sent in
+	// the latest exchange), not a sum across exchanges. Provider usage reports
+	// the total input for each request, which already includes all history, so
+	// accumulating it would double-count earlier turns and produce inflated
+	// totals like tens of millions of tokens.
+	//
+	// Only update when the current step reports a positive prompt token
+	// count. Providers sometimes omit input tokens (reporting only output
+	// tokens or a total), so preserve the last known context length when the
+	// prompt count is unavailable.
+	if promptTokens > 0 {
+		session.PromptTokens = promptTokens
+		session.LastPromptTokens = promptTokens
+	}
 	// Use OutputTokens (not CompletionTokens which adds ReasoningTokens)
 	// to avoid double-counting reasoning tokens for OpenAI-style providers
 	// where OutputTokens already includes ReasoningTokens.

@@ -1000,8 +1000,8 @@ func (t *TaskNodeItem) ToggleExpanded() bool {
 
 // HandleMouseClick implements MouseClickable.
 // Returns false to let HandleDelayedClick fall through to ToggleExpanded.
-func (t *TaskNodeItem) HandleMouseClick(btn ansi.MouseButton, x, y int) bool {
-	return false
+func (t *TaskNodeItem) HandleMouseClick(btn ansi.MouseButton, x, y int) (bool, tea.Cmd) {
+	return false, nil
 }
 
 func (t *TaskNodeItem) SetFocused(focused bool) {

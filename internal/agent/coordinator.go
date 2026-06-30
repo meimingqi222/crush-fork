@@ -22,6 +22,8 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
+	"github.com/kaptinlin/jsonschema"
+
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/mailbox"
 	agentNotify "github.com/charmbracelet/crush/internal/agent/notify"
@@ -183,6 +185,10 @@ type coordinator struct {
 	// skillsCache caches discovered skills to avoid repeated I/O overhead.
 	skillsCache   map[string][]*skills.Skill
 	skillsCacheMu sync.Mutex
+
+	// visionService describes images using a vision-capable helper model
+	// when the primary model does not support image inputs. May be nil.
+	visionService *VisionService
 }
 
 func NewCoordinator(
@@ -239,6 +245,8 @@ func NewCoordinator(
 	if memoryEngine != nil {
 		c.SetMemoryEngine(memoryEngine)
 	}
+	c.visionService = NewVisionService(c)
+
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
 	if !ok {
 		return nil, errCoderAgentNotConfigured
@@ -731,19 +739,15 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, fmt.Errorf("failed to append auto mode reminder: %w", err)
 	}
 
-	supportsImages, supportsImagesErr := c.resolveCoderModelSupportsImages()
-	if supportsImagesErr != nil {
-		slog.Warn("Failed to resolve model image support; keeping original attachments", "error", supportsImagesErr, "session_id", sessionID)
-		supportsImages = true
-	}
-	filteredAttachments := filterAttachmentsForModelSupport(attachments, supportsImages)
-	parts := []message.ContentPart{message.TextContent{Text: prompt}}
-	for _, attachment := range filteredAttachments {
-		parts = append(parts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
+	// Create the user message immediately with the original attachments so the
+	// UI can display it without waiting for any model-side processing.
+	rawParts := []message.ContentPart{message.TextContent{Text: prompt}}
+	for _, attachment := range attachments {
+		rawParts = append(rawParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
 	}
 	userMessage, err := c.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:  message.User,
-		Parts: parts,
+		Parts: rawParts,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user message: %w", err)
@@ -817,7 +821,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return c.currentAgent.Run(ctx, SessionAgentCall{
 			SessionID:        sessionID,
 			Prompt:           prompt,
-			Attachments:      filteredAttachments,
+			Attachments:      attachments,
 			MaxOutputTokens:  maxTokens,
 			ProviderOptions:  runtimeConfig.ProviderOptions,
 			Temperature:      runtimeConfig.Temperature,
@@ -1372,6 +1376,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 			}
 			return ""
 		}(),
+		VisionService: c.visionService,
 	})
 
 	// Only use async initialization for the primary agent (not subagents).
@@ -2280,16 +2285,22 @@ func (c *coordinator) resolveCoderModelSupportsImages() (bool, error) {
 	if !ok {
 		return false, fmt.Errorf("selected model %q not configured", agentCfg.Model)
 	}
-	providerCfg, ok := c.cfg.Config().Providers.Get(modelCfg.Provider)
-	if !ok {
-		return false, errModelProviderNotConfigured
+	catwalkModel := c.cfg.Config().GetModel(modelCfg.Provider, modelCfg.Model)
+	if catwalkModel == nil {
+		return false, fmt.Errorf("model %q not found", modelCfg.Model)
 	}
-	for i := range providerCfg.Models {
-		if providerCfg.Models[i].ID == modelCfg.Model {
-			return providerCfg.Models[i].SupportsImages, nil
-		}
+	return catwalkModel.SupportsImages, nil
+}
+
+// missingFinishPolicyAllowsJSONFallback reports whether a subagent that never
+// called yield may still complete via JSON schema fallback extraction.
+func missingFinishPolicyAllowsJSONFallback(policy MissingFinishPolicy) bool {
+	switch policy {
+	case MissingFinishWarn, MissingFinishRetryThenWarn:
+		return true
+	default:
+		return false
 	}
-	return false, fmt.Errorf("model %q not found in provider config", modelCfg.Model)
 }
 
 func (c *coordinator) EscalationBridge() *permission.EscalationBridge {
@@ -2515,6 +2526,13 @@ func (c *coordinator) lookupCatwalkModel(selectedModel config.SelectedModel) (ca
 		if candidate.ID == selectedModel.Model {
 			return candidate.Model, nil
 		}
+	}
+
+	// Fallback: search all providers for matching model metadata. The user
+	// may have configured a model under a provider that supports it via its
+	// endpoint but doesn't explicitly list it in the config.
+	if found, _, ok := c.cfg.Config().FindModelInAnyProvider(selectedModel.Model); ok {
+		return found, nil
 	}
 
 	return catwalk.Model{}, errTargetModelNotFound
@@ -3359,9 +3377,15 @@ func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentPa
 		!c.childSessionWasBudgetAborted(ctx, childSessionID)
 	if shouldRetry {
 		for range 2 {
+			steerPrompt := "Call yield exactly once now. Summarize only the work already completed. Do not start new work unless needed to determine final status."
+			// If the subagent has an output schema, remind it to use the
+			// payload field with the correct structure.
+			if runtime.OutputSchema != nil {
+				steerPrompt += " Use the yield tool's payload field (not data) for your structured result, conforming to the output schema."
+			}
 			_, runErr := params.Agent.Run(ctx, SessionAgentCall{
 				SessionID:        childSessionID,
-				Prompt:           "Call yield exactly once now. Summarize only the work already completed. Do not start new work unless needed to determine final status.",
+				Prompt:           steerPrompt,
 				MaxOutputTokens:  maxOutputTokens,
 				ProviderOptions:  providerOptions,
 				Temperature:      temperature,
@@ -3383,6 +3407,24 @@ func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentPa
 	if strings.TrimSpace(content) == "" {
 		content = subAgentNoContentText(childSessionID)
 	}
+
+	// Fallback completion: if the subagent has an output schema but never
+	// called yield, try to parse its last assistant text as JSON and validate
+	// it against the schema. If it conforms, use it as the payload. This
+	// mirrors oh-my-pi's resolveFallbackCompletion — many models produce
+	// valid structured output but forget to call yield. Only apply for
+	// warn-style policies; fail policies must not be bypassed.
+	if runtime.OutputSchema != nil && missingFinishPolicyAllowsJSONFallback(policy) {
+		if payload := tryFallbackPayloadFromOutput(content, runtime.OutputSchema); payload != nil {
+			return message.ToolResultYield{
+				Status:  string(message.ToolResultSubtaskStatusCompletedWithWarnings),
+				Data:    content,
+				Payload: payload,
+				Error:   "yield was not called; payload extracted from final assistant text",
+			}, true
+		}
+	}
+
 	switch policy {
 	case MissingFinishFail, MissingFinishRetryThenFail:
 		return message.ToolResultYield{
@@ -3397,6 +3439,61 @@ func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentPa
 			Error:  "yield was not called",
 		}, true
 	}
+}
+
+// tryFallbackPayloadFromOutput attempts to parse raw assistant text as JSON
+// and validate it against the output schema. Returns the validated payload
+// bytes if successful, or nil if parsing/validation fails.
+func tryFallbackPayloadFromOutput(content string, outputSchema any) json.RawMessage {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+
+	// Strip markdown code fences if present.
+	if strings.HasPrefix(content, "```") {
+		lines := strings.Split(content, "\n")
+		if len(lines) >= 2 {
+			// Remove first line (```json or ```) and last line (```).
+			end := len(lines) - 1
+			if strings.TrimSpace(lines[end]) == "```" {
+				lines = lines[1:end]
+			} else {
+				lines = lines[1:]
+			}
+			content = strings.TrimSpace(strings.Join(lines, "\n"))
+		}
+	}
+
+	var parsed any
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		return nil
+	}
+
+	// If no schema, accept any valid JSON.
+	if outputSchema == nil {
+		if bytes, err := json.Marshal(parsed); err == nil {
+			return bytes
+		}
+		return nil
+	}
+
+	// Validate against the output schema.
+	schemaBytes, err := json.Marshal(outputSchema)
+	if err != nil {
+		return nil
+	}
+	compiler := jsonschema.NewCompiler()
+	compiled, err := compiler.Compile(schemaBytes)
+	if err != nil {
+		return nil
+	}
+	if result := compiled.Validate(parsed); result.IsValid() {
+		if bytes, err := json.Marshal(parsed); err == nil {
+			return bytes
+		}
+	}
+	return nil
 }
 
 // childSessionWasBudgetAborted reports whether the most recent assistant

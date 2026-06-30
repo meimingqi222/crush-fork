@@ -167,6 +167,20 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		}
 	}
 
+	// Register the describe_image tool only when the primary model does not
+	// support images and a vision helper model is configured. When the primary
+	// model already has vision, the read tool handles images natively and this
+	// tool is unnecessary.
+	if c.visionService != nil && c.visionService.IsAvailable() {
+		supportsImages, err := c.resolveCoderModelSupportsImages()
+		if err != nil {
+			slog.Warn("Could not resolve coder model image support; skipping describe_image registration", "error", err)
+		} else if !supportsImages {
+			describeImageTool := agenttools.NewDescribeImageTool(c.permissions, c.cfg.WorkingDir())
+			register(describeImageTool, "builtin", builtinToolMetadata(agenttools.DescribeImageToolName))
+		}
+	}
+
 	for _, customTool := range c.plugins().GetCustomTools() {
 		customAgentTool := plugin.NewCustomToolAgentTool(customTool, c.cfg.WorkingDir())
 		register(customAgentTool, "plugin", metadataFromPluginToolDefinition(customTool))

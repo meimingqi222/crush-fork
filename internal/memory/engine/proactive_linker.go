@@ -23,11 +23,11 @@ const (
 // in the background. This builds the memory graph incrementally without
 // requiring an explicit consolidation pass.
 type ProactiveLinker struct {
-	store            EventStore
-	tripleStore      *TripleStore
-	embedder         Embedder
+	store             EventStore
+	tripleStore       *TripleStore
+	embedder          Embedder
 	embeddingPipeline *EmbeddingPipeline
-	now              func() time.Time
+	now               func() time.Time
 }
 
 // NewProactiveLinker creates a new ProactiveLinker. When embedder is nil,
@@ -77,9 +77,9 @@ func (pl *ProactiveLinker) LinkNewEvent(ctx context.Context, newEvent MemoryEven
 	cutoff := pl.now().AddDate(0, -3, 0) // look back up to 3 months
 	cutoffUnix := cutoff.Unix()
 	events, err := pl.store.Query(ctx, EventFilter{
-		Limit:        200,
-		AfterTime:    &cutoffUnix,
-		OrderDesc:    true,
+		Limit:     200,
+		AfterTime: &cutoffUnix,
+		OrderDesc: true,
 	})
 	if err != nil {
 		slog.Debug("Proactive link: candidate query failed", "error", err)

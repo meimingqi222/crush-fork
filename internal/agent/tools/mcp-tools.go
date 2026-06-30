@@ -112,8 +112,12 @@ func (m *Tool) Info() fantasy.ToolInfo {
 // compresses it, and returns the raw (unencoded) image bytes along with the
 // (possibly updated) MIME type. Callers that need a base64 string must encode
 // the returned bytes themselves.
-func normalizeMCPMediaPayload(mediaType string, data []byte, mimeType string, toolName string) ([]byte, string) {
-	if mediaType != "image" || len(data) == 0 {
+func normalizeMCPMediaPayload(resultType string, data []byte, mimeType string, toolName string) ([]byte, string) {
+	if len(data) == 0 {
+		return data, mimeType
+	}
+	// MCP image and media payloads arrive base64-encoded in the Data field.
+	if resultType != "image" && resultType != "media" {
 		return data, mimeType
 	}
 
@@ -168,6 +172,15 @@ func (m *Tool) Run(ctx context.Context, params fantasy.ToolCall) (fantasy.ToolRe
 	switch result.Type {
 	case "image", "media":
 		if !GetSupportsImagesFromContext(ctx) {
+			vision := GetVisionServiceFromContext(ctx)
+			if vision != nil && vision.IsAvailable() {
+				rawImageData, mediaType := normalizeMCPMediaPayload(result.Type, result.Data, result.MediaType, m.tool.Name)
+				desc, descErr := vision.DescribeImage(ctx, rawImageData, mediaType, "")
+				if descErr != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to describe image from MCP tool: %v", descErr)), nil
+				}
+				return fantasy.NewTextResponse(desc), nil
+			}
 			modelName := GetModelNameFromContext(ctx)
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
 		}

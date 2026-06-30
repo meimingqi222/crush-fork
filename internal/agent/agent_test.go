@@ -337,8 +337,9 @@ func TestUpdateSessionUsage_AccumulatesTotals(t *testing.T) {
 
 	agent.updateSessionUsage(model, &sess, usage, nil, 0, false)
 
-	// For Anthropic: promptTokens = InputTokens + CacheCreationTokens + CacheReadTokens
-	require.Equal(t, int64(2320), sess.PromptTokens) // 1000 + (120 + 300 + 900)
+	// PromptTokens tracks the current step's input tokens (current context
+	// length), not a cumulative sum, to avoid double-counting history.
+	require.Equal(t, int64(1320), sess.PromptTokens) // 120 + 300 + 900
 	require.Equal(t, int64(445), sess.CompletionTokens)
 	require.GreaterOrEqual(t, sess.Cost, 1.25)
 	// LastPromptTokens should reflect only this step's input tokens (SET, not +=).
@@ -390,7 +391,8 @@ func TestUpdateSessionUsage_AccumulatesTotals_OpenAI(t *testing.T) {
 
 	agent.updateSessionUsage(model, &sess, usage, nil, 0, false)
 
-	require.Equal(t, int64(2320), sess.PromptTokens)
+	// PromptTokens tracks the current step's input tokens, not a cumulative sum.
+	require.Equal(t, int64(1320), sess.PromptTokens)
 	require.Equal(t, int64(445), sess.CompletionTokens)
 	require.Equal(t, int64(1320), sess.LastPromptTokens)
 }
@@ -419,8 +421,9 @@ func TestUpdateSessionUsage_LastPromptTokensIsSetNotAccumulated(t *testing.T) {
 	require.Equal(t, int64(15000), sess.PromptTokens)
 
 	agent.updateSessionUsage(model, &sess, secondUsage, nil, 0, false)
-	// PromptTokens accumulates across steps (used for billing).
-	require.Equal(t, int64(30300), sess.PromptTokens)
+	// PromptTokens reflects the current step's input tokens (current context
+	// length), not a cumulative sum.
+	require.Equal(t, int64(15300), sess.PromptTokens)
 	// LastPromptTokens reflects only the second step (used for display/StopWhen).
 	require.Equal(t, int64(15300), sess.LastPromptTokens)
 }

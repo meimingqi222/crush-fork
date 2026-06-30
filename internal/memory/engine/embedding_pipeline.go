@@ -14,15 +14,15 @@ const (
 )
 
 type EmbeddingPipeline struct {
-	store     EventStore
-	embStore  *EmbeddingStore
-	embedder  Embedder
-	now       func() time.Time
-	mu        sync.Mutex
-	queue     []string
-	stopped   bool
-	stopCh    chan struct{}
-	running   bool
+	store    EventStore
+	embStore *EmbeddingStore
+	embedder Embedder
+	now      func() time.Time
+	mu       sync.Mutex
+	queue    []string
+	stopped  bool
+	stopCh   chan struct{}
+	running  bool
 }
 
 func NewEmbeddingPipeline(store EventStore, embStore *EmbeddingStore, embedder Embedder) *EmbeddingPipeline {

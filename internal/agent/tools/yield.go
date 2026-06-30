@@ -62,9 +62,14 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 		}
 	}
 
-	// Track schema validation attempts per session to allow one retry before
-	// force-accepting. This prevents infinite loops when the agent cannot
-	// produce conforming output.
+	// maxSchemaRetries is the number of times the model is allowed to retry
+	// a payload that fails schema validation before the result is
+	// force-accepted. This mirrors oh-my-pi's approach of giving the model
+	// multiple chances with detailed feedback before accepting whatever it
+	// produced — preventing hard failures while still encouraging conforming
+	// output.
+	const maxSchemaRetries = 3
+
 	var (
 		validationAttempts   = make(map[string]int)
 		validationAttemptsMu sync.Mutex
@@ -123,13 +128,13 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 
 				var dataValue any
 				if unmarshalErr := json.Unmarshal(params.Payload, &dataValue); unmarshalErr != nil {
-					// First failure: allow retry.
-					if attempts == 0 {
+					if attempts < maxSchemaRetries {
+						remaining := maxSchemaRetries - attempts
 						return fantasy.NewTextErrorResponse(
-							fmt.Sprintf("Schema validation error: payload is not valid JSON: %s. Please fix the payload field and retry.", unmarshalErr.Error()),
+							fmt.Sprintf("Schema validation error: payload is not valid JSON: %s. Please fix the payload field and retry (%d attempt(s) remaining).", unmarshalErr.Error(), remaining),
 						), nil
 					}
-					// Second failure: force-accept to avoid infinite loop.
+					// Exhausted retries: force-accept to avoid infinite loop.
 				} else {
 					result := compiledSchema.Validate(dataValue)
 					if !result.IsValid() {
@@ -149,8 +154,8 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 						}
 					}
 					if !result.IsValid() {
-						// First failure: return error to allow retry.
-						if attempts == 0 {
+						if attempts < maxSchemaRetries {
+							remaining := maxSchemaRetries - attempts
 							errors := result.DetailedErrors()
 							var errParts []string
 							for path, msg := range errors {
@@ -161,10 +166,10 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 								errMsg = "payload does not conform to the expected output schema"
 							}
 							return fantasy.NewTextErrorResponse(
-								fmt.Sprintf("Schema validation failed: %s. Please fix the payload field and retry.", errMsg),
+								fmt.Sprintf("Schema validation failed: %s. Please fix the payload field and retry (%d attempt(s) remaining).", errMsg, remaining),
 							), nil
 						}
-						// Second failure: force-accept to avoid infinite loop.
+						// Exhausted retries: force-accept to avoid infinite loop.
 					}
 				}
 			}

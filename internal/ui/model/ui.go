@@ -166,6 +166,18 @@ type (
 	// copyChatHighlightMsg is sent to copy the current chat highlight to clipboard.
 	copyChatHighlightMsg struct{}
 
+	// agentRunStartedMsg is sent when the UI has submitted a prompt to the
+	// agent coordinator but the coordinator has not yet returned.
+	agentRunStartedMsg struct {
+		SessionID string
+	}
+
+	// agentRunFinishedMsg is sent when AgentCoordinator.Run returns.
+	agentRunFinishedMsg struct {
+		SessionID string
+		Err       error
+	}
+
 	// sessionViewState captures the view state of a session so it can be
 	// restored when navigating back from a child session.
 	sessionViewState struct {
@@ -253,6 +265,11 @@ type UI struct {
 
 	// isCanceling tracks whether the user has pressed escape once to cancel.
 	isCanceling bool
+
+	// agentRunInProgress is true while the UI is waiting for
+	// AgentCoordinator.Run to return. This covers the vision-preprocessing
+	// phase before the sessionAgent marks the session as busy.
+	agentRunInProgress bool
 
 	header *header
 
@@ -928,9 +945,61 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case copyChatHighlightMsg:
 		cmds = append(cmds, m.copyChatHighlight())
+	case agentRunStartedMsg:
+		if m.session != nil && m.session.ID == msg.SessionID {
+			m.agentRunInProgress = true
+			m.refreshEditorPlaceholder()
+			// Show a spinner on the most recent user message while vision
+			// preprocessing or the primary model is still starting up.
+			items := m.chat.MessageItems()
+			for i := len(items) - 1; i >= 0; i-- {
+				if userItem, ok := items[i].(*chat.UserMessageItem); ok {
+					userItem.SetLoadingStateVisible(true)
+					m.chat.RegisterAnimation(userItem.ID())
+					break
+				}
+			}
+			if !m.globalTickActive {
+				m.globalTickActive = true
+				cmds = append(cmds, anim.GlobalTick())
+			}
+		}
+	case agentRunFinishedMsg:
+		if m.session != nil && m.session.ID == msg.SessionID {
+			m.agentRunInProgress = false
+			m.refreshEditorPlaceholder()
+			// Stop the user-message spinner once the agent has started
+			// producing output (or failed).
+			items := m.chat.MessageItems()
+			for _, item := range items {
+				if userItem, ok := item.(*chat.UserMessageItem); ok {
+					userItem.SetLoadingStateVisible(false)
+					m.chat.UnregisterAnimation(userItem.ID())
+				}
+			}
+		}
+		if msg.Err != nil {
+			err := msg.Err
+			isCancelErr := errors.Is(err, context.Canceled)
+			isPermissionErr := permission.IsPermissionError(err)
+			if !isCancelErr && !isPermissionErr {
+				cmds = append(cmds, func() tea.Msg {
+					return util.InfoMsg{Type: util.InfoTypeError, Msg: err.Error()}
+				})
+			}
+		}
+		cmds = append(cmds, func() tea.Msg {
+			refreshed, err := m.com.App.Sessions.Get(context.Background(), msg.SessionID)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			return sessionUsageRefreshedMsg{session: &refreshed}
+		})
 	case DelayedClickMsg:
 		// Handle delayed single-click action (e.g., expansion).
-		m.chat.HandleDelayedClick(msg)
+		if _, cmd := m.chat.HandleDelayedClick(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case tea.MouseClickMsg:
 		// Pass mouse events to dialogs first if any are open.
 		if m.dialog.HasDialogs() {
@@ -3310,12 +3379,13 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 
 			case key.Matches(msg, m.keyMap.Editor.PasteImage):
-				if m.modelSupportsImages() {
-					m.lastClipboardPasteShortcut = time.Now()
-					// Pass an empty PasteMsg for keyboard shortcut - fallback is not needed
-					// since there's no text content to paste anyway.
-					cmds = append(cmds, m.pasteImageFromClipboard(tea.PasteMsg{}))
-				}
+				// Allow image paste regardless of model vision support. When the model
+				// does not support images, the coordinator will use the vision helper
+				// model (if configured) to describe them, or drop them silently.
+				m.lastClipboardPasteShortcut = time.Now()
+				// Pass an empty PasteMsg for keyboard shortcut - fallback is not needed
+				// since there's no text content to paste anyway.
+				cmds = append(cmds, m.pasteImageFromClipboard(tea.PasteMsg{}))
 
 			case m.attachments.HasAny() && m.textarea.Value() == "" && key.Matches(msg, m.keyMap.Editor.RemoveLastAttachment):
 				if m.attachments.DeleteLast() {
@@ -3836,12 +3906,6 @@ func (m *UI) ShortHelp() []key.Binding {
 		)
 
 		switch m.focus {
-		case uiFocusEditor:
-			binds = append(binds,
-				k.Editor.CycleExecutionMode,
-				k.Editor.CycleCollaborationMode,
-				k.Editor.PromptEnhance,
-			)
 		case uiFocusMain:
 			binds = append(binds, k.Chat.UpDown)
 			if m.selectedHasChildSession() {
@@ -4582,12 +4646,19 @@ func isWhitespace(b byte) bool {
 }
 
 // isAgentBusy returns true if the agent coordinator exists and is currently
-// busy processing a request.
+// busy processing a request, or if the UI is still waiting for
+// AgentCoordinator.Run to return (vision preprocessing phase).
 func (m *UI) isAgentBusy() bool {
-	return m.hasSession() &&
-		m.com.App != nil &&
-		m.com.App.AgentCoordinator != nil &&
-		m.com.App.AgentCoordinator.IsSessionBusy(m.session.ID)
+	if !m.hasSession() || m.com.App == nil {
+		return false
+	}
+	if m.agentRunInProgress {
+		return true
+	}
+	if m.com.App.AgentCoordinator == nil {
+		return false
+	}
+	return m.com.App.AgentCoordinator.IsSessionBusy(m.session.ID)
 }
 
 func (m *UI) hasLiveSessionActivity() bool {
@@ -4773,41 +4844,23 @@ func (m *UI) executeApprovedPlan(sessionID, plan string) tea.Cmd {
 func (m *UI) runAgentMessage(content string, attachments ...message.Attachment) tea.Cmd {
 	ctx := context.Background()
 
-	preRunCmd := func() tea.Msg {
-		for _, path := range m.sessionFileReads {
-			m.com.App.FileTracker.RecordRead(ctx, m.session.ID, path)
-			m.com.App.LSPManager.Start(ctx, path)
-		}
-		return nil
-	}
-
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
+
+	preRunCmd := func() tea.Msg {
+		for _, path := range m.sessionFileReads {
+			m.com.App.FileTracker.RecordRead(ctx, sessionID, path)
+			m.com.App.LSPManager.Start(ctx, path)
+		}
+		return agentRunStartedMsg{SessionID: sessionID}
+	}
+
 	runCmd := func() tea.Msg {
 		_, err := m.com.App.AgentCoordinator.Run(context.Background(), sessionID, content, attachments...)
-		if err != nil {
-			isCancelErr := errors.Is(err, context.Canceled)
-			isPermissionErr := permission.IsPermissionError(err)
-			if isCancelErr || isPermissionErr {
-				return nil
-			}
-			return util.InfoMsg{
-				Type: util.InfoTypeError,
-				Msg:  err.Error(),
-			}
-		}
-		return nil
+		return agentRunFinishedMsg{SessionID: sessionID, Err: err}
 	}
 
-	refreshUsageCmd := func() tea.Msg {
-		refreshed, err := m.com.App.Sessions.Get(context.Background(), sessionID)
-		if err != nil {
-			return util.ReportError(err)()
-		}
-		return sessionUsageRefreshedMsg{session: &refreshed}
-	}
-
-	return tea.Sequence(preRunCmd, runCmd, refreshUsageCmd)
+	return tea.Sequence(preRunCmd, runCmd)
 }
 
 func isPlanApprovalMessage(content string) bool {
@@ -5373,10 +5426,9 @@ func (m *UI) handlePasteMsg(msg tea.PasteMsg) tea.Cmd {
 		return m.handleClipboardFallback(clipboardFallbackMsg{pasteMsg: msg})
 	}
 
-	// Only attempt image paste when the current model supports images.
-	if !m.modelSupportsImages() {
-		return m.handleClipboardFallback(clipboardFallbackMsg{pasteMsg: msg})
-	}
+	// Always attempt image/file paste from clipboard. When the model does
+	// not support images, the coordinator will use the vision helper model
+	// (if configured) to describe them, or drop them silently.
 	// Try to paste image/file from clipboard first.
 	return m.pasteImageFromClipboard(msg)
 }
