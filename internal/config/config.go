@@ -1223,7 +1223,7 @@ func (c *Config) FindModelInAnyProvider(modelID string) (catwalk.Model, string, 
 	for providerID, providerCfg := range c.Providers.Seq2() {
 		for _, m := range providerCfg.Models {
 			if m.ID == modelID {
-				return m, providerID, true
+				return m.Model, providerID, true
 			}
 		}
 	}
@@ -1234,7 +1234,7 @@ func (c *Config) GetModel(provider, model string) *catwalk.Model {
 	if providerConfig, ok := c.Providers.Get(provider); ok {
 		for i := range providerConfig.Models {
 			if providerConfig.Models[i].ID == model {
-				return &providerConfig.Models[i]
+				return &providerConfig.Models[i].Model
 			}
 		}
 	}
