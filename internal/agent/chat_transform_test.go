@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
@@ -64,4 +65,21 @@ func TestUsageSnapshotFromMessagesNoAssistant(t *testing.T) {
 	require.Equal(t, int64(0), snap.TotalTokens)
 	require.Equal(t, int64(1234), snap.EstimatedPromptTokens)
 	require.Equal(t, int64(1234), snap.ContextUsed)
+}
+
+func TestFilterImageFilesForModel(t *testing.T) {
+	t.Parallel()
+	files := []fantasy.FilePart{
+		{Filename: "photo.png", MediaType: "image/png"},
+		{Filename: "doc.pdf", MediaType: "application/pdf"},
+		{Filename: "shot.jpg", MediaType: "image/jpeg"},
+	}
+
+	visionModel := Model{CatwalkCfg: catwalk.Model{SupportsImages: true}}
+	require.Equal(t, files, filterImageFilesForModel(files, visionModel))
+
+	nonVisionModel := Model{CatwalkCfg: catwalk.Model{SupportsImages: false}}
+	filtered := filterImageFilesForModel(files, nonVisionModel)
+	require.Len(t, filtered, 1)
+	require.Equal(t, "doc.pdf", filtered[0].Filename)
 }

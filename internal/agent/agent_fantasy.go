@@ -5,7 +5,8 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
-
+	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -65,9 +66,9 @@ func isDuplicateAdjacentTextPart(existing []fantasy.MessagePart, part fantasy.Me
 // messages for models that do not support image inputs. This prevents
 // "invalid content type" errors when conversation history contains images
 // recorded during a previous session with a vision-capable model.
-//
-// It strips FilePart entries from user messages and replaces media tool
-// results with a text placeholder. Empty user messages are dropped entirely.
+// FilePart entries in user messages are replaced with a text placeholder that
+// preserves the filename and MIME type. Media tool results are replaced with a
+// text placeholder.
 func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Message {
 	result := make([]fantasy.Message, 0, len(messages))
 	for _, msg := range messages {
@@ -75,16 +76,11 @@ func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Me
 		case fantasy.MessageRoleUser:
 			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
 			for _, part := range msg.Content {
-				// Check for both value and pointer types of FilePart
-				var isFilePart bool
-				if _, ok := part.(fantasy.FilePart); ok {
-					isFilePart = true
-				} else if _, ok := part.(*fantasy.FilePart); ok {
-					isFilePart = true
+				if filePart := filePartFromMessagePart(part); filePart != nil {
+					filtered = append(filtered, fantasy.TextPart{Text: imageAttachmentPlaceholder(filePart.Filename, filePart.MediaType, false)})
+					continue
 				}
-				if !isFilePart {
-					filtered = append(filtered, part)
-				}
+				filtered = append(filtered, part)
 			}
 			if len(filtered) == 0 {
 				continue
@@ -113,6 +109,131 @@ func stripImagePartsFromFantasyMessages(messages []fantasy.Message) []fantasy.Me
 		}
 	}
 	return result
+}
+
+// stripImagePartsFromFantasyMessagesWithVision works like
+// stripImagePartsFromFantasyMessages but, when a VisionDescriber is provided,
+// replaces FilePart entries in user messages with a placeholder that tells the
+// model it can call the describe_image tool to obtain a text description of the
+// image instead of preprocessing the image eagerly.
+func stripImagePartsFromFantasyMessagesWithVision(messages []fantasy.Message, vision tools.VisionDescriber) []fantasy.Message {
+	if vision == nil || !vision.IsAvailable() {
+		return stripImagePartsFromFantasyMessages(messages)
+	}
+	result := make([]fantasy.Message, 0, len(messages))
+	for _, msg := range messages {
+		switch msg.Role {
+		case fantasy.MessageRoleUser:
+			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
+			for _, part := range msg.Content {
+				if filePart := filePartFromMessagePart(part); filePart != nil {
+					filtered = append(filtered, fantasy.TextPart{Text: imageAttachmentPlaceholder(filePart.Filename, filePart.MediaType, true)})
+					continue
+				}
+				filtered = append(filtered, part)
+			}
+			if len(filtered) == 0 {
+				continue
+			}
+			msg.Content = filtered
+			result = append(result, msg)
+		case fantasy.MessageRoleTool:
+			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
+			for _, part := range msg.Content {
+				tr, ok := part.(fantasy.ToolResultPart)
+				if !ok {
+					filtered = append(filtered, part)
+					continue
+				}
+				if _, isMedia := tr.Output.(fantasy.ToolResultOutputContentMedia); isMedia {
+					tr.Output = fantasy.ToolResultOutputContentText{
+						Text: "[Image/media content not supported by current model]",
+					}
+				}
+				filtered = append(filtered, tr)
+			}
+			msg.Content = filtered
+			result = append(result, msg)
+		default:
+			result = append(result, msg)
+		}
+	}
+	return result
+}
+
+func filePartFromMessagePart(part fantasy.MessagePart) *fantasy.FilePart {
+	if fp, ok := part.(fantasy.FilePart); ok {
+		return &fp
+	}
+	if fp, ok := part.(*fantasy.FilePart); ok && fp != nil {
+		return fp
+	}
+	return nil
+}
+
+func imageAttachmentPlaceholder(filename, mimeType string, hasVision bool) string {
+	name := filename
+	if name == "" {
+		name = "image"
+	}
+	if hasVision {
+		return fmt.Sprintf("[Image attachment: %s (%s). Use the describe_image tool if you need a description.]", name, mimeType)
+	}
+	return fmt.Sprintf("[Image attachment: %s (%s). The current model does not support images and no vision helper is configured.]", name, mimeType)
+}
+
+func imageAttachmentPlaceholderForMessage(filename, mimeType, messageID string, imageIndex int, hasVision bool) string {
+	name := filename
+	if name == "" {
+		name = "image"
+	}
+	if hasVision {
+		if messageID != "" && imageIndex > 0 {
+			return fmt.Sprintf("[Image attachment: %s (%s). Use the describe_image tool with message_id=%q and image_index=%d if you need a description.]", name, mimeType, messageID, imageIndex)
+		}
+		return imageAttachmentPlaceholder(name, mimeType, true)
+	}
+	return fmt.Sprintf("[Image attachment: %s (%s). The current model does not support images and no vision helper is configured.]", name, mimeType)
+}
+
+// promptWithImageAttachmentPlaceholders returns a user prompt that includes
+// text attachments inline and appends placeholder notes for any image
+// attachments. This is used for the initial request to non-vision models,
+// where the image is sent via Files/Prompt rather than as a FilePart in the
+// message history (which stripImagePartsFromFantasyMessages would handle).
+func promptWithImageAttachmentPlaceholders(prompt string, attachments []message.Attachment, hasVision bool) string {
+	return promptWithImageAttachmentPlaceholdersForMessage(prompt, attachments, "", hasVision)
+}
+
+func promptWithImageAttachmentPlaceholdersForMessage(prompt string, attachments []message.Attachment, messageID string, hasVision bool) string {
+	prompt = message.PromptWithTextAttachments(prompt, attachments)
+	var imagePlaceholders []string
+	imageIndex := 0
+	for _, att := range attachments {
+		if !att.IsImage() {
+			continue
+		}
+		imageIndex++
+		name := att.FileName
+		if name == "" {
+			name = att.FilePath
+		}
+		imagePlaceholders = append(imagePlaceholders, imageAttachmentPlaceholderForMessage(name, att.MimeType, messageID, imageIndex, hasVision))
+	}
+	if len(imagePlaceholders) == 0 {
+		return prompt
+	}
+	if prompt == "" {
+		return strings.Join(imagePlaceholders, "\n\n")
+	}
+	return prompt + "\n\n" + strings.Join(imagePlaceholders, "\n\n")
+}
+
+// describeImageToolSystemPromptNote returns a short system prompt note that
+// reminds the model it can call describe_image for any image attachment when
+// the primary model does not support vision inputs.
+func describeImageToolSystemPromptNote() string {
+	return `You do not have direct vision capabilities. When the user includes image attachments, use the describe_image tool with the attachment's message_id and image_index to obtain a text description. Use the filename path only when no message_id is shown. You may call it multiple times if there are several images.`
 }
 
 // stripToolCallPartsFromFantasyMessages removes tool-call parts from

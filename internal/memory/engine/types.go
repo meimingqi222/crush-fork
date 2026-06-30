@@ -20,12 +20,12 @@ type MemoryKind string
 
 const (
 	// Long-lived stable knowledge (months to years).
-	MemoryKindProfile    MemoryKind = "profile"     // User/team profile and identity
-	MemoryKindIdentity   MemoryKind = "identity"    // Identity information
-	MemoryKindPreference MemoryKind = "preference"  // User preferences and style
-	MemoryKindCorrection MemoryKind = "correction"  // Explicit corrections or do/don't rules
-	MemoryKindConstraint MemoryKind = "constraint"  // Hard constraints and requirements
-	MemoryKindTeam       MemoryKind = "team"        // Team composition and conventions
+	MemoryKindProfile    MemoryKind = "profile"    // User/team profile and identity
+	MemoryKindIdentity   MemoryKind = "identity"   // Identity information
+	MemoryKindPreference MemoryKind = "preference" // User preferences and style
+	MemoryKindCorrection MemoryKind = "correction" // Explicit corrections or do/don't rules
+	MemoryKindConstraint MemoryKind = "constraint" // Hard constraints and requirements
+	MemoryKindTeam       MemoryKind = "team"       // Team composition and conventions
 
 	// Medium-term knowledge (weeks to months).
 	MemoryKindSkill     MemoryKind = "skill"     // Acquired skills and capabilities
@@ -36,14 +36,14 @@ const (
 	MemoryKindPattern   MemoryKind = "pattern"   // Recurring patterns observed
 
 	// Shorter-term knowledge (days to weeks).
-	MemoryKindFact      MemoryKind = "fact"      // Isolated factual knowledge
-	MemoryKindReference MemoryKind = "reference" // Reference material lookups
-	MemoryKindDecision  MemoryKind = "decision"  // Architectural/design decisions
-	MemoryKindApproach  MemoryKind = "approach"  // Approach taken for a problem
-	MemoryKindAttempt   MemoryKind = "attempt"   // Attempted solutions
-	MemoryKindOutcome   MemoryKind = "outcome"   // Outcomes of actions
-	MemoryKindContext   MemoryKind = "context"   // Situational context
-	MemoryKindEvent     MemoryKind = "event"     // Notable events
+	MemoryKindFact         MemoryKind = "fact"         // Isolated factual knowledge
+	MemoryKindReference    MemoryKind = "reference"    // Reference material lookups
+	MemoryKindDecision     MemoryKind = "decision"     // Architectural/design decisions
+	MemoryKindApproach     MemoryKind = "approach"     // Approach taken for a problem
+	MemoryKindAttempt      MemoryKind = "attempt"      // Attempted solutions
+	MemoryKindOutcome      MemoryKind = "outcome"      // Outcomes of actions
+	MemoryKindContext      MemoryKind = "context"      // Situational context
+	MemoryKindEvent        MemoryKind = "event"        // Notable events
 	MemoryKindConversation MemoryKind = "conversation" // Conversation segments
 
 	// Transient state (hours to days).
@@ -83,21 +83,21 @@ type MemorySourceRef struct {
 
 // MemoryEvent is the central event type in the event-sourced memory system.
 type MemoryEvent struct {
-	ID         string          `json:"id"`
-	Scope      MemoryScope     `json:"scope"`
-	Kind       MemoryKind      `json:"kind"`
-	Content    string          `json:"content"`
-	Summary    string          `json:"summary,omitempty"`
-	Source     MemorySourceRef `json:"source"`
-	Confidence float64         `json:"confidence"`
-	Importance float64         `json:"importance"`
-	Veracity   MemoryVeracity  `json:"veracity,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
-	Supersedes *string         `json:"supersedes,omitempty"`
-	Tags       []string        `json:"tags,omitempty"`
-	Watermark  int64           `json:"watermark"`
-	ExpiresAt  *time.Time      `json:"expires_at,omitempty"`
+	ID         string            `json:"id"`
+	Scope      MemoryScope       `json:"scope"`
+	Kind       MemoryKind        `json:"kind"`
+	Content    string            `json:"content"`
+	Summary    string            `json:"summary,omitempty"`
+	Source     MemorySourceRef   `json:"source"`
+	Confidence float64           `json:"confidence"`
+	Importance float64           `json:"importance"`
+	Veracity   MemoryVeracity    `json:"veracity,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+	Supersedes *string           `json:"supersedes,omitempty"`
+	Tags       []string          `json:"tags,omitempty"`
+	Watermark  int64             `json:"watermark"`
+	ExpiresAt  *time.Time        `json:"expires_at,omitempty"`
 	Triples    []ExtractedTriple `json:"triples,omitempty"`
 }
 

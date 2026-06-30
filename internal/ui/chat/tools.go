@@ -689,8 +689,8 @@ func (t *baseToolMessageItem) getSpinnerPrefix() string {
 
 // HandleMouseClick implements MouseClickable.
 // Returns false to let HandleDelayedClick fall through to ToggleExpanded.
-func (t *baseToolMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) bool {
-	return false
+func (t *baseToolMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) (bool, tea.Cmd) {
+	return false, nil
 }
 
 // HandleKeyEvent implements KeyEventHandler.

@@ -27,6 +27,7 @@ const (
 	ModelTypeSmall
 	ModelTypeBackground
 	ModelTypeAutoClassifier
+	ModelTypeVision
 )
 
 // String returns the string representation of the [ModelType].
@@ -40,6 +41,8 @@ func (mt ModelType) String() string {
 		return "Background"
 	case ModelTypeAutoClassifier:
 		return "Auto Classifier"
+	case ModelTypeVision:
+		return "Vision"
 	default:
 		return "Unknown"
 	}
@@ -56,6 +59,8 @@ func (mt ModelType) Config() config.SelectedModelType {
 		return config.SelectedModelTypeBackground
 	case ModelTypeAutoClassifier:
 		return config.SelectedModelTypeAutoClassifier
+	case ModelTypeVision:
+		return config.SelectedModelTypeVision
 	default:
 		return ""
 	}
@@ -72,6 +77,8 @@ func (mt ModelType) Placeholder() string {
 		return backgroundModelInputPlaceholder
 	case ModelTypeAutoClassifier:
 		return autoClassifierModelInputPlaceholder
+	case ModelTypeVision:
+		return visionModelInputPlaceholder
 	default:
 		return ""
 	}
@@ -83,6 +90,7 @@ const (
 	smallModelInputPlaceholder          = "Choose a model for small, simple tasks"
 	backgroundModelInputPlaceholder     = "Choose a model for background tasks (memory extraction, handoff generation)"
 	autoClassifierModelInputPlaceholder = "Choose a model for Auto Mode permission review"
+	visionModelInputPlaceholder         = "Choose a vision model for image description (optional)"
 )
 
 // ModelsID is the identifier for the model selection dialog.
@@ -90,7 +98,7 @@ const ModelsID = "models"
 
 const defaultModelsDialogMaxWidth = 90
 
-const modelSummaryContentHeight = 4
+const modelSummaryContentHeight = 5
 
 // Models represents a model selection dialog.
 type Models struct {
@@ -296,6 +304,7 @@ func (m *Models) modelTypeRadioView() string {
 	smallRadioStyle := t.RadioOff
 	handoffRadioStyle := t.RadioOff
 	autoClassifierRadioStyle := t.RadioOff
+	visionRadioStyle := t.RadioOff
 	switch m.modelType {
 	case ModelTypeLarge:
 		largeRadioStyle = t.RadioOn
@@ -303,6 +312,8 @@ func (m *Models) modelTypeRadioView() string {
 		smallRadioStyle = t.RadioOn
 	case ModelTypeBackground:
 		handoffRadioStyle = t.RadioOn
+	case ModelTypeVision:
+		visionRadioStyle = t.RadioOn
 	default:
 		autoClassifierRadioStyle = t.RadioOn
 	}
@@ -311,12 +322,14 @@ func (m *Models) modelTypeRadioView() string {
 	smallRadio := smallRadioStyle.Padding(0, 1).Render()
 	handoffRadio := handoffRadioStyle.Padding(0, 1).Render()
 	autoClassifierRadio := autoClassifierRadioStyle.Padding(0, 1).Render()
+	visionRadio := visionRadioStyle.Padding(0, 1).Render()
 
-	return fmt.Sprintf("%s%s  %s%s  %s%s  %s%s",
+	return fmt.Sprintf("%s%s  %s%s  %s%s  %s%s  %s%s",
 		largeRadio, textStyle.Render(ModelTypeLarge.String()),
 		smallRadio, textStyle.Render(ModelTypeSmall.String()),
 		handoffRadio, textStyle.Render(ModelTypeBackground.String()),
-		autoClassifierRadio, textStyle.Render(ModelTypeAutoClassifier.String()))
+		autoClassifierRadio, textStyle.Render(ModelTypeAutoClassifier.String()),
+		visionRadio, textStyle.Render(ModelTypeVision.String()))
 }
 
 func (m *Models) currentModelSummaryView(width int) string {
@@ -325,6 +338,7 @@ func (m *Models) currentModelSummaryView(width int) string {
 		m.currentModelSummaryLine(ModelTypeSmall, width),
 		m.currentModelSummaryLine(ModelTypeBackground, width),
 		m.currentModelSummaryLine(ModelTypeAutoClassifier, width),
+		m.currentModelSummaryLine(ModelTypeVision, width),
 	}
 	return m.com.Styles.Dialog.SecondaryText.Width(width).Render(strings.Join(lines, "\n"))
 }
@@ -555,6 +569,9 @@ func (m *Models) setProviderItems() error {
 
 			group := NewModelGroup(t, name, true)
 			for _, model := range p.Models {
+				if m.modelType == ModelTypeVision && !model.SupportsImages {
+					continue
+				}
 				item := NewModelItem(t, provider, model, m.modelType, false, model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider)
 				group.AppendItems(item)
 				itemsMap[item.ID()] = item
@@ -636,6 +653,9 @@ func (m *Models) setProviderItems() error {
 
 		group := NewModelGroup(t, name, providerConfigured)
 		for _, model := range displayProvider.Models {
+			if m.modelType == ModelTypeVision && !model.SupportsImages {
+				continue
+			}
 			item := NewModelItem(t, provider, model, m.modelType, false, model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider)
 			group.AppendItems(item)
 			itemsMap[item.ID()] = item
@@ -708,6 +728,8 @@ func (m *Models) nextModelType(current ModelType) ModelType {
 		return ModelTypeBackground
 	case ModelTypeBackground:
 		return ModelTypeAutoClassifier
+	case ModelTypeAutoClassifier:
+		return ModelTypeVision
 	default:
 		return ModelTypeLarge
 	}

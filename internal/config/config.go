@@ -72,6 +72,7 @@ const (
 	SelectedModelTypeDesigner       SelectedModelType = "designer"
 	SelectedModelTypeLibrarian      SelectedModelType = "librarian"
 	SelectedModelTypeQuickTask      SelectedModelType = "quick_task"
+	SelectedModelTypeVision         SelectedModelType = "vision"
 
 	// Deprecated: kept only for backward-compatible config loading.
 	SelectedModelTypeHandoff SelectedModelType = "handoff"
@@ -1188,13 +1189,38 @@ func (c *Config) IsConfigured() bool {
 	return len(c.EnabledProviders()) > 0
 }
 
-func (c *Config) GetModel(provider, model string) *catwalk.Model {
-	if providerConfig, ok := c.Providers.Get(provider); ok {
-		for _, m := range providerConfig.Models {
-			if m.ID == model {
-				return &m
+// FindModelInAnyProvider searches all configured providers for a model with
+// the given ID. Returns the model and the provider ID it was found in.
+// This is used as a fallback when a model is configured under a provider
+// that doesn't list it in its models array (e.g., when the provider's
+// endpoint supports the model even though it isn't explicitly declared).
+func (c *Config) FindModelInAnyProvider(modelID string) (catwalk.Model, string, bool) {
+	if c == nil || c.Providers == nil {
+		return catwalk.Model{}, "", false
+	}
+	for providerID, providerCfg := range c.Providers.Seq2() {
+		for _, m := range providerCfg.Models {
+			if m.ID == modelID {
+				return m, providerID, true
 			}
 		}
+	}
+	return catwalk.Model{}, "", false
+}
+
+func (c *Config) GetModel(provider, model string) *catwalk.Model {
+	if providerConfig, ok := c.Providers.Get(provider); ok {
+		for i := range providerConfig.Models {
+			if providerConfig.Models[i].ID == model {
+				return &providerConfig.Models[i]
+			}
+		}
+	}
+	// Fallback: search all providers for the model ID. The user may have
+	// configured a model under a provider that supports it via its endpoint
+	// even though the model isn't explicitly listed in that provider's config.
+	if found, _, ok := c.FindModelInAnyProvider(model); ok {
+		return &found
 	}
 	// Fallback: look up model in models.dev data and create a catwalk.Model.
 	if devData := GetModelsDevData(); len(devData) > 0 {
@@ -1304,6 +1330,7 @@ func allToolNames() []string {
 		"yield",
 		"subtask_result",
 		"write",
+		"describe_image",
 	}
 }
 

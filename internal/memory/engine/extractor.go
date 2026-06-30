@@ -15,14 +15,14 @@ type Transcript struct {
 // ExtractedEvent is the structured output from LLM analysis of a session
 // transcript. It maps directly to MemoryEvent fields.
 type ExtractedEvent struct {
-	Kind       MemoryKind     `json:"kind"`
-	Scope      MemoryScope    `json:"scope"`
-	Content    string         `json:"content"`
-	Summary    string         `json:"summary,omitempty"`
-	Confidence float64        `json:"confidence"`
-	Importance float64        `json:"importance"`
-	Veracity   MemoryVeracity `json:"veracity,omitempty"`
-	Tags       []string       `json:"tags,omitempty"`
+	Kind       MemoryKind        `json:"kind"`
+	Scope      MemoryScope       `json:"scope"`
+	Content    string            `json:"content"`
+	Summary    string            `json:"summary,omitempty"`
+	Confidence float64           `json:"confidence"`
+	Importance float64           `json:"importance"`
+	Veracity   MemoryVeracity    `json:"veracity,omitempty"`
+	Tags       []string          `json:"tags,omitempty"`
 	Triples    []ExtractedTriple `json:"triples,omitempty"`
 }
 

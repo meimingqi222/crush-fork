@@ -212,19 +212,21 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		cost = *openrouterCost
 	}
 
-	promptTokens := promptTokensForUsage(resp.TotalUsage, usageProvider(model))
 	// Use OutputTokens only (not OutputTokens + ReasoningTokens) to avoid
 	// double-counting reasoning tokens for OpenAI-style providers where
 	// OutputTokens already includes ReasoningTokens.
 	completionTokens := resp.TotalUsage.OutputTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
-	// concurrent session updates.
+	// concurrent session updates. Title generation is an auxiliary call: add
+	// its output tokens and cost, but do not touch prompt_tokens. That field
+	// tracks the latest main-conversation context length, and the SQL path
+	// increments prompt_tokens rather than setting an absolute value.
 	if sessionLock != nil {
 		sessionLock.Lock()
 		defer sessionLock.Unlock()
 	}
-	saveErr := a.sessions.UpdateTitleAndUsage(context.Background(), sessionID, title, promptTokens, completionTokens, cost)
+	saveErr := a.sessions.UpdateTitleAndUsage(context.Background(), sessionID, title, 0, completionTokens, cost)
 	if saveErr != nil {
 		slog.Warn("Failed to save session title and usage", "error", saveErr)
 		return

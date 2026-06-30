@@ -168,6 +168,15 @@ func (c *coordinator) selectedModelWithOverride(
 			break
 		}
 	}
+	// Fallback: if the model isn't listed in the selected provider's models
+	// array, search all providers for matching model metadata. The user may
+	// have configured a model under a provider that supports it via its
+	// endpoint but doesn't explicitly list it in the config.
+	if catwalkModel == nil {
+		if found, _, ok := c.cfg.Config().FindModelInAnyProvider(selectedModel.Model); ok {
+			catwalkModel = &found
+		}
+	}
 	if catwalkModel == nil {
 		return Model{}, config.ProviderConfig{}, errTargetModelNotFound
 	}

@@ -1383,6 +1383,41 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 		_, err := coord.resolveCoderModelSupportsImages()
 		require.ErrorContains(t, err, "model \"missing-model\" not found")
 	})
+
+	t.Run("falls back to FindModelInAnyProvider when model is unlisted in selected provider", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, "primary-provider", config.ProviderConfig{
+			ID: "primary-provider",
+			Models: []catwalk.Model{
+				{ID: "other-model", SupportsImages: false},
+			},
+		})
+		coord.cfg.Config().Providers.Set("catalog-provider", config.ProviderConfig{
+			ID: "catalog-provider",
+			Models: []catwalk.Model{
+				{ID: "vision-model", SupportsImages: true},
+			},
+		})
+		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}
+		coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
+			Provider: "primary-provider",
+			Model:    "vision-model",
+		}
+
+		supportsImages, err := coord.resolveCoderModelSupportsImages()
+		require.NoError(t, err)
+		require.True(t, supportsImages)
+	})
+}
+
+func TestMissingFinishPolicyAllowsJSONFallback(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, missingFinishPolicyAllowsJSONFallback(MissingFinishWarn))
+	require.True(t, missingFinishPolicyAllowsJSONFallback(MissingFinishRetryThenWarn))
+	require.False(t, missingFinishPolicyAllowsJSONFallback(MissingFinishFail))
+	require.False(t, missingFinishPolicyAllowsJSONFallback(MissingFinishRetryThenFail))
+	require.False(t, missingFinishPolicyAllowsJSONFallback(""))
 }
 
 func TestCreateSubagentWorktreeDirUsesProjectDataDir(t *testing.T) {
@@ -2011,6 +2046,94 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 			require.True(t, ok)
 			require.NotNil(t, parsed.Effort)
 			assert.Equal(t, anthropic.Effort("max"), *parsed.Effort)
+		})
+	}
+}
+
+func TestTryFallbackPayloadFromOutput(t *testing.T) {
+	t.Parallel()
+
+	exploreSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{"type": "string"},
+			"files": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":        map[string]any{"type": "string"},
+						"description": map[string]any{"type": "string"},
+					},
+					"required": []string{"path", "description"},
+				},
+			},
+		},
+		"required": []string{"summary", "files"},
+	}
+
+	tests := []struct {
+		name    string
+		content string
+		schema  any
+		want    bool
+	}{
+		{
+			name:    "valid JSON conforming to schema",
+			content: `{"summary":"found it","files":[{"path":"foo.go","description":"main file"}]}`,
+			schema:  exploreSchema,
+			want:    true,
+		},
+		{
+			name:    "valid JSON wrapped in markdown fence",
+			content: "```json\n{\"summary\":\"found it\",\"files\":[]}\n```",
+			schema:  exploreSchema,
+			want:    true,
+		},
+		{
+			name:    "invalid JSON",
+			content: "This is just text, not JSON.",
+			schema:  exploreSchema,
+			want:    false,
+		},
+		{
+			name:    "valid JSON but does not conform to schema",
+			content: `{"wrong":"field"}`,
+			schema:  exploreSchema,
+			want:    false,
+		},
+		{
+			name:    "empty content",
+			content: "",
+			schema:  exploreSchema,
+			want:    false,
+		},
+		{
+			name:    "nil schema accepts any valid JSON",
+			content: `{"anything":"goes"}`,
+			schema:  nil,
+			want:    true,
+		},
+		{
+			name:    "nil schema rejects invalid JSON",
+			content: "not json",
+			schema:  nil,
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result := tryFallbackPayloadFromOutput(tc.content, tc.schema)
+			if tc.want {
+				require.NotNil(t, result, "expected non-nil payload")
+				// Verify the result is valid JSON.
+				var parsed any
+				require.NoError(t, json.Unmarshal(result, &parsed))
+			} else {
+				require.Nil(t, result, "expected nil payload")
+			}
 		})
 	}
 }

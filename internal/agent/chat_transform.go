@@ -252,6 +252,7 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		systemPrompt = joinSystemSections([]string{systemPrompt, autoModePrompt})
 	}
 	history, files := a.preparePrompt(transformedMessages, input.Attachments...)
+	files = filterImageFilesForModel(files, input.Model)
 	transformedEstimate := estimatePromptStateTokens(history, systemPrompt, promptPrefix)
 	slog.Debug("[PERF] buildChatRequestState: preparePrompt done", "duration", time.Since(start), "session_id", input.SessionID)
 	slog.Debug("Built chat request token estimate",
@@ -281,6 +282,24 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 			promptPrefix != input.PromptPrefix,
 		EstimateReduced: transformedEstimate < originalEstimate,
 	}, nil
+}
+
+// filterImageFilesForModel removes image FileParts from the request when the
+// primary model does not support image inputs. This prevents providers from
+// rejecting requests with unsupported media; the model still sees a text
+// placeholder produced by stripImagePartsFromFantasyMessages(WithVision).
+func filterImageFilesForModel(files []fantasy.FilePart, model Model) []fantasy.FilePart {
+	if model.CatwalkCfg.SupportsImages {
+		return files
+	}
+	filtered := make([]fantasy.FilePart, 0, len(files))
+	for _, f := range files {
+		if strings.HasPrefix(f.MediaType, "image/") {
+			continue
+		}
+		filtered = append(filtered, f)
+	}
+	return filtered
 }
 
 func buildSessionCompactingPrompt(todos []session.Todo, extraContext []string, promptOverride string) string {

@@ -43,7 +43,7 @@ func TestHandleDelayedClickTogglesTaskNodeNestedOperationsOnce(t *testing.T) {
 	handled, _ := chatModel.HandleMouseDown(0, 0)
 	require.True(t, handled)
 
-	clicked := chatModel.HandleDelayedClick(DelayedClickMsg{
+	clicked, _ := chatModel.HandleDelayedClick(DelayedClickMsg{
 		ClickID: chatModel.pendingClickID,
 		ItemIdx: 0,
 		X:       0,
@@ -84,7 +84,7 @@ func TestHandleDelayedClickExpandsGenericToolMessage(t *testing.T) {
 	handled, _ := chatModel.HandleMouseDown(0, 0)
 	require.True(t, handled)
 
-	clicked := chatModel.HandleDelayedClick(DelayedClickMsg{
+	clicked, _ := chatModel.HandleDelayedClick(DelayedClickMsg{
 		ClickID: chatModel.pendingClickID,
 		ItemIdx: 0,
 		X:       0,

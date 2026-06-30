@@ -407,6 +407,20 @@ func handleFileRead(
 
 	if isSupportedImage {
 		if !GetSupportsImagesFromContext(ctx) {
+			vision := GetVisionServiceFromContext(ctx)
+			if vision != nil && vision.IsAvailable() {
+				imageData, readErr := os.ReadFile(filePath)
+				if readErr != nil {
+					return fantasy.ToolResponse{}, fmt.Errorf("error reading image file: %w", readErr)
+				}
+				desc, descErr := vision.DescribeImage(ctx, imageData, mimeType, "")
+				if descErr != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to describe image: %v", descErr)), nil
+				}
+				meta := ReadResponseMetadata{Path: filePath}
+				meta.applyRecovery(recovery)
+				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(desc), meta), nil
+			}
 			modelName := GetModelNameFromContext(ctx)
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
 		}

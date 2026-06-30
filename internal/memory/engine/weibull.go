@@ -28,10 +28,10 @@ func (p WeibullParams) Decay(ageHours float64) float64 {
 // VoiceWeights defines the RRF fusion weights for each retrieval "voice".
 // These weights are tuned to match Mnemopi's polyphonic recall profile.
 type VoiceWeights struct {
-	Vector    float64 // Semantic vector similarity
-	FTS       float64 // Lexical full-text search
-	Temporal  float64 // Recency-weighted temporal scoring
-	Triple    float64 // Knowledge graph / triple matching
+	Vector   float64 // Semantic vector similarity
+	FTS      float64 // Lexical full-text search
+	Temporal float64 // Recency-weighted temporal scoring
+	Triple   float64 // Knowledge graph / triple matching
 }
 
 // DefaultVoiceWeights returns the recommended voice balance:

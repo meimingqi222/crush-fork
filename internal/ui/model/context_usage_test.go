@@ -113,9 +113,10 @@ func TestResolveContextUsageSnapshotReturnsProvisionalDirectly(t *testing.T) {
 	}
 
 	snapshot := resolveContextUsageSnapshot(&session.Session{
+		PromptTokens:         110_000,
+		CompletionTokens:     600,
 		LastPromptTokens:     110_000,
 		LastCompletionTokens: 600,
-		CompletionTokens:     600,
 	}, []message.Message{
 		{
 			ID:       "finished",
@@ -147,6 +148,10 @@ func TestResolveContextUsageSnapshotReturnsProvisionalDirectly(t *testing.T) {
 		},
 	}, nil, selected)
 
+	// For provisional messages the current exchange has not been committed
+	// to session totals yet. TotalTokens is floored at the last known
+	// exchange total (110_000 + 600 = 110_600) and OutputTokens is floored
+	// at the committed completion tokens.
 	require.Equal(t, int64(110_600), snapshot.TotalTokens)
 	require.Equal(t, int64(600), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
@@ -179,7 +184,7 @@ func TestDisplayContextWindowFallsBackToMaxPromptTokens(t *testing.T) {
 	require.Equal(t, int64(150_000), window)
 }
 
-func TestResolveContextUsageSnapshotFloorsProvisionalToSessionHistory(t *testing.T) {
+func TestResolveContextUsageSnapshotAccumulatesProvisionalExchange(t *testing.T) {
 	t.Parallel()
 
 	selected := &agent.Model{
@@ -188,12 +193,14 @@ func TestResolveContextUsageSnapshotFloorsProvisionalToSessionHistory(t *testing
 	}
 
 	// Only a provisional assistant message exists and no finished message
-	// is available. The snapshot must be floored to the session's last
-	// confirmed totals so the display does not drop below known history.
+	// is available. The snapshot should be floored at the last known
+	// exchange total so the display never drops below the confirmed context
+	// length.
 	snapshot := resolveContextUsageSnapshot(&session.Session{
+		PromptTokens:         50_000,
+		CompletionTokens:     500,
 		LastPromptTokens:     50_000,
 		LastCompletionTokens: 500,
-		CompletionTokens:     500,
 	}, []message.Message{
 		{
 			ID:       "current",
@@ -209,6 +216,9 @@ func TestResolveContextUsageSnapshotFloorsProvisionalToSessionHistory(t *testing
 		},
 	}, nil, selected)
 
+	// TotalTokens is floored at the last exchange total (50_000 + 500 =
+	// 50_500). OutputTokens uses the live provisional value since it is
+	// larger than the committed completion tokens.
 	require.Equal(t, int64(50_500), snapshot.TotalTokens)
 	require.Equal(t, int64(1_200), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
