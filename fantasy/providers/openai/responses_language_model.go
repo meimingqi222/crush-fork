@@ -237,12 +237,6 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 		}
 		if openaiOptions.Instructions != nil {
 			params.Instructions = param.NewOpt(*openaiOptions.Instructions)
-		} else if systemInstructions != "" {
-			// Use system prompt extracted from the input array as the
-			// instructions field. This enables providers (xAI, OpenAI) to
-			// cache the system prompt as part of the stable prefix, which
-			// significantly improves cache hit rates.
-			params.Instructions = param.NewOpt(systemInstructions)
 		}
 		if openaiOptions.ServiceTier != nil {
 			params.ServiceTier = responses.ResponseNewParamsServiceTier(*openaiOptions.ServiceTier)
@@ -271,6 +265,16 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 			}
 			params.Reasoning = reasoning
 		}
+	}
+
+	// Apply system instructions extracted from the input array when not
+	// explicitly set via openaiOptions.Instructions. This runs outside the
+	// openaiOptions nil-check so it also applies when openaiOptions is nil.
+	// Using the instructions field enables providers (xAI, OpenAI) to cache
+	// the system prompt as part of the stable prefix, which significantly
+	// improves cache hit rates.
+	if !params.Instructions.Valid() && systemInstructions != "" {
+		params.Instructions = param.NewOpt(systemInstructions)
 	}
 
 	if modelConfig.requiredAutoTruncation {

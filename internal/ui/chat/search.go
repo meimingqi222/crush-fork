@@ -44,7 +44,7 @@ func (g *GlobToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		return ""
 	}
 
-	toolParams := []string{params.Pattern}
+	toolParams := append([]string{}, params.Patterns...)
 	if params.Path != "" {
 		toolParams = append(toolParams, "path", params.Path)
 	}

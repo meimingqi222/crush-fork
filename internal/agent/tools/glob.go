@@ -23,8 +23,7 @@ const GlobToolName = "glob"
 var globDescription []byte
 
 type GlobParams struct {
-	Pattern  string   `json:"pattern,omitempty" description:"A single glob pattern to match files against. Use patterns for multiple patterns."`
-	Patterns []string `json:"patterns,omitempty" description:"Multiple glob patterns to search for in a single call (e.g. [\"**/*.ts\", \"**/*.tsx\"]). Preferred over multiple separate calls."`
+	Patterns []string `json:"patterns" description:"Glob patterns to match files against (e.g. [\"**/*.ts\", \"**/*.tsx\"]). At least one pattern is required."`
 	Path     string   `json:"path,omitempty" description:"The directory to search in. Defaults to the current working directory."`
 }
 
@@ -38,14 +37,8 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 		GlobToolName,
 		string(globDescription),
 		func(ctx context.Context, params GlobParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			// Build effective pattern list from both Pattern and Patterns fields.
-			var effectivePatterns []string
-			if params.Pattern != "" {
-				effectivePatterns = append(effectivePatterns, params.Pattern)
-			}
-			effectivePatterns = append(effectivePatterns, params.Patterns...)
-			if len(effectivePatterns) == 0 {
-				return fantasy.NewTextErrorResponse("pattern or patterns is required"), nil
+			if len(params.Patterns) == 0 {
+				return fantasy.NewTextErrorResponse("patterns is required and must contain at least one glob pattern"), nil
 			}
 
 			// Use session-specific working directory from context if available.
@@ -55,7 +48,7 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 			var allFiles []string
 			truncated := false
 			perPatternLimit := 100
-			for _, pat := range effectivePatterns {
+			for _, pat := range params.Patterns {
 				files, patTruncated, err := globFiles(ctx, pat, searchPath, perPatternLimit)
 				if err != nil {
 					slog.Warn("Glob search failed", "error", err, "pattern", pat, "path", searchPath)

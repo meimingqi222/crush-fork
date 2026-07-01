@@ -1217,7 +1217,7 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 		var params tools.GlobParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			var parts []string
-			parts = append(parts, fmt.Sprintf("**Pattern:** %s", params.Pattern))
+			parts = append(parts, fmt.Sprintf("**Patterns:** %s", strings.Join(params.Patterns, ", ")))
 			if params.Path != "" {
 				parts = append(parts, fmt.Sprintf("**Path:** %s", params.Path))
 			}
