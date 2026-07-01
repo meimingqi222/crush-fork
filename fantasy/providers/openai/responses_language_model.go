@@ -174,7 +174,7 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 	}
 
 	storeEnabled := openaiOptions != nil && openaiOptions.Store != nil && *openaiOptions.Store
-	input, inputWarnings := toResponsesPrompt(call.Prompt, modelConfig.systemMessageMode, storeEnabled)
+	input, systemInstructions, inputWarnings := toResponsesPrompt(call.Prompt, modelConfig.systemMessageMode, storeEnabled)
 	warnings = append(warnings, inputWarnings...)
 
 	var include []IncludeType
@@ -237,6 +237,12 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 		}
 		if openaiOptions.Instructions != nil {
 			params.Instructions = param.NewOpt(*openaiOptions.Instructions)
+		} else if systemInstructions != "" {
+			// Use system prompt extracted from the input array as the
+			// instructions field. This enables providers (xAI, OpenAI) to
+			// cache the system prompt as part of the stable prefix, which
+			// significantly improves cache hit rates.
+			params.Instructions = param.NewOpt(systemInstructions)
 		}
 		if openaiOptions.ServiceTier != nil {
 			params.ServiceTier = responses.ResponseNewParamsServiceTier(*openaiOptions.ServiceTier)
@@ -389,9 +395,10 @@ func responsesUsage(resp responses.Response) fantasy.Usage {
 	return usage
 }
 
-func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bool) (responses.ResponseInputParam, []fantasy.CallWarning) {
+func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bool) (responses.ResponseInputParam, string, []fantasy.CallWarning) {
 	var input responses.ResponseInputParam
 	var warnings []fantasy.CallWarning
+	var instructionsText string
 
 	for _, msg := range prompt {
 		switch msg.Role {
@@ -427,10 +434,18 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 			}
 
 			switch systemMessageMode {
-			case "system":
-				input = append(input, responses.ResponseInputItemParamOfMessage(systemText, responses.EasyInputMessageRoleSystem))
-			case "developer":
-				input = append(input, responses.ResponseInputItemParamOfMessage(systemText, responses.EasyInputMessageRoleDeveloper))
+			case "system", "developer":
+				// Collect system text for the instructions field instead of
+				// injecting it as a system/developer message in the input
+				// array. The Responses API's `instructions` field is cached
+				// separately by providers (xAI, OpenAI) as part of the stable
+				// prefix, which dramatically improves cache hit rates. When
+				// system messages are in the input array, they are part of
+				// the conversation history and not cached as a stable prefix.
+				if instructionsText != "" {
+					instructionsText += "\n\n"
+				}
+				instructionsText += systemText
 			case "remove":
 				warnings = append(warnings, fantasy.CallWarning{
 					Type:    fantasy.CallWarningTypeOther,
@@ -555,13 +570,53 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 					// recognised Responses API input type; skip.
 					continue
 				case fantasy.ContentTypeReasoning:
-					// Reasoning items are always skipped during replay.
-					// When store is enabled, the API already has them
-					// persisted server-side. When store is disabled, the
-					// item IDs are ephemeral and referencing them causes
-					// "Item not found" errors. In both cases, replaying
-					// reasoning inline is not supported by the API.
-					continue
+					// When store is enabled, the API already has reasoning
+					// items persisted server-side — skip replay.
+					if store {
+						continue
+					}
+					// When store is disabled, replay reasoning items that
+					// carry encrypted_content so the model can maintain
+					// chain-of-thought continuity across turns. The OpenAI
+					// Responses API doc says: "Be sure to include these
+					// items in your input to the Responses API for
+					// subsequent turns of a conversation if you are
+					// manually managing context." Without encrypted_content
+					// the item cannot be reconstructed, so skip it.
+					reasoningPart, ok := fantasy.AsContentType[fantasy.ReasoningPart](c)
+					if !ok {
+						continue
+					}
+					var meta *ResponsesReasoningMetadata
+					if reasoningPart.ProviderOptions != nil {
+						if v, ok := reasoningPart.ProviderOptions[Name]; ok {
+							if m, ok := v.(*ResponsesReasoningMetadata); ok {
+								meta = m
+							}
+						}
+					}
+					if meta == nil || meta.EncryptedContent == nil || *meta.EncryptedContent == "" {
+						continue
+					}
+					summary := make([]responses.ResponseReasoningItemSummaryParam, 0, len(meta.Summary))
+					for _, s := range meta.Summary {
+						summary = append(summary, responses.ResponseReasoningItemSummaryParam{
+							Text: s,
+						})
+					}
+					if len(summary) == 0 {
+						summary = append(summary, responses.ResponseReasoningItemSummaryParam{
+							Text: "",
+						})
+					}
+					reasoningItem := responses.ResponseReasoningItemParam{
+						ID:      meta.ItemID,
+						Summary: summary,
+					}
+					reasoningItem.EncryptedContent = param.NewOpt(*meta.EncryptedContent)
+					input = append(input, responses.ResponseInputItemUnionParam{
+						OfReasoning: &reasoningItem,
+					})
 				}
 			}
 
@@ -672,7 +727,7 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 		}
 	}
 
-	return input, warnings
+	return input, instructionsText, warnings
 }
 
 func hasVisibleResponsesUserContent(content responses.ResponseInputMessageContentListParam) bool {
@@ -682,7 +737,7 @@ func hasVisibleResponsesUserContent(content responses.ResponseInputMessageConten
 func hasVisibleResponsesAssistantContent(items []responses.ResponseInputItemUnionParam, startIdx int) bool {
 	// Check if we added any assistant content parts from this message
 	for i := startIdx; i < len(items); i++ {
-		if items[i].OfMessage != nil || items[i].OfFunctionCall != nil || items[i].OfItemReference != nil {
+		if items[i].OfMessage != nil || items[i].OfFunctionCall != nil || items[i].OfItemReference != nil || items[i].OfReasoning != nil {
 			return true
 		}
 	}

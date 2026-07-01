@@ -3,10 +3,16 @@ package agent
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/stringext"
 )
@@ -75,7 +81,173 @@ func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
 }
 
 func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
+	old := a.systemPrompt.Get()
 	a.systemPrompt.Set(systemPrompt)
+	// Only invalidate the enhanced system prompt cache if the base
+	// prompt actually changed. The coordinator calls SetSystemPrompt on
+	// every Run(), so unconditional invalidation would defeat the cache
+	// entirely — the enhanced prompt would be rebuilt from scratch each
+	// time, causing the instructions hash to change and breaking prompt
+	// caching on the provider side.
+	if a.enhancedSystemPrompt != nil && old != systemPrompt {
+		oldHash := sha256.Sum256([]byte(old))
+		newHash := sha256.Sum256([]byte(systemPrompt))
+		slog.Info("[CACHE-DIAG] SetSystemPrompt changed, invalidating enhanced cache",
+			"old_len", len(old),
+			"new_len", len(systemPrompt),
+			"old_hash", hex.EncodeToString(oldHash[:8]),
+			"new_hash", hex.EncodeToString(newHash[:8]),
+		)
+		a.enhancedSystemPrompt.Set("")
+	}
+}
+
+// buildEnhancedSystemPrompt appends dynamic-but-stable-per-session parts
+// (MCP instructions, mental models, vision note) to the base system prompt
+// and caches the result. Subsequent calls return the cached value, keeping
+// the prompt prefix identical across turns for prompt caching.
+func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel Model) string {
+	if a.enhancedSystemPrompt != nil {
+		if cached := a.enhancedSystemPrompt.Get(); cached != "" {
+			return cached
+		}
+	}
+
+	enhanced := basePrompt
+
+	// Collect MCP instructions in deterministic (alphabetical) order.
+	// mcp.GetStates() returns a map whose iteration order is random in Go,
+	// so without sorting the concatenated instructions would differ between
+	// rebuilds, changing the system prompt hash and breaking prompt caching.
+	mcpStates := mcp.GetStates()
+	mcpNames := make([]string, 0, len(mcpStates))
+	for name := range mcpStates {
+		mcpNames = append(mcpNames, name)
+	}
+	slices.Sort(mcpNames)
+
+	var instructions strings.Builder
+	for _, name := range mcpNames {
+		server := mcpStates[name]
+		if server.State != mcp.StateConnected {
+			continue
+		}
+		if s := server.Client.InitializeResult().Instructions; s != "" {
+			instructions.WriteString(s)
+			instructions.WriteString("\n\n")
+		}
+	}
+	if s := instructions.String(); s != "" {
+		enhanced += "\n\n<mcp-instructions>\n" + s + "\n</mcp-instructions>"
+	}
+
+	if a.memoryEngineEnabled && a.memoryEngineBackend == "hindsight" {
+		if retriever := a.memoryEngineRetriever; retriever != nil {
+			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
+				if snippet := hr.MentalModelsSnippet(); snippet != "" {
+					enhanced += "\n\n" + snippet
+				}
+			}
+		}
+	}
+
+	if !largeModel.CatwalkCfg.SupportsImages && a.visionService != nil && a.visionService.IsAvailable() {
+		enhanced += "\n\n" + describeImageToolSystemPromptNote()
+	}
+
+	if a.enhancedSystemPrompt != nil {
+		a.enhancedSystemPrompt.Set(enhanced)
+	}
+
+	// Diagnostic: log hash and section sizes to identify what changes
+	// between rebuilds. This helps pinpoint which dynamic section is
+	// causing the instructions hash to vary across Run() calls.
+	baseLen := len(basePrompt)
+	mcpLen := instructions.Len()
+	mmLen := 0
+	if a.memoryEngineEnabled && a.memoryEngineBackend == "hindsight" {
+		if retriever := a.memoryEngineRetriever; retriever != nil {
+			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
+				mmLen = len(hr.MentalModelsSnippet())
+			}
+		}
+	}
+	h := sha256.Sum256([]byte(enhanced))
+	slog.Info("[CACHE-DIAG] enhancedSystemPrompt rebuilt",
+		"hash", hex.EncodeToString(h[:8]),
+		"total_len", len(enhanced),
+		"base_len", baseLen,
+		"mcp_len", mcpLen,
+		"mental_models_len", mmLen,
+		"mcp_servers_connected", len(mcpNames),
+	)
+
+	return enhanced
+}
+
+// mcpStateSnapshot captures the MCP server states at a point in time.
+// Used to detect changes during a run so we can notify the agent.
+type mcpStateSnapshot map[string]mcp.State
+
+// snapshotMcpStates records the current MCP server states.
+func snapshotMcpStates() mcpStateSnapshot {
+	snapshot := make(mcpStateSnapshot)
+	for name, info := range mcp.GetStates() {
+		snapshot[name] = info.State
+	}
+	return snapshot
+}
+
+// mcpStateChange describes a single MCP server state transition.
+type mcpStateChange struct {
+	Name string
+	From mcp.State
+	To   mcp.State
+}
+
+// diffMcpStates compares the current MCP states against a snapshot and
+// returns the changes (new servers, disconnected servers, state transitions).
+func diffMcpStates(snapshot mcpStateSnapshot) []mcpStateChange {
+	current := mcp.GetStates()
+	var changes []mcpStateChange
+
+	// Check for new servers or state transitions.
+	for name, info := range current {
+		prevState, existed := snapshot[name]
+		if !existed {
+			changes = append(changes, mcpStateChange{Name: name, From: mcp.StateDisabled, To: info.State})
+		} else if prevState != info.State {
+			changes = append(changes, mcpStateChange{Name: name, From: prevState, To: info.State})
+		}
+	}
+	// Check for servers that disappeared (disconnected/removed).
+	for name, prevState := range snapshot {
+		if _, exists := current[name]; !exists {
+			changes = append(changes, mcpStateChange{Name: name, From: prevState, To: mcp.StateDisabled})
+		}
+	}
+
+	return changes
+}
+
+// formatMcpChangeNotification creates a System Message informing the agent
+// about MCP server state changes. This is injected as a trailing system
+// message to preserve the prompt cache prefix.
+func formatMcpChangeNotification(changes []mcpStateChange) string {
+	var b strings.Builder
+	b.WriteString("<system-reminder>\n")
+	b.WriteString("The following MCP server connections have changed since the conversation started:\n")
+	for _, c := range changes {
+		if c.To == mcp.StateConnected {
+			b.WriteString(fmt.Sprintf("- MCP server \"%s\" is now connected (was: %s). Its tools and instructions are now available.\n", c.Name, c.From))
+		} else if c.From == mcp.StateConnected {
+			b.WriteString(fmt.Sprintf("- MCP server \"%s\" disconnected (was: connected). Its tools are no longer available.\n", c.Name))
+		} else {
+			b.WriteString(fmt.Sprintf("- MCP server \"%s\" state changed from %s to %s.\n", c.Name, c.From, c.To))
+		}
+	}
+	b.WriteString("</system-reminder>")
+	return b.String()
 }
 
 func (a *sessionAgent) SetSystemPromptPrefix(systemPromptPrefix string) {

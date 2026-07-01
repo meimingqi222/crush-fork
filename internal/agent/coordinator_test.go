@@ -1440,14 +1440,14 @@ func TestResolveCoderModelSupportsImages(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, "primary-provider", config.ProviderConfig{
 			ID: "primary-provider",
-			Models: []catwalk.Model{
-				{ID: "other-model", SupportsImages: false},
+			Models: []config.ProviderModel{
+				{Model: catwalk.Model{ID: "other-model", SupportsImages: false}},
 			},
 		})
 		coord.cfg.Config().Providers.Set("catalog-provider", config.ProviderConfig{
 			ID: "catalog-provider",
-			Models: []catwalk.Model{
-				{ID: "vision-model", SupportsImages: true},
+			Models: []config.ProviderModel{
+				{Model: catwalk.Model{ID: "vision-model", SupportsImages: true}},
 			},
 		})
 		coord.cfg.Config().Agents[config.AgentCoder] = config.Agent{Model: config.SelectedModelTypeLarge}

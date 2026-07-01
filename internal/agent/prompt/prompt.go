@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -27,6 +28,7 @@ type Prompt struct {
 	disableGlobalFile    bool
 	omitProjectContext   bool
 	contextPathsOverride []string
+	gitStatus            string
 }
 
 type PromptDat struct {
@@ -87,6 +89,15 @@ func WithContextPathsOverride(paths []string) Option {
 			return
 		}
 		p.contextPathsOverride = append([]string(nil), paths...)
+	}
+}
+
+// WithGitStatus sets a pre-computed git status string to use instead of
+// running git commands. This allows callers to freeze the git status for
+// prompt caching stability across turns within a session.
+func WithGitStatus(status string) Option {
+	return func(p *Prompt) {
+		p.gitStatus = status
 	}
 }
 
@@ -233,15 +244,28 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		AvailSkillXML: availSkillXML,
 	}
 	if isGit {
-		var err error
-		data.GitStatus, err = getGitStatus(ctx, workingDir)
-		if err != nil {
-			return PromptDat{}, err
+		if p.gitStatus != "" {
+			data.GitStatus = p.gitStatus
+		} else {
+			var err error
+			data.GitStatus, err = getGitStatus(ctx, workingDir)
+			if err != nil {
+				return PromptDat{}, err
+			}
 		}
 	}
 
-	for _, contextFiles := range projectFiles {
-		data.ContextFiles = append(data.ContextFiles, contextFiles...)
+	// Sort project file keys for deterministic output. projectFiles is a
+	// map whose iteration order is random in Go, so without sorting the
+	// ContextFiles slice would have a different order each Build() call,
+	// changing the system prompt hash and breaking prompt caching.
+	projectKeys := make([]string, 0, len(projectFiles))
+	for k := range projectFiles {
+		projectKeys = append(projectKeys, k)
+	}
+	slices.Sort(projectKeys)
+	for _, k := range projectKeys {
+		data.ContextFiles = append(data.ContextFiles, projectFiles[k]...)
 	}
 	data.GlobalContextFiles = globalFiles
 	return data, nil
@@ -250,6 +274,12 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 func isGitRepo(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// GetGitStatus computes the git status string for a directory.
+// It runs git branch, git status, and git log commands.
+func GetGitStatus(ctx context.Context, dir string) (string, error) {
+	return getGitStatus(ctx, dir)
 }
 
 func getGitStatus(ctx context.Context, dir string) (string, error) {

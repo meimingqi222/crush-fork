@@ -186,6 +186,11 @@ type coordinator struct {
 	skillsCache   map[string][]*skills.Skill
 	skillsCacheMu sync.Mutex
 
+	// gitStatusCache freezes git status per working directory so the system
+	// prompt prefix stays stable across turns, enabling prompt cache hits.
+	gitStatusCache   map[string]string
+	gitStatusCacheMu sync.Mutex
+
 	// visionService describes images using a vision-capable helper model
 	// when the primary model does not support image inputs. May be nil.
 	visionService *VisionService
@@ -2321,12 +2326,38 @@ func (c *coordinator) updateCurrentAgentRuntime(ctx context.Context) (sessionAge
 	// Use session-specific working directory from context if available,
 	// otherwise fall back to global working directory.
 	workingDir := cmp.Or(tools.GetWorkingDirFromContext(ctx), c.cfg.WorkingDir())
-	promptBuilder, err := promptForAgent(agentCfg, false, prompt.WithWorkingDir(workingDir))
+	frozenGitStatus := c.getOrFreezeGitStatus(ctx, workingDir)
+	promptBuilder, err := promptForAgent(agentCfg, false, prompt.WithWorkingDir(workingDir), prompt.WithGitStatus(frozenGitStatus))
 	if err != nil {
 		return sessionAgentRuntimeConfig{}, err
 	}
 
 	return c.refreshSessionAgentRuntimeConfig(ctx, c.currentAgent, promptBuilder, agentCfg, false)
+}
+
+// getOrFreezeGitStatus returns a cached git status for the working directory,
+// computing it once on first access and reusing the frozen value for all
+// subsequent calls. This keeps the system prompt prefix stable across turns
+// so that prompt caching (xAI prompt_cache_key, Anthropic cache_control, etc.)
+// can hit on the unchanged prefix instead of being invalidated by git status
+// changes after every file edit.
+func (c *coordinator) getOrFreezeGitStatus(ctx context.Context, workingDir string) string {
+	c.gitStatusCacheMu.Lock()
+	defer c.gitStatusCacheMu.Unlock()
+	if c.gitStatusCache == nil {
+		c.gitStatusCache = make(map[string]string)
+	}
+	if cached, ok := c.gitStatusCache[workingDir]; ok {
+		return cached
+	}
+	status, err := prompt.GetGitStatus(ctx, workingDir)
+	if err != nil {
+		slog.Debug("Failed to compute git status for freezing", "error", err, "working_dir", workingDir)
+		c.gitStatusCache[workingDir] = ""
+		return ""
+	}
+	c.gitStatusCache[workingDir] = status
+	return status
 }
 
 func (c *coordinator) RefreshTools(ctx context.Context) error {

@@ -3529,7 +3529,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 1, "should only have user message")
 		require.Len(t, warnings, 1)
@@ -3555,7 +3555,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 2, "should have both user and assistant messages")
 		require.Empty(t, warnings)
@@ -3583,7 +3583,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 2, "should have both user and assistant messages")
 		require.Empty(t, warnings)
@@ -3605,7 +3605,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 1)
 		require.Empty(t, warnings)
@@ -3628,7 +3628,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Empty(t, input)
 		require.Len(t, warnings, 2) // One for unsupported type, one for empty message
@@ -3650,7 +3650,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 1)
 		require.Empty(t, warnings)
@@ -3671,7 +3671,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 1)
 		require.Empty(t, warnings)
@@ -3692,7 +3692,7 @@ func TestResponsesToPrompt_DropsEmptyMessages(t *testing.T) {
 			},
 		}
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 
 		require.Len(t, input, 1)
 		require.Empty(t, warnings)
@@ -4351,7 +4351,7 @@ func TestResponsesToPrompt_WebSearchProviderExecutedToolResults(t *testing.T) {
 	t.Run("store false skips item reference", func(t *testing.T) {
 		t.Parallel()
 
-		input, warnings := toResponsesPrompt(prompt, "system instructions", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system instructions", false)
 
 		require.Empty(t, warnings)
 		require.Len(t, input, 2,
@@ -4363,7 +4363,7 @@ func TestResponsesToPrompt_WebSearchProviderExecutedToolResults(t *testing.T) {
 	t.Run("store true uses item reference", func(t *testing.T) {
 		t.Parallel()
 
-		input, warnings := toResponsesPrompt(prompt, "system instructions", true)
+		input, _, warnings := toResponsesPrompt(prompt, "system instructions", true)
 
 		require.Empty(t, warnings)
 		require.Len(t, input, 3,
@@ -4415,7 +4415,7 @@ func TestResponsesToPrompt_ReasoningWithStore(t *testing.T) {
 	t.Run("store true skips reasoning", func(t *testing.T) {
 		t.Parallel()
 
-		input, warnings := toResponsesPrompt(prompt, "system", true)
+		input, _, warnings := toResponsesPrompt(prompt, "system", true)
 		require.Empty(t, warnings)
 
 		// With store=true: user, assistant text (reasoning
@@ -4429,18 +4429,67 @@ func TestResponsesToPrompt_ReasoningWithStore(t *testing.T) {
 		}
 	})
 
-	t.Run("store false skips reasoning", func(t *testing.T) {
+	t.Run("store false replays reasoning with encrypted_content", func(t *testing.T) {
 		t.Parallel()
 
-		input, warnings := toResponsesPrompt(prompt, "system", false)
+		input, _, warnings := toResponsesPrompt(prompt, "system", false)
 		require.Empty(t, warnings)
 
-		// With store=false: user, assistant text, follow-up user.
-		require.Len(t, input, 3)
+		// With store=false: user, reasoning, assistant text, follow-up user.
+		require.Len(t, input, 4)
 
+		// The reasoning item should be present with encrypted_content.
+		require.NotNil(t, input[1].OfReasoning,
+			"reasoning item should be replayed when store=false and encrypted_content is available")
+		require.Equal(t, reasoningItemID, input[1].OfReasoning.ID)
+		require.True(t, input[1].OfReasoning.EncryptedContent.Valid())
+		require.Equal(t, encryptedContent, input[1].OfReasoning.EncryptedContent.Value)
+	})
+
+	t.Run("store false skips reasoning without encrypted_content", func(t *testing.T) {
+		t.Parallel()
+
+		// Reasoning part without encrypted_content — cannot be replayed.
+		noEncReasoning := fantasy.ReasoningPart{
+			Text: "thinking...",
+			ProviderOptions: fantasy.ProviderOptions{
+				Name: &ResponsesReasoningMetadata{
+					ItemID:           "rs_noenc",
+					EncryptedContent: nil,
+					Summary:          []string{},
+				},
+			},
+		}
+		promptNoEnc := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "hi"},
+				},
+			},
+			{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{
+					noEncReasoning,
+					fantasy.TextPart{Text: "hello"},
+				},
+			},
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "bye"},
+				},
+			},
+		}
+
+		input, _, warnings := toResponsesPrompt(promptNoEnc, "system", false)
+		require.Empty(t, warnings)
+
+		// Without encrypted_content, reasoning is skipped: user, assistant text, follow-up user.
+		require.Len(t, input, 3)
 		for _, item := range input {
 			require.Nil(t, item.OfReasoning,
-				"reasoning items must not appear when store=false")
+				"reasoning items must not appear without encrypted_content")
 		}
 	})
 }

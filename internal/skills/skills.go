@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -220,6 +221,14 @@ func Discover(paths []string) []*Skill {
 			return nil
 		})
 	}
+
+	// Sort skills by name for deterministic output. The fastwalk traversal
+	// is concurrent, so append order varies between calls. Without sorting,
+	// the generated prompt XML (ToPromptXML) differs each run, which
+	// changes the system prompt hash and breaks prompt caching.
+	slices.SortFunc(skills, func(a, b *Skill) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 
 	PublishState(DiscoveryState{
 		Loaded: skills,

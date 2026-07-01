@@ -36,7 +36,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
-	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/checkpoint"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -217,9 +216,14 @@ type sessionAgent struct {
 	smallModel         *csync.Value[Model]
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
-	workingDir         string
-	tools              *csync.Slice[fantasy.AgentTool]
-	agentFactory       func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
+	// enhancedSystemPrompt caches the system prompt after appending dynamic
+	// but stable-per-session parts (MCP instructions, mental models, vision
+	// note). This keeps the prompt prefix identical across turns, which is
+	// critical for prompt caching. Invalidated by SetSystemPrompt.
+	enhancedSystemPrompt *csync.Value[string]
+	workingDir           string
+	tools                *csync.Slice[fantasy.AgentTool]
+	agentFactory         func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
 
 	refreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
 	deferredToolRuntime  deferredToolRuntime
@@ -358,6 +362,7 @@ func NewSessionAgent(
 		smallModel:             csync.NewValue(opts.SmallModel),
 		systemPromptPrefix:     csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:           csync.NewValue(opts.SystemPrompt),
+		enhancedSystemPrompt:   csync.NewValue(""),
 		workingDir:             opts.WorkingDir,
 		agentFactory:           agentFactory,
 		refreshCallConfig:      opts.RefreshCallConfig,
@@ -469,6 +474,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, err
 	}
 
+	// Inject prompt_cache_key for OpenAI Responses API providers so that
+	// subsequent turns of the same session can benefit from server-side
+	// prompt caching (xAI Grok, OpenAI o-series, etc.). Using the session ID
+	// as the cache key ensures a stable prefix across turns.
+	if call.SessionID != "" && call.ProviderOptions != nil {
+		if opts, ok := call.ProviderOptions[openai.Name]; ok {
+			if respOpts, ok := opts.(*openai.ResponsesProviderOptions); ok && respOpts.PromptCacheKey == nil {
+				cacheKey := call.SessionID
+				respOpts.PromptCacheKey = &cacheKey
+			}
+		}
+	}
+
 	// Apply a wall-clock deadline to the run when configured. This catches
 	// stream hangs that don't advance completedStepsThisRun (provider bugs,
 	// thinking-mode loops, network stalls) which the step budget cannot
@@ -501,37 +519,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			agentTools = filterToolsByNames(agentTools, runtimeConfig.AllowedToolNames)
 		}
 	}
-	var instructions strings.Builder
+	// Build the enhanced system prompt (base + MCP instructions + mental
+	// models + vision note). Cache it so subsequent turns reuse the exact
+	// same prefix, which is critical for prompt caching. The cache is
+	// invalidated by SetSystemPrompt (called when models/config change).
+	systemPrompt = a.buildEnhancedSystemPrompt(systemPrompt, largeModel)
 
-	for _, server := range mcp.GetStates() {
-		if server.State != mcp.StateConnected {
-			continue
-		}
-		if s := server.Client.InitializeResult().Instructions; s != "" {
-			instructions.WriteString(s)
-			instructions.WriteString("\n\n")
-		}
-	}
-
-	if s := instructions.String(); s != "" {
-		systemPrompt += "\n\n<mcp-instructions>\n" + s + "\n</mcp-instructions>"
-	}
-
-	// Check if memory prefetch is ready (non-blocking). If settled, use cached
-	// result. This approach mirrors Claude Code's design: the result is cached
-	// after settlement, so retries get the same data without re-running.
-	// Memory is injected into systemPrompt below (when settled) for role-isolation,
-	// or as a System Message in PrepareStep when it settles asynchronously.
-	prefetchedRecallReady := false
-	prefetchedRecallResult := ""
+	// Check if memory prefetch is ready (non-blocking) for logging purposes.
+	// Memory is always injected via PrepareStep as a trailing System Message,
+	// never into the system prompt, to keep the prompt prefix stable for caching.
 	prefetchNotReadyLogged := false
 	if !a.isSubAgent && call.MemoryPrefetch != nil {
-		if result, settled := call.MemoryPrefetch.GetSettled(); settled {
-			if result != "" {
-				prefetchedRecallReady = true
-				prefetchedRecallResult = result
-				slog.Debug("[PERF] sessionAgent: prefetched memory recall ready", "session_id", call.SessionID)
-			}
+		if _, settled := call.MemoryPrefetch.GetSettled(); settled {
+			slog.Debug("[PERF] sessionAgent: prefetched memory recall ready", "session_id", call.SessionID)
 		} else {
 			prefetchNotReadyLogged = true
 			slog.Debug("[PERF] sessionAgent: memory prefetch not ready, will retry on next step", "session_id", call.SessionID)
@@ -662,27 +662,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 	slog.Debug("[PERF] sessionAgent: user message created (animation starts here)", "duration", time.Since(start), "session_id", call.SessionID)
 
-	// Append settled prefetch memories to systemPrompt for role-isolation and caching.
-	// prefetchedRecallReady was set above; reuse the cached result to avoid a redundant
-	// GetSettled() call. This flag also acts as a lock preventing re-injection as a
-	// System Message during PrepareStep.
-	if prefetchedRecallReady {
-		systemPrompt += "\n\n" + FormatAutoRecallMessage(prefetchedRecallResult)
-	}
-
-	if a.memoryEngineEnabled && a.memoryEngineBackend == "hindsight" {
-		if retriever := a.memoryEngineRetriever; retriever != nil {
-			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
-				if snippet := hr.MentalModelsSnippet(); snippet != "" {
-					systemPrompt += "\n\n" + snippet
-				}
-			}
-		}
-	}
-
-	if !largeModel.CatwalkCfg.SupportsImages && a.visionService != nil && a.visionService.IsAvailable() {
-		systemPrompt += "\n\n" + describeImageToolSystemPromptNote()
-	}
+	// Memory prefetch is NOT injected into systemPrompt. Instead, it is always
+	// injected via PrepareStep as a trailing System Message. This keeps the
+	// system prompt prefix stable across turns, which is critical for prompt
+	// caching (xAI prompt_cache_key, Anthropic cache_control, etc.). Injecting
+	// memory into the system prompt only when prefetch happens to be settled
+	// would change the prefix on subsequent turns and invalidate the cache.
+	// MCP instructions, mental models, and vision note are already included
+	// in the cached enhanced system prompt above.
 
 	requestState, err := a.buildChatRequestState(genCtx, chatRequestStateInput{
 		SessionID:      call.SessionID,
@@ -757,8 +744,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// lost. It is reset at the start of each stream attempt.
 	salvage := newSalvageBuffer(salvageMaxRunes)
 	runStream := func(providerOptions fantasy.ProviderOptions, billFirstStepAsUser bool) (*fantasy.AgentResult, error) {
-		prefetchedRecallInjected := prefetchedRecallReady
+		// Memory is never injected into the system prompt (see comment above).
+		// Always start with prefetchedRecallInjected=false so PrepareStep
+		// handles all memory injection as a trailing System Message.
+		prefetchedRecallInjected := false
 		injectedInPrepareStep := false
+		// Snapshot MCP states at the start of this run. If MCP servers
+		// connect/disconnect during the run, we inject a System Message
+		// notification (preserving cache prefix) and invalidate the
+		// enhancedSystemPrompt cache so the next Run() rebuilds it.
+		mcpSnapshot := snapshotMcpStates()
+		mcpChangeNotified := false
 		currentAssistant = nil
 		currentStepToolMessageIDs = nil
 		currentStepToolResultChars = 0
@@ -905,6 +901,24 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					} else if !prefetchNotReadyLogged {
 						prefetchNotReadyLogged = true
 						slog.Debug("[PERF] sessionAgent: memory prefetch not ready, will retry on next step", "session_id", call.SessionID)
+					}
+				}
+
+				// Detect MCP state changes since the run started and inject
+				// a notification System Message. This keeps the system prompt
+				// prefix stable (for caching) while still informing the agent
+				// about newly connected/disconnected MCP servers.
+				if !mcpChangeNotified {
+					if changes := diffMcpStates(mcpSnapshot); len(changes) > 0 {
+						notification := formatMcpChangeNotification(changes)
+						prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(notification))
+						mcpChangeNotified = true
+						// Invalidate the enhanced system prompt cache so the
+						// next Run() picks up the new MCP instructions.
+						if a.enhancedSystemPrompt != nil {
+							a.enhancedSystemPrompt.Set("")
+						}
+						slog.Info("MCP state changed during run, injected notification", "changes", changes, "session_id", call.SessionID)
 					}
 				}
 

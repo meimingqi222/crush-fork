@@ -19,8 +19,8 @@ func TestVisionServiceAvailableForConfiguredModelMissingProviderMetadata(t *test
 		Type:    openaicompat.Name,
 		BaseURL: "https://example.test/v1",
 		APIKey:  "test-key",
-		Models: []catwalk.Model{
-			{ID: "text-model", SupportsImages: false},
+		Models: []config.ProviderModel{
+			{Model: catwalk.Model{ID: "text-model", SupportsImages: false}},
 		},
 	})
 	coord.cfg.Config().Models[config.SelectedModelTypeVision] = config.SelectedModel{
@@ -42,8 +42,8 @@ func TestVisionServiceResolveSynthesizesMetadataForUnlistedConfiguredModel(t *te
 		Type:    openaicompat.Name,
 		BaseURL: "https://example.test/v1",
 		APIKey:  "test-key",
-		Models: []catwalk.Model{
-			{ID: "text-model", SupportsImages: false},
+		Models: []config.ProviderModel{
+			{Model: catwalk.Model{ID: "text-model", SupportsImages: false}},
 		},
 	})
 	coord.cfg.Config().Models[config.SelectedModelTypeVision] = config.SelectedModel{
@@ -74,8 +74,8 @@ func TestBuildAgentReceivesCoordinatorVisionService(t *testing.T) {
 		Type:    openaicompat.Name,
 		BaseURL: "https://example.test/v1",
 		APIKey:  "test-key",
-		Models: []catwalk.Model{
-			{ID: "test-model"},
+		Models: []config.ProviderModel{
+			{Model: catwalk.Model{ID: "test-model"}},
 		},
 	})
 	coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
