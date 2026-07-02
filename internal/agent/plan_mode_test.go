@@ -19,8 +19,8 @@ func TestCollaborationModePrompt(t *testing.T) {
 	require.Contains(t, prompt, "Plan Mode")
 	require.Contains(t, prompt, "request_user_input")
 	require.Contains(t, prompt, "plan_exit")
-	require.Contains(t, prompt, "<proposed_plan>")
-	require.Contains(t, prompt, "Do not write files")
+	require.Contains(t, prompt, "active markdown plan file")
+	require.Contains(t, prompt, "Do not write source files")
 
 	defaultPrompt := collaborationModePrompt(session.CollaborationModeDefault)
 	require.Empty(t, defaultPrompt)
@@ -90,6 +90,7 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModePlan, []string{tools.ReadToolName}))
 
 	require.Equal(t, []string{
+		AgentToolName,
 		tools.ReadToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
@@ -140,9 +141,12 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModeDefault))
 
 	require.Equal(t, []string{
+		AgentToolName,
 		"grep",
 		tools.ReadToolName,
 		tools.GlobToolName,
+		tools.EditToolName,
+		tools.WriteToolName,
 		tools.RequestUserInputToolName,
 		tools.PlanExitToolName,
 		tools.LSPToolName,

@@ -131,6 +131,21 @@ func (m *UI) modeInfo(width int) string {
 		}
 	}
 
+	if goal := m.session.Goal; goal.Status != "" && goal.Status != sessionpkg.GoalStatusComplete && goal.Status != sessionpkg.GoalStatusDropped {
+		goalLabel := fmt.Sprintf("GOAL %s", goal.Status)
+		if text := strings.TrimSpace(goal.Text); text != "" {
+			runes := []rune(text)
+			if len(runes) > 18 {
+				text = string(runes[:18]) + "…"
+			}
+			goalLabel += " · " + text
+		}
+		if goal.HasBudget() {
+			goalLabel += fmt.Sprintf(" · %d/%d", goal.TokensUsed, goal.TokenBudget)
+		}
+		modes = append(modes, goalLabel)
+	}
+
 	if len(modes) == 0 {
 		return ""
 	}

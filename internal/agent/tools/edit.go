@@ -103,6 +103,11 @@ func NewEditTool(
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 
 			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
+			if params.Patch == "" {
+				if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, params.FilePath); blocked || guardErr != nil {
+					return response, guardErr
+				}
+			}
 
 			var response fantasy.ToolResponse
 			var opErr error
@@ -1310,6 +1315,11 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		absPath := filepathext.SmartJoin(edit.workingDir, pPath)
 		absPaths = append(absPaths, absPath)
 		pathToPatch[absPath] = p
+	}
+	for _, absPath := range absPaths {
+		if response, blocked, guardErr := enforcePlanModeWriteTarget(edit.ctx, absPath); blocked || guardErr != nil {
+			return response, guardErr
+		}
 	}
 
 	if err := checkPreflightLimits(absPaths); err != nil {

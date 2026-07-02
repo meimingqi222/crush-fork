@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,9 +122,14 @@ func TestCancelAgentRequiresSecondEscapeToCancel(t *testing.T) {
 	require.Empty(t, coord.cancelSessions)
 
 	cmd = ui.cancelAgent()
-	require.Nil(t, cmd)
+	require.NotNil(t, cmd)
 	require.False(t, ui.isCanceling)
 	require.Equal(t, []string{"s1"}, coord.cancelSessions)
+
+	info, ok := cmd().(util.InfoMsg)
+	require.True(t, ok)
+	require.Equal(t, util.InfoTypeInfo, info.Type)
+	require.Equal(t, "Request canceled", info.Msg)
 }
 
 func TestLoadSessionMsgResetsCancelState(t *testing.T) {

@@ -33,6 +33,7 @@ import (
 	"github.com/charmbracelet/crush/internal/checkpoint"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	goalruntime "github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/httpext"
@@ -42,6 +43,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/plan"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -89,6 +91,10 @@ const (
 	mentalModelTTL     = 5 * time.Minute
 	recallContextTurns = 1
 )
+
+type goalContinuationDepthKey struct{}
+
+const maxGoalContinuationsPerRun = 8
 
 type Coordinator interface {
 	// INFO: (kujtim) this is not used yet we will use this when we have multiple agents
@@ -333,6 +339,26 @@ func (c *coordinator) plugins() *plugin.Runtime {
 		return c.pluginRuntime
 	}
 	return plugin.DefaultRuntime()
+}
+
+func (c *coordinator) ensurePlanFileForSession(ctx context.Context, sess session.Session) (session.Session, error) {
+	if strings.TrimSpace(sess.PlanFilePath) != "" {
+		return sess, nil
+	}
+	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
+	if workspaceRoot == "" {
+		workspaceRoot = c.cfg.WorkingDir()
+	}
+	planPath, err := plan.EnsureSessionFile(workspaceRoot, sess.ID)
+	if err != nil {
+		return session.Session{}, err
+	}
+	sess.PlanFilePath = planPath
+	updated, err := c.sessions.Save(ctx, sess)
+	if err != nil {
+		return session.Session{}, err
+	}
+	return updated, nil
 }
 
 // getDiscoveredSkills returns cached skills for the given paths, discovering
@@ -719,6 +745,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
+	if sess.CollaborationMode == session.CollaborationModePlan {
+		sess, err = c.ensurePlanFileForSession(ctx, sess)
+		if err != nil {
+			return nil, err
+		}
+	}
 	slog.Debug("[PERF] coordinator: got session", "duration", time.Since(start), "session_id", sessionID)
 
 	// Set session-specific working directory in context.
@@ -744,20 +776,25 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, fmt.Errorf("failed to append auto mode reminder: %w", err)
 	}
 
-	// Create the user message immediately with the original attachments so the
-	// UI can display it without waiting for any model-side processing.
-	rawParts := []message.ContentPart{message.TextContent{Text: prompt}}
-	for _, attachment := range attachments {
-		rawParts = append(rawParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
+	transientPrompt := goalruntime.IsSteerPrompt(prompt)
+	var userMessage *message.Message
+	if !transientPrompt {
+		// Create the user message immediately with the original attachments so the
+		// UI can display it without waiting for any model-side processing.
+		rawParts := []message.ContentPart{message.TextContent{Text: prompt}}
+		for _, attachment := range attachments {
+			rawParts = append(rawParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
+		}
+		created, err := c.messages.Create(ctx, sessionID, message.CreateMessageParams{
+			Role:  message.User,
+			Parts: rawParts,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create user message: %w", err)
+		}
+		userMessage = &created
+		slog.Debug("[PERF] coordinator: created user message", "duration", time.Since(start), "session_id", sessionID)
 	}
-	userMessage, err := c.messages.Create(ctx, sessionID, message.CreateMessageParams{
-		Role:  message.User,
-		Parts: rawParts,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create user message: %w", err)
-	}
-	slog.Debug("[PERF] coordinator: created user message", "duration", time.Since(start), "session_id", sessionID)
 
 	// Start async memory prefetch immediately after user message creation.
 	// This allows the memory recall to happen in parallel with other setup work.
@@ -823,7 +860,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 	run := func() (*fantasy.AgentResult, error) {
 		slog.Debug("[PERF] coordinator: starting sessionAgent.Run", "duration", time.Since(start), "session_id", sessionID)
-		return c.currentAgent.Run(ctx, SessionAgentCall{
+		call := SessionAgentCall{
 			SessionID:        sessionID,
 			Prompt:           prompt,
 			Attachments:      attachments,
@@ -834,9 +871,15 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			TopK:             runtimeConfig.TopK,
 			FrequencyPenalty: runtimeConfig.FrequencyPenalty,
 			PresencePenalty:  runtimeConfig.PresencePenalty,
-			UserMessage:      &userMessage,
+			UserMessage:      userMessage,
 			MemoryPrefetch:   memoryPrefetch,
-		})
+			TransientPrompt:  transientPrompt,
+			NonInteractive:   transientPrompt,
+		}
+		if transientPrompt {
+			call.InitiatorType = copilot.InitiatorAgent
+		}
+		return c.currentAgent.Run(ctx, call)
 	}
 	// Call engine OnSessionCreated for first-turn initialization.
 	if c.memoryEngine != nil && c.memoryEngine.Enabled() {
@@ -874,9 +917,33 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 					tryLoadMentalModels(context.Background(), retriever, mentalModelTTL, 0)
 				}
 			} else {
-				slog.Debug("Memory engine enabled, calling AfterTurnIdle")
-				if err := c.memoryEngine.AfterTurnIdle(context.Background(), sessionID, nil); err != nil {
-					slog.Warn("Memory engine AfterTurnIdle failed", "error", err, "session_id", sessionID)
+				slog.Debug("Memory engine enabled, scheduling AfterTurnIdle")
+				go func() {
+					if err := c.memoryEngine.AfterTurnIdle(context.Background(), sessionID, nil); err != nil {
+						slog.Warn("Memory engine AfterTurnIdle failed", "error", err, "session_id", sessionID)
+					}
+				}()
+			}
+		}
+
+		if goalResult, budgetExhausted, goalErr := goalruntime.NewRuntime(c.sessions).PostTurn(ctx, sessionID, result.TotalUsage.InputTokens, result.TotalUsage.OutputTokens); goalErr != nil {
+			slog.Warn("Failed to update goal runtime", "error", goalErr, "session_id", sessionID)
+		} else if c.currentAgent.QueuedPrompts(sessionID) == 0 {
+			depth, _ := ctx.Value(goalContinuationDepthKey{}).(int)
+			if depth < maxGoalContinuationsPerRun && goalruntime.ShouldChainContinuation(prompt, depth) {
+				continuationCtx := context.WithValue(ctx, goalContinuationDepthKey{}, depth+1)
+				var continuationPrompt string
+				if budgetExhausted {
+					continuationPrompt = goalruntime.BuildBudgetLimitPrompt(goalResult)
+				} else if goalruntime.NeedsContinuation(goalResult) {
+					continuationPrompt = goalruntime.BuildContinuationPrompt(goalResult)
+				}
+				if continuationPrompt != "" {
+					contResult, contErr := c.Run(continuationCtx, sessionID, continuationPrompt)
+					if contResult != nil {
+						result = contResult
+					}
+					originalErr = contErr
 				}
 			}
 		}
@@ -1448,6 +1515,28 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 		return sessionAgentRuntimeConfig{}, err
 	}
 	systemPrompt = buildSystemPromptForModes(systemPrompt, mode, permissionMode)
+	if mode == session.CollaborationModePlan {
+		if sessionID := tools.GetSessionFromContext(ctx); sessionID != "" {
+			planSess, planErr := c.sessions.Get(ctx, sessionID)
+			if planErr == nil {
+				planSess, planErr = c.ensurePlanFileForSession(ctx, planSess)
+			}
+			if planErr != nil {
+				return sessionAgentRuntimeConfig{}, planErr
+			}
+			systemPrompt += fmt.Sprintf("\n\n<active_plan_file>\n%s\n</active_plan_file>", planSess.PlanFilePath)
+		}
+	}
+
+	// Append goal mode prompt if the session has an active goal.
+	if goalSessionID := tools.GetSessionFromContext(ctx); goalSessionID != "" {
+		if goalSess, goalErr := c.sessions.Get(ctx, goalSessionID); goalErr == nil && (goalSess.Goal.IsActive() || goalSess.Goal.Status == session.GoalStatusBudgetLimited) {
+			if goalPrompt := GoalPromptForSession(goalSess.Goal); goalPrompt != "" {
+				systemPrompt += "\n\n" + goalPrompt
+			}
+		}
+	}
+
 	if hasTool(toolSet, tools.ToolSearchToolName) {
 		systemPrompt = appendDeferredToolsPromptSection(systemPrompt, toolBuild.DeferredHints)
 	}

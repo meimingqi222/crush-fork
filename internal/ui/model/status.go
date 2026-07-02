@@ -100,16 +100,20 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 	}
 
 	ind := indStyle.String()
-	indWidth := lipgloss.Width(ind)
-	msg := strings.Join(strings.Split(s.msg.Msg, "\n"), " ")
-	msgWidth := lipgloss.Width(msg)
-	msg = ansi.Truncate(msg, area.Dx()-indWidth-msgWidth, "…")
-	padWidth := max(0, area.Dx()-indWidth-msgWidth)
-	msg += strings.Repeat(" ", padWidth)
-	info := msgStyle.Render(msg)
+	info := msgStyle.Render(layoutStatusMessage(ind, s.msg.Msg, area.Dx()))
 
 	// Draw the info message over the help view
 	uv.NewStyledString(ind+info).Draw(scr, area)
+}
+
+func layoutStatusMessage(indicator string, msg string, areaWidth int) string {
+	indWidth := lipgloss.Width(indicator)
+	msg = strings.Join(strings.Split(msg, "\n"), " ")
+	maxMsgWidth := max(0, areaWidth-indWidth)
+	msg = ansi.Truncate(msg, maxMsgWidth, "…")
+	msgWidth := lipgloss.Width(msg)
+	padWidth := max(0, areaWidth-indWidth-msgWidth)
+	return msg + strings.Repeat(" ", padWidth)
 }
 
 // clearInfoMsgCmd returns a command that clears the info message after the

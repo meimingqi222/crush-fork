@@ -68,6 +68,9 @@ func NewWriteTool(
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 
 			filePath := filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
+			if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, filePath); blocked || guardErr != nil {
+				return response, guardErr
+			}
 
 			fileInfo, err := os.Stat(filePath)
 			if err == nil {

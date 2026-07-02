@@ -450,6 +450,8 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{
+		"agent",
+		"edit",
 		"glob",
 		"grep",
 		"lsp",
@@ -459,16 +461,15 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"recall",
 		"reflect",
 		"request_user_input",
+		"write",
 	}, planNames)
-	assert.NotContains(t, planNames, AgentToolName)
+	assert.Contains(t, planNames, AgentToolName)
 	assert.NotContains(t, planNames, "agentic_fetch")
 	assert.NotContains(t, planNames, "bash")
 	assert.NotContains(t, planNames, "fetch")
 	assert.NotContains(t, planNames, "sourcegraph")
 	assert.NotContains(t, planNames, "tool_search")
-	assert.NotContains(t, planNames, "edit")
 	assert.NotContains(t, planNames, tools.RetainToolName)
-	assert.NotContains(t, planNames, "write")
 	assert.NotContains(t, planNames, "todos")
 }
 

@@ -326,6 +326,11 @@ func (a *Anim) Start() tea.Cmd {
 	return nil
 }
 
+// StepIndex returns the current animation frame index.
+func (a *Anim) StepIndex() int {
+	return int(a.step.Load())
+}
+
 // Tick advances the animation by one step. This is called by the global
 // animation ticker rather than per-animation timers, ensuring a single
 // redraw cycle regardless of how many animations are active.

@@ -1063,7 +1063,7 @@ func TestGenerateTitleRespectsSessionLockDuringUsageUpdate(t *testing.T) {
 	require.Equal(t, "locked-title", after.Title)
 }
 
-func TestRunWaitsForTitleGenerationBeforeDequeuing(t *testing.T) {
+func TestRunDequeuesBeforeTitleGenerationCompletes(t *testing.T) {
 	t.Parallel()
 
 	env := testEnv(t)
@@ -1152,24 +1152,12 @@ func TestRunWaitsForTitleGenerationBeforeDequeuing(t *testing.T) {
 		t.Fatal("title generation did not start")
 	}
 
-	require.Eventually(t, func() bool {
-		return sessAgent.QueuedPrompts(testSession.ID) == 1
-	}, time.Second, 10*time.Millisecond)
-
-	select {
-	case err := <-runDone:
-		require.NoError(t, err)
-		t.Fatal("run finished before title generation was released")
-	default:
-	}
-
-	require.False(t, hasUserPrompt("queued later"))
-	close(releaseTitle)
-
 	require.NoError(t, <-runDone)
 	require.Eventually(t, func() bool {
 		return hasUserPrompt("queued later")
 	}, time.Second, 10*time.Millisecond)
+
+	close(releaseTitle)
 }
 
 type textualToolProtocolTestAgent struct {

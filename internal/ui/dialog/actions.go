@@ -76,6 +76,47 @@ type (
 		SessionID string
 		Feedback  string
 	}
+	// ActionExecuteWithCompact approves a plan and compacts the context before
+	// execution. The conversation is summarized, then the plan is executed in the
+	// compacted session.
+	ActionExecuteWithCompact struct {
+		SessionID string
+		Plan      string
+	}
+	// ActionExecuteKeepContext approves a plan and executes it without
+	// compacting, preserving the full exploration history.
+	ActionExecuteKeepContext struct {
+		SessionID string
+		Plan      string
+	}
+	// ActionSetGoal sets or replaces the session's goal objective.
+	ActionSetGoal struct {
+		SessionID string
+		Goal      string
+		Budget    int64
+	}
+	// ActionSetGoalBudget updates the current goal token budget.
+	ActionSetGoalBudget struct {
+		SessionID string
+		Budget    int64
+	}
+	// ActionStartGuidedGoal starts an agent-led goal refinement flow.
+	ActionStartGuidedGoal struct {
+		SessionID string
+		RoughGoal string
+	}
+	// ActionPauseGoal pauses the current goal.
+	ActionPauseGoal struct {
+		SessionID string
+	}
+	// ActionResumeGoal resumes a paused goal.
+	ActionResumeGoal struct {
+		SessionID string
+	}
+	// ActionDropGoal drops the current goal.
+	ActionDropGoal struct {
+		SessionID string
+	}
 	ActionInitializeProject struct{}
 	ActionSummarize         struct {
 		SessionID string

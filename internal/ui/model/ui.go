@@ -159,6 +159,21 @@ type (
 		Status    string
 		Mode      session.CollaborationMode
 	}
+	planReviewLoadedMsg struct {
+		SessionID string
+		Plan      string
+		Err       error
+	}
+	planCompactedForExecutionMsg struct {
+		SessionID string
+		Plan      string
+		Err       error
+	}
+	goalUpdatedMsg struct {
+		Session session.Session
+		Status  string
+		Err     error
+	}
 
 	// closeDialogMsg is sent to close the current dialog.
 	closeDialogMsg struct{}
@@ -270,6 +285,12 @@ type UI struct {
 	// AgentCoordinator.Run to return. This covers the vision-preprocessing
 	// phase before the sessionAgent marks the session as busy.
 	agentRunInProgress bool
+
+	// sessionAgentLockSeen becomes true once the current UI-submitted run has
+	// marked the session busy. It lets isAgentBusy distinguish the pre-lock
+	// startup window from post-turn background work that still runs inside
+	// AgentCoordinator.Run after the session lock is released.
+	sessionAgentLockSeen bool
 
 	header *header
 
@@ -747,6 +768,48 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.invalidateSidebarCache()
 
+	case planReviewLoadedMsg:
+		if msg.Err != nil {
+			cmds = append(cmds, util.ReportError(msg.Err))
+			break
+		}
+		plan := strings.TrimSpace(msg.Plan)
+		if plan == "" {
+			cmds = append(cmds, util.ReportWarn("No proposed plan found in the active plan file."))
+			break
+		}
+		m.latestProposedPlan = plan
+		if m.dialog.ContainsDialog(dialog.ProposedPlanID) {
+			m.dialog.CloseDialog(dialog.ProposedPlanID)
+		}
+		if m.dialog.ContainsDialog(dialog.PlanReviewID) {
+			m.dialog.CloseDialog(dialog.PlanReviewID)
+		}
+		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan))
+
+	case planCompactedForExecutionMsg:
+		if msg.Err != nil {
+			cmds = append(cmds, util.ReportError(msg.Err))
+			break
+		}
+		cmds = append(cmds, util.ReportInfo("Context compacted. Starting implementation."))
+		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteWithCompact))
+
+	case goalUpdatedMsg:
+		if msg.Err != nil {
+			cmds = append(cmds, util.ReportError(msg.Err))
+			break
+		}
+		if m.session != nil && m.session.ID == msg.Session.ID {
+			*m.session = msg.Session
+		}
+		if msg.Status != "" {
+			cmds = append(cmds, util.ReportInfo(msg.Status))
+		}
+		m.dialog.CloseDialog(dialog.GoalID)
+		m.dialog.CloseDialog(dialog.GoalBudgetID)
+		m.invalidateSidebarCache()
+
 	case userCommandsLoadedMsg:
 		m.customCommands = msg.Commands
 		dia := m.dialog.Dialog(dialog.CommandsID)
@@ -948,35 +1011,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentRunStartedMsg:
 		if m.session != nil && m.session.ID == msg.SessionID {
 			m.agentRunInProgress = true
+			m.sessionAgentLockSeen = false
 			m.refreshEditorPlaceholder()
-			// Show a spinner on the most recent user message while vision
-			// preprocessing or the primary model is still starting up.
-			items := m.chat.MessageItems()
-			for i := len(items) - 1; i >= 0; i-- {
-				if userItem, ok := items[i].(*chat.UserMessageItem); ok {
-					userItem.SetLoadingStateVisible(true)
-					m.chat.RegisterAnimation(userItem.ID())
-					break
-				}
-			}
-			if !m.globalTickActive {
-				m.globalTickActive = true
-				cmds = append(cmds, anim.GlobalTick())
-			}
 		}
 	case agentRunFinishedMsg:
 		if m.session != nil && m.session.ID == msg.SessionID {
 			m.agentRunInProgress = false
+			m.sessionAgentLockSeen = false
 			m.refreshEditorPlaceholder()
-			// Stop the user-message spinner once the agent has started
-			// producing output (or failed).
-			items := m.chat.MessageItems()
-			for _, item := range items {
-				if userItem, ok := item.(*chat.UserMessageItem); ok {
-					userItem.SetLoadingStateVisible(false)
-					m.chat.UnregisterAnimation(userItem.ID())
-				}
-			}
 		}
 		if msg.Err != nil {
 			err := msg.Err
@@ -1276,7 +1318,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsgSeq++
 		currentSeq := m.statusMsgSeq
 		m.status.SetInfoMsg(msg)
-		if msg.Type == util.InfoTypeError {
+		if msg.Persistent || msg.Type == util.InfoTypeError {
 			break
 		}
 		ttl := msg.TTL
@@ -2464,9 +2506,36 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, util.ReportWarn("No proposed plan found in this session."))
 			break
 		}
-		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan))
+		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteDirect))
 		m.dialog.CloseDialog(dialog.CommandsID)
 		m.dialog.CloseDialog(dialog.ProposedPlanID)
+		m.dialog.CloseDialog(dialog.PlanReviewID)
+	case dialog.ActionExecuteWithCompact:
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before executing the plan..."))
+			break
+		}
+		if strings.TrimSpace(msg.Plan) == "" {
+			cmds = append(cmds, util.ReportWarn("No proposed plan found in this session."))
+			break
+		}
+		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteWithCompact))
+		m.dialog.CloseDialog(dialog.CommandsID)
+		m.dialog.CloseDialog(dialog.ProposedPlanID)
+		m.dialog.CloseDialog(dialog.PlanReviewID)
+	case dialog.ActionExecuteKeepContext:
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before executing the plan..."))
+			break
+		}
+		if strings.TrimSpace(msg.Plan) == "" {
+			cmds = append(cmds, util.ReportWarn("No proposed plan found in this session."))
+			break
+		}
+		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteKeepContext))
+		m.dialog.CloseDialog(dialog.CommandsID)
+		m.dialog.CloseDialog(dialog.ProposedPlanID)
+		m.dialog.CloseDialog(dialog.PlanReviewID)
 	case dialog.ActionSubmitPlanFeedback:
 		feedback := strings.TrimSpace(msg.Feedback)
 		if feedback == "" {
@@ -2475,6 +2544,77 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		cmds = append(cmds, m.sendMessage(feedback))
 		m.dialog.CloseDialog(dialog.ProposedPlanID)
+		m.dialog.CloseDialog(dialog.PlanReviewID)
+	case dialog.ActionSetGoal:
+		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
+			if goal.IsActive() || goal.Status == session.GoalStatusPaused {
+				return goal, "", errors.New("a goal is already active; drop or complete it first")
+			}
+			now := time.Now().Unix()
+			return session.Goal{
+				Text:        strings.TrimSpace(msg.Goal),
+				Status:      session.GoalStatusActive,
+				TokenBudget: msg.Budget,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}, "Goal set.", nil
+		}))
+	case dialog.ActionSetGoalBudget:
+		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
+			if goal.Status == "" {
+				return goal, "", errors.New("no goal is currently set")
+			}
+			goal.TokenBudget = msg.Budget
+			if goal.IsBudgetExhausted() && goal.Status == session.GoalStatusActive {
+				goal.Status = session.GoalStatusBudgetLimited
+			} else if !goal.IsBudgetExhausted() && goal.Status == session.GoalStatusBudgetLimited {
+				goal.Status = session.GoalStatusActive
+			}
+			goal.UpdatedAt = time.Now().Unix()
+			return goal, "Goal budget updated.", nil
+		}))
+		m.dialog.CloseDialog(dialog.GoalBudgetID)
+	case dialog.ActionStartGuidedGoal:
+		cmds = append(cmds, m.sendMessage(buildGuidedGoalPrompt(msg.RoughGoal)))
+		m.dialog.CloseDialog(dialog.GuidedGoalID)
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionPauseGoal:
+		if m.session == nil {
+			break
+		}
+		if !m.session.Goal.IsActive() {
+			cmds = append(cmds, util.ReportWarn("No active goal to pause."))
+			break
+		}
+		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
+			goal.Status = session.GoalStatusPaused
+			goal.UpdatedAt = time.Now().Unix()
+			return goal, "Goal paused.", nil
+		}))
+	case dialog.ActionResumeGoal:
+		if m.session == nil {
+			break
+		}
+		if m.session.Goal.Status != session.GoalStatusPaused && m.session.Goal.Status != session.GoalStatusBudgetLimited {
+			cmds = append(cmds, util.ReportWarn("No paused or budget-limited goal to resume."))
+			break
+		}
+		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
+			goal.Status = session.GoalStatusActive
+			goal.UpdatedAt = time.Now().Unix()
+			return goal, "Goal resumed.", nil
+		}))
+	case dialog.ActionDropGoal:
+		if m.session == nil {
+			break
+		}
+		if m.session.Goal.Status == "" {
+			cmds = append(cmds, util.ReportWarn("No goal to drop."))
+			break
+		}
+		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
+			return session.Goal{}, "Goal dropped.", nil
+		}))
 	case dialog.ActionToggleNotifications:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
@@ -2573,7 +2713,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleThinking:
 		cmds = append(cmds, func() tea.Msg {
-			if m.isAgentBusy() {
+			if m.isSessionAgentBusy() {
 				return util.ReportWarn("Agent is busy, please wait...")()
 			}
 			cfg := m.com.Config()
@@ -2656,7 +2796,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.CommandsID)
 
 	case dialog.ActionSelectModel:
-		if m.isAgentBusy() {
+		if m.isSessionAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
 			break
 		}
@@ -2699,7 +2839,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		cmds = append(cmds, m.prepareModelSwitchCmd(msg, sessionID, isOnboarding))
 	case dialog.ActionSelectReasoningEffort:
-		if m.isAgentBusy() {
+		if m.isSessionAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
 			break
 		}
@@ -2821,10 +2961,9 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 }
 
 func childSessionStatus(msg message.Message) (text string, isError bool, ok bool) {
-	const retryPrefix = "Service temporarily unavailable. Retrying in "
-
-	if content := strings.TrimSpace(msg.Content().Text); strings.HasPrefix(content, retryPrefix) {
-		return content, false, true
+	content := strings.TrimSpace(msg.Content().Text)
+	if display, ok := agent.RetryStatusDisplayText(content); ok {
+		return display, false, true
 	}
 
 	for _, result := range msg.ToolResults() {
@@ -2956,6 +3095,9 @@ func (m *UI) updateLatestProposedPlan(msg message.Message) {
 	if !hasToolCall(msg, agenttools.PlanExitToolName) {
 		return
 	}
+	if strings.TrimSpace(m.session.PlanFilePath) != "" {
+		return
+	}
 	plan, ok := planmode.ExtractProposedPlan(msg.Content().Text)
 	if !ok {
 		return
@@ -2971,9 +3113,6 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 		return nil
 	}
 	plan, ok := planmode.ExtractProposedPlan(msg.Content().Text)
-	if !ok || strings.TrimSpace(plan) == "" {
-		return nil
-	}
 	if !hasToolCall(msg, agenttools.PlanExitToolName) {
 		return nil
 	}
@@ -2981,11 +3120,27 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 		return nil
 	}
 	m.lastPromptedPlanMsg = msg.ID
+	if (!ok || strings.TrimSpace(plan) == "") && strings.TrimSpace(m.session.PlanFilePath) != "" {
+		return m.loadPlanReview(msg.SessionID, m.session.PlanFilePath)
+	}
+	if !ok || strings.TrimSpace(plan) == "" {
+		return nil
+	}
 	if m.dialog.ContainsDialog(dialog.ProposedPlanID) {
 		m.dialog.CloseDialog(dialog.ProposedPlanID)
 	}
-	m.dialog.OpenDialog(dialog.NewProposedPlan(m.com, msg.SessionID, plan))
+	m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan))
 	return nil
+}
+
+func (m *UI) loadPlanReview(sessionID, planFilePath string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := os.ReadFile(planFilePath)
+		if err != nil {
+			return planReviewLoadedMsg{SessionID: sessionID, Err: err}
+		}
+		return planReviewLoadedMsg{SessionID: sessionID, Plan: string(data)}
+	}
 }
 
 func hasToolCall(msg message.Message, toolName string) bool {
@@ -4646,16 +4801,30 @@ func isWhitespace(b byte) bool {
 }
 
 // isAgentBusy returns true if the agent coordinator exists and is currently
-// busy processing a request, or if the UI is still waiting for
-// AgentCoordinator.Run to return (vision preprocessing phase).
+// busy processing a request, or if the UI is still waiting for the session
+// agent to mark the session busy (user-message creation, model refresh, vision
+// preprocessing).
 func (m *UI) isAgentBusy() bool {
 	if !m.hasSession() || m.com.App == nil {
 		return false
 	}
-	if m.agentRunInProgress {
+	coordinator := m.com.App.AgentCoordinator
+	if coordinator != nil && coordinator.IsSessionBusy(m.session.ID) {
+		m.sessionAgentLockSeen = true
 		return true
 	}
-	if m.com.App.AgentCoordinator == nil {
+	// Post-turn background work (title generation, memory extraction) may still
+	// be running inside AgentCoordinator.Run after the session lock is released.
+	if m.agentRunInProgress && m.sessionAgentLockSeen {
+		return false
+	}
+	return m.agentRunInProgress
+}
+
+// isSessionAgentBusy reports whether the session agent currently holds the
+// session lock. Post-turn background work does not count as busy.
+func (m *UI) isSessionAgentBusy() bool {
+	if !m.hasSession() || m.com.App == nil || m.com.App.AgentCoordinator == nil {
 		return false
 	}
 	return m.com.App.AgentCoordinator.IsSessionBusy(m.session.ID)
@@ -4811,13 +4980,18 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	}
 
 	trimmedContent = strings.TrimSpace(content)
+	if len(attachments) == 0 {
+		if cmd, handled := m.handleGoalSlashCommand(trimmedContent); handled {
+			return cmd
+		}
+	}
 	if m.session != nil &&
 		m.session.CollaborationMode == session.CollaborationModePlan &&
 		strings.TrimSpace(m.latestProposedPlan) != "" &&
 		len(attachments) == 0 &&
 		trimmedContent != "" {
 		if isPlanApprovalMessage(trimmedContent) {
-			return m.executeApprovedPlan(m.session.ID, m.latestProposedPlan)
+			return m.executeApprovedPlan(m.session.ID, m.latestProposedPlan, planmode.ExecuteDirect)
 		}
 		content = buildPlanRevisionPrompt(m.latestProposedPlan, trimmedContent)
 	}
@@ -4825,7 +4999,15 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	return m.runAgentMessage(content, attachments...)
 }
 
-func (m *UI) executeApprovedPlan(sessionID, plan string) tea.Cmd {
+func (m *UI) executeApprovedPlan(sessionID, plan string, mode planmode.ExecutionContextMode) tea.Cmd {
+	if mode == planmode.ExecuteWithCompact {
+		return func() tea.Msg {
+			if err := m.com.App.AgentCoordinator.Summarize(context.Background(), sessionID, nil); err != nil {
+				return planCompactedForExecutionMsg{SessionID: sessionID, Plan: plan, Err: err}
+			}
+			return planCompactedForExecutionMsg{SessionID: sessionID, Plan: plan}
+		}
+	}
 	return tea.Sequence(
 		func() tea.Msg {
 			_, err := m.com.App.Sessions.UpdateCollaborationMode(context.Background(), sessionID, session.CollaborationModeDefault)
@@ -4837,8 +5019,171 @@ func (m *UI) executeApprovedPlan(sessionID, plan string) tea.Cmd {
 			}
 			return planModeChangedMsg{SessionID: sessionID, Status: "Plan approved. Starting implementation.", Mode: session.CollaborationModeDefault}
 		},
-		m.runAgentMessage(planmode.BuildExecutionPrompt(plan)),
+		m.runAgentMessage(planmode.BuildExecutionPrompt(plan, mode)),
 	)
+}
+
+func (m *UI) updateGoal(sessionID string, mutate func(session.Goal) (session.Goal, string, error)) tea.Cmd {
+	return func() tea.Msg {
+		sess, err := m.com.App.Sessions.Get(context.Background(), sessionID)
+		if err != nil {
+			return goalUpdatedMsg{Err: err}
+		}
+		goal, status, err := mutate(sess.Goal)
+		if err != nil {
+			return goalUpdatedMsg{Err: err}
+		}
+		sess.Goal = goal
+		updated, err := m.com.App.Sessions.Save(context.Background(), sess)
+		if err != nil {
+			return goalUpdatedMsg{Err: err}
+		}
+		return goalUpdatedMsg{Session: updated, Status: status}
+	}
+}
+
+func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
+	if m.session == nil || content == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(content, "/guided-goal") {
+		rough := strings.TrimSpace(strings.TrimPrefix(content, "/guided-goal"))
+		if rough == "" {
+			return m.openGuidedGoalDialog(), true
+		}
+		return m.sendMessage(buildGuidedGoalPrompt(rough)), true
+	}
+	if !strings.HasPrefix(content, "/goal") {
+		return nil, false
+	}
+	args := strings.TrimSpace(strings.TrimPrefix(content, "/goal"))
+	if args == "" || args == "show" {
+		return m.openGoalStatusDialog(), true
+	}
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return m.openGoalStatusDialog(), true
+	}
+	switch fields[0] {
+	case "set":
+		objective, budget, err := parseGoalSetArgs(strings.TrimSpace(strings.TrimPrefix(args, "set")))
+		if err != nil {
+			return util.ReportError(err), true
+		}
+		if objective == "" {
+			return m.openGoalDialog(), true
+		}
+		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
+			if goal.IsActive() || goal.Status == session.GoalStatusPaused {
+				return goal, "", errors.New("a goal is already active; drop or complete it first")
+			}
+			now := time.Now().Unix()
+			return session.Goal{Text: objective, Status: session.GoalStatusActive, TokenBudget: budget, CreatedAt: now, UpdatedAt: now}, "Goal set.", nil
+		}), true
+	case "guided":
+		rough := strings.TrimSpace(strings.TrimPrefix(args, "guided"))
+		if rough == "" {
+			return m.openGuidedGoalDialog(), true
+		}
+		return m.sendMessage(buildGuidedGoalPrompt(rough)), true
+	case "pause":
+		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
+			if !goal.IsActive() {
+				return goal, "", errors.New("no active goal to pause")
+			}
+			goal.Status = session.GoalStatusPaused
+			goal.UpdatedAt = time.Now().Unix()
+			return goal, "Goal paused.", nil
+		}), true
+	case "resume":
+		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
+			if goal.Status != session.GoalStatusPaused && goal.Status != session.GoalStatusBudgetLimited {
+				return goal, "", errors.New("no paused or budget-limited goal to resume")
+			}
+			goal.Status = session.GoalStatusActive
+			goal.UpdatedAt = time.Now().Unix()
+			return goal, "Goal resumed.", nil
+		}), true
+	case "drop":
+		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
+			if goal.Status == "" {
+				return goal, "", errors.New("no goal to drop")
+			}
+			return session.Goal{}, "Goal dropped.", nil
+		}), true
+	case "budget":
+		if len(fields) < 2 {
+			return m.openGoalBudgetDialog(), true
+		}
+		budget, err := parseGoalBudget(fields[1])
+		if err != nil {
+			return util.ReportError(err), true
+		}
+		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
+			if goal.Status == "" {
+				return goal, "", errors.New("no goal is currently set")
+			}
+			goal.TokenBudget = budget
+			if goal.IsBudgetExhausted() && goal.Status == session.GoalStatusActive {
+				goal.Status = session.GoalStatusBudgetLimited
+			} else if !goal.IsBudgetExhausted() && goal.Status == session.GoalStatusBudgetLimited {
+				goal.Status = session.GoalStatusActive
+			}
+			goal.UpdatedAt = time.Now().Unix()
+			return goal, "Goal budget updated.", nil
+		}), true
+	default:
+		return util.ReportWarn("Unknown /goal command. Use set, show, pause, resume, drop, budget, or guided."), true
+	}
+}
+
+func parseGoalSetArgs(args string) (string, int64, error) {
+	fields := strings.Fields(args)
+	var budget int64
+	var objective []string
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "--budget" && i+1 < len(fields) {
+			parsed, err := parseGoalBudget(fields[i+1])
+			if err != nil {
+				return "", 0, err
+			}
+			budget = parsed
+			i++
+			continue
+		}
+		objective = append(objective, fields[i])
+	}
+	return strings.Join(objective, " "), budget, nil
+}
+
+func parseGoalBudget(value string) (int64, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || value == "off" || value == "none" || value == "0" {
+		return 0, nil
+	}
+	budget, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || budget < 0 {
+		return 0, fmt.Errorf("goal budget must be a non-negative integer or off")
+	}
+	return budget, nil
+}
+
+func buildGuidedGoalPrompt(roughGoal string) string {
+	return strings.TrimSpace(fmt.Sprintf(`<guided_goal>
+You are helping the user define an autonomous goal for this Crush session.
+
+Rough goal from the user:
+%s
+
+Rules:
+- Do not start implementation while refining the goal.
+- Ask at most one clarification question at a time.
+- Ask no more than three clarification questions total.
+- If the rough goal is already actionable, do not ask a question; produce the final goal immediately.
+- The final goal must be outcome-oriented, bounded, verifiable, and no narrower than the user's intent.
+- Include validation expectations when they are known.
+- Once the final goal is clear, call the goal tool with op="create" and the final objective. Use a token_budget only if the user explicitly gave one.
+</guided_goal>`, strings.TrimSpace(roughGoal)))
 }
 
 func (m *UI) runAgentMessage(content string, attachments ...message.Attachment) tea.Cmd {
@@ -5012,7 +5357,7 @@ func (m *UI) cancelAgent() tea.Cmd {
 		// Stop the spinning todo indicator.
 		m.todoIsSpinning = false
 		m.renderPills()
-		return nil
+		return util.ReportInfo("Request canceled")
 	}
 
 	// If there's a queue that's not yet paused, pause it first.
@@ -5046,6 +5391,22 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openHandoffDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.GoalID:
+		if cmd := m.openGoalDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.GoalStatusID:
+		if cmd := m.openGoalStatusDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.GoalBudgetID:
+		if cmd := m.openGoalBudgetDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.GuidedGoalID:
+		if cmd := m.openGuidedGoalDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.MCPID:
 		if cmd := m.openMCPDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -5071,6 +5432,54 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		break
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m *UI) openGoalDialog() tea.Cmd {
+	if m.session == nil {
+		return util.ReportWarn("Create or open a session before setting a goal.")
+	}
+	if m.dialog.ContainsDialog(dialog.GoalID) {
+		m.dialog.BringToFront(dialog.GoalID)
+		return nil
+	}
+	m.dialog.OpenDialog(dialog.NewGoal(m.com, m.session.ID))
+	return nil
+}
+
+func (m *UI) openGoalStatusDialog() tea.Cmd {
+	if m.session == nil {
+		return util.ReportWarn("Open a session before showing a goal.")
+	}
+	if m.dialog.ContainsDialog(dialog.GoalStatusID) {
+		m.dialog.BringToFront(dialog.GoalStatusID)
+		return nil
+	}
+	m.dialog.OpenDialog(dialog.NewGoalStatus(m.com, m.session.Goal))
+	return nil
+}
+
+func (m *UI) openGoalBudgetDialog() tea.Cmd {
+	if m.session == nil || m.session.Goal.Status == "" {
+		return util.ReportWarn("Set a goal before setting a budget.")
+	}
+	if m.dialog.ContainsDialog(dialog.GoalBudgetID) {
+		m.dialog.BringToFront(dialog.GoalBudgetID)
+		return nil
+	}
+	m.dialog.OpenDialog(dialog.NewGoalBudget(m.com, m.session.ID))
+	return nil
+}
+
+func (m *UI) openGuidedGoalDialog() tea.Cmd {
+	if m.session == nil {
+		return util.ReportWarn("Create or open a session before starting guided goal setup.")
+	}
+	if m.dialog.ContainsDialog(dialog.GuidedGoalID) {
+		m.dialog.BringToFront(dialog.GuidedGoalID)
+		return nil
+	}
+	m.dialog.OpenDialog(dialog.NewGuidedGoal(m.com, m.session.ID))
+	return nil
 }
 
 // openQuitDialog opens the quit confirmation dialog.
@@ -5145,8 +5554,10 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 	queuePaused := m.queuePaused
 
 	permissionMode := session.PermissionModeDefault
+	goal := session.Goal{}
 	if m.session != nil {
 		permissionMode = m.session.PermissionMode
+		goal = m.session.Goal
 	}
 	// Get denial queue count for auto mode
 	denialCount := 0
@@ -5155,7 +5566,7 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 			denialCount = dq.Size()
 		}
 	}
-	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, queuePaused, mode, permissionMode, m.latestProposedPlan, denialCount, m.customCommands, m.mcpPrompts)
+	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, queuePaused, mode, permissionMode, m.latestProposedPlan, goal, denialCount, m.customCommands, m.mcpPrompts)
 	if err != nil {
 		return util.ReportError(err)
 	}

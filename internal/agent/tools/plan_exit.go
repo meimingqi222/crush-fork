@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/session"
@@ -13,6 +16,10 @@ import (
 var planExitDescription []byte
 
 const PlanExitToolName = "plan_exit"
+
+type PlanExitMetadata struct {
+	PlanFilePath string `json:"plan_file_path"`
+}
 
 func NewPlanExitTool(sessions session.Service) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
@@ -31,8 +38,26 @@ func NewPlanExitTool(sessions session.Service) fantasy.AgentTool {
 			if sess.CollaborationMode != session.CollaborationModePlan {
 				return fantasy.NewTextErrorResponse("plan_exit can only be used in Plan Mode"), nil
 			}
+			planPath := strings.TrimSpace(sess.PlanFilePath)
+			if planPath == "" {
+				return fantasy.NewTextErrorResponse("No active plan file is set for this session."), nil
+			}
+			data, err := os.ReadFile(planPath)
+			if err != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("failed to read plan file: %w", err)
+			}
+			if strings.TrimSpace(string(data)) == "" {
+				return fantasy.NewTextErrorResponse("The active plan file is empty. Write the final plan before calling plan_exit."), nil
+			}
+			metadata, err := json.Marshal(PlanExitMetadata{PlanFilePath: planPath})
+			if err != nil {
+				return fantasy.ToolResponse{}, fmt.Errorf("failed to encode plan exit metadata: %w", err)
+			}
 
-			return fantasy.NewTextResponse("Plan marked ready for review."), nil
+			return fantasy.ToolResponse{
+				Content:  fmt.Sprintf("Plan marked ready for review. Plan file: %s", planPath),
+				Metadata: string(metadata),
+			}, nil
 		},
 	)
 }

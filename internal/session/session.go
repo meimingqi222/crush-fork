@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
+	"github.com/charmbracelet/crush/internal/plan"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 	"github.com/zeebo/xxh3"
@@ -228,6 +230,57 @@ func normalizeTodos(todos []Todo, populateTimestamps bool) []Todo {
 	return normalized
 }
 
+// GoalStatus represents the state of a session goal.
+type GoalStatus string
+
+const (
+	GoalStatusActive        GoalStatus = "active"
+	GoalStatusPaused        GoalStatus = "paused"
+	GoalStatusBudgetLimited GoalStatus = "budget-limited"
+	GoalStatusComplete      GoalStatus = "complete"
+	GoalStatusDropped       GoalStatus = "dropped"
+)
+
+// Goal represents a persistent autonomous objective for a session. The agent
+// works toward the goal across multiple turns, with optional token budget
+// tracking.
+type Goal struct {
+	Text        string     `json:"text,omitempty"`
+	Status      GoalStatus `json:"status,omitempty"`
+	TokenBudget int64      `json:"token_budget,omitempty"`
+	TokensUsed  int64      `json:"tokens_used,omitempty"`
+	TimeSeconds int64      `json:"time_seconds,omitempty"`
+	CreatedAt   int64      `json:"created_at,omitempty"`
+	UpdatedAt   int64      `json:"updated_at,omitempty"`
+}
+
+// IsActive returns true if the goal is currently being pursued.
+func (g Goal) IsActive() bool {
+	return g.Status == GoalStatusActive
+}
+
+// HasBudget returns true if the goal has a token budget set.
+func (g Goal) HasBudget() bool {
+	return g.TokenBudget > 0
+}
+
+// IsBudgetExhausted returns true if the goal has exhausted its token budget.
+func (g Goal) IsBudgetExhausted() bool {
+	return g.HasBudget() && g.TokensUsed >= g.TokenBudget
+}
+
+// RemainingTokens returns the remaining token budget, or 0 if no budget is set.
+func (g Goal) RemainingTokens() int64 {
+	if !g.HasBudget() {
+		return 0
+	}
+	remaining := g.TokenBudget - g.TokensUsed
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 type Session struct {
 	ID                     string
 	ParentSessionID        string
@@ -236,10 +289,12 @@ type Session struct {
 	WorkspaceCWD           string
 	CollaborationMode      CollaborationMode
 	PermissionMode         PermissionMode
+	PlanFilePath           string
 	HandoffSourceSessionID string
 	HandoffGoal            string
 	HandoffDraftPrompt     string
 	HandoffRelevantFiles   []string
+	Goal                   Goal
 	MessageCount           int64
 	PromptTokens           int64
 	CompletionTokens       int64
@@ -342,8 +397,9 @@ func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessi
 			String: parentSession.WorkspaceCWD,
 			Valid:  parentSession.WorkspaceCWD != "",
 		},
-		CollaborationMode:    string(CollaborationModeDefault),
+		CollaborationMode:    string(parentSession.CollaborationMode),
 		PermissionMode:       string(parentSession.PermissionMode),
+		PlanFilePath:         parentSession.PlanFilePath,
 		Kind:                 string(KindNormal),
 		HandoffGoal:          "",
 		HandoffDraftPrompt:   "",
@@ -484,6 +540,14 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 		HandoffGoal:          session.HandoffGoal,
 		HandoffDraftPrompt:   session.HandoffDraftPrompt,
 		HandoffRelevantFiles: relevantFilesJSON,
+		PlanFilePath:         session.PlanFilePath,
+		GoalText:             session.Goal.Text,
+		GoalStatus:           string(session.Goal.Status),
+		GoalTokenBudget:      session.Goal.TokenBudget,
+		GoalTokensUsed:       session.Goal.TokensUsed,
+		GoalTimeSeconds:      session.Goal.TimeSeconds,
+		GoalCreatedAt:        session.Goal.CreatedAt,
+		GoalUpdatedAt:        session.Goal.UpdatedAt,
 		PromptTokens:         session.PromptTokens,
 		CompletionTokens:     session.CompletionTokens,
 		LastPromptTokens:     session.LastPromptTokens,
@@ -526,8 +590,35 @@ func (s *service) UpdateCollaborationMode(ctx context.Context, sessionID string,
 	}
 	updated := s.fromDBItem(dbSession)
 	updated.EstimatedUsage = current.EstimatedUsage
+	if updated.CollaborationMode == CollaborationModePlan {
+		ensured, err := s.ensurePlanFile(ctx, updated)
+		if err != nil {
+			return Session{}, err
+		}
+		updated = ensured
+	}
 	s.Publish(pubsub.UpdatedEvent, updated)
 	return updated, nil
+}
+
+func (s *service) ensurePlanFile(ctx context.Context, sess Session) (Session, error) {
+	if strings.TrimSpace(sess.PlanFilePath) != "" {
+		return sess, nil
+	}
+	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
+	if workspaceRoot == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return Session{}, fmt.Errorf("failed to resolve workspace for plan file: %w", err)
+		}
+		workspaceRoot = cwd
+	}
+	planPath, err := plan.EnsureSessionFile(workspaceRoot, sess.ID)
+	if err != nil {
+		return Session{}, err
+	}
+	sess.PlanFilePath = planPath
+	return s.Save(ctx, sess)
 }
 
 func (s *service) UpdatePermissionMode(ctx context.Context, sessionID string, mode PermissionMode) (Session, error) {
@@ -628,20 +719,30 @@ func (s service) fromDBItem(item db.Session) Session {
 		WorkspaceCWD:           item.WorkspaceCwd.String,
 		CollaborationMode:      NormalizeCollaborationMode(item.CollaborationMode),
 		PermissionMode:         NormalizePermissionMode(item.PermissionMode),
+		PlanFilePath:           item.PlanFilePath,
 		HandoffSourceSessionID: item.HandoffSourceSessionID.String,
 		HandoffGoal:            item.HandoffGoal,
 		HandoffDraftPrompt:     item.HandoffDraftPrompt,
 		HandoffRelevantFiles:   relevantFiles,
-		MessageCount:           item.MessageCount,
-		PromptTokens:           item.PromptTokens,
-		CompletionTokens:       item.CompletionTokens,
-		LastPromptTokens:       item.LastPromptTokens,
-		LastCompletionTokens:   item.LastCompletionTokens,
-		SummaryMessageID:       item.SummaryMessageID.String,
-		Cost:                   item.Cost,
-		Todos:                  todos,
-		CreatedAt:              item.CreatedAt,
-		UpdatedAt:              item.UpdatedAt,
+		Goal: Goal{
+			Text:        item.GoalText,
+			Status:      GoalStatus(item.GoalStatus),
+			TokenBudget: item.GoalTokenBudget,
+			TokensUsed:  item.GoalTokensUsed,
+			TimeSeconds: item.GoalTimeSeconds,
+			CreatedAt:   item.GoalCreatedAt,
+			UpdatedAt:   item.GoalUpdatedAt,
+		},
+		MessageCount:         item.MessageCount,
+		PromptTokens:         item.PromptTokens,
+		CompletionTokens:     item.CompletionTokens,
+		LastPromptTokens:     item.LastPromptTokens,
+		LastCompletionTokens: item.LastCompletionTokens,
+		SummaryMessageID:     item.SummaryMessageID.String,
+		Cost:                 item.Cost,
+		Todos:                todos,
+		CreatedAt:            item.CreatedAt,
+		UpdatedAt:            item.UpdatedAt,
 	}
 }
 

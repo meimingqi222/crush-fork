@@ -137,6 +137,14 @@ type Session struct {
 	HandoffGoal            string         `json:"handoff_goal"`
 	HandoffDraftPrompt     string         `json:"handoff_draft_prompt"`
 	HandoffRelevantFiles   string         `json:"handoff_relevant_files"`
+	PlanFilePath           string         `json:"plan_file_path"`
+	GoalText               string         `json:"goal_text"`
+	GoalStatus             string         `json:"goal_status"`
+	GoalTokenBudget        int64          `json:"goal_token_budget"`
+	GoalTokensUsed         int64          `json:"goal_tokens_used"`
+	GoalTimeSeconds        int64          `json:"goal_time_seconds"`
+	GoalCreatedAt          int64          `json:"goal_created_at"`
+	GoalUpdatedAt          int64          `json:"goal_updated_at"`
 	PermissionMode         string         `json:"permission_mode"`
 	LastSummaryAt          sql.NullInt64  `json:"last_summary_at"`
 }

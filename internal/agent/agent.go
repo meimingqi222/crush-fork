@@ -149,7 +149,10 @@ type SessionAgentCall struct {
 	FrequencyPenalty *float64
 	PresencePenalty  *float64
 	NonInteractive   bool
-	UserMessage      *message.Message
+	// TransientPrompt skips persisting the prompt as a user message. Used for
+	// internal goal continuation steers that should not appear in chat history.
+	TransientPrompt bool
+	UserMessage     *message.Message
 	// MemoryPrefetch is an async memory recall result. The coordinator starts
 	// the prefetch goroutine, and the agent consumes it if ready. The result
 	// is cached so retries can reuse it. Modeled after Claude Code's approach.
@@ -647,13 +650,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			})
 		}
 	}
-	defer wg.Wait()
 
 	// Add the user message to the session.
 	var userMessage message.Message
-	if call.UserMessage != nil {
+	switch {
+	case call.TransientPrompt:
+		userMessage = transientUserMessage(call.SessionID, call.Prompt, call.Attachments)
+	case call.UserMessage != nil:
 		userMessage = *call.UserMessage
-	} else {
+	default:
 		var err error
 		userMessage, err = a.createUserMessage(genCtx, call)
 		if err != nil {
@@ -1795,9 +1800,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				"max_attempts", maxRetriableAttempts,
 				"delay", delay,
 			)
-			retryText := fmt.Sprintf(
-				"Service temporarily unavailable. Retrying in %d seconds... (attempt %d/%d)",
-				int(delay.Seconds()), emptyStreamRetryAttempt, maxRetriableAttempts,
+			retryText := FormatTransientRetryMessage(
+				errors.New("received empty response stream"),
+				delay,
+				emptyStreamRetryAttempt,
+				maxRetriableAttempts,
 			)
 			retryMsg, retryMsgErr := a.messages.Create(genCtx, call.SessionID, message.CreateMessageParams{
 				Role: message.Assistant,
@@ -1924,9 +1931,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 			// Show a temporary message in the chat so the user knows
 			// a retry is in progress and how long it will take.
-			retryText := fmt.Sprintf(
-				"Service temporarily unavailable. Retrying in %d seconds... (attempt %d/%d)",
-				int(delay.Seconds()), retryAttempt, maxRetriableAttempts,
+			retryText := FormatTransientRetryMessage(
+				err,
+				delay,
+				retryAttempt,
+				maxRetriableAttempts,
 			)
 			retryMsg, retryMsgErr := a.messages.Create(genCtx, call.SessionID, message.CreateMessageParams{
 				Role: message.Assistant,
@@ -2350,13 +2359,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	queuedMessages, ok := a.messageQueue.Get(call.SessionID)
 	hasQueuedMessages := ok && len(queuedMessages) > 0
-	if !call.NonInteractive && a.notify != nil && !shouldSummarize && !hasQueuedMessages {
-		a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			SessionID:    call.SessionID,
-			SessionTitle: currentSession.Title,
-			Type:         notify.TypeAgentFinished,
-		})
-	}
 
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
@@ -2411,7 +2413,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Release active request before processing queued messages.
 	a.activeRequests.Del(call.SessionID)
 	cancel()
-	wg.Wait()
+
+	if !call.NonInteractive && a.notify != nil && !shouldSummarize && !hasQueuedMessages {
+		a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			SessionID:    call.SessionID,
+			SessionTitle: currentSession.Title,
+			Type:         notify.TypeAgentFinished,
+		})
+	}
 
 	if a.QueuedPrompts(call.SessionID) == 0 {
 		return result, err

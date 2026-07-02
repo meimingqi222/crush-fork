@@ -332,9 +332,14 @@ func NewToolMessageItem(
 	case tools.TodosToolName:
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "To-Do"
+	case tools.GoalToolName:
+		item = NewGoalToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Goal"
 	case tools.RequestUserInputToolName:
 		item = NewRequestUserInputToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "Request User Input"
+	case tools.DescribeImageToolName:
+		item = NewDescribeImageToolMessageItem(sty, toolCall, result, canceled)
 
 	default:
 		if IsDockerMCPTool(toolCall.Name) {
@@ -1307,7 +1312,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.SourcegraphToolName, tools.LSPToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.SourcegraphToolName, tools.LSPToolName, tools.TodosToolName, tools.GoalToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1585,6 +1590,8 @@ func prettifyToolName(name string) string {
 		return "Sourcegraph"
 	case tools.TodosToolName:
 		return "To-Do"
+	case tools.GoalToolName:
+		return "Goal"
 	case tools.RequestUserInputToolName:
 		return "Request User Input"
 	case tools.ReadToolName:

@@ -340,14 +340,14 @@ func TestMaybeOpenProposedPlanDialogRequiresPlanExit(t *testing.T) {
 	}
 
 	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))
-	require.False(t, ui.dialog.ContainsDialog(dialog.ProposedPlanID))
+	require.False(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
 
 	msg.Parts = append(msg.Parts,
 		message.ToolCall{ID: "tool-1", Name: agenttools.PlanExitToolName, Finished: true},
 	)
 
 	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))
-	require.True(t, ui.dialog.ContainsDialog(dialog.ProposedPlanID))
+	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
 }
 
 func TestHandleChildSessionMessageRemovesStaleNestedToolsAfterRetryReset(t *testing.T) {

@@ -244,8 +244,9 @@ func TestCreateTaskSessionInheritsParentModes(t *testing.T) {
 	parent.WorkspaceCWD = t.TempDir()
 	parent, err = svc.Save(context.Background(), parent)
 	require.NoError(t, err)
-	_, err = svc.UpdateCollaborationMode(context.Background(), parent.ID, CollaborationModePlan)
+	parent, err = svc.UpdateCollaborationMode(context.Background(), parent.ID, CollaborationModePlan)
 	require.NoError(t, err)
+	require.NotEmpty(t, parent.PlanFilePath)
 	_, err = svc.UpdatePermissionMode(context.Background(), parent.ID, PermissionModeYolo)
 	require.NoError(t, err)
 
@@ -253,8 +254,9 @@ func TestCreateTaskSessionInheritsParentModes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, parent.ID, child.ParentSessionID)
 	require.Equal(t, parent.WorkspaceCWD, child.WorkspaceCWD)
-	require.Equal(t, CollaborationModeDefault, child.CollaborationMode)
+	require.Equal(t, CollaborationModePlan, child.CollaborationMode)
 	require.Equal(t, PermissionModeYolo, child.PermissionMode)
+	require.Equal(t, parent.PlanFilePath, child.PlanFilePath)
 }
 
 func TestDeleteTriggersDeleteCallbackAfterSuccessfulDelete(t *testing.T) {

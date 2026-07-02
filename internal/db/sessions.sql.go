@@ -23,6 +23,14 @@ INSERT INTO sessions (
     handoff_goal,
     handoff_draft_prompt,
     handoff_relevant_files,
+    plan_file_path,
+    goal_text,
+    goal_status,
+    goal_token_budget,
+    goal_tokens_used,
+    goal_time_seconds,
+    goal_created_at,
+    goal_updated_at,
     message_count,
     prompt_tokens,
     completion_tokens,
@@ -46,10 +54,18 @@ INSERT INTO sessions (
     ?,
     ?,
     ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
     null,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 `
 
 type CreateSessionParams struct {
@@ -64,6 +80,14 @@ type CreateSessionParams struct {
 	HandoffGoal            string         `json:"handoff_goal"`
 	HandoffDraftPrompt     string         `json:"handoff_draft_prompt"`
 	HandoffRelevantFiles   string         `json:"handoff_relevant_files"`
+	PlanFilePath           string         `json:"plan_file_path"`
+	GoalText               string         `json:"goal_text"`
+	GoalStatus             string         `json:"goal_status"`
+	GoalTokenBudget        int64          `json:"goal_token_budget"`
+	GoalTokensUsed         int64          `json:"goal_tokens_used"`
+	GoalTimeSeconds        int64          `json:"goal_time_seconds"`
+	GoalCreatedAt          int64          `json:"goal_created_at"`
+	GoalUpdatedAt          int64          `json:"goal_updated_at"`
 	MessageCount           int64          `json:"message_count"`
 	PromptTokens           int64          `json:"prompt_tokens"`
 	CompletionTokens       int64          `json:"completion_tokens"`
@@ -83,6 +107,14 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.HandoffGoal,
 		arg.HandoffDraftPrompt,
 		arg.HandoffRelevantFiles,
+		arg.PlanFilePath,
+		arg.GoalText,
+		arg.GoalStatus,
+		arg.GoalTokenBudget,
+		arg.GoalTokensUsed,
+		arg.GoalTimeSeconds,
+		arg.GoalCreatedAt,
+		arg.GoalUpdatedAt,
 		arg.MessageCount,
 		arg.PromptTokens,
 		arg.CompletionTokens,
@@ -110,6 +142,14 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)
@@ -127,7 +167,7 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 }
 
 const getLastSession = `-- name: GetLastSession :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 FROM sessions
 WHERE parent_session_id IS NULL
 ORDER BY updated_at DESC
@@ -158,6 +198,14 @@ func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)
@@ -165,7 +213,7 @@ func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 FROM sessions
 WHERE id = ? LIMIT 1
 `
@@ -194,6 +242,14 @@ func (q *Queries) GetSessionByID(ctx context.Context, id string) (Session, error
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)
@@ -201,7 +257,7 @@ func (q *Queries) GetSessionByID(ctx context.Context, id string) (Session, error
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 FROM sessions
 WHERE parent_session_id is NULL
 ORDER BY updated_at DESC
@@ -237,6 +293,14 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 			&i.HandoffGoal,
 			&i.HandoffDraftPrompt,
 			&i.HandoffRelevantFiles,
+			&i.PlanFilePath,
+			&i.GoalText,
+			&i.GoalStatus,
+			&i.GoalTokenBudget,
+			&i.GoalTokensUsed,
+			&i.GoalTimeSeconds,
+			&i.GoalCreatedAt,
+			&i.GoalUpdatedAt,
 			&i.PermissionMode,
 			&i.LastSummaryAt,
 		); err != nil {
@@ -254,7 +318,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 const listSessionsByParentID = `-- name: ListSessionsByParentID :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 FROM sessions
 WHERE parent_session_id = ?
 ORDER BY created_at DESC
@@ -290,6 +354,14 @@ func (q *Queries) ListSessionsByParentID(ctx context.Context, parentSessionID sq
 			&i.HandoffGoal,
 			&i.HandoffDraftPrompt,
 			&i.HandoffRelevantFiles,
+			&i.PlanFilePath,
+			&i.GoalText,
+			&i.GoalStatus,
+			&i.GoalTokenBudget,
+			&i.GoalTokensUsed,
+			&i.GoalTimeSeconds,
+			&i.GoalCreatedAt,
+			&i.GoalUpdatedAt,
 			&i.PermissionMode,
 			&i.LastSummaryAt,
 		); err != nil {
@@ -335,6 +407,14 @@ SET
     handoff_goal = ?,
     handoff_draft_prompt = ?,
     handoff_relevant_files = ?,
+    plan_file_path = ?,
+    goal_text = ?,
+    goal_status = ?,
+    goal_token_budget = ?,
+    goal_tokens_used = ?,
+    goal_time_seconds = ?,
+    goal_created_at = ?,
+    goal_updated_at = ?,
     prompt_tokens = ?,
     completion_tokens = ?,
     last_prompt_tokens = ?,
@@ -343,7 +423,7 @@ SET
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 `
 
 type UpdateSessionParams struct {
@@ -356,6 +436,14 @@ type UpdateSessionParams struct {
 	HandoffGoal            string         `json:"handoff_goal"`
 	HandoffDraftPrompt     string         `json:"handoff_draft_prompt"`
 	HandoffRelevantFiles   string         `json:"handoff_relevant_files"`
+	PlanFilePath           string         `json:"plan_file_path"`
+	GoalText               string         `json:"goal_text"`
+	GoalStatus             string         `json:"goal_status"`
+	GoalTokenBudget        int64          `json:"goal_token_budget"`
+	GoalTokensUsed         int64          `json:"goal_tokens_used"`
+	GoalTimeSeconds        int64          `json:"goal_time_seconds"`
+	GoalCreatedAt          int64          `json:"goal_created_at"`
+	GoalUpdatedAt          int64          `json:"goal_updated_at"`
 	PromptTokens           int64          `json:"prompt_tokens"`
 	CompletionTokens       int64          `json:"completion_tokens"`
 	LastPromptTokens       int64          `json:"last_prompt_tokens"`
@@ -377,6 +465,14 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		arg.HandoffGoal,
 		arg.HandoffDraftPrompt,
 		arg.HandoffRelevantFiles,
+		arg.PlanFilePath,
+		arg.GoalText,
+		arg.GoalStatus,
+		arg.GoalTokenBudget,
+		arg.GoalTokensUsed,
+		arg.GoalTimeSeconds,
+		arg.GoalCreatedAt,
+		arg.GoalUpdatedAt,
 		arg.PromptTokens,
 		arg.CompletionTokens,
 		arg.LastPromptTokens,
@@ -408,6 +504,14 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)
@@ -418,7 +522,7 @@ const updateSessionCollaborationMode = `-- name: UpdateSessionCollaborationMode 
 UPDATE sessions
 SET collaboration_mode = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 `
 
 type UpdateSessionCollaborationModeParams struct {
@@ -450,6 +554,14 @@ func (q *Queries) UpdateSessionCollaborationMode(ctx context.Context, arg Update
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)
@@ -460,7 +572,7 @@ const updateSessionPermissionMode = `-- name: UpdateSessionPermissionMode :one
 UPDATE sessions
 SET permission_mode = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 `
 
 type UpdateSessionPermissionModeParams struct {
@@ -492,6 +604,14 @@ func (q *Queries) UpdateSessionPermissionMode(ctx context.Context, arg UpdateSes
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)
@@ -507,7 +627,7 @@ SET
     cost = cost + ?,
     updated_at = strftime('%s', 'now')
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, permission_mode, last_summary_at
 `
 
 type UpdateSessionTitleAndUsageParams struct {
@@ -548,6 +668,14 @@ func (q *Queries) UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSess
 		&i.HandoffGoal,
 		&i.HandoffDraftPrompt,
 		&i.HandoffRelevantFiles,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
 		&i.PermissionMode,
 		&i.LastSummaryAt,
 	)

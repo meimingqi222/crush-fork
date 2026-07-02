@@ -23,8 +23,16 @@ const (
 	builtinPruneRecentUserTurns = 2
 
 	builtinPruneCompactedNoticePrefix = "[Old tool result content cleared"
-	builtinPruneProtectedToolName     = "skill"
+
+	// builtinPruneProtectedToolNames contains tool names whose results should
+	// never be pruned during context compression. These tools carry state that
+	// must survive summarization (e.g. skill loading, goal tracking).
 )
+
+var builtinPruneProtectedToolNames = map[string]struct{}{
+	"skill": {},
+	"goal":  {},
+}
 
 // builtinPruneToolResults clears oversized tool result content from older
 // messages to reduce the payload sent to plugins and the LLM. It works
@@ -82,7 +90,7 @@ loop:
 			if !ok || tr.IsError || tr.Content == "" {
 				continue
 			}
-			if tr.Name == builtinPruneProtectedToolName {
+			if _, protected := builtinPruneProtectedToolNames[tr.Name]; protected {
 				continue
 			}
 			if strings.HasPrefix(tr.Content, builtinPruneCompactedNoticePrefix) {

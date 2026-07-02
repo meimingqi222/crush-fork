@@ -62,6 +62,7 @@ type Commands struct {
 	mode           session.CollaborationMode
 	permissionMode session.PermissionMode
 	proposedPlan   string
+	goal           session.Goal
 	selected       CommandType
 	denialCount    int // Number of items in denial queue
 
@@ -84,7 +85,7 @@ type Commands struct {
 var _ Dialog = (*Commands)(nil)
 
 // NewCommands creates a new commands dialog.
-func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue, queuePaused bool, mode session.CollaborationMode, permissionMode session.PermissionMode, proposedPlan string, denialCount int, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
+func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue, queuePaused bool, mode session.CollaborationMode, permissionMode session.PermissionMode, proposedPlan string, goal session.Goal, denialCount int, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
 	c := &Commands{
 		com:            com,
 		selected:       SystemCommands,
@@ -96,6 +97,7 @@ func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, has
 		mode:           mode,
 		permissionMode: permissionMode,
 		proposedPlan:   proposedPlan,
+		goal:           goal,
 		denialCount:    denialCount,
 		customCommands: customCommands,
 		mcpPrompts:     mcpPrompts,
@@ -452,6 +454,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Enter Plan Mode", "", ActionTogglePlanMode{SessionID: c.sessionID, NextMode: session.CollaborationModePlan}))
 			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_orchestrate_mode", "Enter Orchestrate Mode", "", ActionToggleOrchestrateMode{SessionID: c.sessionID, NextMode: session.CollaborationModeOrchestrate}))
 		}
+		commands = append(commands, c.goalCommands()...)
 	} else {
 		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Enter Plan Mode", "", ActionTogglePlanMode{NextMode: session.CollaborationModePlan}))
 		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_orchestrate_mode", "Enter Orchestrate Mode", "", ActionToggleOrchestrateMode{NextMode: session.CollaborationModeOrchestrate}))
@@ -579,6 +582,41 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	)
 
 	return commands
+}
+
+func (c *Commands) goalCommands() []*CommandItem {
+	switch c.goal.Status {
+	case "":
+		return []*CommandItem{
+			NewCommandItem(c.com.Styles, "set_goal", "Goal: Set Goal", "", ActionOpenDialog{GoalID}),
+			NewCommandItem(c.com.Styles, "guided_goal", "Goal: Guided Goal", "", ActionOpenDialog{GuidedGoalID}),
+		}
+	case session.GoalStatusActive:
+		return []*CommandItem{
+			NewCommandItem(c.com.Styles, "show_goal", "Goal: Show Goal", "", ActionOpenDialog{GoalStatusID}),
+			NewCommandItem(c.com.Styles, "pause_goal", "Goal: Pause Goal", "", ActionPauseGoal{SessionID: c.sessionID}),
+			NewCommandItem(c.com.Styles, "set_goal_budget", "Goal: Set Budget", "", ActionOpenDialog{GoalBudgetID}),
+			NewCommandItem(c.com.Styles, "drop_goal", "Goal: Drop Goal", "", ActionDropGoal{SessionID: c.sessionID}),
+		}
+	case session.GoalStatusPaused:
+		return []*CommandItem{
+			NewCommandItem(c.com.Styles, "show_goal", "Goal: Show Goal", "", ActionOpenDialog{GoalStatusID}),
+			NewCommandItem(c.com.Styles, "resume_goal", "Goal: Resume Goal", "", ActionResumeGoal{SessionID: c.sessionID}),
+			NewCommandItem(c.com.Styles, "set_goal_budget", "Goal: Set Budget", "", ActionOpenDialog{GoalBudgetID}),
+			NewCommandItem(c.com.Styles, "drop_goal", "Goal: Drop Goal", "", ActionDropGoal{SessionID: c.sessionID}),
+		}
+	case session.GoalStatusBudgetLimited:
+		return []*CommandItem{
+			NewCommandItem(c.com.Styles, "show_goal", "Goal: Show Goal", "", ActionOpenDialog{GoalStatusID}),
+			NewCommandItem(c.com.Styles, "set_goal_budget", "Goal: Resume With New Budget", "", ActionOpenDialog{GoalBudgetID}),
+			NewCommandItem(c.com.Styles, "drop_goal", "Goal: Drop Goal", "", ActionDropGoal{SessionID: c.sessionID}),
+		}
+	default:
+		return []*CommandItem{
+			NewCommandItem(c.com.Styles, "set_goal", "Goal: Set Goal", "", ActionOpenDialog{GoalID}),
+			NewCommandItem(c.com.Styles, "guided_goal", "Goal: Guided Goal", "", ActionOpenDialog{GuidedGoalID}),
+		}
+	}
 }
 
 // SetCustomCommands sets the custom commands and refreshes the view if user commands are currently displayed.

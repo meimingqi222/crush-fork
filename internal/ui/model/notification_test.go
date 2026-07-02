@@ -153,6 +153,7 @@ func TestHandleAgentNotificationSubagentQueued(t *testing.T) {
 
 type mockRunCoordinator struct {
 	agent.Coordinator
+	busy    bool
 	runFunc func(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 }
 
@@ -170,7 +171,7 @@ func (m *mockRunCoordinator) CancelAll() {
 }
 
 func (m *mockRunCoordinator) IsSessionBusy(sessionID string) bool {
-	return false
+	return m.busy
 }
 
 func (m *mockRunCoordinator) QueuedPrompts(sessionID string) int {

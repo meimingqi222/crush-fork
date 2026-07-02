@@ -137,6 +137,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewTripleQueryTool(c.memoryEngineTripleStore()),
 		agenttools.NewMemoryStatusTool(c.memoryEngine),
 		agenttools.NewTodosTool(c.sessions),
+		agenttools.NewGoalTool(c.sessions),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}

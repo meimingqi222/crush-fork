@@ -6,16 +6,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
 )
-
-// userMessageSpinnerFrames are the Braille characters used for a lightweight
-// spinner shown while an image attachment is being processed.
-var userMessageSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // UserMessageItem represents a user message in the chat UI.
 type UserMessageItem struct {
@@ -23,11 +18,9 @@ type UserMessageItem struct {
 	*cachedMessageItem
 	*focusableMessageItem
 
-	attachments      *attachments.Renderer
-	message          *message.Message
-	sty              *styles.Styles
-	showLoadingState bool
-	spinnerFrame     int
+	attachments *attachments.Renderer
+	message     *message.Message
+	sty         *styles.Styles
 }
 
 // NewUserMessageItem creates a new UserMessageItem.
@@ -68,16 +61,6 @@ func (m *UserMessageItem) RawRender(width int) string {
 			content = attachmentsStr
 		} else {
 			content = strings.Join([]string{content, "", attachmentsStr}, "\n")
-		}
-	}
-
-	if m.showLoadingState {
-		frame := userMessageSpinnerFrames[m.spinnerFrame%len(userMessageSpinnerFrames)]
-		spinner := m.sty.Base.Faint(true).Render(frame + " analyzing image...")
-		if content == "" {
-			content = spinner
-		} else {
-			content = strings.Join([]string{content, spinner}, "\n")
 		}
 	}
 
@@ -177,38 +160,4 @@ func (m *UserMessageItem) hasImageAttachment() bool {
 		}
 	}
 	return false
-}
-
-// SetLoadingStateVisible controls whether the loading spinner is rendered
-// below the user message while image attachments are being processed.
-func (m *UserMessageItem) SetLoadingStateVisible(visible bool) {
-	if m.showLoadingState == visible {
-		return
-	}
-	m.showLoadingState = visible
-	m.clearCache()
-}
-
-// StartAnimation implements chat.Animatable.
-func (m *UserMessageItem) StartAnimation() tea.Cmd {
-	return nil
-}
-
-// Animate implements chat.Animatable.
-func (m *UserMessageItem) Animate(anim.StepMsg) tea.Cmd {
-	return nil
-}
-
-// TickAnimation implements chat.Animatable.
-func (m *UserMessageItem) TickAnimation() {
-	if !m.showLoadingState {
-		return
-	}
-	m.spinnerFrame = (m.spinnerFrame + 1) % len(userMessageSpinnerFrames)
-	m.clearCache()
-}
-
-// IsAnimating implements chat.Animatable.
-func (m *UserMessageItem) IsAnimating() bool {
-	return m.showLoadingState
 }

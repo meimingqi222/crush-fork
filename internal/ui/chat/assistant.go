@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/planmode"
@@ -274,6 +275,9 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 		a.cachedStrippedContentInput = rawContent
 	}
 	content := strings.TrimSpace(a.cachedStrippedContent)
+	if display, ok := agent.RetryStatusDisplayText(content); ok {
+		content = display
+	}
 	// if the massage has reasoning content add that first
 	if thinking != "" {
 		messageParts = append(messageParts, a.renderThinking(thinking, width))
