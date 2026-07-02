@@ -134,7 +134,13 @@ func Parse(path string) (*Skill, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseContent(path, content)
+}
 
+// parseContent parses SKILL.md content read from path. It is shared by Parse
+// (which reads from disk) and EmbeddedSkills (which parses content embedded
+// into the binary via a virtual crush:// path).
+func parseContent(path string, content []byte) (*Skill, error) {
 	frontmatter, body, err := splitFrontmatter(string(content))
 	if err != nil {
 		return nil, err
@@ -169,9 +175,11 @@ func splitFrontmatter(content string) (frontmatter, body string, err error) {
 	return before, after, nil
 }
 
-// Discover finds all valid skills in the given paths.
+// Discover finds all valid skills in the given paths. Builtin skills
+// embedded in the binary are always included with the lowest priority: a
+// user skill discovered on disk with the same name overrides the builtin.
 func Discover(paths []string) []*Skill {
-	var skills []*Skill
+	var userSkills []*Skill
 	var mu sync.Mutex
 	seen := make(map[string]bool)
 	errorsMap := make(map[string]error)
@@ -216,11 +224,28 @@ func Discover(paths []string) []*Skill {
 			}
 			slog.Debug("Successfully loaded skill", "name", skill.Name, "path", path)
 			mu.Lock()
-			skills = append(skills, skill)
+			userSkills = append(userSkills, skill)
 			mu.Unlock()
 			return nil
 		})
 	}
+
+	// Merge builtin skills (lowest priority) with user skills. A user skill
+	// with the same name overrides the builtin, so shadowed builtins are
+	// skipped. User skills are always kept.
+	userNames := make(map[string]bool, len(userSkills))
+	for _, s := range userSkills {
+		userNames[s.Name] = true
+	}
+	builtinSkills := EmbeddedSkills()
+	skills := make([]*Skill, 0, len(userSkills)+len(builtinSkills))
+	for _, s := range builtinSkills {
+		if userNames[s.Name] {
+			continue
+		}
+		skills = append(skills, s)
+	}
+	skills = append(skills, userSkills...)
 
 	// Sort skills by name for deterministic output. The fastwalk traversal
 	// is concurrent, so append order varies between calls. Without sorting,
@@ -236,6 +261,56 @@ func Discover(paths []string) []*Skill {
 	})
 
 	return skills
+}
+
+// skillsCache is the package-level cache backing DiscoverCached. It maps a
+// paths key (strings.Join(paths, ",")) to the discovered []*Skill.
+var skillsCache sync.Map
+
+// DiscoverCached returns the result of Discover for the given paths, scanning
+// the filesystem only on the first call for a given paths key. Subsequent
+// calls return the cached value. The returned slice is a copy so callers
+// cannot mutate the cached state. Use Invalidate to force a re-scan.
+func DiscoverCached(paths []string) []*Skill {
+	if len(paths) == 0 {
+		return nil
+	}
+	key := strings.Join(paths, ",")
+	if v, ok := skillsCache.Load(key); ok {
+		return copySkills(v.([]*Skill))
+	}
+	discovered := Discover(paths)
+	actual, loaded := skillsCache.LoadOrStore(key, copySkills(discovered))
+	if loaded {
+		// Another goroutine won the race and stored first; use its value.
+		return copySkills(actual.([]*Skill))
+	}
+	return copySkills(discovered)
+}
+
+// Invalidate clears cached skill discovery results. If paths is nil, all
+// cached entries are removed. Otherwise only the entry for the given paths
+// (joined by ",") is removed.
+func Invalidate(paths []string) {
+	if paths == nil {
+		skillsCache.Range(func(key, _ any) bool {
+			skillsCache.Delete(key)
+			return true
+		})
+		return
+	}
+	skillsCache.Delete(strings.Join(paths, ","))
+}
+
+// copySkills returns a shallow copy of the given skill slice so caller
+// mutations to the slice header do not affect cached state.
+func copySkills(in []*Skill) []*Skill {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*Skill, len(in))
+	copy(out, in)
+	return out
 }
 
 // ToPromptXML generates XML for injection into the system prompt.

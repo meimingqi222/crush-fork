@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
 	crushlog "github.com/charmbracelet/crush/internal/log"
@@ -264,6 +266,193 @@ func TestCallToolWithRetryDoesNotRetryCanceledContext(t *testing.T) {
 	_, err := callToolWithRetry(ctx, store, name, &ClientSession{}, &sdkmcp.CallToolParams{Name: "test-tool"})
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, callCount)
+}
+
+// TestShouldRetryToolCall_SyscallErrors verifies that low-level connection
+// failures surfaced as syscall errors are treated as retryable on every
+// platform (these constants exist in the syscall package on both Unix and
+// Windows).
+func TestShouldRetryToolCall_SyscallErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"ECONNRESET", fmt.Errorf("connection reset by peer: %w", syscall.ECONNRESET)},
+		{"ECONNREFUSED", fmt.Errorf("connection refused: %w", syscall.ECONNREFUSED)},
+		{"EPIPE", fmt.Errorf("broken pipe: %w", syscall.EPIPE)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.True(t, shouldRetryToolCall(context.Background(), tt.err),
+				"expected shouldRetryToolCall to return true for %s", tt.name)
+			// The wrapped error must still match the underlying syscall
+			// value via errors.Is so the retry decision is reliable.
+			require.True(t, errors.Is(tt.err, syscall.ECONNRESET) ||
+				errors.Is(tt.err, syscall.ECONNREFUSED) ||
+				errors.Is(tt.err, syscall.EPIPE))
+		})
+	}
+}
+
+// TestShouldRetryToolCall_NonRetryableErrors verifies that benign and
+// context-driven errors are not treated as retryable, guarding against the
+// expanded retry set masking cancellations.
+func TestShouldRetryToolCall_NonRetryableErrors(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, shouldRetryToolCall(context.Background(), nil))
+	require.False(t, shouldRetryToolCall(context.Background(), errors.New("some benign error")))
+
+	// A cancelled context short-circuits the retry decision even when the
+	// error would otherwise be retryable.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, shouldRetryToolCall(ctx, fmt.Errorf("connection reset: %w", syscall.ECONNRESET)))
+}
+
+// TestCallToolWithRetry_NetworkRetryDelay verifies that the network-error
+// retry path waits reconnectRetryDelay (~100ms) before triggering a
+// reconnect, while still ultimately invoking the reconnect.
+func TestCallToolWithRetry_NetworkRetryDelay(t *testing.T) {
+	store := loadTestStore(t)
+	const name = "retry-delay-mcp"
+
+	originalCallToolOnSession := callToolOnSession
+	originalReconnectClient := reconnectClient
+	t.Cleanup(func() {
+		callToolOnSession = originalCallToolOnSession
+		reconnectClient = originalReconnectClient
+		states.Del(name)
+		sessions.Del(name)
+		allTools.Del(name)
+	})
+
+	updateState(name, StateConnected, nil, &ClientSession{}, Counts{Tools: 1})
+
+	callToolOnSession = func(ctx context.Context, session *ClientSession, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
+		return nil, fmt.Errorf("transport failed: %w", syscall.ECONNRESET)
+	}
+
+	var reconnectTime time.Time
+	reconnectClient = func(ctx context.Context, cfg *config.ConfigStore, gotName string) error {
+		reconnectTime = time.Now()
+		require.Equal(t, name, gotName)
+		return nil
+	}
+
+	start := time.Now()
+	_, err := callToolWithRetry(context.Background(), store, name, &ClientSession{}, &sdkmcp.CallToolParams{Name: "test-tool"})
+	elapsed := time.Since(start)
+	require.Error(t, err)
+
+	// reconnectClient must have been invoked after the backoff.
+	require.False(t, reconnectTime.IsZero(), "reconnect must be attempted after the delay")
+	delay := reconnectTime.Sub(start)
+	// The reconnect must happen after ~reconnectRetryDelay (100ms). Allow a
+	// ±50ms tolerance per the task spec, with a generous upper bound to
+	// absorb scheduler jitter on busy CI hosts.
+	require.GreaterOrEqual(t, delay, reconnectRetryDelay-50*time.Millisecond,
+		"expected at least ~100ms delay before reconnect, got %v", delay)
+	require.LessOrEqual(t, delay, reconnectRetryDelay+150*time.Millisecond,
+		"reconnect delayed too long: %v", delay)
+	// Sanity: total elapsed should also reflect the sleep.
+	require.GreaterOrEqual(t, elapsed, reconnectRetryDelay-50*time.Millisecond)
+}
+
+// TestCallToolWithRetry_OAuthRetryHasNoDelay verifies that the OAuth 401
+// refresh path retries immediately, without the 100ms backoff that gates the
+// network-error path. This locks in the distinction between the two retry
+// paths required by the spec.
+func TestCallToolWithRetry_OAuthRetryHasNoDelay(t *testing.T) {
+	store := loadTestStore(t)
+	const name = "oauth-no-delay-mcp"
+
+	originalCallToolOnSession := callToolOnSession
+	originalRefreshToken := refreshToken
+	originalReconnectClient := reconnectClient
+	t.Cleanup(func() {
+		callToolOnSession = originalCallToolOnSession
+		refreshToken = originalRefreshToken
+		reconnectClient = originalReconnectClient
+		states.Del(name)
+		sessions.Del(name)
+		allTools.Del(name)
+	})
+
+	updateState(name, StateConnected, nil, &ClientSession{}, Counts{Tools: 1})
+
+	callToolOnSession = func(ctx context.Context, session *ClientSession, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
+		return nil, errors.New("HTTP 401 Unauthorized")
+	}
+	refreshToken = func(ctx context.Context, serverName string) error {
+		require.Equal(t, name, serverName)
+		return nil
+	}
+	reconnectClient = func(ctx context.Context, cfg *config.ConfigStore, gotName string) error {
+		t.Fatal("reconnect should not be called on 401 auth error")
+		return nil
+	}
+
+	start := time.Now()
+	_, err := callToolWithRetry(context.Background(), store, name, &ClientSession{}, &sdkmcp.CallToolParams{Name: "test-tool"})
+	elapsed := time.Since(start)
+
+	// Refresh succeeds but the retry call still returns 401, so an error is
+	// expected. The important assertion is that the OAuth path did not wait
+	// for reconnectRetryDelay before retrying.
+	require.Error(t, err)
+	require.Less(t, elapsed, reconnectRetryDelay-50*time.Millisecond,
+		"OAuth retry path must not apply the network backoff, took %v", elapsed)
+}
+
+// TestCallToolWithRetry_ReconnectLimitWhileReconnecting verifies the single
+// reconnect limit: when a background reconnectLoop is already running for the
+// server, callToolWithRetry must not trigger a second synchronous reconnect.
+// It surfaces the original failure instead.
+func TestCallToolWithRetry_ReconnectLimitWhileReconnecting(t *testing.T) {
+	store := loadTestStore(t)
+	const name = "reconnect-limit-mcp"
+
+	originalCallToolOnSession := callToolOnSession
+	originalReconnectClient := reconnectClient
+	t.Cleanup(func() {
+		callToolOnSession = originalCallToolOnSession
+		reconnectClient = originalReconnectClient
+		states.Del(name)
+		sessions.Del(name)
+		allTools.Del(name)
+		reconnecting.Delete(name)
+	})
+
+	updateState(name, StateConnected, nil, &ClientSession{}, Counts{Tools: 1})
+
+	callToolOnSession = func(ctx context.Context, session *ClientSession, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error) {
+		return nil, fmt.Errorf("transport failed: %w", syscall.ECONNRESET)
+	}
+
+	reconnectCalled := false
+	reconnectClient = func(ctx context.Context, cfg *config.ConfigStore, gotName string) error {
+		reconnectCalled = true
+		return nil
+	}
+
+	// Simulate an in-flight background reconnectLoop for this server.
+	reconnecting.Store(name, struct{}{})
+	require.True(t, isReconnecting(name))
+
+	start := time.Now()
+	_, err := callToolWithRetry(context.Background(), store, name, &ClientSession{}, &sdkmcp.CallToolParams{Name: "test-tool"})
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "original failure should be surfaced")
+	require.False(t, reconnectCalled, "reconnect must not be triggered while a background loop is running")
+	// Because we short-circuit before the backoff, this path must return
+	// promptly.
+	require.Less(t, elapsed, reconnectRetryDelay-50*time.Millisecond,
+		"reconnect-limit path must skip the backoff, took %v", elapsed)
 }
 
 func loadTestStore(t *testing.T) *config.ConfigStore {

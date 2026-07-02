@@ -30,6 +30,50 @@ type File struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
+type McpOauthToken struct {
+	ServerName   string        `json:"server_name"`
+	AccessToken  string        `json:"access_token"`
+	RefreshToken string        `json:"refresh_token"`
+	ExpiresAt    sql.NullInt64 `json:"expires_at"`
+	CreatedAt    int64         `json:"created_at"`
+	UpdatedAt    int64         `json:"updated_at"`
+}
+
+type McpToolCache struct {
+	ServerName string `json:"server_name"`
+	ConfigHash string `json:"config_hash"`
+	ToolsJson  string `json:"tools_json"`
+	CachedAt   int64  `json:"cached_at"`
+}
+
+type MemoryConflict struct {
+	ID           int64          `json:"id"`
+	FactAID      string         `json:"fact_a_id"`
+	FactBID      string         `json:"fact_b_id"`
+	ConflictType string         `json:"conflict_type"`
+	Resolution   sql.NullString `json:"resolution"`
+	ResolvedAt   sql.NullInt64  `json:"resolved_at"`
+	CreatedAt    int64          `json:"created_at"`
+	UpdatedAt    int64          `json:"updated_at"`
+}
+
+type MemoryEdge struct {
+	SourceID  string  `json:"source_id"`
+	TargetID  string  `json:"target_id"`
+	EdgeType  string  `json:"edge_type"`
+	Weight    float64 `json:"weight"`
+	CreatedAt int64   `json:"created_at"`
+}
+
+type MemoryEmbedding struct {
+	EventID       string `json:"event_id"`
+	Model         string `json:"model"`
+	EmbeddingJson string `json:"embedding_json"`
+	Dimension     int64  `json:"dimension"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
 type MemoryEvent struct {
 	ID         string         `json:"id"`
 	SessionID  string         `json:"session_id"`
@@ -47,6 +91,7 @@ type MemoryEvent struct {
 	CreatedAt  int64          `json:"created_at"`
 	UpdatedAt  int64          `json:"updated_at"`
 	ExpiresAt  sql.NullInt64  `json:"expires_at"`
+	Veracity   string         `json:"veracity"`
 }
 
 type MemoryEventsFt struct {
@@ -90,6 +135,22 @@ type MemorySource struct {
 	Watermark              int64  `json:"watermark"`
 	CreatedAt              int64  `json:"created_at"`
 	UpdatedAt              int64  `json:"updated_at"`
+}
+
+type MemoryTriple struct {
+	ID            string         `json:"id"`
+	Subject       string         `json:"subject"`
+	Predicate     string         `json:"predicate"`
+	Object        string         `json:"object"`
+	Confidence    float64        `json:"confidence"`
+	Veracity      string         `json:"veracity"`
+	ValidFrom     int64          `json:"valid_from"`
+	ValidTo       sql.NullInt64  `json:"valid_to"`
+	SourceEventID sql.NullString `json:"source_event_id"`
+	Scope         string         `json:"scope"`
+	CreatedAt     int64          `json:"created_at"`
+	UpdatedAt     int64          `json:"updated_at"`
+	SupersededBy  sql.NullString `json:"superseded_by"`
 }
 
 type Message struct {
@@ -137,6 +198,8 @@ type Session struct {
 	HandoffGoal            string         `json:"handoff_goal"`
 	HandoffDraftPrompt     string         `json:"handoff_draft_prompt"`
 	HandoffRelevantFiles   string         `json:"handoff_relevant_files"`
+	PermissionMode         string         `json:"permission_mode"`
+	LastSummaryAt          sql.NullInt64  `json:"last_summary_at"`
 	PlanFilePath           string         `json:"plan_file_path"`
 	GoalText               string         `json:"goal_text"`
 	GoalStatus             string         `json:"goal_status"`
@@ -145,6 +208,4 @@ type Session struct {
 	GoalTimeSeconds        int64          `json:"goal_time_seconds"`
 	GoalCreatedAt          int64          `json:"goal_created_at"`
 	GoalUpdatedAt          int64          `json:"goal_updated_at"`
-	PermissionMode         string         `json:"permission_mode"`
-	LastSummaryAt          sql.NullInt64  `json:"last_summary_at"`
 }

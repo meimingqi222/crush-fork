@@ -21,6 +21,8 @@ type Querier interface {
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	DeleteCheckpoint(ctx context.Context, id string) error
 	DeleteFile(ctx context.Context, id string) error
+	DeleteMCPOAuthToken(ctx context.Context, serverName string) error
+	DeleteMCPToolCache(ctx context.Context, serverName string) error
 	DeleteMessage(ctx context.Context, id string) error
 	DeleteSession(ctx context.Context, id string) error
 	DeleteSessionCheckpoints(ctx context.Context, sessionID string) error
@@ -35,6 +37,8 @@ type Querier interface {
 	GetHourDayHeatmap(ctx context.Context) ([]GetHourDayHeatmapRow, error)
 	GetLastSession(ctx context.Context) (Session, error)
 	GetLatestSessionCheckpoint(ctx context.Context, sessionID string) (Checkpoint, error)
+	GetMCPOAuthToken(ctx context.Context, serverName string) (McpOauthToken, error)
+	GetMCPToolCache(ctx context.Context, serverName string) (McpToolCache, error)
 	GetMaterializedView(ctx context.Context, viewName string) (MemoryMaterializedView, error)
 	GetMaxMemoryEventWatermark(ctx context.Context) (interface{}, error)
 	GetMemoryEventByID(ctx context.Context, id string) (GetMemoryEventByIDRow, error)
@@ -77,6 +81,8 @@ type Querier interface {
 	UpdateSessionCollaborationMode(ctx context.Context, arg UpdateSessionCollaborationModeParams) (Session, error)
 	UpdateSessionPermissionMode(ctx context.Context, arg UpdateSessionPermissionModeParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) (Session, error)
+	UpsertMCPOAuthToken(ctx context.Context, arg UpsertMCPOAuthTokenParams) error
+	UpsertMCPToolCache(ctx context.Context, arg UpsertMCPToolCacheParams) error
 	UpsertMaterializedView(ctx context.Context, arg UpsertMaterializedViewParams) error
 	UpsertMemorySource(ctx context.Context, arg UpsertMemorySourceParams) error
 }

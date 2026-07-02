@@ -57,6 +57,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteFileStmt, err = db.PrepareContext(ctx, deleteFile); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteFile: %w", err)
 	}
+	if q.deleteMCPOAuthTokenStmt, err = db.PrepareContext(ctx, deleteMCPOAuthToken); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteMCPOAuthToken: %w", err)
+	}
+	if q.deleteMCPToolCacheStmt, err = db.PrepareContext(ctx, deleteMCPToolCache); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteMCPToolCache: %w", err)
+	}
 	if q.deleteMessageStmt, err = db.PrepareContext(ctx, deleteMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteMessage: %w", err)
 	}
@@ -98,6 +104,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getLatestSessionCheckpointStmt, err = db.PrepareContext(ctx, getLatestSessionCheckpoint); err != nil {
 		return nil, fmt.Errorf("error preparing query GetLatestSessionCheckpoint: %w", err)
+	}
+	if q.getMCPOAuthTokenStmt, err = db.PrepareContext(ctx, getMCPOAuthToken); err != nil {
+		return nil, fmt.Errorf("error preparing query GetMCPOAuthToken: %w", err)
+	}
+	if q.getMCPToolCacheStmt, err = db.PrepareContext(ctx, getMCPToolCache); err != nil {
+		return nil, fmt.Errorf("error preparing query GetMCPToolCache: %w", err)
 	}
 	if q.getMaterializedViewStmt, err = db.PrepareContext(ctx, getMaterializedView); err != nil {
 		return nil, fmt.Errorf("error preparing query GetMaterializedView: %w", err)
@@ -225,6 +237,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.updateSessionTitleAndUsageStmt, err = db.PrepareContext(ctx, updateSessionTitleAndUsage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionTitleAndUsage: %w", err)
 	}
+	if q.upsertMCPOAuthTokenStmt, err = db.PrepareContext(ctx, upsertMCPOAuthToken); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertMCPOAuthToken: %w", err)
+	}
+	if q.upsertMCPToolCacheStmt, err = db.PrepareContext(ctx, upsertMCPToolCache); err != nil {
+		return nil, fmt.Errorf("error preparing query UpsertMCPToolCache: %w", err)
+	}
 	if q.upsertMaterializedViewStmt, err = db.PrepareContext(ctx, upsertMaterializedView); err != nil {
 		return nil, fmt.Errorf("error preparing query UpsertMaterializedView: %w", err)
 	}
@@ -289,6 +307,16 @@ func (q *Queries) Close() error {
 	if q.deleteFileStmt != nil {
 		if cerr := q.deleteFileStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteFileStmt: %w", cerr)
+		}
+	}
+	if q.deleteMCPOAuthTokenStmt != nil {
+		if cerr := q.deleteMCPOAuthTokenStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteMCPOAuthTokenStmt: %w", cerr)
+		}
+	}
+	if q.deleteMCPToolCacheStmt != nil {
+		if cerr := q.deleteMCPToolCacheStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteMCPToolCacheStmt: %w", cerr)
 		}
 	}
 	if q.deleteMessageStmt != nil {
@@ -359,6 +387,16 @@ func (q *Queries) Close() error {
 	if q.getLatestSessionCheckpointStmt != nil {
 		if cerr := q.getLatestSessionCheckpointStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getLatestSessionCheckpointStmt: %w", cerr)
+		}
+	}
+	if q.getMCPOAuthTokenStmt != nil {
+		if cerr := q.getMCPOAuthTokenStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getMCPOAuthTokenStmt: %w", cerr)
+		}
+	}
+	if q.getMCPToolCacheStmt != nil {
+		if cerr := q.getMCPToolCacheStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getMCPToolCacheStmt: %w", cerr)
 		}
 	}
 	if q.getMaterializedViewStmt != nil {
@@ -571,6 +609,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateSessionTitleAndUsageStmt: %w", cerr)
 		}
 	}
+	if q.upsertMCPOAuthTokenStmt != nil {
+		if cerr := q.upsertMCPOAuthTokenStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertMCPOAuthTokenStmt: %w", cerr)
+		}
+	}
+	if q.upsertMCPToolCacheStmt != nil {
+		if cerr := q.upsertMCPToolCacheStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing upsertMCPToolCacheStmt: %w", cerr)
+		}
+	}
 	if q.upsertMaterializedViewStmt != nil {
 		if cerr := q.upsertMaterializedViewStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing upsertMaterializedViewStmt: %w", cerr)
@@ -631,6 +679,8 @@ type Queries struct {
 	createSessionStmt                  *sql.Stmt
 	deleteCheckpointStmt               *sql.Stmt
 	deleteFileStmt                     *sql.Stmt
+	deleteMCPOAuthTokenStmt            *sql.Stmt
+	deleteMCPToolCacheStmt             *sql.Stmt
 	deleteMessageStmt                  *sql.Stmt
 	deleteSessionStmt                  *sql.Stmt
 	deleteSessionCheckpointsStmt       *sql.Stmt
@@ -645,6 +695,8 @@ type Queries struct {
 	getHourDayHeatmapStmt              *sql.Stmt
 	getLastSessionStmt                 *sql.Stmt
 	getLatestSessionCheckpointStmt     *sql.Stmt
+	getMCPOAuthTokenStmt               *sql.Stmt
+	getMCPToolCacheStmt                *sql.Stmt
 	getMaterializedViewStmt            *sql.Stmt
 	getMaxMemoryEventWatermarkStmt     *sql.Stmt
 	getMemoryEventByIDStmt             *sql.Stmt
@@ -687,6 +739,8 @@ type Queries struct {
 	updateSessionCollaborationModeStmt *sql.Stmt
 	updateSessionPermissionModeStmt    *sql.Stmt
 	updateSessionTitleAndUsageStmt     *sql.Stmt
+	upsertMCPOAuthTokenStmt            *sql.Stmt
+	upsertMCPToolCacheStmt             *sql.Stmt
 	upsertMaterializedViewStmt         *sql.Stmt
 	upsertMemorySourceStmt             *sql.Stmt
 }
@@ -706,6 +760,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createSessionStmt:                  q.createSessionStmt,
 		deleteCheckpointStmt:               q.deleteCheckpointStmt,
 		deleteFileStmt:                     q.deleteFileStmt,
+		deleteMCPOAuthTokenStmt:            q.deleteMCPOAuthTokenStmt,
+		deleteMCPToolCacheStmt:             q.deleteMCPToolCacheStmt,
 		deleteMessageStmt:                  q.deleteMessageStmt,
 		deleteSessionStmt:                  q.deleteSessionStmt,
 		deleteSessionCheckpointsStmt:       q.deleteSessionCheckpointsStmt,
@@ -720,6 +776,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getHourDayHeatmapStmt:              q.getHourDayHeatmapStmt,
 		getLastSessionStmt:                 q.getLastSessionStmt,
 		getLatestSessionCheckpointStmt:     q.getLatestSessionCheckpointStmt,
+		getMCPOAuthTokenStmt:               q.getMCPOAuthTokenStmt,
+		getMCPToolCacheStmt:                q.getMCPToolCacheStmt,
 		getMaterializedViewStmt:            q.getMaterializedViewStmt,
 		getMaxMemoryEventWatermarkStmt:     q.getMaxMemoryEventWatermarkStmt,
 		getMemoryEventByIDStmt:             q.getMemoryEventByIDStmt,
@@ -762,6 +820,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateSessionCollaborationModeStmt: q.updateSessionCollaborationModeStmt,
 		updateSessionPermissionModeStmt:    q.updateSessionPermissionModeStmt,
 		updateSessionTitleAndUsageStmt:     q.updateSessionTitleAndUsageStmt,
+		upsertMCPOAuthTokenStmt:            q.upsertMCPOAuthTokenStmt,
+		upsertMCPToolCacheStmt:             q.upsertMCPToolCacheStmt,
 		upsertMaterializedViewStmt:         q.upsertMaterializedViewStmt,
 		upsertMemorySourceStmt:             q.upsertMemorySourceStmt,
 	}

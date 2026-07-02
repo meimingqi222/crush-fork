@@ -391,7 +391,7 @@ func writeSkills(b *strings.Builder, cfg *config.ConfigStore) {
 		return
 	}
 
-	discovered := skills.Discover(c.Options.SkillsPaths)
+	discovered := skills.DiscoverCached(c.Options.SkillsPaths)
 	if len(discovered) == 0 {
 		return
 	}

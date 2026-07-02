@@ -301,10 +301,11 @@ type MCPOAuthRegistration struct {
 }
 
 type MCPOAuthAuthServer struct {
-	Issuer                string `json:"issuer,omitempty" jsonschema:"description=OAuth authorization server issuer URL,format=uri"`
-	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" jsonschema:"description=OAuth authorization endpoint for the MCP server,format=uri"`
-	TokenEndpoint         string `json:"token_endpoint,omitempty" jsonschema:"description=OAuth token endpoint for the MCP server,format=uri"`
-	RegistrationEndpoint  string `json:"registration_endpoint,omitempty" jsonschema:"description=OAuth dynamic client registration endpoint for the MCP server,format=uri"`
+	Issuer                            string   `json:"issuer,omitempty" jsonschema:"description=OAuth authorization server issuer URL,format=uri"`
+	AuthorizationEndpoint             string   `json:"authorization_endpoint,omitempty" jsonschema:"description=OAuth authorization endpoint for the MCP server,format=uri"`
+	TokenEndpoint                     string   `json:"token_endpoint,omitempty" jsonschema:"description=OAuth token endpoint for the MCP server,format=uri"`
+	RegistrationEndpoint              string   `json:"registration_endpoint,omitempty" jsonschema:"description=OAuth dynamic client registration endpoint for the MCP server,format=uri"`
+	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty" jsonschema:"description=OAuth token endpoint authentication methods supported by the authorization server"`
 }
 
 type MCPOAuthConfig struct {
@@ -321,16 +322,17 @@ type MCPOAuthConfig struct {
 }
 
 type MCPConfig struct {
-	Command       string            `json:"command,omitempty" jsonschema:"description=Command to execute for stdio MCP servers,example=npx"`
-	Env           map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set for the MCP server"`
-	Args          []string          `json:"args,omitempty" jsonschema:"description=Arguments to pass to the MCP server command"`
-	Type          MCPType           `json:"type" jsonschema:"required,description=Type of MCP connection,enum=stdio,enum=sse,enum=http,default=stdio"`
-	URL           string            `json:"url,omitempty" jsonschema:"description=URL for HTTP or SSE MCP servers,format=uri,example=http://localhost:3000/mcp"`
-	Disabled      bool              `json:"disabled,omitempty" jsonschema:"description=Whether this MCP server is disabled,default=false"`
-	DisabledTools []string          `json:"disabled_tools,omitempty" jsonschema:"description=List of tools from this MCP server to disable,example=get-library-doc"`
-	EnabledTools  []string          `json:"enabled_tools,omitempty" jsonschema:"description=List of tools from this MCP server to enable exclusively (whitelist). If empty, all non-disabled tools are enabled.,example=use-library-doc"`
-	Timeout       int               `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for MCP server connections,default=15,example=30,example=60,example=120"`
-	OAuth         *MCPOAuthConfig   `json:"oauth,omitempty" jsonschema:"description=OAuth configuration for HTTP MCP servers"`
+	Command              string            `json:"command,omitempty" jsonschema:"description=Command to execute for stdio MCP servers,example=npx"`
+	Env                  map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set for the MCP server"`
+	Args                 []string          `json:"args,omitempty" jsonschema:"description=Arguments to pass to the MCP server command"`
+	Type                 MCPType           `json:"type" jsonschema:"required,description=Type of MCP connection,enum=stdio,enum=sse,enum=http,default=stdio"`
+	URL                  string            `json:"url,omitempty" jsonschema:"description=URL for HTTP or SSE MCP servers,format=uri,example=http://localhost:3000/mcp"`
+	Disabled             bool              `json:"disabled,omitempty" jsonschema:"description=Whether this MCP server is disabled,default=false"`
+	DisabledTools        []string          `json:"disabled_tools,omitempty" jsonschema:"description=List of tools from this MCP server to disable,example=get-library-doc"`
+	EnabledTools         []string          `json:"enabled_tools,omitempty" jsonschema:"description=List of tools from this MCP server to enable exclusively (whitelist). If empty, all non-disabled tools are enabled.,example=use-library-doc"`
+	Timeout              int               `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for MCP server connections,default=15,example=30,example=60,example=120"`
+	StartupGracePeriodMs int               `json:"startup_grace_period_ms,omitempty" jsonschema:"description=Maximum time in milliseconds to wait for this MCP server to connect during startup before unblocking the main flow. Servers still connecting after the grace period continue in the background. When set on any server, the effective grace period is the maximum across all non-disabled servers; when unset on all servers, the default of 2000ms (2s) is used,default=2000,example=100,example=5000"`
+	OAuth                *MCPOAuthConfig   `json:"oauth,omitempty" jsonschema:"description=OAuth configuration for HTTP MCP servers"`
 
 	// TODO: maybe make it possible to get the value from the env
 	Headers map[string]string `json:"headers,omitempty" jsonschema:"description=HTTP headers for HTTP/SSE MCP servers"`

@@ -18,6 +18,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -58,7 +59,97 @@ var (
 	broker   = pubsub.NewBroker[Event]()
 	initOnce sync.Once
 	initDone = make(chan struct{})
+	// queries holds the database handle used to persist and read cached MCP
+	// tool definitions. It is injected via SetQueries and may be nil when no
+	// database is available, in which case caching is silently disabled.
+	queries *db.Queries
+	// configStore holds the application config store used to read MCP OAuth
+	// configuration and persist refreshed tokens. It is injected via
+	// SetConfigStore and may be nil when no config store is available.
+	configStore *config.ConfigStore
+	// authorizers tracks the live OAuth authorizer for each MCP server that
+	// supports interactive auth. RefreshToken looks up the authorizer by
+	// server name so it can reuse the authorizer's mutex and refresh logic
+	// instead of racing with the round tripper's pre-refresh path.
+	authorizers = csync.NewMap[string, *mcpOAuthAuthorizer]()
+	// circuitBreakers tracks per-server reconnect failure counts so the
+	// auto-reconnect loop can trip a breaker after too many failures.
+	circuitBreakers = csync.NewMap[string, circuitBreakerState]()
+	// disconnecting marks servers being deliberately disconnected (e.g.
+	// disabled or manually reconnected) so in-flight auto-reconnect loops
+	// know to stop.
+	disconnecting = csync.NewMap[string, struct{}]()
+	// reconnecting marks servers with an active reconnectLoop goroutine so
+	// we never spawn two loops for the same server. Stored via sync.Map's
+	// atomic LoadOrStore to avoid the TOCTOU race a csync.Map check-then-set
+	// would introduce.
+	reconnecting sync.Map
+	// reconnectMus holds a per-server mutex that serializes reconnect
+	// operations (Reconnect, ResetCircuitBreaker, synchronous
+	// reconnectClient calls) so concurrent callers cannot race on session
+	// double-close or state overwrites. A sync.Map is used (rather than
+	// csync.Map) because LoadOrStore is required to atomically create each
+	// server's mutex.
+	reconnectMus sync.Map // map[string]*sync.Mutex
+	// reconnectWg tracks all in-flight reconnectLoop goroutines so Close
+	// can wait for them to exit before tearing down sessions. This
+	// prevents a loop from racing with session teardown (e.g. calling
+	// Reconnect→Close on the same session, or overwriting state after
+	// Close returns).
+	reconnectWg sync.WaitGroup
+	// closeMu serializes Close's lifecycleCancel+Wait with
+	// maybeStartReconnectLoop's tryStartReconnect+Add. This ensures the
+	// WaitGroup Add happens-before Wait, avoiding the classic WaitGroup
+	// race where Add(1) occurs after Wait() has already observed a zero
+	// counter.
+	closeMu sync.Mutex
+	// lifecycleCtx is the long-lived context used by background reconnect
+	// loops. It is cancelled when Close is called so loops exit promptly on
+	// application shutdown.
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	lifecycleOnce   sync.Once
+	// reconnectFn is the function used by reconnectLoop and
+	// ResetCircuitBreaker to attempt a reconnect. It defaults to Reconnect;
+	// tests may override it to avoid real network operations.
+	reconnectFn = Reconnect
+	// reconnectBackoffs is the exponential backoff schedule used between
+	// reconnect attempts. Tests may shorten it to run quickly.
+	reconnectBackoffs = []time.Duration{
+		500 * time.Millisecond,
+		time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+	}
 )
+
+// Circuit breaker configuration. The breaker opens after a server fails to
+// reconnect circuitBreakerThreshold times within a circuitBreakerWindow
+// rolling window, suspending further auto-reconnect attempts until the user
+// manually resets it via ResetCircuitBreaker.
+const (
+	circuitBreakerWindow    = 30 * time.Second
+	circuitBreakerThreshold = 5
+)
+
+// ErrCircuitOpen is the sentinel error recorded against a server's state
+// when its circuit breaker opens.
+var ErrCircuitOpen = errors.New("circuit breaker open: reconnect paused after repeated failures")
+
+// SetQueries injects the database handle used to persist and read cached MCP
+// tool definitions. It should be called before Initialize; passing nil
+// disables caching.
+func SetQueries(q *db.Queries) {
+	queries = q
+}
+
+// SetConfigStore injects the config store used to read MCP OAuth configuration
+// and persist refreshed tokens. It should be called before Initialize; passing
+// nil disables automatic token refresh from callToolWithRetry.
+func SetConfigStore(cs *config.ConfigStore) {
+	configStore = cs
+}
 
 // State represents the current state of an MCP client
 type State int
@@ -69,6 +160,14 @@ const (
 	StateConnected
 	StateNeedsAuth
 	StateError
+	// StateCached means the server connection failed but its tool
+	// definitions were restored from the on-disk cache, so the tools remain
+	// available for the LLM while a live connection is retried on demand.
+	StateCached
+	// StateCircuitOpen means the circuit breaker has opened after repeated
+	// reconnect failures. Auto-reconnect is paused until the user triggers
+	// a manual reconnect via ResetCircuitBreaker.
+	StateCircuitOpen
 )
 
 func (s State) String() string {
@@ -83,6 +182,10 @@ func (s State) String() string {
 		return "needs_auth"
 	case StateError:
 		return "error"
+	case StateCached:
+		return "cached"
+	case StateCircuitOpen:
+		return "circuit_open"
 	default:
 		return "unknown"
 	}
@@ -141,6 +244,29 @@ func GetState(name string) (ClientInfo, bool) {
 
 // Close closes all MCP clients. This should be called during application shutdown.
 func Close(ctx context.Context) error {
+	// Cancel the lifecycle context first so any in-flight reconnect loops
+	// exit promptly and do not race with the session teardown below.
+	// closeMu serializes lifecycleCancel with maybeStartReconnectLoop's
+	// tryStartReconnect+Add so the WaitGroup Add happens-before Wait below.
+	ensureLifecycle()
+	closeMu.Lock()
+	lifecycleCancel()
+	closeMu.Unlock()
+	// Wait for all in-flight reconnect loops to exit so they cannot race
+	// with the session teardown below. The lifecycle context was cancelled
+	// above, so each loop's reconnectFn (which derives its context from
+	// lifecycleCtx) returns promptly and the loop observes ctx.Done() on
+	// its next iteration. The wait is bounded by ctx so a stuck loop
+	// cannot block shutdown indefinitely.
+	waitDone := make(chan struct{})
+	go func() {
+		reconnectWg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+	}
 	var wg sync.WaitGroup
 	for name, session := range sessions.Seq2() {
 		wg.Go(func() {
@@ -168,6 +294,7 @@ func Close(ctx context.Context) error {
 // Initialize initializes MCP clients based on the provided configuration.
 func Initialize(ctx context.Context, permissions permission.Service, cfg *config.ConfigStore) {
 	slog.Info("Initializing MCP clients")
+	ensureLifecycle()
 	var wg sync.WaitGroup
 	// Initialize states for all configured MCPs
 	for name, m := range cfg.Config().MCP {
@@ -202,7 +329,24 @@ func Initialize(ctx context.Context, permissions permission.Service, cfg *config
 			}
 		}(name, m)
 	}
-	wg.Wait()
+
+	// Wait for either all servers to connect or the startup grace period to
+	// elapse. Servers that haven't finished connecting are NOT cancelled —
+	// they continue in the background and publish state changes via pubsub
+	// once they complete. The grace period only controls when the main flow
+	// is unblocked (initDone closed).
+	gracePeriod := cfg.MCPStartupGracePeriod()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// All servers connected within the grace period.
+	case <-time.After(gracePeriod):
+		slog.Warn("MCP startup grace period elapsed; continuing with background connections", "grace_period", gracePeriod)
+	}
 	initOnce.Do(func() { close(initDone) })
 }
 
@@ -214,6 +358,29 @@ func WaitForInit(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// WaitForInitWithTimeout blocks until MCP initialization is complete or the
+// given timeout elapses. It returns nil if initialization completed within
+// the timeout, or an error describing the timeout otherwise. This is useful
+// for non-interactive callers that want to bound how long they block on MCP
+// startup; servers still connecting after the timeout continue in the
+// background.
+func WaitForInitWithTimeout(timeout time.Duration) error {
+	return waitForInitWithTimeout(initDone, timeout)
+}
+
+// waitForInitWithTimeout is the testable core of WaitForInitWithTimeout. It
+// accepts the initDone channel as a parameter so tests can exercise the
+// timeout behavior with a controlled channel without relying on package
+// state.
+func waitForInitWithTimeout(initDone <-chan struct{}, timeout time.Duration) error {
+	select {
+	case <-initDone:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("MCP initialization did not complete within %v", timeout)
 	}
 }
 
@@ -273,6 +440,10 @@ func initClient(ctx context.Context, cfg *config.ConfigStore, name string, m con
 	resourceCount := updateResources(name, resources)
 	sessions.Set(name, session)
 
+	// Persist the freshly fetched tools so a later startup can fall back to
+	// them if this server becomes unreachable.
+	saveCachedToolsFallback(ctx, name, m, tools)
+
 	updateState(name, StateConnected, nil, session, Counts{
 		Tools:     toolCount,
 		Prompts:   len(prompts),
@@ -284,6 +455,14 @@ func initClient(ctx context.Context, cfg *config.ConfigStore, name string, m con
 
 // DisableSingle disables and closes a single MCP client by name.
 func DisableSingle(cfg *config.ConfigStore, name string) error {
+	// Mark as disconnecting so any in-flight auto-reconnect loop stops
+	// rather than racing with the disable.
+	markDisconnecting(name)
+	defer clearDisconnecting(name)
+	// A disabled server must not retain a tripped breaker; otherwise the
+	// user could never re-enable it without a manual reset.
+	resetCircuitBreaker(name)
+
 	session, ok := sessions.Get(name)
 	if ok {
 		if err := session.Close(); err != nil &&
@@ -310,6 +489,10 @@ func getOrRenewClient(ctx context.Context, cfg *config.ConfigStore, name string)
 	sess, ok := sessions.Get(name)
 	if !ok {
 		if err := Reconnect(ctx, cfg, name); err != nil {
+			// Spawn a background reconnect loop with exponential backoff
+			// so subsequent requests can find a live session once the
+			// server recovers. The current request still fails.
+			maybeStartReconnectLoop(cfg, name)
 			return nil, err
 		}
 		sess, ok = sessions.Get(name)
@@ -332,6 +515,10 @@ func getOrRenewClient(ctx context.Context, cfg *config.ConfigStore, name string)
 	updateState(name, stateForError(maybeTimeoutErr(err, timeout)), maybeTimeoutErr(err, timeout), nil, state.Counts)
 
 	if err := Reconnect(ctx, cfg, name); err != nil {
+		// Spawn a background reconnect loop with exponential backoff so
+		// subsequent requests can find a live session once the server
+		// recovers. The current request still fails.
+		maybeStartReconnectLoop(cfg, name)
 		return nil, err
 	}
 	sess, ok = sessions.Get(name)
@@ -353,6 +540,28 @@ func updateState(name string, state State, err error, client *ClientSession, cou
 	switch state {
 	case StateConnected:
 		info.ConnectedAt = time.Now()
+	case StateCached:
+		// Tools come from the cache; there is no live session to retain.
+		// Prompts and resources are not cached, so clear any stale entries
+		// left over from a previous live connection. This keeps the maps
+		// consistent with Counts, which reports zero prompts and resources
+		// in the cached state.
+		info.Client = nil
+		sessions.Del(name)
+		allPrompts.Del(name)
+		allResources.Del(name)
+	case StateCircuitOpen:
+		// The breaker only opens after both the live connection and the
+		// cache fallback have failed, at which point StateError has already
+		// cleared all tools, prompts, and resources. Clear them again here
+		// for defensive consistency with StateError so the maps and counts
+		// stay coherent regardless of how the breaker was reached.
+		info.Client = nil
+		info.Counts = Counts{}
+		sessions.Del(name)
+		allTools.Del(name)
+		allPrompts.Del(name)
+		allResources.Del(name)
 	case StateDisabled, StateNeedsAuth, StateError:
 		info.Client = nil
 		info.Counts = Counts{}
@@ -478,6 +687,25 @@ func isAuthLikeError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	// Network errors that mention auth-like words (e.g. "Proxy unauthorized:
+	// connection refused") must not be classified as auth errors — they
+	// indicate connectivity issues, not missing credentials. Check these
+	// before the auth markers so the broad "unauthorized"/"forbidden"
+	// markers do not misfire on transport errors.
+	for _, netMarker := range []string{
+		"connection refused",
+		"connection reset",
+		"dial tcp",
+		"dial unix",
+		"no such host",
+		"i/o timeout",
+		"network is unreachable",
+		"proxy unauthorized",
+	} {
+		if strings.Contains(msg, netMarker) {
+			return false
+		}
+	}
 	for _, marker := range []string{
 		"unauthorized",
 		"forbidden",
@@ -504,6 +732,15 @@ func isAuthLikeError(err error) bool {
 }
 
 func Reconnect(ctx context.Context, cfg *config.ConfigStore, name string) error {
+	// Serialize reconnects per server so concurrent callers (reconnectLoop,
+	// ResetCircuitBreaker, callToolWithRetry, RunTool) cannot race on
+	// session double-close or state overwrites. Reconnect does not recurse
+	// — none of its callees invoke Reconnect or reconnectLockFor — so this
+	// cannot self-deadlock.
+	mu := reconnectLockFor(name)
+	mu.Lock()
+	defer mu.Unlock()
+
 	m, ok := cfg.Config().MCP[name]
 	if !ok {
 		return fmt.Errorf("mcp %s not found", name)
@@ -519,30 +756,42 @@ func Reconnect(ctx context.Context, cfg *config.ConfigStore, name string) error 
 	resolver := cfg.Resolver()
 	session, err := createSession(ctx, cfg, name, m, resolver)
 	if err != nil {
+		if loadCachedToolsFallback(ctx, cfg, name, m, err) {
+			return nil
+		}
 		return err
 	}
 
 	tools, err := getTools(ctx, session)
 	if err != nil {
 		slog.Error("Error listing tools", "error", err, "name", name)
-		updateState(name, stateForError(err), err, nil, Counts{})
 		_ = session.Close()
+		if loadCachedToolsFallback(ctx, cfg, name, m, err) {
+			return nil
+		}
+		updateState(name, stateForError(err), err, nil, Counts{})
 		return err
 	}
 
 	prompts, err := getPrompts(ctx, session)
 	if err != nil {
 		slog.Error("Error listing prompts", "error", err, "name", name)
-		updateState(name, stateForError(err), err, nil, Counts{})
 		_ = session.Close()
+		if loadCachedToolsFallback(ctx, cfg, name, m, err) {
+			return nil
+		}
+		updateState(name, stateForError(err), err, nil, Counts{})
 		return err
 	}
 
 	resources, err := getResources(ctx, session)
 	if err != nil {
 		slog.Error("Error listing resources", "error", err, "name", name)
-		updateState(name, stateForError(err), err, nil, Counts{})
 		_ = session.Close()
+		if loadCachedToolsFallback(ctx, cfg, name, m, err) {
+			return nil
+		}
+		updateState(name, stateForError(err), err, nil, Counts{})
 		return err
 	}
 
@@ -551,12 +800,54 @@ func Reconnect(ctx context.Context, cfg *config.ConfigStore, name string) error 
 	resourceCount := updateResources(name, resources)
 	sessions.Set(name, session)
 
+	// Persist the freshly fetched tools so a later startup can fall back to
+	// them if this server becomes unreachable.
+	saveCachedToolsFallback(ctx, name, m, tools)
+
 	updateState(name, StateConnected, nil, session, Counts{
 		Tools:     toolCount,
 		Prompts:   len(prompts),
 		Resources: resourceCount,
 	})
 	return nil
+}
+
+// loadCachedToolsFallback attempts to load cached tool definitions for the
+// server and register them as deferred tools when a live connection could not
+// be established. It reports whether the cache was successfully used. origErr
+// is the error that triggered the fallback and is recorded on the resulting
+// state so callers can inspect the cause.
+func loadCachedToolsFallback(ctx context.Context, cfg *config.ConfigStore, name string, m config.MCPConfig, origErr error) bool {
+	if queries == nil {
+		return false
+	}
+	configHash := ComputeConfigHash(m)
+	cacheCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tools, err := LoadCachedTools(cacheCtx, queries, name, configHash, DefaultCacheTTL)
+	if err != nil {
+		slog.Warn("MCP cache fallback failed", "name", name, "error", err)
+		return false
+	}
+	toolCount := updateTools(cfg, name, tools)
+	updateState(name, StateCached, origErr, nil, Counts{Tools: toolCount})
+	slog.Info("MCP server connected from cache", "name", name, "tools", toolCount)
+	return true
+}
+
+// saveCachedToolsFallback persists the current tool definitions so they can be
+// reused on a later startup if the server is unreachable. Failures are
+// non-fatal and only logged.
+func saveCachedToolsFallback(ctx context.Context, name string, m config.MCPConfig, tools []*Tool) {
+	if queries == nil {
+		return
+	}
+	configHash := ComputeConfigHash(m)
+	cacheCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := SaveCachedTools(cacheCtx, queries, name, configHash, tools); err != nil {
+		slog.Warn("Failed to persist mcp tool cache", "name", name, "error", err)
+	}
 }
 
 func createTransport(ctx context.Context, cfg *config.ConfigStore, name string, m config.MCPConfig, resolver config.VariableResolver) (mcp.Transport, error) {
@@ -583,10 +874,15 @@ func createTransport(ctx context.Context, cfg *config.ConfigStore, name string, 
 			headers: headers,
 		})
 		if m.SupportsInteractiveAuth() {
+			authorizer := newMCPOAuthAuthorizer(name, cfg, headers)
+			// Register the authorizer so RefreshToken can reuse its mutex
+			// and refresh logic, avoiding a race with the round tripper's
+			// pre-refresh path.
+			authorizers.Set(name, authorizer)
 			transport = &oauthRoundTripper{
 				base:       http.DefaultTransport,
 				headers:    headers,
-				authorizer: newMCPOAuthAuthorizer(name, cfg, headers),
+				authorizer: authorizer,
 			}
 		}
 		client := &http.Client{Transport: transport}
@@ -637,4 +933,238 @@ func stdioCheck(old *exec.Cmd) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", err, string(out))
+}
+
+// ensureLifecycle lazily initializes the package-level lifecycle context.
+// The context is cancelled when Close is called, signalling background
+// reconnect loops to exit.
+func ensureLifecycle() {
+	lifecycleOnce.Do(func() {
+		lifecycleCtx, lifecycleCancel = context.WithCancel(context.Background())
+	})
+}
+
+// circuitBreakerState holds the per-server circuit breaker state used to
+// throttle auto-reconnect attempts when a server is unreachable. The
+// methods below are pure functions on the value, so the breaker logic can
+// be unit-tested without spinning up a real MCP server.
+type circuitBreakerState struct {
+	// failures counts reconnect failures within the current window.
+	failures int
+	// windowStart is the time at which the current failure window opened.
+	// A zero value means no failures have been recorded yet.
+	windowStart time.Time
+	// open is true once the breaker has tripped; auto-reconnect loops must
+	// stop while it is set.
+	open bool
+}
+
+// recordFailure returns the breaker state after recording a reconnect
+// failure at now. If the rolling window has elapsed since windowStart, the
+// failure count is reset before the new failure is recorded. The breaker
+// opens once failures reach threshold within the window.
+func (s circuitBreakerState) recordFailure(now time.Time, window time.Duration, threshold int) circuitBreakerState {
+	if s.windowStart.IsZero() || now.Sub(s.windowStart) >= window {
+		s.failures = 0
+		s.windowStart = now
+		s.open = false
+	}
+	s.failures++
+	if s.failures >= threshold {
+		s.open = true
+	}
+	return s
+}
+
+// isOpen reports whether the breaker is currently open at the given time.
+// A breaker whose window has elapsed since the last failure is considered
+// closed so reconnects can resume.
+func (s circuitBreakerState) isOpen(now time.Time, window time.Duration) bool {
+	if !s.open {
+		return false
+	}
+	if s.windowStart.IsZero() {
+		return false
+	}
+	if now.Sub(s.windowStart) >= window {
+		return false
+	}
+	return true
+}
+
+// recordCircuitBreakerFailure records a reconnect failure for the named
+// server and reports whether its breaker is now open.
+func recordCircuitBreakerFailure(name string) bool {
+	now := time.Now()
+	prev, ok := circuitBreakers.Get(name)
+	if !ok {
+		prev = circuitBreakerState{}
+	}
+	updated := prev.recordFailure(now, circuitBreakerWindow, circuitBreakerThreshold)
+	circuitBreakers.Set(name, updated)
+	return updated.open
+}
+
+// isCircuitBreakerOpen reports whether the breaker for the named server is
+// currently open. Breakers whose window has elapsed are treated as closed.
+func isCircuitBreakerOpen(name string) bool {
+	prev, ok := circuitBreakers.Get(name)
+	if !ok {
+		return false
+	}
+	return prev.isOpen(time.Now(), circuitBreakerWindow)
+}
+
+// resetCircuitBreaker clears the breaker state for the named server so
+// auto-reconnect can resume immediately.
+func resetCircuitBreaker(name string) {
+	circuitBreakers.Del(name)
+}
+
+// markDisconnecting records that the named server is being deliberately
+// disconnected (e.g. disabled or manually reconnected). Auto-reconnect
+// loops check this flag to avoid fighting with user-initiated actions.
+func markDisconnecting(name string) {
+	disconnecting.Set(name, struct{}{})
+}
+
+// clearDisconnecting clears the disconnecting flag. Call this after the
+// user-initiated disconnect/reconnect completes.
+func clearDisconnecting(name string) {
+	disconnecting.Del(name)
+}
+
+// isDisconnecting reports whether the named server is being deliberately
+// disconnected.
+func isDisconnecting(name string) bool {
+	_, ok := disconnecting.Get(name)
+	return ok
+}
+
+// tryStartReconnect attempts to mark a reconnect loop as started for the
+// named server. It returns false if a loop is already running, the server
+// is being deliberately disconnected, or the lifecycle context is already
+// cancelled. The atomic LoadOrStore on the reconnecting map guarantees
+// that at most one loop runs per server even under concurrent callers.
+func tryStartReconnect(name string) bool {
+	ensureLifecycle()
+	if lifecycleCtx.Err() != nil {
+		return false
+	}
+	if isDisconnecting(name) {
+		return false
+	}
+	_, loaded := reconnecting.LoadOrStore(name, struct{}{})
+	return !loaded
+}
+
+// stopReconnect clears the reconnecting flag. It must be called when a
+// reconnect loop exits so a future loop can be started.
+func stopReconnect(name string) {
+	reconnecting.Delete(name)
+}
+
+// reconnectLockFor returns the per-server mutex used to serialize reconnect
+// operations. The mutex is created on first use (atomically via
+// LoadOrStore) and reused for the lifetime of the server.
+func reconnectLockFor(name string) *sync.Mutex {
+	v, _ := reconnectMus.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// isReconnecting reports whether a background reconnectLoop is currently
+// running for the named server. Tool-call retries consult this to avoid
+// triggering a redundant synchronous reconnect that would race with the
+// background loop and risk a reconnect storm.
+func isReconnecting(name string) bool {
+	_, ok := reconnecting.Load(name)
+	return ok
+}
+
+// reconnectLoop attempts to reconnect to the named MCP server using the
+// exponential backoff schedule in reconnectBackoffs. The loop stops early
+// if:
+//   - the context is cancelled (e.g. application shutdown),
+//   - the server is being deliberately disconnected,
+//   - the circuit breaker opens (after circuitBreakerThreshold failures
+//     within circuitBreakerWindow), or
+//   - a reconnect succeeds.
+//
+// Each failure is recorded against the breaker; once the breaker opens the
+// server is published as StateCircuitOpen so the UI can surface that
+// auto-reconnect is paused. The function is intended to run in a
+// background goroutine spawned by maybeStartReconnectLoop.
+func reconnectLoop(ctx context.Context, cfg *config.ConfigStore, name string) {
+	for i, delay := range reconnectBackoffs {
+		if ctx.Err() != nil {
+			return
+		}
+		if isDisconnecting(name) {
+			slog.Debug("Skipping reconnect; server is being disconnected manually", "name", name)
+			return
+		}
+		if isCircuitBreakerOpen(name) {
+			slog.Warn("Circuit breaker open; stopping reconnect loop", "name", name)
+			prev, _ := states.Get(name)
+			updateState(name, StateCircuitOpen, ErrCircuitOpen, nil, prev.Counts)
+			return
+		}
+		err := reconnectFn(ctx, cfg, name)
+		if err == nil {
+			resetCircuitBreaker(name)
+			return
+		}
+		slog.Warn("Reconnect attempt failed", "name", name, "attempt", i+1, "error", err)
+		if recordCircuitBreakerFailure(name) {
+			slog.Warn("Circuit breaker opened", "name", name)
+			prev, _ := states.Get(name)
+			updateState(name, StateCircuitOpen, ErrCircuitOpen, nil, prev.Counts)
+			return
+		}
+		// Wait for the backoff delay before the next attempt. Skip the
+		// sleep after the final attempt so the goroutine exits promptly.
+		if i < len(reconnectBackoffs)-1 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+	}
+}
+
+// maybeStartReconnectLoop starts a reconnectLoop goroutine for the named
+// server if one is not already running and the server is not being
+// deliberately disconnected. The loop uses the package lifecycle context
+// so it is cancelled when Close is called.
+func maybeStartReconnectLoop(cfg *config.ConfigStore, name string) {
+	// closeMu serializes tryStartReconnect+Add with Close's
+	// lifecycleCancel+Wait. This ensures the WaitGroup Add happens-before
+	// Close's Wait, avoiding the classic WaitGroup race where Add(1)
+	// occurs after Wait() has already observed a zero counter.
+	closeMu.Lock()
+	if !tryStartReconnect(name) {
+		closeMu.Unlock()
+		return
+	}
+	reconnectWg.Add(1)
+	closeMu.Unlock()
+	go func() {
+		defer reconnectWg.Done()
+		defer stopReconnect(name)
+		reconnectLoop(lifecycleCtx, cfg, name)
+	}()
+}
+
+// ResetCircuitBreaker clears the circuit breaker state for the named server
+// and attempts a manual reconnect. It is intended for user-initiated
+// reconnects (e.g. the /mcp reconnect command) to override a tripped
+// breaker. The disconnecting flag is set for the duration of the call so
+// any in-flight auto-reconnect loop stops and does not race with the
+// manual reconnect.
+func ResetCircuitBreaker(ctx context.Context, cfg *config.ConfigStore, name string) error {
+	resetCircuitBreaker(name)
+	markDisconnecting(name)
+	defer clearDisconnecting(name)
+	return reconnectFn(ctx, cfg, name)
 }

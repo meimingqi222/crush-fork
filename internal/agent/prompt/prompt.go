@@ -227,7 +227,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		for _, pth := range cfg.Options.SkillsPaths {
 			expandedPaths = append(expandedPaths, expandPath(pth, store))
 		}
-		if discoveredSkills := skills.Discover(expandedPaths); len(discoveredSkills) > 0 {
+		if discoveredSkills := skills.DiscoverCached(expandedPaths); len(discoveredSkills) > 0 {
 			availSkillXML = skills.ToPromptXML(discoveredSkills)
 		}
 	}

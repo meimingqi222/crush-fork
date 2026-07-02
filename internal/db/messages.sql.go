@@ -237,7 +237,7 @@ type ListMessagesBySessionPageParams struct {
 }
 
 func (q *Queries) ListMessagesBySessionPage(ctx context.Context, arg ListMessagesBySessionPageParams) ([]Message, error) {
-	rows, err := q.query(ctx, q.listMessagesBySessionPageStmt, listMessagesBySessionPage, arg.SessionID, arg.Offset, arg.Limit)
+	rows, err := q.query(ctx, q.listMessagesBySessionPageStmt, listMessagesBySessionPage, arg.SessionID, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}

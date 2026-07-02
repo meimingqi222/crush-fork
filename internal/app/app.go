@@ -203,6 +203,13 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	// Check for updates in the background.
 	go app.checkForUpdates(ctx)
 
+	// Inject the database handle so MCP tool definitions can be persisted to
+	// and read from the on-disk cache when a server is unreachable.
+	mcp.SetQueries(q)
+	// Inject the config store so MCP OAuth tokens can be refreshed
+	// automatically when a tool call returns 401/403.
+	mcp.SetConfigStore(store)
+
 	go mcp.Initialize(ctx, app.Permissions, store)
 
 	// cleanup database upon app shutdown
@@ -509,9 +516,13 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		}
 	}
 
-	// Wait for MCP initialization to complete before reading MCP tools.
-	if err := mcp.WaitForInit(ctx); err != nil {
-		return fmt.Errorf("failed to wait for MCP initialization: %w", err)
+	// Wait for MCP initialization up to the configured startup grace period.
+	// Servers that haven't finished connecting continue in the background and
+	// become available via pubsub state changes once they complete. A timeout
+	// here is not fatal — it only means some MCP servers may not be ready yet.
+	gracePeriod := app.config.MCPStartupGracePeriod()
+	if err := mcp.WaitForInitWithTimeout(gracePeriod); err != nil {
+		slog.Warn("MCP initialization did not complete within startup grace period; continuing with background connections", "grace_period", gracePeriod, "error", err)
 	}
 
 	// force update of agent models before running so mcp tools are loaded

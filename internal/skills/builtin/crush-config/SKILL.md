@@ -31,7 +31,6 @@ The `$schema` property enables IDE autocomplete but is optional.
 ## Common Tasks
 
 - Add a custom provider: add an entry under `providers` with `type`, `base_url`, `api_key`, and `models`.
-- Disable a builtin or local skill: add the skill name to `options.disabled_skills`.
 - Add an MCP server: add an entry under `mcp` with `type` and either `command` (stdio) or `url` (http/sse).
 
 ## Model Selection
@@ -132,7 +131,6 @@ The `$schema` property enables IDE autocomplete but is optional.
   "options": {
     "skills_paths": ["./skills"],
     "disabled_tools": ["bash", "sourcegraph"],
-    "disabled_skills": ["crush-config"],
     "tui": {
       "compact_mode": false,
       "diff_mode": "unified",

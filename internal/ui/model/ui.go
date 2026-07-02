@@ -6330,7 +6330,10 @@ func (m *UI) authenticateMCP(name string) tea.Cmd {
 
 func (m *UI) reconnectMCP(name string) tea.Cmd {
 	return func() tea.Msg {
-		if err := mcp.Reconnect(context.Background(), m.com.Store(), name); err != nil {
+		// ResetCircuitBreaker clears any tripped breaker state and performs
+		// a manual reconnect. This lets the user override a paused
+		// auto-reconnect loop via the /mcp reconnect command.
+		if err := mcp.ResetCircuitBreaker(context.Background(), m.com.Store(), name); err != nil {
 			return util.ReportError(err)()
 		}
 		return util.NewInfoMsg("MCP " + name + " reconnected")
@@ -6393,14 +6396,14 @@ func (m *UI) enableDockerMCP() tea.Msg {
 	if err := mcp.InitializeSingle(ctx, config.DockerMCPName, store); err != nil {
 		// Roll back runtime and in-memory state when startup fails.
 		disableErr := mcp.DisableSingle(store, config.DockerMCPName)
-		delete(store.Config().MCP, config.DockerMCPName)
+		store.RemoveMCP(config.DockerMCPName)
 		return util.ReportError(fmt.Errorf("failed to start docker MCP: %w", errors.Join(err, disableErr)))()
 	}
 
 	if err := store.PersistDockerMCPConfig(mcpConfig); err != nil {
 		// Roll back runtime and in-memory state if persistence fails.
 		disableErr := mcp.DisableSingle(store, config.DockerMCPName)
-		delete(store.Config().MCP, config.DockerMCPName)
+		store.RemoveMCP(config.DockerMCPName)
 		return util.ReportError(fmt.Errorf("docker MCP started but failed to persist configuration: %w", errors.Join(err, disableErr)))()
 	}
 

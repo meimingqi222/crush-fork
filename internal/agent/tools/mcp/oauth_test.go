@@ -25,6 +25,22 @@ func TestStateForError_MapsAuthErrors(t *testing.T) {
 
 	state = stateForError(errors.New("boom"))
 	require.Equal(t, StateError, state)
+
+	// Network errors that happen to mention auth-like words must not be
+	// misclassified as auth errors (would trigger OAuth refresh instead of
+	// reconnect).
+	state = stateForError(errors.New("Proxy unauthorized: connection refused"))
+	require.Equal(t, StateError, state)
+
+	state = stateForError(errors.New("Get \"https://example.com/mcp\": dial tcp 10.0.0.1:443: connect: connection refused"))
+	require.Equal(t, StateError, state)
+
+	// Genuine 401 responses should still be treated as auth errors.
+	state = stateForError(errors.New("HTTP 401 Unauthorized"))
+	require.Equal(t, StateNeedsAuth, state)
+
+	state = stateForError(errors.New("status code 401: Unauthorized"))
+	require.Equal(t, StateNeedsAuth, state)
 }
 
 func TestCloneMCPOAuthConfig(t *testing.T) {

@@ -273,6 +273,10 @@ func (d *MCPDetail) statusIcon(t *styles.Styles) string {
 		return t.ResourceBusyIcon.String()
 	case agentmcp.StateError:
 		return t.ResourceErrorIcon.String()
+	case agentmcp.StateCached:
+		return t.ResourceOfflineIcon.String()
+	case agentmcp.StateCircuitOpen:
+		return t.ResourceErrorIcon.String()
 	case agentmcp.StateDisabled:
 		return t.ResourceOfflineIcon.String()
 	default:
@@ -294,6 +298,10 @@ func (d *MCPDetail) statusText() string {
 			return "Needs authentication. Press a to authenticate."
 		}
 		return "Needs authentication"
+	case agentmcp.StateCached:
+		return "Cached (offline)"
+	case agentmcp.StateCircuitOpen:
+		return "Circuit open. Press ctrl+r to reconnect."
 	case agentmcp.StateError:
 		if d.state.Error != nil {
 			return fmt.Sprintf("Error: %s", d.state.Error.Error())

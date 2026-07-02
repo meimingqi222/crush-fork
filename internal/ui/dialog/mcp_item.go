@@ -132,6 +132,10 @@ func (i *MCPItem) icon() string {
 		return i.t.ResourceBusyIcon.String()
 	case agentmcp.StateError:
 		return i.t.ResourceErrorIcon.String()
+	case agentmcp.StateCached:
+		return i.t.ResourceOfflineIcon.String()
+	case agentmcp.StateCircuitOpen:
+		return i.t.ResourceErrorIcon.String()
 	case agentmcp.StateDisabled:
 		return i.t.ResourceOfflineIcon.String()
 	default:
@@ -174,6 +178,10 @@ func (i *MCPItem) stateLabel() string {
 		return "Needs auth"
 	case agentmcp.StateError:
 		return "Error"
+	case agentmcp.StateCached:
+		return "Cached"
+	case agentmcp.StateCircuitOpen:
+		return "Circuit open"
 	case agentmcp.StateDisabled:
 		return "Disabled"
 	default:

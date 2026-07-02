@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	hyperp "github.com/charmbracelet/crush/internal/agent/hyper"
@@ -25,6 +26,7 @@ import (
 // providers), and persistence to both global and workspace config files.
 type ConfigStore struct {
 	config         *Config
+	configMu       sync.RWMutex // protects config and its mutable maps/fields
 	workingDir     string
 	workingDirMu   sync.RWMutex // protects workingDir
 	resolver       VariableResolver
@@ -34,8 +36,15 @@ type ConfigStore struct {
 	knownProviders []catwalk.Provider
 }
 
-// Config returns the pure-data config struct (read-only after load).
+// Config returns the pure-data config struct.
+//
+// The returned pointer aliases the store's live config. Callers must not
+// mutate the MCP, Models, or RecentModels maps in place; use the ConfigStore
+// setter methods instead, which apply copy-on-write under configMu. Reader
+// access to these maps is safe because writers never mutate an installed map.
 func (s *ConfigStore) Config() *Config {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
 	return s.config
 }
 
@@ -73,6 +82,8 @@ func (s *ConfigStore) KnownProviders() []catwalk.Provider {
 
 // SetupAgents configures the built-in agents and merges configured overrides.
 func (s *ConfigStore) SetupAgents() {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	s.config.SetupAgents()
 }
 
@@ -157,16 +168,28 @@ func (s *ConfigStore) UpdatePreferredModel(scope Scope, modelType SelectedModelT
 
 // ApplyPreferredModel updates the in-memory preferred model and recent models.
 func (s *ConfigStore) ApplyPreferredModel(modelType SelectedModelType, model SelectedModel) {
-	s.config.Models[modelType] = model
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	// Copy-on-write the Models map so concurrent readers of the previous
+	// map are safe.
+	newModels := make(map[SelectedModelType]SelectedModel, len(s.config.Models)+1)
+	for k, v := range s.config.Models {
+		newModels[k] = v
+	}
+	newModels[modelType] = model
+	s.config.Models = newModels
 
 	recent, changed, ok := updatedRecentModels(s.config.RecentModels[modelType], model)
 	if !ok || !changed {
 		return
 	}
-	if s.config.RecentModels == nil {
-		s.config.RecentModels = make(map[SelectedModelType][]SelectedModel)
+	// Copy-on-write the RecentModels map.
+	newRecent := make(map[SelectedModelType][]SelectedModel, len(s.config.RecentModels)+1)
+	for k, v := range s.config.RecentModels {
+		newRecent[k] = v
 	}
-	s.config.RecentModels[modelType] = recent
+	newRecent[modelType] = recent
+	s.config.RecentModels = newRecent
 }
 
 // PersistPreferredModel persists the preferred model and current recent list
@@ -175,7 +198,9 @@ func (s *ConfigStore) PersistPreferredModel(scope Scope, modelType SelectedModel
 	if err := s.SetConfigField(scope, fmt.Sprintf("models.%s", modelType), model); err != nil {
 		return fmt.Errorf("failed to update preferred model: %w", err)
 	}
+	s.configMu.RLock()
 	recent := s.config.RecentModels[modelType]
+	s.configMu.RUnlock()
 	if recent == nil {
 		return nil
 	}
@@ -187,6 +212,8 @@ func (s *ConfigStore) PersistPreferredModel(scope Scope, modelType SelectedModel
 
 // SetCompactMode sets the compact mode setting and persists it.
 func (s *ConfigStore) SetCompactMode(scope Scope, enabled bool) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if s.config.Options == nil {
 		s.config.Options = &Options{}
 	}
@@ -199,6 +226,8 @@ func (s *ConfigStore) SetCompactMode(scope Scope, enabled bool) error {
 
 // SetSkipRequests sets the skip requests (YOLO mode) setting and persists it.
 func (s *ConfigStore) SetSkipRequests(scope Scope, enabled bool) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if s.config.Permissions == nil {
 		s.config.Permissions = &Permissions{}
 	}
@@ -209,6 +238,8 @@ func (s *ConfigStore) SetSkipRequests(scope Scope, enabled bool) error {
 // SetPreferredPermissionMode sets the preferred interactive permission mode
 // and persists it.
 func (s *ConfigStore) SetPreferredPermissionMode(scope Scope, mode string) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if s.config.Options == nil {
 		s.config.Options = &Options{}
 	}
@@ -222,19 +253,88 @@ func (s *ConfigStore) SetPreferredCollaborationMode(scope Scope, mode string) er
 	return s.SetPreferredPermissionMode(scope, mode)
 }
 
+// MCPStartupGracePeriod returns the effective startup grace period for MCP
+// servers. When at least one non-disabled server explicitly configures
+// startup_grace_period_ms, the maximum configured value is used. When no
+// server configures it, the default of 2 seconds is returned. This value
+// controls how long the application waits for MCP servers to connect before
+// unblocking the main flow; servers still connecting after the grace period
+// continue in the background.
+func (s *ConfigStore) MCPStartupGracePeriod() time.Duration {
+	const defaultGrace = 2 * time.Second
+	if s == nil || s.config == nil {
+		return defaultGrace
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	var max time.Duration
+	found := false
+	for _, m := range s.config.MCP {
+		if m.Disabled {
+			continue
+		}
+		if m.StartupGracePeriodMs <= 0 {
+			continue
+		}
+		found = true
+		d := time.Duration(m.StartupGracePeriodMs) * time.Millisecond
+		if d > max {
+			max = d
+		}
+	}
+	if !found {
+		return defaultGrace
+	}
+	return max
+}
+
 // SetMCPDisabled sets the disabled state for an MCP server and persists it.
 func (s *ConfigStore) SetMCPDisabled(scope Scope, name string, disabled bool) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	mcpConfig, ok := s.config.MCP[name]
 	if !ok {
 		return fmt.Errorf("mcp %s not found", name)
 	}
 	mcpConfig.Disabled = disabled
-	s.config.MCP[name] = mcpConfig
+	s.config.MCP = copyMCPsWith(s.config.MCP, name, mcpConfig)
 	return s.SetConfigField(scope, fmt.Sprintf("mcp.%s.disabled", name), disabled)
+}
+
+// RemoveMCP removes an MCP server from the in-memory config. It does not
+// persist the change; callers that need persistence should use SetConfigField
+// or RemoveConfigField with the appropriate scope.
+func (s *ConfigStore) RemoveMCP(name string) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	if _, ok := s.config.MCP[name]; !ok {
+		return
+	}
+	newMCP := make(MCPs, len(s.config.MCP))
+	for k, v := range s.config.MCP {
+		if k != name {
+			newMCP[k] = v
+		}
+	}
+	s.config.MCP = newMCP
+}
+
+// copyMCPsWith returns a copy of mcp with the entry at name replaced by cfg.
+// The original map is not mutated, so concurrent readers of the old map are
+// safe.
+func copyMCPsWith(mcp MCPs, name string, cfg MCPConfig) MCPs {
+	newMCP := make(MCPs, len(mcp))
+	for k, v := range mcp {
+		newMCP[k] = v
+	}
+	newMCP[name] = cfg
+	return newMCP
 }
 
 // SetTransparentBackground sets the transparent background setting and persists it.
 func (s *ConfigStore) SetTransparentBackground(scope Scope, enabled bool) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if s.config.Options == nil {
 		s.config.Options = &Options{}
 	}
@@ -244,6 +344,8 @@ func (s *ConfigStore) SetTransparentBackground(scope Scope, enabled bool) error 
 
 // SetProviderAPIKey sets the API key for a provider and persists it.
 func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey any) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	var providerConfig ProviderConfig
 	var exists bool
 	var setKeyOrToken func()
@@ -318,6 +420,15 @@ func (s *ConfigStore) persistProviderAPIKey(scope Scope, providerID string, apiK
 }
 
 func (s *ConfigStore) SetMCPOAuthConfig(scope Scope, mcpName string, oauthCfg *MCPOAuthConfig) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return s.setMCPOAuthConfigLocked(scope, mcpName, oauthCfg)
+}
+
+// setMCPOAuthConfigLocked updates the OAuth config for an MCP server. The
+// caller must hold configMu. The MCP map is replaced via copy-on-write so
+// concurrent readers of the previous map are safe.
+func (s *ConfigStore) setMCPOAuthConfigLocked(scope Scope, mcpName string, oauthCfg *MCPOAuthConfig) error {
 	mcpConfig, ok := s.config.MCP[mcpName]
 	if !ok {
 		return fmt.Errorf("mcp %s not found", mcpName)
@@ -325,7 +436,7 @@ func (s *ConfigStore) SetMCPOAuthConfig(scope Scope, mcpName string, oauthCfg *M
 
 	if oauthCfg == nil {
 		mcpConfig.OAuth = nil
-		s.config.MCP[mcpName] = mcpConfig
+		s.config.MCP = copyMCPsWith(s.config.MCP, mcpName, mcpConfig)
 		if !s.HasConfigField(scope, fmt.Sprintf("mcp.%s.oauth", mcpName)) {
 			return nil
 		}
@@ -333,7 +444,7 @@ func (s *ConfigStore) SetMCPOAuthConfig(scope Scope, mcpName string, oauthCfg *M
 	}
 
 	mcpConfig.OAuth = cloneMCPOAuthConfig(oauthCfg)
-	s.config.MCP[mcpName] = mcpConfig
+	s.config.MCP = copyMCPsWith(s.config.MCP, mcpName, mcpConfig)
 	if err := s.SetConfigField(scope, fmt.Sprintf("mcp.%s.oauth", mcpName), mcpConfig.OAuth); err != nil {
 		return fmt.Errorf("failed to save mcp oauth config: %w", err)
 	}
@@ -341,7 +452,9 @@ func (s *ConfigStore) SetMCPOAuthConfig(scope Scope, mcpName string, oauthCfg *M
 }
 
 func (s *ConfigStore) SetMCPOAuthToken(scope Scope, mcpName string, token *oauth.Token) error {
-	oauthCfg, err := s.cloneCurrentMCPOAuthConfig(mcpName)
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	oauthCfg, err := s.cloneCurrentMCPOAuthConfigLocked(mcpName)
 	if err != nil {
 		return err
 	}
@@ -352,10 +465,12 @@ func (s *ConfigStore) SetMCPOAuthToken(scope Scope, mcpName string, token *oauth
 		oauthCfg = &MCPOAuthConfig{}
 	}
 	oauthCfg.Token = token
-	return s.SetMCPOAuthConfig(scope, mcpName, oauthCfg)
+	return s.setMCPOAuthConfigLocked(scope, mcpName, oauthCfg)
 }
 
-func (s *ConfigStore) cloneCurrentMCPOAuthConfig(mcpName string) (*MCPOAuthConfig, error) {
+// cloneCurrentMCPOAuthConfigLocked returns a deep copy of the current OAuth
+// config for the given MCP server. The caller must hold configMu.
+func (s *ConfigStore) cloneCurrentMCPOAuthConfigLocked(mcpName string) (*MCPOAuthConfig, error) {
 	mcpConfig, ok := s.config.MCP[mcpName]
 	if !ok {
 		return nil, fmt.Errorf("mcp %s not found", mcpName)
@@ -391,7 +506,9 @@ func cloneMCPOAuthConfig(in *MCPOAuthConfig) *MCPOAuthConfig {
 
 // RefreshOAuthToken refreshes the OAuth token for the given provider.
 func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, providerID string) error {
+	s.configMu.RLock()
 	providerConfig, exists := s.config.Providers.Get(providerID)
+	s.configMu.RUnlock()
 	if !exists {
 		return fmt.Errorf("provider %s not found", providerID)
 	}
@@ -423,7 +540,9 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 		providerConfig.SetupGitHubCopilot()
 	}
 
+	s.configMu.RLock()
 	s.config.Providers.Set(providerID, providerConfig)
+	s.configMu.RUnlock()
 
 	if err := cmp.Or(
 		s.persistProviderAPIKey(scope, providerID, newToken.AccessToken),
@@ -437,15 +556,21 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 
 // recordRecentModel records a model in the recent models list.
 func (s *ConfigStore) recordRecentModel(scope Scope, modelType SelectedModelType, model SelectedModel) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	updated, changed, ok := updatedRecentModels(s.config.RecentModels[modelType], model)
 	if !ok || !changed {
 		return nil
 	}
 
-	if s.config.RecentModels == nil {
-		s.config.RecentModels = make(map[SelectedModelType][]SelectedModel)
+	// Copy-on-write the RecentModels map so concurrent readers of the
+	// previous map are safe.
+	newRecent := make(map[SelectedModelType][]SelectedModel, len(s.config.RecentModels)+1)
+	for k, v := range s.config.RecentModels {
+		newRecent[k] = v
 	}
-	s.config.RecentModels[modelType] = updated
+	newRecent[modelType] = updated
+	s.config.RecentModels = newRecent
 
 	if err := s.SetConfigField(scope, fmt.Sprintf("recent_models.%s", modelType), updated); err != nil {
 		return fmt.Errorf("failed to persist recent models: %w", err)

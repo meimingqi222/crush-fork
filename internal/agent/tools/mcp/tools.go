@@ -12,6 +12,8 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -42,6 +44,12 @@ var (
 		return session.CallTool(ctx, params)
 	}
 	reconnectClient = Reconnect
+	refreshToken    = RefreshToken
+	// reconnectRetryDelay is the backoff applied before a synchronous
+	// reconnect triggered by a failed tool call. It only gates the
+	// network-error retry path; the OAuth refresh path retries immediately.
+	// Tests may shorten it to run quickly.
+	reconnectRetryDelay = 100 * time.Millisecond
 )
 
 // Tools returns all available MCP tools.
@@ -54,6 +62,33 @@ func RunTool(ctx context.Context, cfg *config.ConfigStore, name, toolName string
 	var args map[string]any
 	if err := json.Unmarshal([]byte(input), &args); err != nil {
 		return ToolResult{}, fmt.Errorf("error parsing parameters: %s", err)
+	}
+
+	// If the server is not currently connected (e.g. its tools were loaded
+	// from cache after a connection failure, or no session exists yet), try
+	// to establish a live connection before invoking the tool. This avoids a
+	// hard failure when the LLM picks a cached tool whose server is still
+	// coming up.
+	if !isSessionReady(name) {
+		if isReconnecting(name) {
+			// A background reconnect loop is already running. Wait for it
+			// to re-establish the session rather than triggering a
+			// redundant synchronous reconnect that would race with the
+			// loop and risk a reconnect storm when multiple tools are
+			// called concurrently against the same server.
+			if !waitForSessionReady(ctx, name, 10*time.Second) {
+				return ToolResult{}, errors.New("server still connecting, please retry")
+			}
+		} else {
+			waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := reconnectClient(waitCtx, cfg, name); err != nil {
+				slog.Warn("RunTool initial reconnect failed", "name", name, "error", err)
+			}
+			cancel()
+			if !isSessionReady(name) {
+				return ToolResult{}, errors.New("server still connecting, please retry")
+			}
+		}
 	}
 
 	c, err := getOrRenewClient(ctx, cfg, name)
@@ -75,17 +110,87 @@ func RunTool(ctx context.Context, cfg *config.ConfigStore, name, toolName string
 	return resultFromMCPContent(result.Content), nil
 }
 
+// isSessionReady reports whether the named MCP server has a live, connected
+// session ready to accept tool calls.
+func isSessionReady(name string) bool {
+	info, ok := states.Get(name)
+	if !ok || info.State != StateConnected {
+		return false
+	}
+	_, hasSession := sessions.Get(name)
+	return hasSession
+}
+
+// waitForSessionReady polls isSessionReady until it returns true, the
+// context is cancelled, or the timeout elapses. It is used by RunTool to
+// wait for a background reconnect loop to re-establish a session without
+// triggering a redundant synchronous reconnect that would race with the
+// loop.
+func waitForSessionReady(ctx context.Context, name string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if isSessionReady(name) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 func callToolWithRetry(ctx context.Context, cfg *config.ConfigStore, name string, session *ClientSession, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 	result, err := callToolOnSession(ctx, session, params)
-	if err == nil || !shouldRetryToolCall(ctx, err) {
-		if err != nil {
-			updateStateForToolCallError(name, err)
+	if err == nil {
+		return result, nil
+	}
+
+	// On 401/403 auth errors, try refreshing the OAuth token before giving
+	// up. If refresh succeeds, retry the tool call transparently so the LLM
+	// never sees the auth failure. If refresh fails, mark the server as
+	// needing reauthentication and return a friendly error.
+	if ctx.Err() == nil && stateForError(err) == StateNeedsAuth {
+		if refreshErr := refreshToken(ctx, name); refreshErr == nil {
+			result, err = callToolOnSession(ctx, session, params)
+			if err != nil {
+				updateStateForToolCallError(name, err)
+			}
+			return result, err
 		}
+		// Refresh failed — surface as an auth error requiring user action.
+		updateStateForToolCallError(name, err)
+		return nil, fmt.Errorf("mcp %s requires reauthentication: %w", name, err)
+	}
+
+	if !shouldRetryToolCall(ctx, err) {
+		updateStateForToolCallError(name, err)
 		return result, err
 	}
 
 	firstErr := err
 	updateStateForToolCallError(name, firstErr)
+
+	// Single reconnect limit: if a background reconnectLoop is already
+	// running for this server, do not trigger a redundant synchronous
+	// reconnect that would race with it. Surface the original failure and
+	// let the background loop re-establish the connection.
+	if isReconnecting(name) {
+		return nil, firstErr
+	}
+
+	// Back off briefly before reconnecting so the transport has a chance to
+	// settle and concurrent callers do not hammer a flapping server. This
+	// delay applies only to the network-error retry path; the OAuth refresh
+	// path above retries without waiting.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(reconnectRetryDelay):
+	}
 
 	if err := reconnectClient(ctx, cfg, name); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -117,6 +222,11 @@ func shouldRetryToolCall(ctx context.Context, err error) bool {
 		return false
 	}
 	if errors.Is(err, mcp.ErrConnectionClosed) || errors.Is(err, mcp.ErrSessionMissing) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Recognize low-level connection failures that surface as syscall errors
+	// on both Unix and Windows. These are transient and worth a reconnect.
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
 		return true
 	}
 	var netErr net.Error

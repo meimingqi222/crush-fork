@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -206,7 +207,7 @@ func (a *mcpOAuthAuthorizer) currentAccessToken(ctx context.Context, allowRefres
 		return "", nil
 	}
 	if allowRefresh && m.OAuth.Token.IsExpired() {
-		refreshed, refreshErr := a.refreshTokenLocked(ctx, m)
+		refreshed, refreshErr := a.refreshTokenLocked(ctx, m, false)
 		if refreshErr == nil && refreshed != nil {
 			return refreshed.AccessToken, nil
 		}
@@ -304,16 +305,22 @@ func (a *mcpOAuthAuthorizer) authenticate(ctx context.Context, resourceURL strin
 	updated.Resource = prm.Resource
 	updated.Scopes = slices.Clone(scopes)
 	updated.AuthServer = &config.MCPOAuthAuthServer{
-		Issuer:                asm.Issuer,
-		AuthorizationEndpoint: asm.AuthorizationEndpoint,
-		TokenEndpoint:         asm.TokenEndpoint,
-		RegistrationEndpoint:  asm.RegistrationEndpoint,
+		Issuer:                            asm.Issuer,
+		AuthorizationEndpoint:             asm.AuthorizationEndpoint,
+		TokenEndpoint:                     asm.TokenEndpoint,
+		RegistrationEndpoint:              asm.RegistrationEndpoint,
+		TokenEndpointAuthMethodsSupported: slices.Clone(asm.TokenEndpointAuthMethodsSupported),
 	}
 	if resolved.registration != nil {
 		updated.Registration = resolved.registration
 	}
 	if err := a.store.SetMCPOAuthConfig(config.ScopeGlobal, a.name, updated); err != nil {
 		return nil, err
+	}
+	// Persist the token to the database so it can be used for later refresh
+	// attempts from callToolWithRetry.
+	if saveErr := saveOAuthTokenToDB(ctx, a.name, internalToken); saveErr != nil {
+		slog.Warn("Failed to persist MCP OAuth token", "name", a.name, "error", saveErr)
 	}
 	return internalToken, nil
 }
@@ -470,19 +477,28 @@ func (a *mcpOAuthAuthorizer) currentConfig() (config.MCPConfig, error) {
 	return m, nil
 }
 
-func (a *mcpOAuthAuthorizer) refreshTokenLocked(ctx context.Context, m config.MCPConfig) (*crushoauth.Token, error) {
+// forceRefresh acquires the authorizer's mutex and forces an OAuth token
+// refresh, bypassing the expiry check. It is used by RefreshToken to handle
+// 401 retries where the token may still be technically valid (e.g. revoked
+// server-side) but the server rejects it. Reusing the authorizer's mutex
+// ensures the refresh is serialized with the round tripper's pre-refresh
+// path, avoiding a race that could fail when the OAuth server rotates
+// refresh tokens.
+func (a *mcpOAuthAuthorizer) forceRefresh(ctx context.Context) (*crushoauth.Token, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m, err := a.currentConfig()
+	if err != nil {
+		return nil, err
+	}
+	return a.refreshTokenLocked(ctx, m, true)
+}
+
+func (a *mcpOAuthAuthorizer) refreshTokenLocked(ctx context.Context, m config.MCPConfig, force bool) (*crushoauth.Token, error) {
 	if m.OAuth == nil || m.OAuth.Token == nil || m.OAuth.AuthServer == nil {
 		return nil, fmt.Errorf("oauth refresh is not configured")
 	}
-	clientID := ""
-	clientSecret := ""
-	if m.OAuth.ClientID != "" {
-		clientID = m.OAuth.ClientID
-		clientSecret = m.OAuth.ClientSecret
-	} else if m.OAuth.Registration != nil {
-		clientID = m.OAuth.Registration.ClientID
-		clientSecret = m.OAuth.Registration.ClientSecret
-	}
+	clientID, clientSecret := mcpOAuthClientCredentials(m.OAuth)
 	if clientID == "" || m.OAuth.Token.RefreshToken == "" || m.OAuth.AuthServer.TokenEndpoint == "" {
 		return nil, fmt.Errorf("oauth refresh is not configured")
 	}
@@ -491,15 +507,30 @@ func (a *mcpOAuthAuthorizer) refreshTokenLocked(ctx context.Context, m config.MC
 		ClientSecret: clientSecret,
 		Endpoint: oauth2.Endpoint{
 			TokenURL:  m.OAuth.AuthServer.TokenEndpoint,
-			AuthStyle: selectAuthStyle(nil, clientSecret != ""),
+			AuthStyle: selectAuthStyle(m.OAuth.AuthServer.TokenEndpointAuthMethodsSupported, clientSecret != ""),
 		},
 	}
-	tokenSource := cfg.TokenSource(context.WithValue(ctx, oauth2.HTTPClient, a.client), toOAuth2Token(m.OAuth.Token))
+	current := toOAuth2Token(m.OAuth.Token)
+	if force {
+		// Force the oauth2 library to perform a refresh even when the token
+		// is still valid: a 401 means the server rejected it (e.g. revoked
+		// server-side) and returning the same token would just fail again.
+		current.Expiry = time.Now()
+	}
+	tokenSource := cfg.TokenSource(context.WithValue(ctx, oauth2.HTTPClient, a.client), current)
 	token, err := tokenSource.Token()
 	if err != nil {
 		return nil, err
 	}
 	internalToken := fromOAuth2Token(token)
+	// Persist to the database first, then the config store. Writing the
+	// database first ensures RefreshToken's DB fallback never reads a stale
+	// token after the config store was already updated. A failure in either
+	// store is treated as a refresh failure so the two stores stay
+	// consistent rather than diverging silently.
+	if err := saveOAuthTokenToDB(ctx, a.name, internalToken); err != nil {
+		return nil, fmt.Errorf("persist refreshed oauth token for %s: %w", a.name, err)
+	}
 	updated := cloneMCPOAuthConfig(m.OAuth)
 	updated.Token = internalToken
 	if err := a.store.SetMCPOAuthConfig(config.ScopeGlobal, a.name, updated); err != nil {

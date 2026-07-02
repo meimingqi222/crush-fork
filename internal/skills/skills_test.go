@@ -283,7 +283,8 @@ description: Name doesn't match directory.
 `), 0o644))
 
 	skills := Discover([]string{tmpDir})
-	require.Len(t, skills, 2)
+	// Two user skills plus the builtin skills embedded in the binary.
+	require.Len(t, skills, 2+len(EmbeddedSkills()))
 
 	names := make(map[string]bool)
 	for _, s := range skills {
@@ -291,6 +292,8 @@ description: Name doesn't match directory.
 	}
 	require.True(t, names["skill-one"])
 	require.True(t, names["skill-two"])
+	require.True(t, names["crush-config"])
+	require.True(t, names["jq"])
 }
 
 func TestToPromptXML(t *testing.T) {

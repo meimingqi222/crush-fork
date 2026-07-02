@@ -188,10 +188,6 @@ type coordinator struct {
 	transcriptTurnCounts   map[string]int
 	transcriptTurnCountsMu sync.Mutex
 
-	// skillsCache caches discovered skills to avoid repeated I/O overhead.
-	skillsCache   map[string][]*skills.Skill
-	skillsCacheMu sync.Mutex
-
 	// gitStatusCache freezes git status per working directory so the system
 	// prompt prefix stays stable across turns, enabling prompt cache hits.
 	gitStatusCache   map[string]string
@@ -361,28 +357,12 @@ func (c *coordinator) ensurePlanFileForSession(ctx context.Context, sess session
 	return updated, nil
 }
 
-// getDiscoveredSkills returns cached skills for the given paths, discovering
-// them on first call. This avoids repeated I/O overhead when multiple agents
-// register tools within the same coordinator lifetime.
+// getDiscoveredSkills returns cached skills for the given paths. Caching is
+// handled by the skills package via DiscoverCached so that all callers
+// (coordinator, prompt builder, crush_info tool) share a single cache and
+// avoid repeated filesystem scans.
 func (c *coordinator) getDiscoveredSkills(skillsPaths []string) []*skills.Skill {
-	if len(skillsPaths) == 0 {
-		return nil
-	}
-
-	pathsKey := strings.Join(skillsPaths, ",")
-
-	c.skillsCacheMu.Lock()
-	defer c.skillsCacheMu.Unlock()
-
-	if c.skillsCache == nil {
-		c.skillsCache = make(map[string][]*skills.Skill)
-	}
-	if cached, ok := c.skillsCache[pathsKey]; ok {
-		return cached
-	}
-	discovered := skills.Discover(skillsPaths)
-	c.skillsCache[pathsKey] = discovered
-	return discovered
+	return skills.DiscoverCached(skillsPaths)
 }
 
 // SetMemoryEngine attaches the memory engine to the coordinator.
@@ -2450,6 +2430,9 @@ func (c *coordinator) getOrFreezeGitStatus(ctx context.Context, workingDir strin
 }
 
 func (c *coordinator) RefreshTools(ctx context.Context) error {
+	// Invalidate cached skill discovery so newly added or removed skills are
+	// picked up when tools are rebuilt.
+	skills.Invalidate(nil)
 	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
 	if !ok {
 		return errors.New("coder agent not configured")
