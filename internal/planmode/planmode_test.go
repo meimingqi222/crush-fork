@@ -29,6 +29,12 @@ func TestBuildExecutionPrompt(t *testing.T) {
 	require.Contains(t, prompt, "Approved plan:")
 	require.Contains(t, prompt, "- Ship it")
 	require.NotContains(t, prompt, "<proposed_plan>")
+
+	// Approved-plan execution instructions.
+	require.Contains(t, prompt, "read the active plan file")
+	require.Contains(t, prompt, "`todos` tool")
+	require.Contains(t, prompt, "Verify each step")
+	require.Contains(t, prompt, "plan file is authoritative")
 }
 
 func TestBuildExecutionPromptWithCompact(t *testing.T) {

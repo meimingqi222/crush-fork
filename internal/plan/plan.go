@@ -9,6 +9,11 @@ import (
 
 const defaultPlanSlug = "plan"
 
+// LocalPlanURIPrefix is the URI scheme used to reference plan files within
+// Crush. A plan URI has the form local://<slug>-plan.md, where <slug> is a
+// short kebab-case identifier chosen by the agent.
+const LocalPlanURIPrefix = "local://"
+
 // PlansDir returns the path to the plans directory within the given workspace
 // root. Plans are stored at <workspace>/.crush/plans/.
 func PlansDir(workspaceRoot string) string {
@@ -19,6 +24,58 @@ func PlansDir(workspaceRoot string) string {
 func PlanFilePath(workspaceRoot, sessionID, slug string) string {
 	filename := fmt.Sprintf("%s-%s.md", sanitizeSlug(sessionID), sanitizeSlug(slug))
 	return filepath.Join(PlansDir(workspaceRoot), filename)
+}
+
+// IsLocalPlanURI reports whether path uses the local plan URI scheme.
+func IsLocalPlanURI(path string) bool {
+	return strings.HasPrefix(path, LocalPlanURIPrefix)
+}
+
+// ParseLocalPlanURI parses a local plan URI of the form
+// local://<slug>-plan.md and returns the slug. It returns an error if the URI
+// is malformed or the slug is empty.
+func ParseLocalPlanURI(uri string) (string, error) {
+	if !IsLocalPlanURI(uri) {
+		return "", fmt.Errorf("not a local plan URI: %s", uri)
+	}
+	slug := strings.TrimPrefix(uri, LocalPlanURIPrefix)
+	slug = strings.TrimSpace(slug)
+	slug = strings.TrimSuffix(slug, "-plan.md")
+	slug = strings.TrimSuffix(slug, ".md")
+	slug = sanitizeSlug(slug)
+	if slug == "" || slug == "plan" {
+		return "", fmt.Errorf("local plan URI must include a non-empty slug: %s", uri)
+	}
+	return slug, nil
+}
+
+// ResolveLocalPlanURI converts a local plan URI into an absolute filesystem
+// path for the given workspace and session.
+func ResolveLocalPlanURI(workspaceRoot, sessionID, uri string) (string, error) {
+	slug, err := ParseLocalPlanURI(uri)
+	if err != nil {
+		return "", err
+	}
+	return PlanFilePath(workspaceRoot, sessionID, slug), nil
+}
+
+// SlugFromPlanPath extracts the slug from an absolute plan file path for the
+// given workspace and session. It returns the slug and true if the path is a
+// recognized plan file for the session.
+func SlugFromPlanPath(workspaceRoot, sessionID, path string) (string, bool) {
+	prefix := PlanFilePath(workspaceRoot, sessionID, "")
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		clean = path
+	}
+	clean = filepath.Clean(clean)
+	if !strings.HasPrefix(clean, prefix) {
+		return "", false
+	}
+	slug := strings.TrimPrefix(clean, prefix)
+	slug = strings.TrimSuffix(slug, "-plan.md")
+	slug = strings.TrimSuffix(slug, ".md")
+	return slug, slug != ""
 }
 
 // EnsureDir creates the plans directory if it does not exist.

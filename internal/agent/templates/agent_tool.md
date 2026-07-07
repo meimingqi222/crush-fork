@@ -57,6 +57,9 @@ Each entry in `tasks` accepts:
 - `description` (required): one-line summary of what the task accomplishes.
 - `assignment` (required): full self-contained instructions for the subagent, including file paths, acceptance criteria, and the exact deliverable.
 - `subagent_type` (optional): subagent kind to spawn (e.g. `explore`, `general`, `review`). Defaults to the orchestrator's configured default when omitted.
+- `role` (optional): specialist identity for this subagent (e.g. `planner`, `researcher`, `reviewer`, `executor`). When provided, it is injected into the subagent's system prompt to shape its tone and priorities.
+
+When using a single prompt instead of `tasks`, the top-level `role` field has the same effect.
 
 The model and structured-output schema are determined by the subagent type's static configuration; they are not per-invocation parameters.
 

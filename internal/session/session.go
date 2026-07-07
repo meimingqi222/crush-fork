@@ -48,6 +48,7 @@ type CollaborationMode string
 const (
 	CollaborationModeDefault     CollaborationMode = "default"
 	CollaborationModePlan        CollaborationMode = "plan"
+	CollaborationModePlanPaused  CollaborationMode = "plan_paused"
 	CollaborationModeOrchestrate CollaborationMode = "orchestrate"
 )
 
@@ -55,6 +56,8 @@ func NormalizeCollaborationMode(mode string) CollaborationMode {
 	switch CollaborationMode(mode) {
 	case CollaborationModePlan:
 		return CollaborationModePlan
+	case CollaborationModePlanPaused:
+		return CollaborationModePlanPaused
 	case CollaborationModeOrchestrate:
 		return CollaborationModeOrchestrate
 	default:
@@ -245,6 +248,7 @@ const (
 // works toward the goal across multiple turns, with optional token budget
 // tracking.
 type Goal struct {
+	ID          string     `json:"id,omitempty"`
 	Text        string     `json:"text,omitempty"`
 	Status      GoalStatus `json:"status,omitempty"`
 	TokenBudget int64      `json:"token_budget,omitempty"`
@@ -252,6 +256,11 @@ type Goal struct {
 	TimeSeconds int64      `json:"time_seconds,omitempty"`
 	CreatedAt   int64      `json:"created_at,omitempty"`
 	UpdatedAt   int64      `json:"updated_at,omitempty"`
+}
+
+// NewGoalID returns a new stable identifier for a goal.
+func NewGoalID() string {
+	return uuid.New().String()
 }
 
 // IsActive returns true if the goal is currently being pursued.
@@ -541,6 +550,7 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 		HandoffDraftPrompt:   session.HandoffDraftPrompt,
 		HandoffRelevantFiles: relevantFilesJSON,
 		PlanFilePath:         session.PlanFilePath,
+		GoalID:               session.Goal.ID,
 		GoalText:             session.Goal.Text,
 		GoalStatus:           string(session.Goal.Status),
 		GoalTokenBudget:      session.Goal.TokenBudget,
@@ -575,6 +585,11 @@ func (s *service) UpdateCollaborationMode(ctx context.Context, sessionID string,
 	current, err := s.Get(ctx, sessionID)
 	if err != nil {
 		return Session{}, err
+	}
+	if mode == CollaborationModePlan && !current.IsActivePlanMode() {
+		if err := current.ValidateEnterPlanMode(); err != nil {
+			return Session{}, err
+		}
 	}
 	transition := NewCollaborationModeTransition(current, mode)
 	if !transition.Changed() {
@@ -725,6 +740,7 @@ func (s service) fromDBItem(item db.Session) Session {
 		HandoffDraftPrompt:     item.HandoffDraftPrompt,
 		HandoffRelevantFiles:   relevantFiles,
 		Goal: Goal{
+			ID:          item.GoalID,
 			Text:        item.GoalText,
 			Status:      GoalStatus(item.GoalStatus),
 			TokenBudget: item.GoalTokenBudget,

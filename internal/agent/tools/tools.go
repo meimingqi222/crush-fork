@@ -24,6 +24,7 @@ type (
 
 type sessionLookupService interface {
 	Get(context.Context, string) (session.Session, error)
+	Save(context.Context, session.Session) (session.Session, error)
 }
 
 const (

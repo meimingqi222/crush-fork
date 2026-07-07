@@ -18,9 +18,35 @@ func TestCollaborationModePrompt(t *testing.T) {
 	prompt := collaborationModePrompt(session.CollaborationModePlan)
 	require.Contains(t, prompt, "Plan Mode")
 	require.Contains(t, prompt, "request_user_input")
-	require.Contains(t, prompt, "plan_exit")
-	require.Contains(t, prompt, "active markdown plan file")
-	require.Contains(t, prompt, "Do not write source files")
+	require.Contains(t, prompt, "resolve")
+	require.Contains(t, prompt, "active plan file")
+	require.Contains(t, prompt, "READ-ONLY work only")
+
+	// Mandatory plan sections.
+	require.Contains(t, prompt, "**Context**")
+	require.Contains(t, prompt, "**Approach**")
+	require.Contains(t, prompt, "**Critical files & anchors**")
+	require.Contains(t, prompt, "**Verification**")
+	require.Contains(t, prompt, "**Assumptions & contingencies**")
+
+	// Prohibited sections and references.
+	require.Contains(t, prompt, "Non-Goals")
+	require.Contains(t, prompt, "Alternatives")
+	require.Contains(t, prompt, "Risks")
+	require.Contains(t, prompt, "Future Work")
+	require.Contains(t, prompt, "as discussed")
+	require.Contains(t, prompt, "unverified")
+
+	// Re-entry procedure.
+	require.Contains(t, prompt, "## Re-entry")
+	require.Contains(t, prompt, "Same task continuing → update")
+	require.Contains(t, prompt, "Different task → overwrite")
+
+	// Strict alignment with oh-my-pi.
+	require.Contains(t, prompt, "execution spec")
+	require.Contains(t, prompt, "ZERO design decisions")
+	require.Contains(t, prompt, "Ground every claim")
+	require.Contains(t, prompt, "Your turn ends ONLY by")
 
 	defaultPrompt := collaborationModePrompt(session.CollaborationModeDefault)
 	require.Empty(t, defaultPrompt)
@@ -50,6 +76,7 @@ func TestRiskLevelForTool(t *testing.T) {
 	require.Equal(t, toolRiskDelegation, riskLevelForTool(AgentToolName))
 	require.Equal(t, toolRiskNetwork, riskLevelForTool(tools.AgenticFetchToolName))
 	require.Equal(t, toolRiskRead, riskLevelForTool(tools.ReadToolName))
+	require.Equal(t, toolRiskRead, riskLevelForTool(tools.ResolveToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.WriteToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.EditToolName))
 	require.Equal(t, toolRiskWrite, riskLevelForTool(tools.RetainToolName))
@@ -65,7 +92,7 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 		tools.BashToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
-		tools.PlanExitToolName,
+		tools.ResolveToolName,
 	}
 
 	require.Equal(t, []string{
@@ -73,19 +100,20 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 		tools.BashToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
-		tools.PlanExitToolName,
+		tools.ResolveToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModeDefault, nil))
 
 	require.Equal(t, []string{
 		tools.ReadToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
-		tools.PlanExitToolName,
+		tools.ResolveToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModeDefault, []string{tools.BashToolName}))
 
 	require.Equal(t, []string{
 		tools.ReadToolName,
 		tools.RequestUserInputToolName,
+		tools.ResolveToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModePlan, []string{tools.ReadToolName}))
 
@@ -93,12 +121,14 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 		AgentToolName,
 		tools.ReadToolName,
 		tools.RequestUserInputToolName,
+		tools.ResolveToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy([]string{AgentToolName, tools.AgenticFetchToolName, tools.ReadToolName}, session.CollaborationModePlan, nil))
 
 	require.Equal(t, []string{
 		tools.LSPToolName,
 		tools.RequestUserInputToolName,
+		tools.ResolveToolName,
 		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy([]string{
 		tools.LSPToolName,
@@ -119,7 +149,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.WriteToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
-		tools.PlanExitToolName,
+		tools.ResolveToolName,
 		tools.LSPToolName,
 		tools.SourcegraphToolName,
 	}
@@ -135,7 +165,7 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.WriteToolName,
 		tools.RetainToolName,
 		tools.RequestUserInputToolName,
-		tools.PlanExitToolName,
+		tools.ResolveToolName,
 		tools.LSPToolName,
 		tools.SourcegraphToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModeDefault))
@@ -148,7 +178,8 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.EditToolName,
 		tools.WriteToolName,
 		tools.RequestUserInputToolName,
-		tools.PlanExitToolName,
+		tools.ResolveToolName,
 		tools.LSPToolName,
+		tools.PlanExitToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModePlan))
 }

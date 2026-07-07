@@ -48,6 +48,10 @@ var builtinPruneProtectedToolNames = map[string]struct{}{
 //  5. Only apply the prune if the total prunable content exceeds
 //     builtinPruneMinTokens.
 func builtinPruneToolResults(msgs []message.Message) []message.Message {
+	return builtinPruneToolResultsWithProtection(msgs, nil)
+}
+
+func builtinPruneToolResultsWithProtection(msgs []message.Message, protect func(message.ToolResult) bool) []message.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
@@ -91,6 +95,9 @@ loop:
 				continue
 			}
 			if _, protected := builtinPruneProtectedToolNames[tr.Name]; protected {
+				continue
+			}
+			if protect != nil && protect(tr) {
 				continue
 			}
 			if strings.HasPrefix(tr.Content, builtinPruneCompactedNoticePrefix) {

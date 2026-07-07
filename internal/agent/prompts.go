@@ -115,6 +115,9 @@ by evidence.
 
 func buildSubagentPromptTemplate(baseTemplate string, agentCfg config.Agent) string {
 	sections := []string{strings.TrimSpace(baseTemplate), strings.TrimSpace(subagentPromptSuffix)}
+	if readOnlyPrompt := buildReadOnlyPrompt(agentCfg); readOnlyPrompt != "" {
+		sections = append(sections, readOnlyPrompt)
+	}
 	if lifecyclePrompt := buildAgentLifecyclePrompt(agentCfg); lifecyclePrompt != "" {
 		sections = append(sections, lifecyclePrompt)
 	}
@@ -167,6 +170,15 @@ func buildAgentLifecyclePrompt(agentCfg config.Agent) string {
 	}
 	lines = append(lines, "</agent_lifecycle>")
 	return strings.Join(lines, "\n")
+}
+
+func buildReadOnlyPrompt(agentCfg config.Agent) string {
+	if !subagentIDIsReadOnly(config.CanonicalSubagentID(agentCfg.ID)) {
+		return ""
+	}
+	return `<read_only_boundary>
+You are running as a read-only subagent. You may only use read and search tools to gather evidence. You MUST NOT modify files, edit code, write files, download assets, update todos, retain memory, send messages, stop tasks, restart LSPs, spawn subagents, or invoke any other state-mutating tool. If a requested action would require a state change, report that limitation instead of attempting it.
+</read_only_boundary>`
 }
 
 func buildSubagentRolePrompt(agentCfg config.Agent) string {

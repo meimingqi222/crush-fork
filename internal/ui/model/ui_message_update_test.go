@@ -350,6 +350,68 @@ func TestMaybeOpenProposedPlanDialogRequiresPlanExit(t *testing.T) {
 	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
 }
 
+func TestMaybeOpenProposedPlanDialogWithResolve(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.DefaultStyles()
+	com := &common.Common{Styles: &theme}
+	ui := &UI{
+		com:     com,
+		dialog:  dialog.NewOverlay(),
+		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan},
+	}
+
+	msg := message.Message{
+		ID:        "assistant-1",
+		SessionID: "session-1",
+		Role:      message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
+			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			message.ToolCall{
+				ID:       "tool-1",
+				Name:     agenttools.ResolveToolName,
+				Input:    `{"action":"apply","reason":"plan is ready","extra":{"title":"auth-refactor"}}`,
+				Finished: true,
+			},
+		},
+	}
+
+	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))
+	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
+}
+
+func TestMaybeOpenProposedPlanDialogIgnoresNonApplyResolve(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.DefaultStyles()
+	com := &common.Common{Styles: &theme}
+	ui := &UI{
+		com:     com,
+		dialog:  dialog.NewOverlay(),
+		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan},
+	}
+
+	msg := message.Message{
+		ID:        "assistant-1",
+		SessionID: "session-1",
+		Role:      message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
+			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			message.ToolCall{
+				ID:       "tool-1",
+				Name:     agenttools.ResolveToolName,
+				Input:    `{"action":"reject","reason":"not ready"}`,
+				Finished: true,
+			},
+		},
+	}
+
+	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))
+	require.False(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
+}
+
 func TestHandleChildSessionMessageRemovesStaleNestedToolsAfterRetryReset(t *testing.T) {
 	t.Parallel()
 
@@ -763,6 +825,36 @@ func TestUpdateLatestProposedPlanRequiresPlanModeAndPlanExit(t *testing.T) {
 	planMsg.Parts = append(planMsg.Parts, message.ToolCall{ID: "tool-2", Name: agenttools.PlanExitToolName, Finished: true})
 	ui.updateLatestProposedPlan(planMsg)
 	require.Equal(t, "- Step 1", ui.latestProposedPlan)
+}
+
+func TestUpdateLatestProposedPlanWithResolveApply(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.DefaultStyles()
+	com := &common.Common{Styles: &theme}
+	ui := &UI{
+		com:     com,
+		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan},
+	}
+
+	planMsg := message.Message{
+		ID:        "assistant-1",
+		SessionID: "session-1",
+		Role:      message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
+			message.ToolCall{
+				ID:       "tool-1",
+				Name:     agenttools.ResolveToolName,
+				Input:    `{"action":"apply","reason":"plan is ready","extra":{"title":"auth-refactor"}}`,
+				Finished: true,
+			},
+		},
+	}
+
+	ui.updateLatestProposedPlan(planMsg)
+	require.Equal(t, "- Step 1", ui.latestProposedPlan)
+	require.Equal(t, "auth-refactor", ui.latestProposedPlanTitle)
 }
 
 func TestStatusErrorPersistsAndIgnoresStaleClear(t *testing.T) {

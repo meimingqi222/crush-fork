@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -20,9 +20,9 @@ const GoalToolName = "goal"
 
 // GoalParams defines the parameters for the goal tool.
 type GoalParams struct {
-	Op          string `json:"op" description:"Operation: create, get, complete, pause, resume, drop, budget"`
-	Objective   string `json:"objective,omitempty" description:"Goal objective text (required for create)"`
-	TokenBudget *int64 `json:"token_budget,omitempty" description:"Token budget (0 for unlimited)"`
+	Op          string `json:"op" description:"Operation: create, replace, get, complete, pause, resume, drop, budget"`
+	Objective   string `json:"objective,omitempty" description:"Goal objective text (required for create and replace)"`
+	TokenBudget *int64 `json:"token_budget,omitempty" description:"Token budget (0 for unlimited, optional for replace)"`
 }
 
 // GoalResponseMetadata is attached to tool responses for UI rendering.
@@ -32,7 +32,7 @@ type GoalResponseMetadata struct {
 }
 
 // NewGoalTool creates a new goal tool instance.
-func NewGoalTool(sessions session.Service) fantasy.AgentTool {
+func NewGoalTool(sessions session.Service, runtime *goal.Runtime) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		GoalToolName,
 		string(goalDescription),
@@ -42,93 +42,55 @@ func NewGoalTool(sessions session.Service) fantasy.AgentTool {
 				return fantasy.ToolResponse{}, fmt.Errorf("goal tool requires a session context")
 			}
 
-			currentSession, err := sessions.Get(ctx, sessionID)
-			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to get session: %w", err)
-			}
+			var (
+				goalResult session.Goal
+				err        error
+			)
 
-			now := time.Now().Unix()
-			goal := currentSession.Goal
+			budget := int64(0)
+			if params.TokenBudget != nil {
+				budget = *params.TokenBudget
+			}
 
 			switch params.Op {
 			case "create":
-				if goal.IsActive() || goal.Status == session.GoalStatusPaused {
-					return fantasy.ToolResponse{}, fmt.Errorf("a goal is already active; drop or complete it first")
-				}
-				if params.Objective == "" {
-					return fantasy.ToolResponse{}, fmt.Errorf("objective is required for create")
-				}
-				goal = session.Goal{
-					Text:      params.Objective,
-					Status:    session.GoalStatusActive,
-					CreatedAt: now,
-					UpdatedAt: now,
-				}
-				if params.TokenBudget != nil && *params.TokenBudget > 0 {
-					goal.TokenBudget = *params.TokenBudget
-				}
-
+				goalResult, err = runtime.CreateGoal(ctx, sessionID, params.Objective, budget)
+			case "replace":
+				goalResult, err = runtime.ReplaceGoal(ctx, sessionID, params.Objective, budget)
 			case "get":
-				if goal.Status == "" {
+				currentSession, getErr := sessions.Get(ctx, sessionID)
+				if getErr != nil {
+					return fantasy.ToolResponse{}, fmt.Errorf("failed to get session: %w", getErr)
+				}
+				goalResult = currentSession.Goal
+				if goalResult.Status == "" {
 					return fantasy.ToolResponse{Content: "No goal is currently set."}, nil
 				}
-
 			case "complete":
-				if !goal.IsActive() && goal.Status != session.GoalStatusBudgetLimited {
-					return fantasy.ToolResponse{}, fmt.Errorf("no active goal to complete")
-				}
-				goal.Status = session.GoalStatusComplete
-				goal.UpdatedAt = now
-
+				goalResult, err = runtime.CompleteGoal(ctx, sessionID)
 			case "pause":
-				if !goal.IsActive() {
-					return fantasy.ToolResponse{}, fmt.Errorf("no active goal to pause")
-				}
-				goal.Status = session.GoalStatusPaused
-				goal.UpdatedAt = now
-
+				goalResult, err = runtime.PauseGoal(ctx, sessionID)
 			case "resume":
-				if goal.Status != session.GoalStatusPaused && goal.Status != session.GoalStatusBudgetLimited {
-					return fantasy.ToolResponse{}, fmt.Errorf("no paused or budget-limited goal to resume")
-				}
-				goal.Status = session.GoalStatusActive
-				goal.UpdatedAt = now
-
+				goalResult, err = runtime.ResumeGoal(ctx, sessionID)
 			case "drop":
-				if goal.Status == "" {
-					return fantasy.ToolResponse{}, fmt.Errorf("no goal to drop")
-				}
-				goal = session.Goal{}
-
+				goalResult, err = runtime.DropGoal(ctx, sessionID)
 			case "budget":
-				if goal.Status == "" {
-					return fantasy.ToolResponse{}, fmt.Errorf("no goal is currently set")
-				}
 				if params.TokenBudget == nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("token_budget is required for budget operation")
 				}
-				goal.TokenBudget = *params.TokenBudget
-				if goal.IsBudgetExhausted() && goal.IsActive() {
-					goal.Status = session.GoalStatusBudgetLimited
-				} else if !goal.IsBudgetExhausted() && goal.Status == session.GoalStatusBudgetLimited {
-					goal.Status = session.GoalStatusActive
-				}
-				goal.UpdatedAt = now
-
+				goalResult, err = runtime.SetBudgetGoal(ctx, sessionID, *params.TokenBudget)
 			default:
-				return fantasy.ToolResponse{}, fmt.Errorf("unknown operation: %s (expected: create, get, complete, pause, resume, drop, budget)", params.Op)
+				return fantasy.ToolResponse{}, fmt.Errorf("unknown operation: %s (expected: create, replace, get, complete, pause, resume, drop, budget)", params.Op)
 			}
 
-			currentSession.Goal = goal
-			_, err = sessions.Save(ctx, currentSession)
 			if err != nil {
-				return fantasy.ToolResponse{}, fmt.Errorf("failed to save goal: %w", err)
+				return fantasy.ToolResponse{}, err
 			}
 
-			text := formatGoalResponse(goal, params.Op)
+			text := formatGoalResponse(goalResult, params.Op)
 			metadata, err := json.Marshal(GoalResponseMetadata{
-				Goal:            goal,
-				RemainingTokens: goal.RemainingTokens(),
+				Goal:            goalResult,
+				RemainingTokens: goalResult.RemainingTokens(),
 			})
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to encode goal metadata: %w", err)
@@ -150,6 +112,12 @@ func formatGoalResponse(goal session.Goal, op string) string {
 			text += fmt.Sprintf("\nToken budget: %d", goal.TokenBudget)
 		}
 		return text
+	case "replace":
+		text := fmt.Sprintf("Goal replaced: %s", goal.Text)
+		if goal.HasBudget() {
+			text += fmt.Sprintf("\nToken budget: %d", goal.TokenBudget)
+		}
+		return text
 	case "get":
 		text := fmt.Sprintf("Objective: %s\nStatus: %s", goal.Text, goal.Status)
 		if goal.HasBudget() {
@@ -157,7 +125,7 @@ func formatGoalResponse(goal session.Goal, op string) string {
 				goal.TokenBudget, goal.TokensUsed, goal.RemainingTokens())
 		}
 		if goal.TimeSeconds > 0 {
-			text += fmt.Sprintf("\nTime elapsed: %ds", goal.TimeSeconds)
+			text += fmt.Sprintf("\nActive time: %ds", goal.TimeSeconds)
 		}
 		return text
 	case "complete":

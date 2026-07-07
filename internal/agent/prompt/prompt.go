@@ -29,6 +29,7 @@ type Prompt struct {
 	omitProjectContext   bool
 	contextPathsOverride []string
 	gitStatus            string
+	role                 string
 }
 
 type PromptDat struct {
@@ -43,6 +44,7 @@ type PromptDat struct {
 	ContextFiles       []ContextFile
 	GlobalContextFiles []ContextFile
 	AvailSkillXML      string
+	Role               string
 }
 
 type ContextFile struct {
@@ -98,6 +100,14 @@ func WithContextPathsOverride(paths []string) Option {
 func WithGitStatus(status string) Option {
 	return func(p *Prompt) {
 		p.gitStatus = status
+	}
+}
+
+// WithRole sets an optional specialist identity for the agent. When non-empty,
+// it is exposed to the system prompt template as {{.Role}}.
+func WithRole(role string) Option {
+	return func(p *Prompt) {
+		p.role = role
 	}
 }
 
@@ -242,6 +252,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		Platform:      platform,
 		Date:          p.now().Format("1/2/2006"),
 		AvailSkillXML: availSkillXML,
+		Role:          p.role,
 	}
 	if isGit {
 		if p.gitStatus != "" {

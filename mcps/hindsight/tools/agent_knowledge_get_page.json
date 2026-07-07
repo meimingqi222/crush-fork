@@ -1,0 +1,17 @@
+{
+  "name": "agent_knowledge_get_page",
+  "description": "Read a specific knowledge page by its ID. Returns the full synthesized content.",
+  "inputSchema": {
+    "properties": {
+      "page_id": {
+        "title": "Page Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "page_id"
+    ],
+    "title": "agent_knowledge_get_pageArguments",
+    "type": "object"
+  }
+}

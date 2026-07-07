@@ -41,6 +41,7 @@ type PlanReview struct {
 	com       *common.Common
 	sessionID string
 	plan      string
+	title     string
 
 	// Parsed content.
 	sections []planmode.Section
@@ -86,7 +87,7 @@ type PlanReview struct {
 }
 
 // NewPlanReview creates a new plan review dialog.
-func NewPlanReview(com *common.Common, sessionID, plan string) *PlanReview {
+func NewPlanReview(com *common.Common, sessionID, plan, title string) *PlanReview {
 	input := textinput.New()
 	input.SetVirtualCursor(false)
 	input.Placeholder = "Describe what to change in this section"
@@ -103,6 +104,7 @@ func NewPlanReview(com *common.Common, sessionID, plan string) *PlanReview {
 		com:         com,
 		sessionID:   sessionID,
 		plan:        plan,
+		title:       title,
 		sections:    sections,
 		toc:         toc,
 		showTOC:     len(toc) >= 2,
@@ -365,7 +367,11 @@ func (p *PlanReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	p.viewportH = max(5, area.Dy()-dialogFrameH-titleContentHeight-8)
 
 	rc := NewRenderContext(p.com.Styles, width)
-	rc.Title = "Plan Review"
+	if p.title != "" {
+		rc.Title = p.title
+	} else {
+		rc.Title = "Plan Review"
+	}
 
 	if p.inputMode {
 		p.drawInputMode(rc)

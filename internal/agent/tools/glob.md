@@ -1,43 +1,17 @@
-Fast file pattern matching tool that finds files by name/pattern, returning paths sorted by modification time (newest first). Supports multiple patterns in a single call.
+Globs files and directories via fast pattern matching, any codebase size.
 
-<usage>
-- `patterns` is required and accepts an array of glob patterns
-- Pass multiple patterns as separate array elements (e.g. patterns=["**\/*.ts", "**\/*.tsx"])
-- Optional starting directory (defaults to current working directory)
-- Use Glob for uncertain file-name lookups before read. Do not call read on a path that has only been inferred.
-- Results sorted with most recently modified files first
-</usage>
+<instruction>
+- `path`: a glob, file, or directory. Search several at once by passing a semicolon-delimited list (`src/**/*.ts; test/**/*.ts`).
+- `gitignore` (default `true`) hides `.gitignore` matches. Set `gitignore: false` to find `.env*`, `*.log`, fresh build outputs, or anything your repo ignores.
+- `hidden` (default `true`); combine with `gitignore: false` to surface dotfiles also gitignored.
+- `limit` (default `200`, maximum `200`) caps the number of results.
+- Use Glob for uncertain file-name lookups before read.
+</instruction>
 
-<pattern_syntax>
-- '\*' matches any sequence of non-separator characters
-- '\*\*' matches any sequence including separators
-- '?' matches any single non-separator character
-- '[...]' matches any character in brackets
-- '[!...]' matches any character not in brackets
-</pattern_syntax>
+<output>
+Matching paths sorted by mtime (newest first), one path per line.
+</output>
 
-<examples>
-- '*.js' - JavaScript files in current directory
-- '**/*.js' - JavaScript files in any subdirectory
-- 'src/**/*.{ts,tsx}' - TypeScript files in src directory
-- '*.{html,css,js}' - HTML, CSS, and JS files
-</examples>
-
-<limitations>
-- Results limited to 100 files (newest first)
-- Does not search file contents (use Grep for that)
-- Common ignored directories such as .git and node_modules are skipped
-</limitations>
-
-<cross_platform>
-- Path separators handled automatically (/ and \ work)
-- Uses ripgrep (rg) if available, otherwise Go implementation
-- Patterns should use forward slashes (/) for compatibility
-</cross_platform>
-
-<tips>
-- Combine with Grep: find files with Glob, search contents with Grep
-- Use patterns like `**/name.ext` to verify guessed basenames before reading them
-- For iterative exploration requiring multiple searches, consider Agent tool
-- Check if results truncated and refine pattern if needed
-</tips>
+<avoid>
+Open-ended searches needing multiple rounds of globbing/searching: you MUST use the Agent tool instead.
+</avoid>

@@ -1,0 +1,27 @@
+{
+  "name": "agent_knowledge_update_page",
+  "description": "Update a page's name or source query. The content will re-synthesize on next consolidation.",
+  "inputSchema": {
+    "properties": {
+      "page_id": {
+        "title": "Page Id",
+        "type": "string"
+      },
+      "name": {
+        "default": "",
+        "title": "Name",
+        "type": "string"
+      },
+      "source_query": {
+        "default": "",
+        "title": "Source Query",
+        "type": "string"
+      }
+    },
+    "required": [
+      "page_id"
+    ],
+    "title": "agent_knowledge_update_pageArguments",
+    "type": "object"
+  }
+}

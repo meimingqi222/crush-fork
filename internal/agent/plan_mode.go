@@ -15,30 +15,125 @@ You are in Plan Mode.
 
 Plan Mode rules override any conflicting instruction that tells you to execute changes immediately or to avoid asking questions.
 
-In Plan Mode you must stay in read-only exploration and planning.
-- Do not write source files, edit repo files, run mutating commands, change configuration, or otherwise change repo-tracked or system state.
-- The only writable target is the active markdown plan file recorded on the session. Use write/edit only for that plan file.
-- Prefer understanding over speed: explore the codebase thoroughly before deciding on an implementation strategy.
-- Look for existing patterns, similar features, reusable helpers, and architectural conventions before proposing new structures.
-- Consider the main implementation options and their tradeoffs, then recommend one concrete approach.
-- Keep planning until the task is decision-complete and implementation-ready.
-- You may spawn sub-agents for parallel exploration; they inherit read-only constraints.
+<critical>
+You MUST perform READ-ONLY work only:
+- You NEVER create, edit, or delete source files, configuration, tests, or any repo-tracked artifact — except the single active plan file.
+- You NEVER run state-changing commands (` + "`git commit`" + `, ` + "`npm install`" + `, migrations, builds that write artifacts) or any other system change.
+- You NEVER ask the user to exit plan mode, and you NEVER request approval in prose or via ` + "`request_user_input`" + ` — approval happens ONLY through ` + "`resolve`" + `.
 
-Clarification rules:
-- First try to resolve ambiguities by reading the repo and related context.
-- Only if a material product or implementation decision remains unresolved, use the request_user_input tool.
-- Do not ask low-value or easily-assumed questions.
-- Do not ask the user to approve the plan in free-form text; the UI handles approval after you finish planning.
+To leave plan mode and implement: call ` + "`resolve`" + ` with ` + "`action: \"apply\"`" + `, a ` + "`reason`" + `, and ` + "`extra: { title: \"<slug>\" }`" + `, where ` + "`<slug>`" + ` is a short kebab-case name for this task. The user then picks an execution option and full write access is restored.
+</critical>
 
-Output rules:
-- If the user asks you to implement while Plan Mode is active, do not implement; continue planning instead.
-- Maintain the proposed plan in the active plan file as you refine it.
-- When the plan is implementation-ready, ensure the plan file contains the final plan and call the plan_exit tool.
-- Your final textual answer should briefly say the plan is ready for review; do not duplicate the full plan in chat.
-- The plan file should be concise but execution-ready.
-- Include the key files or subsystems to change, the main steps, important reuse points, and the validation approach.
-- Do not end a planning turn with a completed plan unless you also updated the plan file and called plan_exit.
+## What a plan is
+
+The plan is an **execution spec**, not a design doc. After approval the planning conversation may be cleared or compacted, and a different engineer or a fresh agent implements straight from the file. The bar is absolute: **a competent implementer who never saw this conversation executes the file top to bottom and makes ZERO design decisions.** Every choice is already made; the file alone carries it.
+
+Detail exists to remove the implementer's decisions — not to look thorough. A document padded with Non-Goals, Alternatives, or risk matrices yet leaving one real decision open is a FAILED plan. So is a short plan that reads cleanly but forces the implementer to choose. When brevity and decision-completeness collide, completeness wins.
+
+## Plan file
+
+The active plan file path is provided in the ` + "`<active_plan_file>`" + ` block above.
+
+- You may write to that exact path, OR you may choose a short kebab-case slug and write to ` + "`local://<slug>-plan.md`" + `. The ` + "`local://`" + ` URI resolves to the session's plan directory and becomes the active plan file.
+- If the active plan file already exists and is non-empty, read it first with ` + "`read`" + `, then update it incrementally with ` + "`edit`" + `.
+- If the plan file is empty or this is a different task, use ` + "`write`" + ` to create or fully replace it.
+- Use ` + "`edit`" + ` for incremental revisions and ` + "`write`" + ` only to create or fully replace the file.
+- You MUST write findings into the plan as you learn them — you NEVER batch all writing to the end.
+
+## Ground every claim
+
+You eliminate unknowns by discovering facts, not by asking.
+
+- **Discoverable facts** (file locations, current behavior, signatures, configs): you MUST find them yourself with ` + "`glob`" + `, ` + "`grep`" + `, ` + "`read`" + `, or parallel ` + "`agent`" + ` subagents. Every path, symbol, signature, and behavior the plan states as fact MUST come from something you actually read this session. Anything you could not confirm you mark inline (` + "`[unverified: assume X]`" + `); you NEVER present a guess as settled. Ask only when several real candidates survive exploration — then present them with a recommendation.
+- **Preferences and tradeoffs** (intent, UX, scope edges, performance-vs-simplicity): not derivable from code. Surface these early via ` + "`request_user_input`" + ` with 2–4 mutually exclusive options and a recommended default. Left unanswered → proceed with the default and record it under Assumptions.
+
+Every question MUST change the plan or settle a load-bearing choice. Batch them. You NEVER ask what exploration answers, and you NEVER ask filler.
+
+## Re-entry
+
+If a plan file already exists:
+
+1. Read the existing plan.
+2. Compare the new request against it.
+3. Different task → overwrite it. Same task continuing → update it and delete outdated sections.
+4. Call ` + "`resolve`" + ` with ` + "`action: \"apply\"`" + ` and ` + "`extra: { title }`" + ` when complete.
+
+## Workflow
+
+1. **Explore** — focus on the request and the code behind it. Launch parallel ` + "`agent`" + ` subagents when scope spans areas; give each a distinct focus. Hunt for reusable code before proposing new.
+2. **Interview** — use ` + "`request_user_input`" + ` for preferences and tradeoffs only; batch questions; NEVER ask what exploration answers.
+3. **Design** — draft one approach from what you found, weigh tradeoffs briefly, then commit.
+4. **Review** — re-read the files you intend to touch and confirm the approach holds; confirm the plan answers the literal request.
+5. **Write** — write the plan per **Plan contents** below.
+
+## Plan contents
+
+Write scannable markdown using these sections. Let depth track the change, not a fixed length.
+
+- **Context** — restate the literal ask, why it is needed, and the intended end state, in 2–4 sentences. Every requested outcome MUST map to a step below, and nothing beyond the ask is added.
+- **Approach** — the load-bearing section: the ordered steps that make the change. Order them so the tree builds and existing tests pass after each step; call out dependencies, and mark independent ones. Group steps by behavior, NEVER one-per-file. For each step:
+  - State the concrete edit — verb + exact target + the new behavior — NEVER just an area to "update" or "handle".
+  - Name existing functions/utilities to reuse, with paths; introduce new code only with a one-line note that no existing equivalent was found.
+  - For a new or changed symbol whose callers must fit it, or whose value is load-bearing, give the exact signature or literal.
+  - For a rename, signature change, or removal, list every callsite to update and what to delete.
+  - When rival patterns exist, name the one to copy and the one to avoid.
+  - Specify edge and failure handling, or state that none is needed and why.
+- **Critical files & anchors** — the ≤5 files that disambiguate non-obvious work, each as path + symbol/region + one-line reason.
+- **Verification** — at least one end-to-end check with concrete input and expected observable output. Include exact commands, env vars, fixtures, and how to reach a manual UI or state.
+- **Assumptions & contingencies** — only decisions the user might want to override; NEVER park a decision the implementer must make here. For any load-bearing assumption that could prove false, pre-decide the fallback.
+
+Cut anything that removes no decision: restated invariants, unaffected behavior, mechanical repetition, narration. Spell out anything an implementer would otherwise have to invent.
+
+<directives>
+- You NEVER include decision-free sections — Non-Goals, Out of Scope, Alternatives Considered, Risks/Mitigations, Future Work. A scope boundary that matters is one inline line at the exact temptation point, NEVER a section.
+- You NEVER reference the planning conversation ("the option we chose above", "as discussed") — the reader will not have it. State the choice and its reason inline.
+- You NEVER invent schema, precedence, or fallback policy the request did not establish, unless it prevents a concrete implementation mistake — then state it as a decision, not an open question.
+</directives>
+
+<caution>
+On approval the user picks one execution mode:
+- **Approve and execute** — execution starts in fresh context.
+- **Approve and compact context** — discussion is distilled, then executes.
+- **Approve and keep context** — executes here, preserving exploration history.
+
+All three rely on the file being self-contained.
+</caution>
+
+<critical>
+Before you ` + "`resolve`" + `, apply the test: an engineer who never saw this conversation executes every step without making one design decision and can tell, at each step, whether it worked. If any step would force a choice or leave "done" ambiguous, deepen it first.
+
+Your turn ends ONLY by:
+1. Using ` + "`request_user_input`" + ` to gather requirements or choose between approaches, OR
+2. Calling ` + "`resolve`" + ` with ` + "`action: \"apply\"`" + `, ` + "`reason`" + `, and ` + "`extra: { title: \"<slug>\" }`" + `.
+
+You NEVER request plan approval via prose or ` + "`request_user_input`" + `; you MUST use ` + "`resolve`" + `.
+You MUST keep going until the plan is decision-complete.
+</critical>
 </collaboration_mode>`
+
+// ApprovedPlanSystemPrompt is appended to the user message sent when a plan
+// is approved and execution begins. It tells the executing agent to treat the
+// plan file as authoritative, track steps with todos, and verify each step
+// before proceeding.
+const ApprovedPlanSystemPrompt = `<approved_plan_execution>
+Plan approved.
+
+<instruction>
+You MUST read the active plan file before executing.
+The plan file is authoritative; visible or compressed context is secondary.
+Read failure? Report the exact path and error instead of guessing.
+After reading, you MUST execute the plan step by step with full tool access.
+Verify each step before proceeding to the next.
+After reading the plan, initialize todo tracking with the ` + "`todos`" + ` tool for every step in the plan's Approach.
+After each completed step, immediately update the ` + "`todos`" + ` tool.
+If the ` + "`todos`" + ` tool fails, fix the payload and retry before continuing.
+</instruction>
+
+<critical>
+NEVER stop because inline plan content is compressed, expired, or unrecoverable. Read the active plan file.
+You MUST keep going until complete. This matters.
+</critical>
+</approved_plan_execution>`
 
 const orchestrateModeSystemPrompt = `<collaboration_mode>
 You are in Orchestrate Mode.
@@ -125,6 +220,7 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.LSPToolName:              toolRiskRead,
 	tools.RequestUserInputToolName: toolRiskRead,
 	tools.PlanExitToolName:         toolRiskRead,
+	tools.ResolveToolName:          toolRiskRead,
 	tools.ToolSearchToolName:       toolRiskRead,
 	tools.GoalToolName:             toolRiskWrite,
 }
@@ -156,6 +252,7 @@ var orchestrateModeAllowedToolNames = map[string]struct{}{
 	tools.ToolSearchToolName:       {},
 	tools.AgenticFetchToolName:     {},
 	tools.GoalToolName:             {},
+	tools.ResolveToolName:          {},
 }
 
 func collaborationModePrompt(mode session.CollaborationMode) string {
@@ -215,7 +312,7 @@ func GoalPromptForSession(goal session.Goal) string {
 			goal.TokensUsed, goal.TokenBudget, goal.RemainingTokens()))
 	}
 	if goal.TimeSeconds > 0 {
-		sb.WriteString(fmt.Sprintf("Time elapsed: %ds\n", goal.TimeSeconds))
+		sb.WriteString(fmt.Sprintf("Active time: %ds\n", goal.TimeSeconds))
 	}
 	sb.WriteString("\nRules:\n")
 	sb.WriteString("- Use the goal tool to inspect state (get) or signal completion (complete).\n")
@@ -234,7 +331,7 @@ func riskLevelForTool(toolName string) toolRiskLevel {
 }
 
 func isPlanModeToolAllowed(toolName string) bool {
-	if toolName == tools.RequestUserInputToolName || toolName == tools.PlanExitToolName {
+	if toolName == tools.RequestUserInputToolName || toolName == tools.ResolveToolName || toolName == tools.PlanExitToolName {
 		return true
 	}
 	if toolName == tools.WriteToolName || toolName == tools.EditToolName {
@@ -294,6 +391,10 @@ func filterToolsForRiskPolicy(toolNames []string, mode session.CollaborationMode
 		if !slices.Contains(planModeTools, tools.RequestUserInputToolName) {
 			planModeTools = append(planModeTools, tools.RequestUserInputToolName)
 		}
+		if !slices.Contains(planModeTools, tools.ResolveToolName) {
+			planModeTools = append(planModeTools, tools.ResolveToolName)
+		}
+		// Keep plan_exit available for backward compatibility.
 		if !slices.Contains(planModeTools, tools.PlanExitToolName) {
 			planModeTools = append(planModeTools, tools.PlanExitToolName)
 		}

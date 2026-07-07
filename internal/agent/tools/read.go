@@ -290,8 +290,13 @@ func handleFileRead(
 	// Use session-specific working directory from context if available.
 	effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 
+	resolvedPath, err := resolveLocalPlanURI(ctx, params.Path, effectiveWorkingDir)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
 	// Handle relative paths.
-	filePath := filepathext.SmartJoin(effectiveWorkingDir, params.Path)
+	filePath := filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
 
 	// Check if file is outside working directory and request permission if needed.
 	absWorkingDir, err := filepath.Abs(effectiveWorkingDir)

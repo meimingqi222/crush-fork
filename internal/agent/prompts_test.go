@@ -138,6 +138,35 @@ func TestPromptForAgentUsesReadOnlyTemplateForNamedReadOnlySubagents(t *testing.
 	}
 }
 
+func TestBuildReadOnlyPromptOnlyForReadOnlySubagents(t *testing.T) {
+	t.Parallel()
+
+	assert.Contains(t, buildReadOnlyPrompt(config.Agent{ID: config.AgentExplore}), "read-only subagent")
+	assert.Contains(t, buildReadOnlyPrompt(config.Agent{ID: config.AgentReview}), "MUST NOT modify files")
+	assert.Contains(t, buildReadOnlyPrompt(config.Agent{ID: config.AgentPlan}), "state-mutating tool")
+	assert.Empty(t, buildReadOnlyPrompt(config.Agent{ID: config.AgentGeneral}))
+	assert.Empty(t, buildReadOnlyPrompt(config.Agent{ID: config.AgentCoder}))
+}
+
+func TestBuildSubagentPromptTemplateIncludesReadOnlyBoundaryForReadOnlyAgents(t *testing.T) {
+	t.Parallel()
+
+	template := buildSubagentPromptTemplate("Base prompt.", config.Agent{ID: config.AgentExplore})
+
+	assert.Contains(t, template, "<read_only_boundary>")
+	assert.Contains(t, template, "You may only use read and search tools")
+	assert.Contains(t, template, "MUST NOT modify files")
+}
+
+func TestBuildSubagentPromptTemplateOmitsReadOnlyBoundaryForGeneralAgents(t *testing.T) {
+	t.Parallel()
+
+	template := buildSubagentPromptTemplate("Base prompt.", config.Agent{ID: config.AgentGeneral})
+
+	assert.NotContains(t, template, "<read_only_boundary>")
+	assert.NotContains(t, template, "read-only subagent")
+}
+
 func TestPromptForAgentUsesReviewTemplateForReviewSubagent(t *testing.T) {
 	t.Parallel()
 

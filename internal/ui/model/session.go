@@ -40,6 +40,7 @@ type loadSessionMsg struct {
 	childSessionInfo    map[string]childSessionInfo
 	totalMessageCount   int64
 	skippedMessageCount int64
+	goalPausedNotice    string
 }
 
 // loadMoreMessagesMsg is sent when older messages have been loaded from the
@@ -115,6 +116,24 @@ func (m *UI) loadSessionWithSelection(sessionID string, selectedMessageID string
 			return util.ReportError(err)
 		}
 
+		// Pause an active goal when the session is resumed from storage. The
+		// preserve flag is left false for normal UI loads; automatic goal
+		// continuation chains never go through this code path.
+		var goalPausedNotice string
+		if m.com.App.GoalRuntime != nil {
+			_, notice, pauseErr := m.com.App.GoalRuntime.PauseActiveGoalOnLoad(context.Background(), sessionID, false)
+			if pauseErr != nil {
+				slog.Warn("Failed to pause active goal on session load", "error", pauseErr, "session_id", sessionID)
+			} else if notice != "" {
+				goalPausedNotice = notice
+				// Reload the session to reflect the paused goal state.
+				session, err = m.com.App.Sessions.Get(context.Background(), sessionID)
+				if err != nil {
+					return util.ReportError(err)
+				}
+			}
+		}
+
 		sessionFiles, err := m.loadSessionFiles(sessionID)
 		if err != nil {
 			return util.ReportError(err)
@@ -161,6 +180,7 @@ func (m *UI) loadSessionWithSelection(sessionID string, selectedMessageID string
 			childSessionInfo:    childInfo,
 			totalMessageCount:   totalCount,
 			skippedMessageCount: skippedCount,
+			goalPausedNotice:    goalPausedNotice,
 		}
 	}
 }

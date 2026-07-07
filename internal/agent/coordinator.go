@@ -22,6 +22,7 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
+	"github.com/google/uuid"
 	"github.com/kaptinlin/jsonschema"
 
 	"github.com/charmbracelet/crush/internal/agent/hyper"
@@ -196,6 +197,9 @@ type coordinator struct {
 	// visionService describes images using a vision-capable helper model
 	// when the primary model does not support image inputs. May be nil.
 	visionService *VisionService
+
+	// goalRuntime tracks goal state, token accounting, and wall-clock time.
+	goalRuntime *goalruntime.Runtime
 }
 
 func NewCoordinator(
@@ -214,6 +218,7 @@ func NewCoordinator(
 	timeline timeline.Service,
 	pluginRuntime *plugin.Runtime,
 	memoryEngine *engine.Engine,
+	goalRuntime *goalruntime.Runtime,
 ) (Coordinator, error) {
 	hookMgr, err := hooks.NewManager(cfg.Config().Hooks)
 	if err != nil {
@@ -245,6 +250,7 @@ func NewCoordinator(
 		backgroundAgents:           newBackgroundAgentRegistry(),
 		escalationBridge:           permission.NewEscalationBridge(),
 		transcriptTurnCounts:       make(map[string]int),
+		goalRuntime:                cmp.Or(goalRuntime, goalruntime.NewRuntime(sessions)),
 	}
 	if c.pluginRuntime == nil {
 		c.pluginRuntime = plugin.DefaultRuntime()
@@ -756,7 +762,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, fmt.Errorf("failed to append auto mode reminder: %w", err)
 	}
 
-	transientPrompt := goalruntime.IsSteerPrompt(prompt)
+	transientPrompt := goalruntime.IsSteerPrompt(prompt) || isPlanModeEnforcementPrompt(prompt)
 	var userMessage *message.Message
 	if !transientPrompt {
 		// Create the user message immediately with the original attachments so the
@@ -838,6 +844,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		}
 	}
 
+	// Record the goal turn baseline so token and time accounting is precise.
+	turnID := uuid.New().String()
+	if err := c.goalRuntime.OnTurnStart(ctx, sessionID, turnID, goalruntime.TokenUsage{}); err != nil {
+		slog.Warn("Failed to record goal turn start", "error", err, "session_id", sessionID)
+	}
+
 	run := func() (*fantasy.AgentResult, error) {
 		slog.Debug("[PERF] coordinator: starting sessionAgent.Run", "duration", time.Since(start), "session_id", sessionID)
 		call := SessionAgentCall{
@@ -906,7 +918,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			}
 		}
 
-		if goalResult, budgetExhausted, goalErr := goalruntime.NewRuntime(c.sessions).PostTurn(ctx, sessionID, result.TotalUsage.InputTokens, result.TotalUsage.OutputTokens); goalErr != nil {
+		if goalResult, budgetExhausted, goalErr := c.goalRuntime.PostTurn(ctx, sessionID, goalruntime.TokenUsageFromFantasy(result.TotalUsage)); goalErr != nil {
 			slog.Warn("Failed to update goal runtime", "error", goalErr, "session_id", sessionID)
 		} else if c.currentAgent.QueuedPrompts(sessionID) == 0 {
 			depth, _ := ctx.Value(goalContinuationDepthKey{}).(int)
@@ -925,6 +937,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 					}
 					originalErr = contErr
 				}
+			}
+		}
+
+		if originalErr == nil && !transientPrompt && c.currentAgent.QueuedPrompts(sessionID) == 0 {
+			if enforceErr := c.maybeEnforcePlanModeToolDecision(ctx, sessionID, prompt, sess); enforceErr != nil {
+				originalErr = enforceErr
 			}
 		}
 	}
@@ -1473,12 +1491,19 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 	if err != nil {
 		return sessionAgentRuntimeConfig{}, err
 	}
-	currentAgent.SetModels(inferenceModel, small)
 
 	mode, err := c.collaborationModeForContext(ctx)
 	if err != nil {
 		return sessionAgentRuntimeConfig{}, err
 	}
+	if mode == session.CollaborationModePlan {
+		if planModel, planProviderCfg, planErr := c.selectedModel(ctx, config.SelectedModelTypePlan, isSubAgent); planErr == nil {
+			inferenceModel = planModel
+			providerCfg = planProviderCfg
+		}
+	}
+	currentAgent.SetModels(inferenceModel, small)
+
 	permissionMode, err := c.permissionModeForContext(ctx)
 	if err != nil {
 		return sessionAgentRuntimeConfig{}, err
@@ -2691,6 +2716,7 @@ type subAgentParams struct {
 	SkipHandoffReview         bool
 	SkipStructuredFinishCheck bool
 	IrcAgentID                string
+	Role                      string
 	// AgentID is the registry ID (e.g. "0-Main::explore") for this subagent.
 	// Used by the lifecycle manager to adopt/park the registry entry on
 	// successful completion. Empty when the subagent was not registered.
@@ -2710,6 +2736,7 @@ type subagentTask struct {
 	Description  string
 	Assignment   string
 	SubagentType string
+	Role         string
 }
 
 type subagentBatchParams struct {
@@ -2819,7 +2846,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		prepared[i].Task = t
 		prepared[i].TaskRef = taskRefs[t.Name]
 
-		subAgent, agentCfg, buildErr := c.buildSubAgentForType(ctx, t.SubagentType)
+		subAgent, agentCfg, buildErr := c.buildSubAgentForType(ctx, t.SubagentType, t.Role)
 		if buildErr != nil {
 			prepared[i].SkipResult = &subagentResult{
 				Task:    t,
@@ -2890,6 +2917,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			Prompt:             prompt,
 			SessionTitle:       formatSubagentSessionTitle(description, subagentType),
 			SubagentType:       subagentType,
+			Role:               t.Role,
 			DelegationMailbox:  params.ToolCallID,
 			AgentMemory:        agentCfg.Memory,
 			AgentIsolation:     agentCfg.Isolation,
@@ -4912,6 +4940,7 @@ func (c *coordinator) runBackgroundTaskNode(
 			Prompt:            strings.TrimSpace(command.Prompt),
 			SessionTitle:      formatSubagentSessionTitle(description, subagentType),
 			SubagentType:      subagentType,
+			Role:              task.Role,
 			DelegationMailbox: params.ToolCallID,
 			AgentMemory:       agentCfg.Memory,
 			AgentIsolation:    agentCfg.Isolation,

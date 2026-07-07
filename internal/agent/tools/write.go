@@ -67,7 +67,12 @@ func NewWriteTool(
 			// Use session-specific working directory from context if available.
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 
-			filePath := filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
+			resolvedPath, err := resolveLocalPlanURI(ctx, params.FilePath, effectiveWorkingDir)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			filePath := filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
 			if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, filePath); blocked || guardErr != nil {
 				return response, guardErr
 			}
@@ -154,6 +159,10 @@ func NewWriteTool(
 			}
 
 			filetracker.RecordRead(ctx, sessionID, filePath)
+
+			if adoptErr := adoptPlanFilePathIfNeeded(ctx, filePath); adoptErr != nil {
+				slog.Error("Failed to adopt plan file path", "error", adoptErr)
+			}
 
 			notifyLSPs(ctx, lspManager, params.FilePath)
 

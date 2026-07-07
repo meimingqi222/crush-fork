@@ -151,3 +151,8 @@ func (m *mockPermissionSessionLookup) Get(context.Context, string) (session.Sess
 	}
 	return m.session, nil
 }
+
+func (m *mockPermissionSessionLookup) Save(_ context.Context, s session.Session) (session.Session, error) {
+	m.session = s
+	return s, nil
+}

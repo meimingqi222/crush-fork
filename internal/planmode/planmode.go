@@ -1,6 +1,10 @@
 package planmode
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/charmbracelet/crush/internal/agent"
+)
 
 const (
 	ProposedPlanOpenTag  = "<proposed_plan>"
@@ -50,9 +54,6 @@ const (
 // approves a plan and execution begins.
 func BuildExecutionPrompt(plan string, mode ExecutionContextMode) string {
 	plan = strings.TrimSpace(plan)
-	if plan == "" {
-		return "Execute the approved plan below. You are no longer in Plan Mode, so you should implement it now."
-	}
 
 	var header string
 	switch mode {
@@ -63,5 +64,9 @@ func BuildExecutionPrompt(plan string, mode ExecutionContextMode) string {
 	default:
 		header = "Execute the approved plan below. You are no longer in Plan Mode, so you should implement it now."
 	}
-	return strings.TrimSpace(header + "\n\nApproved plan:\n" + plan)
+
+	if plan == "" {
+		return strings.TrimSpace(agent.ApprovedPlanSystemPrompt + "\n\n" + header)
+	}
+	return strings.TrimSpace(agent.ApprovedPlanSystemPrompt + "\n\n" + header + "\n\nApproved plan:\n" + plan)
 }

@@ -1410,8 +1410,7 @@ func resolveReviewTools(tools []string) []string {
 }
 
 func resolvePrimaryTools(tools []string) []string {
-	blockedTools := []string{"todos"}
-	return filterSlice(tools, blockedTools, false)
+	return tools
 }
 
 func resolveSubAgentTools(tools []string) []string {

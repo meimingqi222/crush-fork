@@ -21,11 +21,17 @@ type FileInfo struct {
 }
 
 func SkipHidden(path string) bool {
-	base := filepath.Base(path)
-	if base != "." && strings.HasPrefix(base, ".") {
+	if IsHidden(path) {
 		return true
 	}
 	return SkipCommonIgnored(path)
+}
+
+// IsHidden reports whether the base name of path is a hidden file or
+// directory (starts with a dot and is not the current directory marker).
+func IsHidden(path string) bool {
+	base := filepath.Base(path)
+	return base != "." && strings.HasPrefix(base, ".")
 }
 
 func SkipCommonIgnored(path string) bool {
@@ -88,12 +94,17 @@ func (w *FastGlobWalker) ShouldSkipDir(path string) bool {
 //
 // Does not respect gitignore.
 func Glob(pattern string, cwd string, limit int) ([]string, bool, error) {
-	return globWithDoubleStar(pattern, cwd, limit, false)
+	return globWithDoubleStar(pattern, cwd, limit, false, true)
 }
 
 // GlobGitignoreAware globs files respecting gitignore.
 func GlobGitignoreAware(pattern string, cwd string, limit int) ([]string, bool, error) {
-	return globWithDoubleStar(pattern, cwd, limit, true)
+	return globWithDoubleStar(pattern, cwd, limit, true, true)
+}
+
+// GlobWithOptions globs files with optional gitignore and hidden filtering.
+func GlobWithOptions(pattern string, cwd string, limit int, gitignore, hidden bool) ([]string, bool, error) {
+	return globWithDoubleStar(pattern, cwd, limit, gitignore, hidden)
 }
 
 func MatchesGlob(pattern, path string) bool {
@@ -106,7 +117,7 @@ func MatchesGlob(pattern, path string) bool {
 	return err == nil && matched
 }
 
-func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) ([]string, bool, error) {
+func globWithDoubleStar(pattern, searchPath string, limit int, gitignore, hidden bool) ([]string, bool, error) {
 	// Normalize pattern to forward slashes on Windows so their config can use
 	// backslashes
 	pattern = filepath.ToSlash(pattern)
@@ -127,6 +138,12 @@ func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) (
 			if gitignore && walker.ShouldSkipDir(path) {
 				return filepath.SkipDir
 			}
+			if !hidden && IsHidden(path) {
+				return filepath.SkipDir
+			}
+			if !gitignore && SkipCommonIgnored(path) {
+				return filepath.SkipDir
+			}
 		}
 
 		relPath, err := filepath.Rel(searchPath, path)
@@ -142,6 +159,12 @@ func globWithDoubleStar(pattern, searchPath string, limit int, gitignore bool) (
 			return nil
 		}
 		if !isDir && gitignore && walker.ShouldSkip(path) {
+			return nil
+		}
+		if !isDir && !hidden && IsHidden(path) {
+			return nil
+		}
+		if !isDir && !gitignore && SkipCommonIgnored(path) {
 			return nil
 		}
 

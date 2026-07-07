@@ -12,6 +12,7 @@ INSERT INTO sessions (
     handoff_draft_prompt,
     handoff_relevant_files,
     plan_file_path,
+    goal_id,
     goal_text,
     goal_status,
     goal_token_budget,
@@ -27,6 +28,7 @@ INSERT INTO sessions (
     updated_at,
     created_at
 ) VALUES (
+    ?,
     ?,
     ?,
     ?,
@@ -86,6 +88,7 @@ SET
     handoff_draft_prompt = ?,
     handoff_relevant_files = ?,
     plan_file_path = ?,
+    goal_id = ?,
     goal_text = ?,
     goal_status = ?,
     goal_token_budget = ?,

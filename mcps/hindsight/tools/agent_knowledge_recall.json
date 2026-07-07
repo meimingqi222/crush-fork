@@ -1,0 +1,22 @@
+{
+  "name": "agent_knowledge_recall",
+  "description": "Search across all retained conversations and documents for specific facts, numbers, or details not covered by your knowledge pages. max_tokens is the result token budget (server returns whatever fits).",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "title": "Query",
+        "type": "string"
+      },
+      "max_tokens": {
+        "default": 1024,
+        "title": "Max Tokens",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "title": "agent_knowledge_recallArguments",
+    "type": "object"
+  }
+}

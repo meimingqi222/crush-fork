@@ -115,6 +115,152 @@ func TestNormalizedMessageUsage_PrefersEstimatedPromptFloor(t *testing.T) {
 	require.Equal(t, int64(18_700), normalized.TotalTokens())
 }
 
+func TestNormalizedMessageUsage_TrustsOpenAIProviderUsageOverEstimate(t *testing.T) {
+	t.Parallel()
+
+	usage := fantasy.Usage{
+		InputTokens:     1,
+		OutputTokens:    85,
+		CacheReadTokens: 36_381,
+	}
+
+	normalized := normalizedMessageUsage(usage, "openai", 54_770)
+
+	require.Equal(t, int64(1), normalized.InputTokens)
+	require.Equal(t, int64(36_381), normalized.CacheReadTokens)
+	require.Equal(t, int64(36_382), normalized.PromptTokens())
+	require.Equal(t, int64(36_467), normalized.TotalTokens())
+}
+
+func TestNormalizedMessageUsage_FloorsToEstimateWhenProviderOmitsPrompt(t *testing.T) {
+	t.Parallel()
+
+	usage := fantasy.Usage{
+		OutputTokens: 200,
+	}
+
+	normalized := normalizedMessageUsage(usage, "openai", 12_000)
+
+	require.Equal(t, int64(12_000), normalized.InputTokens)
+	require.Equal(t, int64(12_200), normalized.TotalTokens())
+}
+
+func TestShouldFloorPromptTokensToEstimate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		usage                 fantasy.Usage
+		providerID            string
+		promptTokens          int64
+		estimatedPromptTokens int64
+		want                  bool
+	}{
+		{
+			name:                  "no estimate",
+			usage:                 fantasy.Usage{InputTokens: 10},
+			providerID:            "anthropic",
+			promptTokens:          10,
+			estimatedPromptTokens: 0,
+			want:                  false,
+		},
+		{
+			name:                  "provider already at or above estimate",
+			usage:                 fantasy.Usage{InputTokens: 20_000},
+			providerID:            "anthropic",
+			promptTokens:          20_000,
+			estimatedPromptTokens: 18_500,
+			want:                  false,
+		},
+		{
+			name:                  "provider omits prompt tokens",
+			usage:                 fantasy.Usage{OutputTokens: 42},
+			providerID:            "anthropic",
+			promptTokens:          0,
+			estimatedPromptTokens: 18_500,
+			want:                  true,
+		},
+		{
+			name: "anthropic under-report without cache",
+			usage: fantasy.Usage{
+				InputTokens:  95,
+				OutputTokens: 200,
+			},
+			providerID:            "anthropic",
+			promptTokens:          95,
+			estimatedPromptTokens: 18_500,
+			want:                  true,
+		},
+		{
+			name: "cache read blocks floor for anthropic",
+			usage: fantasy.Usage{
+				InputTokens:     1,
+				CacheReadTokens: 36_381,
+			},
+			providerID:            "anthropic",
+			promptTokens:          36_382,
+			estimatedPromptTokens: 54_770,
+			want:                  false,
+		},
+		{
+			name: "cache creation blocks floor for anthropic",
+			usage: fantasy.Usage{
+				InputTokens:         120,
+				CacheCreationTokens: 300,
+			},
+			providerID:            "anthropic",
+			promptTokens:          420,
+			estimatedPromptTokens: 18_500,
+			want:                  false,
+		},
+		{
+			name: "openai provider trusts reported usage",
+			usage: fantasy.Usage{
+				InputTokens:     1,
+				CacheReadTokens: 36_381,
+			},
+			providerID:            "openai",
+			promptTokens:          36_382,
+			estimatedPromptTokens: 54_770,
+			want:                  false,
+		},
+		{
+			name: "openai-compat provider trusts reported usage",
+			usage: fantasy.Usage{
+				InputTokens:  12_000,
+				OutputTokens: 200,
+			},
+			providerID:            "openai-compat",
+			promptTokens:          12_000,
+			estimatedPromptTokens: 18_500,
+			want:                  false,
+		},
+		{
+			name: "openai provider floors when prompt omitted",
+			usage: fantasy.Usage{
+				OutputTokens: 200,
+			},
+			providerID:            "openai",
+			promptTokens:          0,
+			estimatedPromptTokens: 12_000,
+			want:                  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := shouldFloorPromptTokensToEstimate(
+				tt.usage,
+				tt.providerID,
+				tt.promptTokens,
+				tt.estimatedPromptTokens,
+			)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestShouldAutoSummarize(t *testing.T) {
 	t.Parallel()
 
@@ -1646,7 +1792,7 @@ func TestPreparePromptDropsLateToolResultForEarlierAssistantCall(t *testing.T) {
 			ID:   "assistant-1",
 			Role: message.Assistant,
 			Parts: []message.ContentPart{
-				message.ToolCall{ID: "call-1", Name: agenttools.GlobToolName, Input: `{"pattern":"**/*.test.ts"}`, Finished: true},
+				message.ToolCall{ID: "call-1", Name: agenttools.GlobToolName, Input: `{"path":"**/*.test.ts"}`, Finished: true},
 			},
 		},
 		{

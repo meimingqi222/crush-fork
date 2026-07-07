@@ -1,0 +1,9 @@
+{
+  "name": "agent_knowledge_list_pages",
+  "description": "List all your knowledge pages (IDs and names only). Use agent_knowledge_get_page to read the full content of a specific page.",
+  "inputSchema": {
+    "properties": {},
+    "title": "agent_knowledge_list_pagesArguments",
+    "type": "object"
+  }
+}

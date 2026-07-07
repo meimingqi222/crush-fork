@@ -91,9 +91,9 @@ func (s *SessionItem) Render(width int) string {
 		styles.ItemBlurred = s.t.Dialog.Sessions.RenamingItemBlurred
 		styles.ItemFocused = s.t.Dialog.Sessions.RenamingingItemFocused
 		if s.focused {
-			inputWidth := width - styles.InfoTextFocused.GetHorizontalFrameSize()
+			inputWidth := max(0, width-styles.ItemFocused.GetHorizontalFrameSize())
 			s.updateTitleInput.SetWidth(inputWidth)
-			s.updateTitleInput.Placeholder = ansi.Truncate(s.Title, width, "…")
+			s.updateTitleInput.Placeholder = ansi.Truncate(s.Title, inputWidth, "…")
 			return styles.ItemFocused.Render(s.updateTitleInput.View())
 		}
 		return renderItem(styles, s.Title, "", s.focused, width, s.cache, &s.m)
@@ -131,9 +131,10 @@ func (s *SessionItem) Render(width int) string {
 		metaStyle = styles.InfoTextFocused
 	}
 
-	titleLine := ansi.Truncate(title, max(0, width), "…")
-	metaLine := ansi.Truncate(metadata, max(0, width), "…")
-	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, metaStyle.Render(metaLine))
+	innerWidth := max(0, width-lineStyle.GetHorizontalFrameSize())
+	titleLine := lipgloss.NewStyle().Width(innerWidth).Render(ansi.Truncate(title, innerWidth, "…"))
+	metaLine := metaStyle.Width(innerWidth).Render(ansi.Truncate(metadata, innerWidth, "…"))
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, metaLine)
 	return lineStyle.Render(content)
 }
 

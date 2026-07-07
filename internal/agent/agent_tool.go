@@ -26,6 +26,7 @@ type AgentTaskParams struct {
 	Description  string `json:"description,omitempty" description:"A short title for the delegated task"`
 	Assignment   string `json:"assignment" description:"The full task instructions for the subagent to perform"`
 	SubagentType string `json:"subagent_type,omitempty" description:"The subagent type to use: general, quick_task, explore, plan, review, designer, librarian, or a configured subagent name"`
+	Role         string `json:"role,omitempty" description:"Optional specialist identity for this subagent (e.g. planner, researcher, reviewer, executor)"`
 }
 
 type AgentParams struct {
@@ -35,6 +36,7 @@ type AgentParams struct {
 	Tasks           []AgentTaskParams `json:"tasks,omitempty" description:"Optional list of independent tasks to execute in parallel"`
 	Context         string            `json:"context,omitempty" description:"Shared background information for all subagents"`
 	RunInBackground bool              `json:"run_in_background,omitempty" description:"Run the agent in the background and return immediately with an agent ID"`
+	Role            string            `json:"role,omitempty" description:"Optional specialist identity for the subagent when using a single prompt (e.g. planner, researcher, reviewer, executor)"`
 }
 
 const (
@@ -96,6 +98,7 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 						Description:  description,
 						Assignment:   assignment,
 						SubagentType: task.SubagentType,
+						Role:         strings.TrimSpace(task.Role),
 					})
 				}
 			} else {
@@ -120,6 +123,7 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 					Description:  description,
 					Assignment:   params.Prompt,
 					SubagentType: params.SubagentType,
+					Role:         strings.TrimSpace(params.Role),
 				}}
 			}
 
@@ -176,7 +180,7 @@ func validateSubagentDelegations(tasks []subagentTask, agents map[string]config.
 	return ""
 }
 
-func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType string) (SessionAgent, config.Agent, error) {
+func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType, role string) (SessionAgent, config.Agent, error) {
 	if c.subAgentFactory != nil {
 		return c.subAgentFactory(ctx, requestedType)
 	}
@@ -186,7 +190,7 @@ func (c *coordinator) buildSubAgentForType(ctx context.Context, requestedType st
 		return nil, config.Agent{}, err
 	}
 
-	promptBuilder, err := promptForAgent(agentCfg, true, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	promptBuilder, err := promptForAgent(agentCfg, true, prompt.WithWorkingDir(c.cfg.WorkingDir()), prompt.WithRole(role))
 	if err != nil {
 		return nil, config.Agent{}, err
 	}

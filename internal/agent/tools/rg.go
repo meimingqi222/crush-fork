@@ -22,7 +22,7 @@ var getRg = sync.OnceValue(func() string {
 	return path
 })
 
-func getRgCmd(ctx context.Context, globPattern string) *exec.Cmd {
+func getRgCmd(ctx context.Context, globPattern string, hidden, gitignore bool) *exec.Cmd {
 	name := getRg()
 	if name == "" {
 		return nil
@@ -32,9 +32,15 @@ func getRgCmd(ctx context.Context, globPattern string) *exec.Cmd {
 	// semantics and the -L flag can cause issues.
 	var args []string
 	if runtime.GOOS == "windows" {
-		args = []string{"--files", "--hidden", "--null"}
+		args = []string{"--files", "--null"}
 	} else {
-		args = []string{"--files", "-L", "--hidden", "--null"}
+		args = []string{"--files", "-L", "--null"}
+	}
+	if hidden {
+		args = append(args, "--hidden")
+	}
+	if !gitignore {
+		args = append(args, "--no-ignore")
 	}
 	if globPattern != "" {
 		args = append(args, "--glob", globPattern)

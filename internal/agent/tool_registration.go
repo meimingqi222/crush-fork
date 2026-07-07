@@ -121,6 +121,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 	builtin := []fantasy.AgentTool{
 		agenttools.NewRequestUserInputTool(c.userInput),
 		agenttools.NewPlanExitTool(c.sessions),
+		agenttools.NewResolveTool(c.sessions),
 		agenttools.NewBashToolWithSessions(c.sessions, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelName, c.hookManager, bashOpts),
 		agenttools.NewJobTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
@@ -137,7 +138,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewTripleQueryTool(c.memoryEngineTripleStore()),
 		agenttools.NewMemoryStatusTool(c.memoryEngine),
 		agenttools.NewTodosTool(c.sessions),
-		agenttools.NewGoalTool(c.sessions),
+		agenttools.NewGoalTool(c.sessions, c.goalRuntime),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}

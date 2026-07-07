@@ -258,9 +258,10 @@ type UI struct {
 	// continueLastSession is set to continue the most recent session on startup.
 	continueLastSession bool
 
-	lastUserMessageTime int64
-	latestProposedPlan  string
-	lastPromptedPlanMsg string
+	lastUserMessageTime     int64
+	latestProposedPlan      string
+	latestProposedPlanTitle string
+	lastPromptedPlanMsg     string
 
 	// The width and height of the terminal in cells.
 	width  int
@@ -687,6 +688,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.com != nil && m.com.App != nil && m.com.App.GetTimeline() != nil && m.session != nil {
 			m.timelineEvents = m.com.App.GetTimeline().ListBySession(m.session.ID)
 		}
+		if msg.goalPausedNotice != "" {
+			cmds = append(cmds, util.ReportInfo(msg.goalPausedNotice))
+		}
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
 		if cmd := m.setSessionMessages(msg.messages); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -785,7 +789,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog.ContainsDialog(dialog.PlanReviewID) {
 			m.dialog.CloseDialog(dialog.PlanReviewID)
 		}
-		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan))
+		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, m.latestProposedPlanTitle))
 
 	case planCompactedForExecutionMsg:
 		if msg.Err != nil {
@@ -1018,6 +1022,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil && m.session.ID == msg.SessionID {
 			m.agentRunInProgress = false
 			m.sessionAgentLockSeen = false
+			if m.syncPromptQueue() {
+				m.updateLayoutAndSize()
+				m.renderPills()
+			}
 			m.refreshEditorPlaceholder()
 		}
 		if msg.Err != nil {
@@ -1445,6 +1453,7 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 		m.lastUserMessageTime = msgPtrs[0].CreatedAt
 	}
 	m.latestProposedPlan = ""
+	m.latestProposedPlanTitle = ""
 
 	// Add messages to chat with linked tool results.
 	// Filter out incomplete summary messages with no content only when the
@@ -2428,6 +2437,10 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before changing Plan Mode..."))
 			break
 		}
+		if msg.NextMode == session.CollaborationModePlan && m.session != nil && m.session.Goal.OccupiesSession() {
+			cmds = append(cmds, util.ReportWarn(session.ErrGoalBlocksPlanMode.Error()))
+			break
+		}
 		cmds = append(cmds, func() tea.Msg {
 			ctx := context.Background()
 			sessionID := msg.SessionID
@@ -2446,8 +2459,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 				return util.ReportError(err)()
 			}
 			status := "Plan Mode disabled"
-			if msg.NextMode == session.CollaborationModePlan {
+			switch msg.NextMode {
+			case session.CollaborationModePlan:
 				status = "Plan Mode enabled"
+			case session.CollaborationModePlanPaused:
+				status = "Plan mode paused."
 			}
 			return planModeChangedMsg{SessionID: sessionID, Status: status, Mode: msg.NextMode}
 		})
@@ -2546,12 +2562,19 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.ProposedPlanID)
 		m.dialog.CloseDialog(dialog.PlanReviewID)
 	case dialog.ActionSetGoal:
+		if m.session != nil {
+			if err := m.session.ValidateGoalWork(); err != nil {
+				cmds = append(cmds, util.ReportWarn(err.Error()))
+				break
+			}
+		}
 		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
 			if goal.IsActive() || goal.Status == session.GoalStatusPaused {
 				return goal, "", errors.New("a goal is already active; drop or complete it first")
 			}
 			now := time.Now().Unix()
 			return session.Goal{
+				ID:          session.NewGoalID(),
 				Text:        strings.TrimSpace(msg.Goal),
 				Status:      session.GoalStatusActive,
 				TokenBudget: msg.Budget,
@@ -2575,6 +2598,12 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}))
 		m.dialog.CloseDialog(dialog.GoalBudgetID)
 	case dialog.ActionStartGuidedGoal:
+		if m.session != nil {
+			if err := m.session.ValidateGoalWork(); err != nil {
+				cmds = append(cmds, util.ReportWarn(err.Error()))
+				break
+			}
+		}
 		cmds = append(cmds, m.sendMessage(buildGuidedGoalPrompt(msg.RoughGoal)))
 		m.dialog.CloseDialog(dialog.GuidedGoalID)
 		m.dialog.CloseDialog(dialog.CommandsID)
@@ -2593,6 +2622,10 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}))
 	case dialog.ActionResumeGoal:
 		if m.session == nil {
+			break
+		}
+		if err := m.session.ValidateGoalWork(); err != nil {
+			cmds = append(cmds, util.ReportWarn(err.Error()))
 			break
 		}
 		if m.session.Goal.Status != session.GoalStatusPaused && m.session.Goal.Status != session.GoalStatusBudgetLimited {
@@ -3092,17 +3125,19 @@ func (m *UI) updateLatestProposedPlan(msg message.Message) {
 	if m.session == nil || m.session.CollaborationMode != session.CollaborationModePlan {
 		return
 	}
-	if !hasToolCall(msg, agenttools.PlanExitToolName) {
+	title, ok := hasPlanExitOrResolveApply(msg)
+	if !ok {
 		return
 	}
 	if strings.TrimSpace(m.session.PlanFilePath) != "" {
 		return
 	}
-	plan, ok := planmode.ExtractProposedPlan(msg.Content().Text)
-	if !ok {
+	plan, extracted := planmode.ExtractProposedPlan(msg.Content().Text)
+	if !extracted {
 		return
 	}
 	m.latestProposedPlan = plan
+	m.latestProposedPlanTitle = title
 }
 
 func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
@@ -3113,7 +3148,8 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 		return nil
 	}
 	plan, ok := planmode.ExtractProposedPlan(msg.Content().Text)
-	if !hasToolCall(msg, agenttools.PlanExitToolName) {
+	title, hasPlanTool := hasPlanExitOrResolveApply(msg)
+	if !hasPlanTool {
 		return nil
 	}
 	if m.lastPromptedPlanMsg == msg.ID {
@@ -3129,7 +3165,7 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 	if m.dialog.ContainsDialog(dialog.ProposedPlanID) {
 		m.dialog.CloseDialog(dialog.ProposedPlanID)
 	}
-	m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan))
+	m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, title))
 	return nil
 }
 
@@ -3150,6 +3186,45 @@ func hasToolCall(msg message.Message, toolName string) bool {
 		}
 	}
 	return false
+}
+
+type resolveToolInput struct {
+	Action string `json:"action"`
+	Extra  struct {
+		Title string `json:"title"`
+	} `json:"extra"`
+}
+
+// findResolveApplyToolCall returns the plan title from a resolve tool call
+// whose action is "apply".
+func findResolveApplyToolCall(msg message.Message) (string, bool) {
+	for _, tc := range msg.ToolCalls() {
+		if tc.Name != agenttools.ResolveToolName {
+			continue
+		}
+		var input resolveToolInput
+		if err := json.Unmarshal([]byte(tc.Input), &input); err != nil {
+			continue
+		}
+		if input.Action != "apply" {
+			continue
+		}
+		return input.Extra.Title, true
+	}
+	return "", false
+}
+
+// hasPlanExitOrResolveApply reports whether the message contains a plan exit
+// tool call or a resolve(action="apply") tool call. It returns an optional
+// title when resolve provided one.
+func hasPlanExitOrResolveApply(msg message.Message) (string, bool) {
+	if title, ok := findResolveApplyToolCall(msg); ok {
+		return title, true
+	}
+	if hasToolCall(msg, agenttools.PlanExitToolName) {
+		return "", true
+	}
+	return "", false
 }
 
 func (m *UI) openRequestUserInputDialog(request userinput.Request) tea.Cmd {
@@ -3236,8 +3311,12 @@ func (m *UI) refreshEditorPlaceholder() {
 		m.textarea.Placeholder = m.workingPlaceholder
 		return
 	}
-	if m.session != nil && m.session.CollaborationMode == session.CollaborationModePlan {
+	if m.session != nil && m.session.IsActivePlanMode() {
 		m.textarea.Placeholder = "Plan Mode: explore, clarify, and propose a plan"
+		return
+	}
+	if m.session != nil && m.session.IsPlanPaused() {
+		m.textarea.Placeholder = "Plan paused — resume plan mode or exit to continue"
 		return
 	}
 	if m.session != nil && m.session.CollaborationMode == session.CollaborationModeOrchestrate {
@@ -3259,7 +3338,7 @@ func (m *UI) cycleExecutionMode() tea.Cmd {
 	if m.isAgentBusy() {
 		return util.ReportWarn("Agent is busy, please wait before changing execution mode...")
 	}
-	if m.session != nil && m.session.CollaborationMode == session.CollaborationModePlan {
+	if m.session != nil && m.session.IsPlanFlow() {
 		return util.ReportWarn("Exit Plan Mode before cycling Ask/Auto/Yolo.")
 	}
 	return m.setExecutionMode(nextExecutionMode(m.currentExecutionMode()))
@@ -5042,11 +5121,26 @@ func (m *UI) updateGoal(sessionID string, mutate func(session.Goal) (session.Goa
 	}
 }
 
+func (m *UI) goalSlashBlocked(cmd string) (tea.Cmd, bool) {
+	if m.session == nil || !m.session.IsPlanFlow() {
+		return nil, false
+	}
+	switch cmd {
+	case "set", "replace", "guided", "resume", "pause", "drop", "budget":
+		return util.ReportWarn(session.ErrPlanBlocksGoalMode.Error()), true
+	default:
+		return nil, false
+	}
+}
+
 func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 	if m.session == nil || content == "" {
 		return nil, false
 	}
 	if strings.HasPrefix(content, "/guided-goal") {
+		if cmd, blocked := m.goalSlashBlocked("guided"); blocked {
+			return cmd, true
+		}
 		rough := strings.TrimSpace(strings.TrimPrefix(content, "/guided-goal"))
 		if rough == "" {
 			return m.openGuidedGoalDialog(), true
@@ -5066,6 +5160,9 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 	}
 	switch fields[0] {
 	case "set":
+		if cmd, blocked := m.goalSlashBlocked("set"); blocked {
+			return cmd, true
+		}
 		objective, budget, err := parseGoalSetArgs(strings.TrimSpace(strings.TrimPrefix(args, "set")))
 		if err != nil {
 			return util.ReportError(err), true
@@ -5078,15 +5175,50 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 				return goal, "", errors.New("a goal is already active; drop or complete it first")
 			}
 			now := time.Now().Unix()
-			return session.Goal{Text: objective, Status: session.GoalStatusActive, TokenBudget: budget, CreatedAt: now, UpdatedAt: now}, "Goal set.", nil
+			return session.Goal{ID: session.NewGoalID(), Text: objective, Status: session.GoalStatusActive, TokenBudget: budget, CreatedAt: now, UpdatedAt: now}, "Goal set.", nil
+		}), true
+	case "replace":
+		if cmd, blocked := m.goalSlashBlocked("replace"); blocked {
+			return cmd, true
+		}
+		objective, budget, err := parseGoalSetArgs(strings.TrimSpace(strings.TrimPrefix(args, "replace")))
+		if err != nil {
+			return util.ReportError(err), true
+		}
+		if objective == "" {
+			return m.openGoalDialog(), true
+		}
+		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
+			now := time.Now().Unix()
+			if goal.Status == "" {
+				return session.Goal{ID: session.NewGoalID(), Text: objective, Status: session.GoalStatusActive, TokenBudget: budget, CreatedAt: now, UpdatedAt: now}, "Goal replaced.", nil
+			}
+			preservedTokensUsed := goal.TokensUsed
+			preservedTimeSeconds := goal.TimeSeconds
+			if budget > 0 {
+				goal.TokenBudget = budget
+			}
+			goal.ID = session.NewGoalID()
+			goal.Text = objective
+			goal.Status = session.GoalStatusActive
+			goal.TokensUsed = preservedTokensUsed
+			goal.TimeSeconds = preservedTimeSeconds
+			goal.UpdatedAt = now
+			return goal, "Goal replaced.", nil
 		}), true
 	case "guided":
+		if cmd, blocked := m.goalSlashBlocked("guided"); blocked {
+			return cmd, true
+		}
 		rough := strings.TrimSpace(strings.TrimPrefix(args, "guided"))
 		if rough == "" {
 			return m.openGuidedGoalDialog(), true
 		}
 		return m.sendMessage(buildGuidedGoalPrompt(rough)), true
 	case "pause":
+		if cmd, blocked := m.goalSlashBlocked("pause"); blocked {
+			return cmd, true
+		}
 		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
 			if !goal.IsActive() {
 				return goal, "", errors.New("no active goal to pause")
@@ -5096,6 +5228,9 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 			return goal, "Goal paused.", nil
 		}), true
 	case "resume":
+		if cmd, blocked := m.goalSlashBlocked("resume"); blocked {
+			return cmd, true
+		}
 		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
 			if goal.Status != session.GoalStatusPaused && goal.Status != session.GoalStatusBudgetLimited {
 				return goal, "", errors.New("no paused or budget-limited goal to resume")
@@ -5105,6 +5240,9 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 			return goal, "Goal resumed.", nil
 		}), true
 	case "drop":
+		if cmd, blocked := m.goalSlashBlocked("drop"); blocked {
+			return cmd, true
+		}
 		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
 			if goal.Status == "" {
 				return goal, "", errors.New("no goal to drop")
@@ -5112,6 +5250,9 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 			return session.Goal{}, "Goal dropped.", nil
 		}), true
 	case "budget":
+		if cmd, blocked := m.goalSlashBlocked("budget"); blocked {
+			return cmd, true
+		}
 		if len(fields) < 2 {
 			return m.openGoalBudgetDialog(), true
 		}
@@ -5133,7 +5274,7 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 			return goal, "Goal budget updated.", nil
 		}), true
 	default:
-		return util.ReportWarn("Unknown /goal command. Use set, show, pause, resume, drop, budget, or guided."), true
+		return util.ReportWarn("Unknown /goal command. Use set, replace, show, pause, resume, drop, budget, or guided."), true
 	}
 }
 

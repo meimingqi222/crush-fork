@@ -80,6 +80,31 @@ func promptTokensForUsage(usage fantasy.Usage, providerID string) int64 {
 	return usage.InputTokens + usage.CacheCreationTokens
 }
 
+// shouldFloorPromptTokensToEstimate reports whether a local character-based
+// prompt estimate should replace provider-reported prompt tokens.
+//
+// The estimate floor exists for providers that omit or severely under-report
+// input usage (some Anthropic responses only carry output deltas). It must
+// not run when the provider already returned a trustworthy prompt total —
+// especially OpenAI/xAI-style usage with cache accounting, where character
+// estimates often overshoot by 30–50% because they ignore tokenizer efficiency
+// and treat cached prefixes as fully billable text.
+func shouldFloorPromptTokensToEstimate(usage fantasy.Usage, providerID string, promptTokens, estimatedPromptTokens int64) bool {
+	if estimatedPromptTokens <= 0 || promptTokens >= estimatedPromptTokens {
+		return false
+	}
+	if promptTokens <= 0 {
+		return true
+	}
+	if usage.CacheReadTokens > 0 || usage.CacheCreationTokens > 0 {
+		return false
+	}
+	if isOpenAIUsageProvider(providerID) {
+		return false
+	}
+	return true
+}
+
 func normalizedMessageUsage(usage fantasy.Usage, providerID string, estimatedPromptTokens int64) message.Usage {
 	normalized := message.Usage{
 		OutputTokens:     usage.OutputTokens,
@@ -89,7 +114,7 @@ func normalizedMessageUsage(usage fantasy.Usage, providerID string, estimatedPro
 	}
 
 	promptTokens := promptTokensForUsage(usage, providerID)
-	if estimatedPromptTokens > 0 && promptTokens < estimatedPromptTokens {
+	if shouldFloorPromptTokensToEstimate(usage, providerID, promptTokens, estimatedPromptTokens) {
 		promptTokens = estimatedPromptTokens
 	}
 
@@ -204,10 +229,11 @@ func isImageMediaType(mediaType string) bool {
 		mediaType == "image/bmp"
 }
 
-func (a *sessionAgent) estimateSessionPromptTokens(history []fantasy.Message, prompt string, attachments []message.Attachment, tools []fantasy.AgentTool, systemPrompt string, promptPrefix string) int64 {
+func (a *sessionAgent) estimateSessionPromptTokens(history []fantasy.Message, prompt string, attachments []message.Attachment, tools []fantasy.AgentTool, systemPrompt string, promptPrefix string, promptSuffix string) int64 {
 	total := estimatePromptTokens(history, tools)
 	total += estimateStringTokens(systemPrompt)
 	total += estimateStringTokens(promptPrefix)
+	total += estimateStringTokens(promptSuffix)
 	total += estimateStringTokens(message.PromptWithTextAttachments(prompt, attachments))
 	return total
 }
@@ -237,7 +263,7 @@ func (a *sessionAgent) estimateNextStepPromptTokens(ctx context.Context, session
 	if err != nil {
 		return 0, false, err
 	}
-	return a.estimateSessionPromptTokens(state.History, "", nil, tools, state.SystemPrompt, state.PromptPrefix), state.EstimateReduced, nil
+	return a.estimateSessionPromptTokens(state.History, "", nil, tools, state.SystemPrompt, state.PromptPrefix, state.PromptSuffix), state.EstimateReduced, nil
 }
 
 func (a *sessionAgent) EstimateSessionPromptTokensForModel(ctx context.Context, sessionID string, model Model) (int64, error) {

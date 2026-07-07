@@ -55,7 +55,11 @@ nul
 **/.crush/**
 
 /crush
+/crush.exe
 /tmp/
+/terminals/
+/.trae/
+/test_dir_run/
 
 manpages/
 completions/crush.*sh

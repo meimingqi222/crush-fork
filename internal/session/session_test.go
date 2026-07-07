@@ -26,6 +26,7 @@ func TestNormalizeCollaborationMode(t *testing.T) {
 	require.Equal(t, CollaborationModeDefault, NormalizeCollaborationMode(string(CollaborationModeDefault)))
 	require.Equal(t, CollaborationModeDefault, NormalizeCollaborationMode("auto"))
 	require.Equal(t, CollaborationModePlan, NormalizeCollaborationMode(string(CollaborationModePlan)))
+	require.Equal(t, CollaborationModePlanPaused, NormalizeCollaborationMode(string(CollaborationModePlanPaused)))
 }
 
 func TestNormalizePermissionMode(t *testing.T) {

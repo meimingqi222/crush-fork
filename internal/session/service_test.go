@@ -227,6 +227,32 @@ func TestListReturnsTopLevelHandoffSessions(t *testing.T) {
 	require.True(t, handoffFound)
 }
 
+func TestUpdateCollaborationModeRejectsPlanWhenGoalOccupiesSession(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(context.Background(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+
+	q := db.New(conn)
+	svc := NewService(q, conn)
+
+	created, err := svc.Create(context.Background(), "Goal blocks plan")
+	require.NoError(t, err)
+	created.Goal = Goal{
+		ID:     NewGoalID(),
+		Text:   "Ship feature",
+		Status: GoalStatusPaused,
+	}
+	created, err = svc.Save(context.Background(), created)
+	require.NoError(t, err)
+
+	_, err = svc.UpdateCollaborationMode(context.Background(), created.ID, CollaborationModePlan)
+	require.ErrorIs(t, err, ErrGoalBlocksPlanMode)
+}
+
 func TestCreateTaskSessionInheritsParentModes(t *testing.T) {
 	t.Parallel()
 

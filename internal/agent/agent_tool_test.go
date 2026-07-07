@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -389,6 +390,59 @@ func TestDeriveSubagentPermissionsPreservesMCPAndPlugins(t *testing.T) {
 	assert.Contains(t, allowed, customTool)
 }
 
+func TestDeriveSubagentPermissionsReadOnlyDeniesStateMutatingTools(t *testing.T) {
+	allTools := []string{
+		"bash", "job", "download", "edit", "read", "write",
+		"retain", "recall", "todos", "send_message", "task_stop",
+		"lsp", "goal", "irc", "glob", "grep", "yield",
+	}
+
+	profile := SubagentProfile{
+		Name:      config.AgentExplore,
+		Kind:      SubagentProfileExplore,
+		ReadOnly:  true,
+		ToolNames: allTools,
+	}
+
+	derived := DeriveSubagentPermissions(ParentPermissionContext{
+		AllowedTools: allTools,
+	}, profile, allTools)
+
+	allowed := toolNamesFromSet(derived.AllowedTools)
+	denied := toolNamesFromSet(derived.DeniedTools)
+
+	assert.Contains(t, allowed, "bash")
+	assert.Contains(t, allowed, "read")
+	assert.Contains(t, allowed, "glob")
+	assert.Contains(t, allowed, "grep")
+	assert.Contains(t, allowed, "recall")
+	assert.Contains(t, allowed, tools.YieldToolName)
+
+	assert.NotContains(t, allowed, tools.DownloadToolName)
+	assert.NotContains(t, allowed, tools.EditToolName)
+	assert.NotContains(t, allowed, tools.WriteToolName)
+	assert.NotContains(t, allowed, tools.RetainToolName)
+	assert.NotContains(t, allowed, tools.TodosToolName)
+	assert.NotContains(t, allowed, tools.SendMessageToolName)
+	assert.NotContains(t, allowed, tools.TaskStopToolName)
+	assert.NotContains(t, allowed, tools.LSPToolName)
+	assert.NotContains(t, allowed, tools.GoalToolName)
+	assert.NotContains(t, allowed, tools.JobToolName)
+	assert.NotContains(t, allowed, tools.IrcToolName)
+
+	assert.Contains(t, denied, tools.DownloadToolName)
+	assert.Contains(t, denied, tools.EditToolName)
+	assert.Contains(t, denied, tools.WriteToolName)
+	assert.Contains(t, denied, tools.RetainToolName)
+	assert.Contains(t, denied, tools.TodosToolName)
+	assert.Contains(t, denied, tools.SendMessageToolName)
+	assert.Contains(t, denied, tools.TaskStopToolName)
+	assert.Contains(t, denied, tools.LSPToolName)
+	assert.Contains(t, denied, tools.GoalToolName)
+	assert.Contains(t, denied, tools.JobToolName)
+	assert.Contains(t, denied, tools.IrcToolName)
+}
+
 func TestDeriveSubagentPermissionsFiltersUnallowedMCPAndPlugins(t *testing.T) {
 	profile := SubagentProfile{
 		Name:      config.AgentGeneral,
@@ -461,6 +515,7 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"recall",
 		"reflect",
 		"request_user_input",
+		"resolve",
 		"write",
 	}, planNames)
 	assert.Contains(t, planNames, AgentToolName)
@@ -501,6 +556,33 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	assert.NotContains(t, defaultNames, "bash")
 	assert.NotContains(t, defaultNames, "read")
 	assert.Contains(t, defaultNames, "write")
+}
+
+func TestBuildToolsForDefaultModeIncludesTodos(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	coord := &coordinator{
+		cfg:         cfg,
+		sessions:    env.sessions,
+		messages:    env.messages,
+		permissions: env.permissions,
+		userInput:   nil,
+		history:     env.history,
+		filetracker: *env.filetracker,
+		lspManager:  lsp.NewManager(cfg),
+	}
+
+	defaultTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentCoder], session.CollaborationModeDefault)
+	require.NoError(t, err)
+
+	defaultNames := make([]string, 0, len(defaultTools))
+	for _, tool := range defaultTools {
+		defaultNames = append(defaultNames, tool.Info().Name)
+	}
+
+	assert.Contains(t, defaultNames, tools.TodosToolName)
 }
 
 func runAgentToolForTest(t *testing.T, tool fantasy.AgentTool, params AgentParams) (fantasy.ToolResponse, error) {
@@ -624,4 +706,46 @@ func TestTaskGraphSemaphoreKeepsCustomAliasAgentBucket(t *testing.T) {
 	require.NotNil(t, builtIn)
 	require.Equal(t, 1, cap(custom))
 	require.Equal(t, 2, cap(builtIn))
+}
+
+func TestAgentParamsParsesRole(t *testing.T) {
+	input := `{"prompt":"fix issue","subagent_type":"general","role":"reviewer"}`
+	var params AgentParams
+	require.NoError(t, json.Unmarshal([]byte(input), &params))
+	assert.Equal(t, "reviewer", params.Role)
+	assert.Equal(t, "fix issue", params.Prompt)
+}
+
+func TestAgentTaskParamsParsesRole(t *testing.T) {
+	input := `{"name":"review","description":"Review changes","assignment":"check the diff","subagent_type":"review","role":"reviewer"}`
+	var params AgentTaskParams
+	require.NoError(t, json.Unmarshal([]byte(input), &params))
+	assert.Equal(t, "reviewer", params.Role)
+	assert.Equal(t, "check the diff", params.Assignment)
+}
+
+func TestPromptWithRoleRendersRole(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	builder, err := prompt.NewPrompt("test", "Role: {{.Role}}", prompt.WithRole("planner"))
+	require.NoError(t, err)
+
+	rendered, err := builder.Build(t.Context(), "", "", cfg)
+	require.NoError(t, err)
+	assert.Equal(t, "Role: planner", rendered)
+}
+
+func TestPromptWithoutRoleRendersEmptyRole(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	builder, err := prompt.NewPrompt("test", "Role: {{.Role}}")
+	require.NoError(t, err)
+
+	rendered, err := builder.Build(t.Context(), "", "", cfg)
+	require.NoError(t, err)
+	assert.Equal(t, "Role: ", rendered)
 }

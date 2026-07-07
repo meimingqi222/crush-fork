@@ -102,7 +102,12 @@ func NewEditTool(
 			// Use session-specific working directory from context if available.
 			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
 
-			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
+			resolvedPath, err := resolveLocalPlanURI(ctx, params.FilePath, effectiveWorkingDir)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
 			if params.Patch == "" {
 				if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, params.FilePath); blocked || guardErr != nil {
 					return response, guardErr
@@ -159,6 +164,12 @@ func NewEditTool(
 
 			text := fmt.Sprintf("<result>\n%s\n</result>\n", response.Content)
 			response.Content = text
+
+			if !response.IsError {
+				if adoptErr := adoptPlanFilePathIfNeeded(ctx, params.FilePath); adoptErr != nil {
+					slog.Error("Failed to adopt plan file path", "error", adoptErr)
+				}
+			}
 
 			messageSvc := GetMessageServiceFromContext(ctx)
 			toolCallID := call.ID

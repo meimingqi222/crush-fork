@@ -85,6 +85,7 @@ func mandatorySubagentToolNames() []string {
 func globalSubagentDeniedTools() []string {
 	return []string{
 		agenttools.PlanExitToolName,
+		agenttools.ResolveToolName,
 		agenttools.RequestUserInputToolName,
 	}
 }
@@ -99,6 +100,9 @@ func readOnlyDeniedToolNames() []string {
 		agenttools.SendMessageToolName,
 		agenttools.TaskStopToolName,
 		agenttools.LSPToolName,
+		agenttools.GoalToolName,
+		agenttools.JobToolName,
+		agenttools.IrcToolName,
 	}
 }
 

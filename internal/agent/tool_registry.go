@@ -56,9 +56,12 @@ func (r *toolRegistry) Invoke(ctx context.Context, name string, args map[string]
 	if !ok {
 		entry, exists := r.entries[trimmedName]
 		if exists && entry.Metadata.Exposure == agenttools.ToolExposureDeferred {
+			recoveryAction := "Tool \"" + trimmedName + "\" is deferred. " +
+				"Call tool_search with query \"select:" + trimmedName + "\" to activate it. " +
+				"It will be available in your next response."
 			payload, err := json.Marshal(map[string]any{
 				"recovered_by":         "deferred_tool_not_activated",
-				"recovery_action":      "Run tool_search with query \"select:" + trimmedName + "\" before using this tool.",
+				"recovery_action":      recoveryAction,
 				"fallback_tool":        "tool_search",
 				"fallback_tool_query":  "select:" + trimmedName,
 				"recovered_parameters": []string{"query"},

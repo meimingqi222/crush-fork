@@ -208,4 +208,5 @@ type Session struct {
 	GoalTimeSeconds        int64          `json:"goal_time_seconds"`
 	GoalCreatedAt          int64          `json:"goal_created_at"`
 	GoalUpdatedAt          int64          `json:"goal_updated_at"`
+	GoalID                 string         `json:"goal_id"`
 }

@@ -114,13 +114,15 @@ func (m *UI) modeInfo(width int) string {
 	switch m.session.CollaborationMode {
 	case sessionpkg.CollaborationModePlan:
 		modes = append(modes, "PLAN")
+	case sessionpkg.CollaborationModePlanPaused:
+		modes = append(modes, "PLAN PAUSED")
 	case sessionpkg.CollaborationModeOrchestrate:
 		modes = append(modes, "ORCHESTRATE")
 	default:
 		modes = append(modes, "STANDARD")
 	}
 
-	if m.session.CollaborationMode != sessionpkg.CollaborationModePlan {
+	if !m.session.IsPlanFlow() {
 		switch m.currentExecutionMode() {
 		case executionModeAuto:
 			modes = append(modes, "AUTO")

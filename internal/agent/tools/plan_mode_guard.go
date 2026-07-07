@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/plan"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -26,14 +27,35 @@ func enforcePlanModeWriteTarget(ctx context.Context, filePath string) (fantasy.T
 	if sess.CollaborationMode != session.CollaborationModePlan {
 		return fantasy.ToolResponse{}, false, nil
 	}
-	planPath := strings.TrimSpace(sess.PlanFilePath)
-	if planPath == "" {
-		return fantasy.NewTextErrorResponse("Plan Mode allows writing only to the active plan file, but this session has no plan file. Exit and re-enter Plan Mode to create one."), true, nil
+
+	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
+	if workspaceRoot == "" {
+		workspaceRoot = activeWorkingDir(ctx)
 	}
-	if samePlanPath(filePath, planPath) {
+	if workspaceRoot == "" {
+		return fantasy.NewTextErrorResponse("Plan Mode allows writing only to the session plan file, but the workspace root is unknown."), true, nil
+	}
+
+	if _, ok := plan.SlugFromPlanPath(workspaceRoot, sessionID, filePath); ok {
 		return fantasy.ToolResponse{}, false, nil
 	}
-	return fantasy.NewTextErrorResponse(fmt.Sprintf("Plan Mode is read-only except for the active plan file. Write blocked: %s. Active plan file: %s", filePath, planPath)), true, nil
+
+	activePath := strings.TrimSpace(sess.PlanFilePath)
+	if activePath != "" && samePlanPath(filePath, activePath) {
+		return fantasy.ToolResponse{}, false, nil
+	}
+
+	if activePath == "" {
+		return fantasy.NewTextErrorResponse("Plan Mode allows writing only to the session plan file. Use a local plan URI such as local://<slug>-plan.md."), true, nil
+	}
+	return fantasy.NewTextErrorResponse(fmt.Sprintf("Plan Mode is read-only except for the session plan file. Write blocked: %s. Active plan file: %s", filePath, activePath)), true, nil
+}
+
+func activeWorkingDir(ctx context.Context) string {
+	if dir := GetWorkingDirFromContext(ctx); dir != "" {
+		return dir
+	}
+	return ""
 }
 
 func samePlanPath(path, planPath string) bool {

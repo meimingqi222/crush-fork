@@ -1,0 +1,17 @@
+{
+  "name": "agent_knowledge_delete_page",
+  "description": "Permanently delete a knowledge page.",
+  "inputSchema": {
+    "properties": {
+      "page_id": {
+        "title": "Page Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "page_id"
+    ],
+    "title": "agent_knowledge_delete_pageArguments",
+    "type": "object"
+  }
+}

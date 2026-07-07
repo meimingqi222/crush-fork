@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/plan"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
@@ -20,8 +21,10 @@ func (s *planGuardSessionService) Get(context.Context, string) (session.Session,
 func TestEnforcePlanModeWriteTargetAllowsPlanFile(t *testing.T) {
 	t.Parallel()
 
-	planPath := t.TempDir() + "/plan.md"
+	workspaceRoot := t.TempDir()
+	planPath := plan.PlanFilePath(workspaceRoot, "sess-1", "plan")
 	sessions := &planGuardSessionService{sess: session.Session{
+		WorkspaceCWD:      workspaceRoot,
 		CollaborationMode: session.CollaborationModePlan,
 		PlanFilePath:      planPath,
 	}}
@@ -38,8 +41,10 @@ func TestEnforcePlanModeWriteTargetAllowsPlanFile(t *testing.T) {
 func TestEnforcePlanModeWriteTargetBlocksOtherFiles(t *testing.T) {
 	t.Parallel()
 
-	planPath := t.TempDir() + "/plan.md"
+	workspaceRoot := t.TempDir()
+	planPath := plan.PlanFilePath(workspaceRoot, "sess-1", "plan")
 	sessions := &planGuardSessionService{sess: session.Session{
+		WorkspaceCWD:      workspaceRoot,
 		CollaborationMode: session.CollaborationModePlan,
 		PlanFilePath:      planPath,
 	}}
@@ -47,7 +52,7 @@ func TestEnforcePlanModeWriteTargetBlocksOtherFiles(t *testing.T) {
 	ctx = context.WithValue(ctx, SessionIDContextKey, "sess-1")
 	ctx = context.WithValue(ctx, SessionServiceContextKey, sessions)
 
-	resp, blocked, err := enforcePlanModeWriteTarget(ctx, t.TempDir()+"/main.go")
+	resp, blocked, err := enforcePlanModeWriteTarget(ctx, workspaceRoot+"/main.go")
 	require.NoError(t, err)
 	require.True(t, blocked)
 	require.Contains(t, resp.Content, "Plan Mode is read-only")

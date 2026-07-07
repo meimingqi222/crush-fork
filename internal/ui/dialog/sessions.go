@@ -229,7 +229,7 @@ func (s *Session) Cursor() *tea.Cursor {
 // Draw implements [Dialog].
 func (s *Session) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := s.com.Styles
-	width := max(0, min(defaultDialogMaxWidth, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
+	width := max(0, min(defaultDialogMaxWidth+20, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
 	height := max(0, min(defaultDialogHeight, area.Dy()-t.Dialog.View.GetVerticalBorderSize()))
 	innerWidth := width - t.Dialog.View.GetHorizontalFrameSize()
 	heightOffset := t.Dialog.Title.GetVerticalFrameSize() + titleContentHeight +

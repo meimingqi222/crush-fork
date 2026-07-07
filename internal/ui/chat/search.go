@@ -44,10 +44,7 @@ func (g *GlobToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		return ""
 	}
 
-	toolParams := append([]string{}, params.Patterns...)
-	if params.Path != "" {
-		toolParams = append(toolParams, "path", params.Path)
-	}
+	toolParams := []string{params.Path}
 
 	header := toolHeader(sty, opts.Status, "Glob", cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {

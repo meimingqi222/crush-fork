@@ -1,0 +1,22 @@
+{
+  "name": "agent_knowledge_ingest",
+  "description": "Upload text content into your memory bank. Pass the full raw content — never summarize before ingesting. The title becomes the document ID (re-ingesting replaces it).",
+  "inputSchema": {
+    "properties": {
+      "title": {
+        "title": "Title",
+        "type": "string"
+      },
+      "content": {
+        "title": "Content",
+        "type": "string"
+      }
+    },
+    "required": [
+      "title",
+      "content"
+    ],
+    "title": "agent_knowledge_ingestArguments",
+    "type": "object"
+  }
+}

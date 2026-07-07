@@ -48,14 +48,14 @@ func TestUsageSnapshotFromMessagesReturnsLatestAssistantUsage(t *testing.T) {
 	require.Equal(t, int64(3600), snap.ContextUsed)
 }
 
-func TestUsageSnapshotFromMessagesContextUsedUsesEstimateWhenLarger(t *testing.T) {
+func TestUsageSnapshotFromMessagesContextUsedPrefersObservedUsage(t *testing.T) {
 	t.Parallel()
 	msgs := []message.Message{
 		{Role: message.Assistant, Usage: message.Usage{InputTokens: 1000, OutputTokens: 200}},
 	}
 	snap := usageSnapshotFromMessages(msgs, 5000)
 	require.Equal(t, int64(5000), snap.EstimatedPromptTokens)
-	require.Equal(t, int64(5000), snap.ContextUsed)
+	require.Equal(t, int64(1200), snap.ContextUsed)
 	require.Equal(t, int64(1200), snap.TotalTokens)
 }
 

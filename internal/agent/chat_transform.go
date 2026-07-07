@@ -47,6 +47,7 @@ type chatRequestState struct {
 	Files            []fantasy.FilePart
 	SystemPrompt     string
 	PromptPrefix     string
+	PromptSuffix     string
 	TransformChanged bool
 	EstimateReduced  bool
 }
@@ -125,10 +126,10 @@ func usageSnapshotFromMessages(msgs []message.Message, estimatedPromptTokens int
 		snap.TotalTokens = m.Usage.PromptTokens() + m.Usage.OutputTokens
 		break
 	}
-	// ContextUsed is max(last_total_tokens, estimated_prompt_tokens) to give
-	// plugins a single number to compare to EffectiveContextWindow.
+	// ContextUsed tracks the latest observed context length. Only fall back to
+	// the character estimate when no assistant usage is available yet.
 	ctxUsed := snap.TotalTokens
-	if estimatedPromptTokens > ctxUsed {
+	if ctxUsed <= 0 && estimatedPromptTokens > 0 {
 		ctxUsed = estimatedPromptTokens
 	}
 	snap.ContextUsed = ctxUsed
@@ -248,12 +249,15 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		return chatRequestState{}, err
 	}
 	slog.Debug("[PERF] buildChatRequestState: transformSystemPrompt done", "duration", time.Since(start), "session_id", input.SessionID)
+	var promptSuffix string
 	if autoModePrompt, ok := pendingAutoModePromptText(transformedMessages, input.PermissionMode); ok {
-		systemPrompt = joinSystemSections([]string{systemPrompt, autoModePrompt})
+		// Keep the main system prompt stable for prompt caching; inject the
+		// auto-mode reminder as a trailing system message instead.
+		promptSuffix = autoModePrompt
 	}
 	history, files := a.preparePrompt(transformedMessages, input.Attachments...)
 	files = filterImageFilesForModel(files, input.Model)
-	transformedEstimate := estimatePromptStateTokens(history, systemPrompt, promptPrefix)
+	transformedEstimate := estimatePromptStateTokens(history, systemPrompt, promptPrefix) + estimateStringTokens(promptSuffix)
 	slog.Debug("[PERF] buildChatRequestState: preparePrompt done", "duration", time.Since(start), "session_id", input.SessionID)
 	slog.Debug("Built chat request token estimate",
 		"session_id", input.SessionID,
@@ -270,6 +274,7 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		"estimate_reduced", transformedEstimate < originalEstimate,
 		"system_prompt_tokens", estimateStringTokens(systemPrompt),
 		"prompt_prefix_tokens", estimateStringTokens(promptPrefix),
+		"prompt_suffix_tokens", estimateStringTokens(promptSuffix),
 	)
 	return chatRequestState{
 		Messages:     transformedMessages,
@@ -277,6 +282,7 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		Files:        files,
 		SystemPrompt: systemPrompt,
 		PromptPrefix: promptPrefix,
+		PromptSuffix: promptSuffix,
 		TransformChanged: !reflect.DeepEqual(transformedMessages, input.Messages) ||
 			systemPrompt != input.SystemPrompt ||
 			promptPrefix != input.PromptPrefix,

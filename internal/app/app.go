@@ -32,6 +32,7 @@ import (
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/format"
+	"github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -78,6 +79,7 @@ type App struct {
 	MemoryEngine  *engine.Engine
 
 	AgentCoordinator agent.Coordinator
+	GoalRuntime      *goal.Runtime
 
 	LSPManager *lsp.Manager
 
@@ -140,12 +142,14 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	}
 	basePermissions := permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, nil)
 	pluginRuntime := plugin.NewRuntime()
+	goalRuntime := goal.NewRuntime(sessions)
 
 	app = &App{
-		Sessions:  sessions,
-		Messages:  messages,
-		History:   files,
-		UserInput: userinput.NewService(),
+		Sessions:    sessions,
+		Messages:    messages,
+		GoalRuntime: goalRuntime,
+		History:     files,
+		UserInput:   userinput.NewService(),
 		Permissions: autopermission.New(basePermissions, sessions, pluginRuntime, func() permission.Classifier {
 			if app == nil || app.AgentCoordinator == nil {
 				return nil
@@ -880,6 +884,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.Timeline,
 		app.PluginRuntime,
 		app.MemoryEngine,
+		app.GoalRuntime,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)

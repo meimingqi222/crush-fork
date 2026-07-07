@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -295,7 +296,7 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 		if a.message.IsSummaryMessage {
 			a.summaryBoxStart = summaryStart
 			messageParts = append(messageParts, a.renderSummary(content, width))
-		} else if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasToolCall(tools.PlanExitToolName) {
+		} else if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasPlanExitOrResolveApply() {
 			messageParts = append(messageParts, a.renderPlan(plan, width))
 		} else {
 			messageParts = append(messageParts, a.renderMarkdown(content, width))
@@ -476,6 +477,30 @@ func (a *AssistantMessageItem) renderPlan(plan string, width int) string {
 func (a *AssistantMessageItem) hasToolCall(toolName string) bool {
 	for _, toolCall := range a.message.ToolCalls() {
 		if toolCall.Name == toolName {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPlanExitOrResolveApply reports whether the message contains a plan_exit
+// tool call or a resolve tool call with action "apply".
+func (a *AssistantMessageItem) hasPlanExitOrResolveApply() bool {
+	if a.hasToolCall(tools.PlanExitToolName) {
+		return true
+	}
+	type resolveInput struct {
+		Action string `json:"action"`
+	}
+	for _, tc := range a.message.ToolCalls() {
+		if tc.Name != tools.ResolveToolName {
+			continue
+		}
+		var input resolveInput
+		if err := json.Unmarshal([]byte(tc.Input), &input); err != nil {
+			continue
+		}
+		if input.Action == "apply" {
 			return true
 		}
 	}

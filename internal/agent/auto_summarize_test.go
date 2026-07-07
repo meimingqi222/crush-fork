@@ -416,6 +416,7 @@ func TestRunFallbackEstimateIncludesSystemPromptAndUserPrompt(t *testing.T) {
 		nil,
 		systemPrompt,
 		"",
+		"",
 	)
 	require.Equal(t, expected, savedSession.LastPromptTokens)
 }
@@ -452,6 +453,7 @@ func TestSummarizeFallbackEstimateIncludesFullSummaryRequest(t *testing.T) {
 		nil,
 		string(summaryPrompt),
 		promptPrefix,
+		"",
 	)
 
 	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)

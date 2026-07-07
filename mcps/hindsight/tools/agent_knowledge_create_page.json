@@ -1,0 +1,27 @@
+{
+  "name": "agent_knowledge_create_page",
+  "description": "Create a new knowledge page. The source_query is a question the system re-asks after each consolidation to rebuild the page from conversation observations. Pages auto-update as you have more conversations.",
+  "inputSchema": {
+    "properties": {
+      "page_id": {
+        "title": "Page Id",
+        "type": "string"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      },
+      "source_query": {
+        "title": "Source Query",
+        "type": "string"
+      }
+    },
+    "required": [
+      "page_id",
+      "name",
+      "source_query"
+    ],
+    "title": "agent_knowledge_create_pageArguments",
+    "type": "object"
+  }
+}

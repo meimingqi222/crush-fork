@@ -1,0 +1,17 @@
+{
+  "name": "agent_knowledge_ingest_file",
+  "description": "Ingest a file from disk into your memory bank. Reads the file and uploads its full content. The filename becomes the document ID.",
+  "inputSchema": {
+    "properties": {
+      "file_path": {
+        "title": "File Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "file_path"
+    ],
+    "title": "agent_knowledge_ingest_fileArguments",
+    "type": "object"
+  }
+}

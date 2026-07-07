@@ -34,7 +34,20 @@ func (s ModeState) CurrentModeID() string {
 }
 
 func (s ModeState) IsPlanMode() bool {
+	return s.IsActivePlanMode()
+}
+
+func (s ModeState) IsActivePlanMode() bool {
 	return NormalizeCollaborationMode(string(s.CollaborationMode)) == CollaborationModePlan
+}
+
+func (s ModeState) IsPlanFlow() bool {
+	switch NormalizeCollaborationMode(string(s.CollaborationMode)) {
+	case CollaborationModePlan, CollaborationModePlanPaused:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s ModeState) IsOrchestrateMode() bool {

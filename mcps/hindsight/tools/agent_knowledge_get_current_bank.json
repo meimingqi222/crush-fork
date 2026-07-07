@@ -1,0 +1,9 @@
+{
+  "name": "agent_knowledge_get_current_bank",
+  "description": "Get the current memory bank ID. This is the bank where conversations are retained and pages are stored. Use this to tell the user which bank their agent will be bound to.",
+  "inputSchema": {
+    "properties": {},
+    "title": "agent_knowledge_get_current_bankArguments",
+    "type": "object"
+  }
+}

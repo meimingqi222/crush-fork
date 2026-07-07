@@ -566,7 +566,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// pure in-memory operation that clears oversized tool output from
 		// older messages, preventing the stdin/stdout JSON payload from
 		// exceeding plugin buffer limits on session restore.
-		msgs = builtinPruneToolResults(msgs)
+		msgs = builtinPruneToolResultsWithProtection(msgs, a.planCompactionProtector(genCtx, call.SessionID))
 	}
 	slog.Debug("[PERF] sessionAgent: restored session context", "duration", time.Since(start), "session_id", call.SessionID)
 
@@ -592,7 +592,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// Estimate input tokens only. The shouldAutoSummarize function handles
 		// output token reservation internally, so we don't need to add maxOutputTokens here.
 		// This prevents double-counting the output reservation for large context models.
-		estimatedInput := a.estimateSessionPromptTokens(preflightState.History, call.Prompt, call.Attachments, agentTools, preflightState.SystemPrompt, preflightState.PromptPrefix)
+		estimatedInput := a.estimateSessionPromptTokens(preflightState.History, call.Prompt, call.Attachments, agentTools, preflightState.SystemPrompt, preflightState.PromptPrefix, preflightState.PromptSuffix)
 		if !preflightState.EstimateReduced {
 			estimatedInput = max(estimatedInput, currentSession.LastInputTokens())
 		}
@@ -942,7 +942,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// message count suggests pruning might be worthwhile.
 				if len(prepared.Messages) > builtinPruneRecentUserTurns*3 {
 					internalForPrune := message.FromFantasyMessages(prepared.Messages)
-					pruned := builtinPruneToolResults(internalForPrune)
+					pruned := builtinPruneToolResultsWithProtection(internalForPrune, a.planCompactionProtector(genCtx, call.SessionID))
 					// builtinPruneToolResults returns the same slice pointer when
 					// nothing was pruned — only reconvert if it actually changed.
 					if len(pruned) > 0 && &pruned[0] != &internalForPrune[0] {
@@ -960,6 +960,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						prepared.Tools,
 						requestState.SystemPrompt,
 						requestState.PromptPrefix,
+						requestState.PromptSuffix,
 					)
 					internalMsgs := message.FromFantasyMessages(prepared.Messages)
 					transformedMsgs, transformErr := a.plugins().TriggerChatMessagesTransform(callContext, plugin.ChatMessagesTransformInput{
@@ -994,6 +995,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							prepared.Tools,
 							requestState.SystemPrompt,
 							requestState.PromptPrefix,
+							requestState.PromptSuffix,
 						)
 						// If morph compression reduced tokens significantly, update the local
 						// session copy so follow-up auto-summarize checks use the reduced
@@ -1151,14 +1153,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 
 				lastSystemRoleInx := 0
+				mainSystemIndex := -1
 				systemMessageUpdated := false
 				for i, msg := range prepared.Messages {
-					// Only add cache control to the last message.
+					// Cache the main system prompt when we transition to history.
 					if msg.Role == fantasy.MessageRoleSystem {
 						lastSystemRoleInx = i
 					} else if !systemMessageUpdated {
-						prepared.Messages[lastSystemRoleInx].ProviderOptions = a.getCacheControlOptions()
+						mainSystemIndex = lastSystemRoleInx
+						prepared.Messages[mainSystemIndex].ProviderOptions = a.getCacheControlOptions()
 						systemMessageUpdated = true
+					}
+					if systemMessageUpdated && mainSystemIndex >= 0 {
+						// Add periodic cache breakpoints every N messages after the
+						// main system prompt so long conversations form a ladder of
+						// cacheable prefixes instead of only caching the tail.
+						historyIndex := i - mainSystemIndex
+						if historyIndex > 0 && historyIndex%cacheBreakpointInterval == 0 {
+							prepared.Messages[i].ProviderOptions = a.getCacheControlOptions()
+						}
 					}
 					// Than add cache control to the last 2 messages.
 					if i > len(prepared.Messages)-3 {
@@ -1168,6 +1181,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 				if requestState.PromptPrefix != "" {
 					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(requestState.PromptPrefix)}, prepared.Messages...)
+				}
+				if requestState.PromptSuffix != "" {
+					prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(requestState.PromptSuffix))
 				}
 				if isAnthropicStyleProtocolProvider(largeModel) {
 					var sanitized bool
@@ -1216,6 +1232,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					attachmentsForEstimate,
 					prepared.Tools,
 					requestState.SystemPrompt,
+					"",
 					"",
 				)
 				promptBudget := promptTokenBudgetForModel(largeModel, call.MaxOutputTokens)
@@ -1438,6 +1455,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				completedStepsThisRun++
 				currentSession = updatedSession
 				normalizedUsage := normalizedMessageUsage(usage, usageProvider(largeModel), estimatedPromptTokens)
+				logContextUsageDiagnostic(contextUsageDiagnosticInput{
+					SessionID:             call.SessionID,
+					Model:                 largeModel,
+					ProviderUsage:         stepResult.Usage,
+					NormalizedUsage:       normalizedUsage,
+					EstimatedPromptTokens: estimatedPromptTokens,
+					UsageEstimated:        estimated,
+					PreparedMessageCount:  len(stepMessages),
+				})
 				slog.Debug("Updated assistant usage from provider response",
 					"session_id", call.SessionID,
 					"message_id", currentAssistant.ID,
@@ -1450,10 +1476,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					"provider_cache_read_tokens", stepResult.Usage.CacheReadTokens,
 					"provider_cache_creation_tokens", stepResult.Usage.CacheCreationTokens,
 					"estimated_prompt_tokens", estimatedPromptTokens,
+					"usage_estimated", estimated,
 					"normalized_prompt_tokens", normalizedUsage.PromptTokens(),
 					"normalized_output_tokens", normalizedUsage.OutputTokens,
 					"normalized_reasoning_tokens", normalizedUsage.ReasoningTokens,
 					"normalized_total_tokens", normalizedUsage.PromptTokens()+normalizedUsage.OutputTokens,
+					"display_total_tokens", normalizedUsage.PromptTokens()+normalizedUsage.OutputTokens,
+					"context_window", effectiveContextWindow(largeModel),
 				)
 				currentAssistant.SetUsage(normalizedUsage)
 				updateErr := a.messages.Update(genCtx, *currentAssistant)
@@ -2676,7 +2705,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// Prune old tool results before sending to plugins during
 	// summarization. Without this, the full unpruned payload sent
 	// to transforms can exceed plugin buffer limits on large sessions.
-	msgs = builtinPruneToolResults(msgs)
+	msgs = builtinPruneToolResultsWithProtection(msgs, a.planCompactionProtector(ctx, sessionID))
 
 	// Filter out non-text content if the summary model doesn't support images
 	if !summaryModel.CatwalkCfg.SupportsImages {
@@ -2818,6 +2847,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		nil,
 		string(summaryPrompt),
 		systemPromptPrefix,
+		"",
 	)
 	if summarizeEstimatedPromptTokens > 0 {
 		summaryMessage.SetUsage(message.Usage{InputTokens: summarizeEstimatedPromptTokens})
@@ -3027,6 +3057,21 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	return err
 }
 
+func (a *sessionAgent) planCompactionProtector(ctx context.Context, sessionID string) func(message.ToolResult) bool {
+	if a == nil || a.sessions == nil || sessionID == "" {
+		return nil
+	}
+	sess, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
+	if workspaceRoot == "" {
+		workspaceRoot = a.workingDir
+	}
+	return planCompactionProtector(workspaceRoot, sessionID, sess.PlanFilePath)
+}
+
 // shouldAutoSummarizeWithCooldown wraps shouldAutoSummarize with a cooldown period
 // after compaction to prevent immediate re-summarization. This is the root-cause fix
 // for the issue where LastPromptTokens reflects the pre-compaction input size.
@@ -3097,6 +3142,12 @@ func (a *sessionAgent) RespondAsBackground(ctx context.Context, from, message st
 	}
 	return reply, nil
 }
+
+// cacheBreakpointInterval controls how often we place Anthropic/Bedrock cache
+// control breakpoints in the message history. A value of 4 means every 4
+// messages after the main system prompt, creating a ladder of cacheable
+// prefixes for long conversations.
+const cacheBreakpointInterval = 4
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
 	if t, _ := strconv.ParseBool(os.Getenv("CRUSH_DISABLE_ANTHROPIC_CACHE")); t {
