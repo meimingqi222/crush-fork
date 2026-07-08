@@ -62,8 +62,13 @@ func ResolveLocalPlanURI(workspaceRoot, sessionID, uri string) (string, error) {
 // SlugFromPlanPath extracts the slug from an absolute plan file path for the
 // given workspace and session. It returns the slug and true if the path is a
 // recognized plan file for the session.
+//
+// The plan filename pattern is <sessionID>-<slug>.md inside the plans
+// directory. The prefix is therefore "<plansDir>/<sessionID>-" — not the
+// fully-rendered default filename (which would make HasPrefix match only the
+// default file and never a custom slug).
 func SlugFromPlanPath(workspaceRoot, sessionID, path string) (string, bool) {
-	prefix := PlanFilePath(workspaceRoot, sessionID, "")
+	prefix := filepath.Join(PlansDir(workspaceRoot), sanitizeSlug(sessionID)) + "-"
 	clean, err := filepath.Abs(path)
 	if err != nil {
 		clean = path
@@ -72,10 +77,15 @@ func SlugFromPlanPath(workspaceRoot, sessionID, path string) (string, bool) {
 	if !strings.HasPrefix(clean, prefix) {
 		return "", false
 	}
+	if !strings.HasSuffix(clean, ".md") {
+		return "", false
+	}
 	slug := strings.TrimPrefix(clean, prefix)
-	slug = strings.TrimSuffix(slug, "-plan.md")
 	slug = strings.TrimSuffix(slug, ".md")
-	return slug, slug != ""
+	if slug == "" {
+		return "", false
+	}
+	return slug, true
 }
 
 // EnsureDir creates the plans directory if it does not exist.
