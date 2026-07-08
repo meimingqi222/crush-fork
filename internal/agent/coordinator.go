@@ -3760,8 +3760,19 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	// Track worktree for cleanup after subagent completes.
 	usedWorktree := effectiveIsolation == "worktree" && subSession.WorkspaceCWD != parentSession.WorkspaceCWD
 	if usedWorktree {
+		// Capture the parent work dir and worktree path for the deferred
+		// merge-back. Patch mode is the default; branch mode (preserving
+		// subagent commits) is opt-in via the per-task isolation override.
+		parentWorkDir := parentSession.WorkspaceCWD
+		if parentWorkDir == "" {
+			parentWorkDir = c.cfg.WorkingDir()
+		}
+		worktreePath := subSession.WorkspaceCWD
 		defer func() {
-			c.cleanupWorktreeIfNeeded(subSession.WorkspaceCWD)
+			result := c.cleanupWorktreeIfNeeded(context.Background(), parentWorkDir, worktreePath, MergeBackModePatch)
+			if result.Message != "" {
+				slog.Info("Subagent worktree merge-back", "success", result.Success, "message", result.Message)
+			}
 		}()
 	}
 
@@ -4175,27 +4186,41 @@ func (c *coordinator) hasWorktreeChanges(worktreeDir string) (bool, error) {
 	return len(strings.TrimSpace(string(output))) > 0, nil
 }
 
-// cleanupWorktreeIfNeeded removes a worktree if it has no changes.
-func (c *coordinator) cleanupWorktreeIfNeeded(worktreeDir string) {
+// cleanupWorktreeIfNeeded merges a worktree's changes back into the parent's
+// working tree (if it has changes) and then removes the worktree. If the
+// merge-back fails, the worktree is preserved for manual resolution.
+func (c *coordinator) cleanupWorktreeIfNeeded(ctx context.Context, parentWorkDir, worktreeDir string, mode MergeBackMode) MergeBackResult {
 	worktreeDir = strings.TrimSpace(worktreeDir)
 	if worktreeDir == "" {
-		return
+		return MergeBackResult{Message: "worktree dir is empty, skipping cleanup"}
 	}
 
 	hasChanges, err := c.hasWorktreeChanges(worktreeDir)
 	if err != nil {
 		slog.Warn("Failed to check worktree changes, skipping cleanup", "path", worktreeDir, "error", err)
-		return
+		return MergeBackResult{Message: fmt.Sprintf("failed to check worktree changes: %v", err)}
 	}
 
-	if hasChanges {
-		slog.Debug("Worktree has changes, preserving", "path", worktreeDir)
-		return
+	if !hasChanges {
+		// No changes — just remove the worktree.
+		if removeErr := c.removeSubagentWorktree(worktreeDir); removeErr != nil {
+			slog.Warn("Failed to cleanup worktree", "path", worktreeDir, "error", removeErr)
+		}
+		return MergeBackResult{Success: true, Message: "worktree had no changes, removed"}
 	}
 
-	if err := c.removeSubagentWorktree(worktreeDir); err != nil {
-		slog.Warn("Failed to cleanup worktree", "path", worktreeDir, "error", err)
+	// Has changes — merge back into parent.
+	result := c.mergeBackWorktree(ctx, parentWorkDir, worktreeDir, mode)
+	if result.Success {
+		// Merge succeeded — remove the worktree.
+		if removeErr := c.removeSubagentWorktree(worktreeDir); removeErr != nil {
+			slog.Warn("Failed to remove worktree after successful merge", "path", worktreeDir, "error", removeErr)
+		}
+	} else {
+		// Merge failed — preserve the worktree for manual resolution.
+		slog.Warn("Merge-back failed, preserving worktree", "path", worktreeDir, "message", result.Message)
 	}
+	return result
 }
 
 // CleanupStaleWorktrees removes worktrees older than the cutoff duration.
