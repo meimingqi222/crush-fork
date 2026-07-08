@@ -2610,33 +2610,15 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 				break
 			}
 		}
-		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
-			if goal.IsActive() || goal.Status == session.GoalStatusPaused {
-				return goal, "", errors.New("a goal is already active; drop or complete it first")
-			}
-			now := time.Now().Unix()
-			return session.Goal{
-				ID:          session.NewGoalID(),
-				Text:        strings.TrimSpace(msg.Goal),
-				Status:      session.GoalStatusActive,
-				TokenBudget: msg.Budget,
-				CreatedAt:   now,
-				UpdatedAt:   now,
-			}, "Goal set.", nil
+		objective := strings.TrimSpace(msg.Goal)
+		budget := msg.Budget
+		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal set.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.CreateGoal(ctx, sid, objective, budget)
 		}))
 	case dialog.ActionSetGoalBudget:
-		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
-			if goal.Status == "" {
-				return goal, "", errors.New("no goal is currently set")
-			}
-			goal.TokenBudget = msg.Budget
-			if goal.IsBudgetExhausted() && goal.Status == session.GoalStatusActive {
-				goal.Status = session.GoalStatusBudgetLimited
-			} else if !goal.IsBudgetExhausted() && goal.Status == session.GoalStatusBudgetLimited {
-				goal.Status = session.GoalStatusActive
-			}
-			goal.UpdatedAt = time.Now().Unix()
-			return goal, "Goal budget updated.", nil
+		budget := msg.Budget
+		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal budget updated.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.SetBudgetGoal(ctx, sid, budget)
 		}))
 		m.dialog.CloseDialog(dialog.GoalBudgetID)
 	case dialog.ActionStartGuidedGoal:
@@ -2657,10 +2639,8 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, util.ReportWarn("No active goal to pause."))
 			break
 		}
-		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
-			goal.Status = session.GoalStatusPaused
-			goal.UpdatedAt = time.Now().Unix()
-			return goal, "Goal paused.", nil
+		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal paused.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.PauseGoal(ctx, sid)
 		}))
 	case dialog.ActionResumeGoal:
 		if m.session == nil {
@@ -2674,10 +2654,8 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, util.ReportWarn("No paused or budget-limited goal to resume."))
 			break
 		}
-		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
-			goal.Status = session.GoalStatusActive
-			goal.UpdatedAt = time.Now().Unix()
-			return goal, "Goal resumed.", nil
+		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal resumed.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.ResumeGoal(ctx, sid)
 		}))
 	case dialog.ActionDropGoal:
 		if m.session == nil {
@@ -2687,8 +2665,8 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, util.ReportWarn("No goal to drop."))
 			break
 		}
-		cmds = append(cmds, m.updateGoal(msg.SessionID, func(goal session.Goal) (session.Goal, string, error) {
-			return session.Goal{}, "Goal dropped.", nil
+		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal dropped.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.DropGoal(ctx, sid)
 		}))
 	case dialog.ActionToggleNotifications:
 		cfg := m.com.Config()
@@ -5144,22 +5122,23 @@ func (m *UI) executeApprovedPlan(sessionID, plan string, mode planmode.Execution
 	)
 }
 
-func (m *UI) updateGoal(sessionID string, mutate func(session.Goal) (session.Goal, string, error)) tea.Cmd {
+// runGoalOp routes a UI-triggered goal state transition through goal.Runtime
+// so wall-clock accounting (settleWallClockToNow/startWallClock/stopWallClock)
+// and status transitions stay consistent with the runtime's invariants.
+// Previously these actions hand-rolled the transition via Sessions.Get/Save,
+// desyncing the runtime's in-memory wall-clock state from persisted status.
+func (m *UI) runGoalOp(sessionID, status string, op func(context.Context, string) (session.Goal, error)) tea.Cmd {
 	return func() tea.Msg {
+		if _, err := op(context.Background(), sessionID); err != nil {
+			return goalUpdatedMsg{Err: err}
+		}
+		// goal.Runtime methods Save the session internally; re-fetch so
+		// goalUpdatedMsg carries the updated session state.
 		sess, err := m.com.App.Sessions.Get(context.Background(), sessionID)
 		if err != nil {
 			return goalUpdatedMsg{Err: err}
 		}
-		goal, status, err := mutate(sess.Goal)
-		if err != nil {
-			return goalUpdatedMsg{Err: err}
-		}
-		sess.Goal = goal
-		updated, err := m.com.App.Sessions.Save(context.Background(), sess)
-		if err != nil {
-			return goalUpdatedMsg{Err: err}
-		}
-		return goalUpdatedMsg{Session: updated, Status: status}
+		return goalUpdatedMsg{Session: sess, Status: status}
 	}
 }
 
@@ -5212,12 +5191,8 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 		if objective == "" {
 			return m.openGoalDialog(), true
 		}
-		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
-			if goal.IsActive() || goal.Status == session.GoalStatusPaused {
-				return goal, "", errors.New("a goal is already active; drop or complete it first")
-			}
-			now := time.Now().Unix()
-			return session.Goal{ID: session.NewGoalID(), Text: objective, Status: session.GoalStatusActive, TokenBudget: budget, CreatedAt: now, UpdatedAt: now}, "Goal set.", nil
+		return m.runGoalOp(m.session.ID, "Goal set.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.CreateGoal(ctx, sid, objective, budget)
 		}), true
 	case "replace":
 		if cmd, blocked := m.goalSlashBlocked("replace"); blocked {
@@ -5230,23 +5205,8 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 		if objective == "" {
 			return m.openGoalDialog(), true
 		}
-		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
-			now := time.Now().Unix()
-			if goal.Status == "" {
-				return session.Goal{ID: session.NewGoalID(), Text: objective, Status: session.GoalStatusActive, TokenBudget: budget, CreatedAt: now, UpdatedAt: now}, "Goal replaced.", nil
-			}
-			preservedTokensUsed := goal.TokensUsed
-			preservedTimeSeconds := goal.TimeSeconds
-			if budget > 0 {
-				goal.TokenBudget = budget
-			}
-			goal.ID = session.NewGoalID()
-			goal.Text = objective
-			goal.Status = session.GoalStatusActive
-			goal.TokensUsed = preservedTokensUsed
-			goal.TimeSeconds = preservedTimeSeconds
-			goal.UpdatedAt = now
-			return goal, "Goal replaced.", nil
+		return m.runGoalOp(m.session.ID, "Goal replaced.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.ReplaceGoal(ctx, sid, objective, budget)
 		}), true
 	case "guided":
 		if cmd, blocked := m.goalSlashBlocked("guided"); blocked {
@@ -5261,35 +5221,22 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 		if cmd, blocked := m.goalSlashBlocked("pause"); blocked {
 			return cmd, true
 		}
-		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
-			if !goal.IsActive() {
-				return goal, "", errors.New("no active goal to pause")
-			}
-			goal.Status = session.GoalStatusPaused
-			goal.UpdatedAt = time.Now().Unix()
-			return goal, "Goal paused.", nil
+		return m.runGoalOp(m.session.ID, "Goal paused.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.PauseGoal(ctx, sid)
 		}), true
 	case "resume":
 		if cmd, blocked := m.goalSlashBlocked("resume"); blocked {
 			return cmd, true
 		}
-		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
-			if goal.Status != session.GoalStatusPaused && goal.Status != session.GoalStatusBudgetLimited {
-				return goal, "", errors.New("no paused or budget-limited goal to resume")
-			}
-			goal.Status = session.GoalStatusActive
-			goal.UpdatedAt = time.Now().Unix()
-			return goal, "Goal resumed.", nil
+		return m.runGoalOp(m.session.ID, "Goal resumed.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.ResumeGoal(ctx, sid)
 		}), true
 	case "drop":
 		if cmd, blocked := m.goalSlashBlocked("drop"); blocked {
 			return cmd, true
 		}
-		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
-			if goal.Status == "" {
-				return goal, "", errors.New("no goal to drop")
-			}
-			return session.Goal{}, "Goal dropped.", nil
+		return m.runGoalOp(m.session.ID, "Goal dropped.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.DropGoal(ctx, sid)
 		}), true
 	case "budget":
 		if cmd, blocked := m.goalSlashBlocked("budget"); blocked {
@@ -5302,18 +5249,8 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 		if err != nil {
 			return util.ReportError(err), true
 		}
-		return m.updateGoal(m.session.ID, func(goal session.Goal) (session.Goal, string, error) {
-			if goal.Status == "" {
-				return goal, "", errors.New("no goal is currently set")
-			}
-			goal.TokenBudget = budget
-			if goal.IsBudgetExhausted() && goal.Status == session.GoalStatusActive {
-				goal.Status = session.GoalStatusBudgetLimited
-			} else if !goal.IsBudgetExhausted() && goal.Status == session.GoalStatusBudgetLimited {
-				goal.Status = session.GoalStatusActive
-			}
-			goal.UpdatedAt = time.Now().Unix()
-			return goal, "Goal budget updated.", nil
+		return m.runGoalOp(m.session.ID, "Goal budget updated.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.SetBudgetGoal(ctx, sid, budget)
 		}), true
 	default:
 		return util.ReportWarn("Unknown /goal command. Use set, replace, show, pause, resume, drop, budget, or guided."), true
