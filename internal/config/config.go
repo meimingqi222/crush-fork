@@ -1397,13 +1397,10 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 	return filterSlice(allTools, disabledTools, false)
 }
 
-func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"bash", "glob", "grep", "read", "tool_search"}
-	// filter to only include tools that are in allowedtools (include mode)
-	return filterSlice(tools, readOnlyTools, true)
-}
-
-var readOnlyResearchToolNames = []string{
+// ReadOnlyResearchToolNames is the set of tools treated as read-only for
+// subagent permission decisions. It is used by the agent runtime to decide
+// whether a configured agent with a custom AllowedTools list is read-only.
+var ReadOnlyResearchToolNames = []string{
 	"bash",
 	"glob",
 	"grep",
@@ -1413,12 +1410,25 @@ var readOnlyResearchToolNames = []string{
 	"tool_search",
 }
 
+var readOnlyExploreToolNames = []string{
+	"bash",
+	"glob",
+	"grep",
+	"read",
+	"tool_search",
+}
+
+func resolveReadOnlyTools(tools []string) []string {
+	// filter to only include tools that are in allowedtools (include mode)
+	return filterSlice(tools, readOnlyExploreToolNames, true)
+}
+
 func resolvePlanningTools(tools []string) []string {
-	return filterSlice(tools, readOnlyResearchToolNames, true)
+	return filterSlice(tools, ReadOnlyResearchToolNames, true)
 }
 
 func resolveReviewTools(tools []string) []string {
-	return filterSlice(tools, readOnlyResearchToolNames, true)
+	return filterSlice(tools, ReadOnlyResearchToolNames, true)
 }
 
 func resolvePrimaryTools(tools []string) []string {

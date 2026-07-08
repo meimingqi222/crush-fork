@@ -138,7 +138,7 @@ func TestApplySubagentRuntimeConfig_DoesNotAllowReadOnlyAgentsToSpawn(t *testing
 	ctx := buildSubagentRuntimeContext(
 		"parent-1", "child-1", "msg-1", "tc-1",
 		subagentTask{Name: "t1", Description: "test"},
-		config.Agent{ID: config.AgentReview, Mode: config.AgentModeSubagent, AllowedTools: []string{AgentToolName, "read"}},
+		config.Agent{ID: config.AgentReview, Mode: config.AgentModeSubagent, AllowedTools: []string{"read"}},
 		ParentPermissionContext{AllowedTools: []string{AgentToolName, "read"}},
 		[]string{AgentToolName, "read"},
 		"session",

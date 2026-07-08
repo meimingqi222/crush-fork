@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/charmbracelet/crush/internal/agent/tools"
 )
 
 // MergeBackMode controls how subagent worktree changes are merged back
@@ -23,12 +26,6 @@ const (
 	// applies it onto the parent's working tree via git apply. Does not
 	// preserve subagent commit history.
 	MergeBackModePatch MergeBackMode = "patch"
-	// MergeBackModeBranch cherry-picks the subagent's commits onto the
-	// parent's current branch, preserving commit history and authorship.
-	// Aborts on the first conflicting commit and leaves the branch
-	// preserved for manual resolution. Falls back to patch mode when the
-	// subagent made no commits.
-	MergeBackModeBranch MergeBackMode = "branch"
 )
 
 // MergeBackResult describes the outcome of a merge-back operation.
@@ -38,8 +35,6 @@ type MergeBackResult struct {
 	Message       string
 	ConflictFile  string // first conflicting file, best-effort extraction
 	SavedDiffPath string // where the diff was saved on apply failure
-	LandedCommits int    // branch mode: commits cherry-picked successfully
-	TotalCommits  int    // branch mode: total commits in worktree branch
 }
 
 // repoLocksMu guards the repoLocks map.
@@ -54,7 +49,7 @@ var repoLocks = make(map[string]*sync.Mutex)
 // repoLockFor returns the mutex for the given git root, allocating one on
 // first use.
 func repoLockFor(gitRoot string) *sync.Mutex {
-	cleaned := filepath.Clean(gitRoot)
+	cleaned := tools.CanonicalLockKey(gitRoot)
 	repoLocksMu.Lock()
 	defer repoLocksMu.Unlock()
 	mu, ok := repoLocks[cleaned]
@@ -88,11 +83,13 @@ func worktreeBranchName(worktreeDir string) string {
 // parent's working tree. The merge is serialized by a per-repo lock so
 // concurrent subagent completions don't corrupt each other's merges.
 //
-// Pre-existing dirty state in the parent's working tree is stashed before
-// applying and restored after, so merged changes never silently fold into
-// or overwrite in-flight user edits.
-func (c *coordinator) mergeBackWorktree(ctx context.Context, parentWorkDir, worktreeDir string, mode MergeBackMode) MergeBackResult {
-	result := MergeBackResult{Mode: mode}
+// Before merging, the parent working tree files that the patch will touch
+// are stashed (and restored afterward) so that merged changes never silently
+// fold into, or overwrite, in-flight user edits. File-path locks are held for
+// every file in the patch so that merge-back does not race concurrent
+// Write/Edit/Download operations on the same paths.
+func (c *coordinator) mergeBackWorktree(ctx context.Context, parentWorkDir, worktreeDir string) (result MergeBackResult) {
+	result = MergeBackResult{Mode: MergeBackModePatch}
 
 	gitRoot, err := resolveGitRoot(parentWorkDir)
 	if err != nil {
@@ -119,10 +116,35 @@ func (c *coordinator) mergeBackWorktree(ctx context.Context, parentWorkDir, work
 		return result
 	}
 
-	// Stash any pre-existing dirty state in the parent's working tree so
-	// the apply/cherry-pick operates on a clean tree and merged changes
-	// never silently fold into or overwrite in-flight user edits.
-	stashed, stashErr := gitStashPush(gitRoot)
+	// Stage all changes in the worktree so that untracked files appear in
+	// the diff and in the file list used for locking.
+	if _, addErr := exec.Command("git", "-C", worktreeDir, "add", "-A").CombinedOutput(); addErr != nil {
+		result.Message = fmt.Sprintf("merge-back failed to stage worktree changes: %v", addErr)
+		return result
+	}
+
+	names, err := gitDiffNamesInWorktree(worktreeDir, branchPoint)
+	if err != nil {
+		result.Message = fmt.Sprintf("merge-back failed to list changed files: %v", err)
+		return result
+	}
+
+	absPaths := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		absPaths = append(absPaths, filepath.Join(gitRoot, name))
+	}
+	if len(absPaths) > 0 {
+		unlock := tools.LockFilePaths(absPaths)
+		defer unlock()
+	}
+
+	// Stash any pre-existing dirty state in the touched parent files so
+	// the apply operates on a clean tree and merged changes never silently
+	// fold into or overwrite in-flight user edits.
+	stashed, stashErr := gitStashPush(gitRoot, names)
 	if stashErr != nil {
 		result.Message = fmt.Sprintf("merge-back failed to stash parent state: %v", stashErr)
 		return result
@@ -142,12 +164,7 @@ func (c *coordinator) mergeBackWorktree(ctx context.Context, parentWorkDir, work
 		}
 	}()
 
-	switch mode {
-	case MergeBackModeBranch:
-		result = c.mergeBackBranch(ctx, gitRoot, worktreeDir, branch, branchPoint)
-	default:
-		result = c.mergeBackPatch(ctx, gitRoot, worktreeDir, branchPoint)
-	}
+	result = c.mergeBackPatch(ctx, gitRoot, worktreeDir, branchPoint)
 	return result
 }
 
@@ -187,45 +204,6 @@ func (c *coordinator) mergeBackPatch(_ context.Context, gitRoot, worktreeDir, br
 	return result
 }
 
-// mergeBackBranch cherry-picks the subagent's commits onto the parent's
-// current branch, preserving commit history. Falls back to patch mode when
-// the subagent made no commits.
-func (c *coordinator) mergeBackBranch(ctx context.Context, gitRoot, worktreeDir, branch, branchPoint string) MergeBackResult {
-	result := MergeBackResult{Mode: MergeBackModeBranch}
-
-	commits, err := gitLogRange(gitRoot, branchPoint, branch)
-	if err != nil {
-		result.Message = fmt.Sprintf("branch merge-back: failed to list commits: %v", err)
-		return result
-	}
-	result.TotalCommits = len(commits)
-
-	if len(commits) == 0 {
-		// No commits — fall back to patch mode for working-tree changes.
-		patchResult := c.mergeBackPatch(ctx, gitRoot, worktreeDir, branchPoint)
-		patchResult.Mode = MergeBackModeBranch
-		return patchResult
-	}
-
-	// Cherry-pick commits in oldest-first order. Abort on first conflict.
-	landed := 0
-	for _, commit := range commits {
-		if cpErr := gitCherryPick(gitRoot, commit); cpErr != nil {
-			conflictFile := extractConflictFile(cpErr)
-			_ = gitCherryPickAbort(gitRoot)
-			result.LandedCommits = landed
-			result.ConflictFile = conflictFile
-			result.Message = fmt.Sprintf("branch merge-back: landed %d/%d commits, aborted on %s due to conflict on %q; branch %s preserved for manual resolution", landed, len(commits), shortHash(commit), conflictFile, branch)
-			return result
-		}
-		landed++
-	}
-	result.Success = true
-	result.LandedCommits = landed
-	result.Message = fmt.Sprintf("branch merge-back: cherry-picked %d commits successfully", landed)
-	return result
-}
-
 // gitMergeBase returns the merge-base of two commits in the given repo.
 func gitMergeBase(repo, a, b string) (string, error) {
 	out, err := exec.Command("git", "-C", repo, "merge-base", a, b).Output()
@@ -235,17 +213,44 @@ func gitMergeBase(repo, a, b string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// gitStashPush stashes any uncommitted changes in the repo. Returns true if
-// a stash entry was created, false if there was nothing to stash.
-func gitStashPush(repo string) (bool, error) {
-	statusOut, err := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+// gitRevParseHead returns the current HEAD commit for the given repo.
+func gitRevParseHead(repo string) (string, error) {
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitDiffStat returns a --stat summary of the diff from <from> to <to>.
+func gitDiffStat(repo, from, to string) (string, error) {
+	out, err := exec.Command("git", "-C", repo, "diff", "--stat", fmt.Sprintf("%s..%s", from, to)).Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff --stat %s..%s: %w", from, to, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitStashPush stashes changes to the given paths in the repo. Returns true
+// if a stash entry was created, false if there was nothing to stash.
+func gitStashPush(repo string, paths []string) (bool, error) {
+	if len(paths) == 0 {
+		return false, nil
+	}
+
+	statusArgs := []string{"-C", repo, "status", "--porcelain", "--"}
+	statusArgs = append(statusArgs, paths...)
+	statusOut, err := exec.Command("git", statusArgs...).Output()
 	if err != nil {
 		return false, fmt.Errorf("check stash status: %w", err)
 	}
 	if len(strings.TrimSpace(string(statusOut))) == 0 {
 		return false, nil
 	}
-	out, err := exec.Command("git", "-C", repo, "stash", "push", "--include-untracked", "-m", "crush-merge-back-stash").CombinedOutput()
+
+	stashArgs := []string{"-C", repo, "stash", "push", "--include-untracked", "-m", "crush-merge-back-stash", "--"}
+	stashArgs = append(stashArgs, paths...)
+	out, err := exec.Command("git", stashArgs...).CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("git stash push: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -279,6 +284,22 @@ func gitDiffInWorktree(worktreeDir, branchPoint string) (string, error) {
 	return string(out), nil
 }
 
+// gitDiffNamesInWorktree returns the names of files changed in the worktree
+// relative to the branch-point commit.
+func gitDiffNamesInWorktree(worktreeDir, branchPoint string) ([]string, error) {
+	out, err := exec.Command("git", "-C", worktreeDir, "diff", "--cached", "--name-only", branchPoint).Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff --cached --name-only %s: %w", branchPoint, err)
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if n := strings.TrimSpace(line); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names, nil
+}
+
 // gitApply applies a diff onto the repo's working tree.
 func gitApply(repo, diff string) error {
 	cmd := exec.Command("git", "-C", repo, "apply")
@@ -291,38 +312,11 @@ func gitApply(repo, diff string) error {
 	return nil
 }
 
-// gitLogRange returns the list of commit hashes in the range from..to,
-// oldest-first (for cherry-pick ordering).
-func gitLogRange(repo, from, to string) ([]string, error) {
-	out, err := exec.Command("git", "-C", repo, "log", "--reverse", "--format=%H", fmt.Sprintf("%s..%s", from, to)).Output()
-	if err != nil {
-		return nil, fmt.Errorf("git log %s..%s: %w", from, to, err)
-	}
-	var commits []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if h := strings.TrimSpace(line); h != "" {
-			commits = append(commits, h)
-		}
-	}
-	return commits, nil
-}
-
-// gitCherryPick cherry-picks a single commit onto the current branch.
-func gitCherryPick(repo, commit string) error {
-	out, err := exec.Command("git", "-C", repo, "cherry-pick", commit).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cherry-pick %s: %w: %s", shortHash(commit), err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// gitCherryPickAbort aborts an in-progress cherry-pick.
-func gitCherryPickAbort(repo string) error {
-	out, err := exec.Command("git", "-C", repo, "cherry-pick", "--abort").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cherry-pick --abort: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+var conflictFileRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`patch failed:\s*([^\s:]+)`),
+	regexp.MustCompile(`error:\s*([^\s:]+):\s*(?:does not match index|does not exist in index|patch does not apply|already exists in index|already exists in working directory)`),
+	regexp.MustCompile(`(?:Merge conflict|CONFLICT \(content\): Merge conflict) in\s+([^\s]+)`),
+	regexp.MustCompile(`conflict in\s+([^\s]+)`),
 }
 
 // extractConflictFile best-effort parses the conflicting file path from a
@@ -332,29 +326,12 @@ func extractConflictFile(err error) string {
 		return ""
 	}
 	msg := err.Error()
-	// git apply errors often contain: "patch failed: <file>" or
-	// "error: <file>: does not exist in index".
-	for _, marker := range []string{"patch failed: ", "does not match index: ", "conflict in "} {
-		if idx := strings.Index(msg, marker); idx >= 0 {
-			rest := msg[idx+len(marker):]
-			// Take up to first newline/space.
-			for i, r := range rest {
-				if r == '\n' || r == ' ' {
-					return rest[:i]
-				}
-			}
-			return strings.TrimSpace(rest)
+	for _, re := range conflictFileRegexes {
+		if matches := re.FindStringSubmatch(msg); matches != nil {
+			return matches[1]
 		}
 	}
 	return ""
-}
-
-// shortHash returns the first 8 chars of a git hash for logging.
-func shortHash(hash string) string {
-	if len(hash) >= 8 {
-		return hash[:8]
-	}
-	return hash
 }
 
 // saveFailedDiff writes a failed diff to the project's artifacts directory

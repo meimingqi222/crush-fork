@@ -85,9 +85,9 @@ func TestComputeBatchIsolationDefault(t *testing.T) {
 			want: "worktree",
 		},
 		{
-			name: "empty task list does not trigger",
+			name:  "empty task list does not trigger",
 			tasks: []subagentTask{},
-			want: "",
+			want:  "",
 		},
 	}
 
@@ -104,11 +104,11 @@ func TestResolveTaskIsolation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                string
-		taskIsolation       string
-		batchDefault        string
-		agentCfgIsolation   string
-		want                string
+		name              string
+		taskIsolation     string
+		batchDefault      string
+		agentCfgIsolation string
+		want              string
 	}{
 		{
 			name:              "task override wins over batch default and agent config",

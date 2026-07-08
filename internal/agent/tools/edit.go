@@ -108,21 +108,6 @@ func NewEditTool(
 			}
 
 			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
-			if params.Patch == "" {
-				if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, params.FilePath); blocked || guardErr != nil {
-					return response, guardErr
-				}
-			}
-
-			// Serialize concurrent writers to the same file path. This is
-			// a stopgap (P1.a) that removes undefined interleaving between
-			// concurrent "session"-isolated subagents racing on the same
-			// path. For patch mode the primary file path is locked; the
-			// patch applier handles multi-file patches atomically within
-			// this critical section.
-			pathMu := filePathLockFor(params.FilePath)
-			pathMu.Lock()
-			defer pathMu.Unlock()
 
 			var response fantasy.ToolResponse
 			var opErr error
@@ -130,17 +115,57 @@ func NewEditTool(
 			editCtx := editContext{ctx, permissions, files, filetracker, effectiveWorkingDir}
 
 			if params.Patch != "" {
+				// Parse the patch to determine the real files being touched and
+				// lock each one so that concurrent writers serialize on the
+				// actual target paths, not just the primary file_path.
+				patches, parseErr := ParseUnifiedPatch(params.Patch)
+				if parseErr != nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to parse unified patch: %v", parseErr)), nil
+				}
+				if len(patches) == 0 {
+					return fantasy.NewTextErrorResponse("No file patches found in unified patch content."), nil
+				}
+				pathSet := make(map[string]struct{})
+				for _, p := range patches {
+					pPath := p.NewPath
+					if pPath == "" {
+						pPath = p.OldPath
+					}
+					if pPath == "" || pPath == "/dev/null" {
+						pPath = params.FilePath
+					}
+					if pPath == "" {
+						return fantasy.NewTextErrorResponse("missing file path in patch header"), nil
+					}
+					absPath := filepathext.SmartJoin(effectiveWorkingDir, pPath)
+					pathSet[absPath] = struct{}{}
+				}
+				absPaths := make([]string, 0, len(pathSet))
+				for p := range pathSet {
+					absPaths = append(absPaths, p)
+				}
+				unlock := LockFilePaths(absPaths)
+				defer unlock()
 				response, opErr = applyUnifiedPatch(editCtx, params.FilePath, params.Patch, call)
-			} else if len(params.Operations) > 0 {
-				response, opErr = applyHashlineEdit(editCtx, params.FilePath, params.Operations, call)
-			} else if len(params.Edits) > 0 {
-				response, opErr = applyEditEntries(editCtx, params.FilePath, params.Edits, call)
-			} else if params.OldString == "" {
-				response, opErr = createNewFile(editCtx, params.FilePath, params.NewString, call)
-			} else if params.NewString == "" {
-				response, opErr = deleteContent(editCtx, params.FilePath, params.OldString, params.ReplaceAll, call)
 			} else {
-				response, opErr = replaceContent(editCtx, params.FilePath, params.OldString, params.NewString, params.ReplaceAll, call)
+				if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, params.FilePath); blocked || guardErr != nil {
+					return response, guardErr
+				}
+				// Serialize concurrent writers to the same file path.
+				pathMu := FilePathLockFor(params.FilePath)
+				pathMu.Lock()
+				defer pathMu.Unlock()
+				if len(params.Operations) > 0 {
+					response, opErr = applyHashlineEdit(editCtx, params.FilePath, params.Operations, call)
+				} else if len(params.Edits) > 0 {
+					response, opErr = applyEditEntries(editCtx, params.FilePath, params.Edits, call)
+				} else if params.OldString == "" {
+					response, opErr = createNewFile(editCtx, params.FilePath, params.NewString, call)
+				} else if params.NewString == "" {
+					response, opErr = deleteContent(editCtx, params.FilePath, params.OldString, params.ReplaceAll, call)
+				} else {
+					response, opErr = replaceContent(editCtx, params.FilePath, params.OldString, params.NewString, params.ReplaceAll, call)
+				}
 			}
 
 			if opErr != nil {

@@ -118,6 +118,11 @@ func NewDownloadTool(permissions permission.Service, workingDir string, client *
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
 			}
 
+			// Serialize concurrent writers to the same file path.
+			pathMu := FilePathLockFor(filePath)
+			pathMu.Lock()
+			defer pathMu.Unlock()
+
 			// Create the output file
 			outFile, err := os.Create(filePath)
 			if err != nil {

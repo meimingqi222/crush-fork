@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/timeline"
 )
@@ -224,7 +225,7 @@ func subagentProfileForAgent(agentCfg config.Agent) SubagentProfile {
 		Description: strings.TrimSpace(agentCfg.Description),
 		Mode:        string(config.NormalizeAgentMode(agentCfg.Mode)),
 		CanSpawn:    len(agentCfg.Spawns) > 0,
-		ReadOnly:    subagentIDIsReadOnly(canonicalID),
+		ReadOnly:    isReadOnlyRuntime(agentCfg),
 		ToolNames:   append([]string(nil), agentCfg.AllowedTools...),
 		Spawns:      append([]string(nil), agentCfg.Spawns...),
 	}
@@ -245,13 +246,57 @@ func subagentProfileForAgent(agentCfg config.Agent) SubagentProfile {
 	return profile
 }
 
-func subagentIDIsReadOnly(canonicalID string) bool {
+// isReadOnlyAgentID is the fallback for agents without an explicit
+// AllowedTools list. It matches the built-in read-only subagent IDs.
+func isReadOnlyAgentID(canonicalID string) bool {
 	switch canonicalID {
 	case config.AgentExplore, config.AgentPlan, config.AgentReview, config.AgentLibrarian:
 		return true
 	default:
 		return false
 	}
+}
+
+// isReadOnlyRuntime determines whether an agent is read-only from its resolved
+// AllowedTools list, falling back to the built-in profile for the canonical ID
+// when no tool list is configured.
+func isReadOnlyRuntime(agentCfg config.Agent) bool {
+	if len(agentCfg.AllowedTools) == 0 {
+		if strings.TrimSpace(agentCfg.ID) == "" {
+			return false
+		}
+		return isReadOnlyAgentID(config.RequestedSubagentID(agentCfg.ID))
+	}
+
+	readOnlyTools := map[string]struct{}{
+		agenttools.BashToolName:             {},
+		agenttools.GlobToolName:             {},
+		agenttools.GrepToolName:             {},
+		agenttools.ReadToolName:             {},
+		agenttools.ToolSearchToolName:       {},
+		agenttools.LSPToolName:              {},
+		agenttools.YieldToolName:            {},
+		agenttools.AgenticFetchToolName:     {},
+		agenttools.SourcegraphToolName:      {},
+		agenttools.DescribeImageToolName:    {},
+		agenttools.MemoryStatusToolName:     {},
+		agenttools.CrushInfoToolName:        {},
+		agenttools.CrushLogsToolName:        {},
+		agenttools.RecallToolName:           {},
+		agenttools.ReflectToolName:          {},
+		agenttools.GraphQueryToolName:       {},
+		agenttools.TripleQueryToolName:      {},
+		agenttools.RequestUserInputToolName: {},
+	}
+	for _, tool := range config.ReadOnlyResearchToolNames {
+		readOnlyTools[tool] = struct{}{}
+	}
+	for _, tool := range agentCfg.AllowedTools {
+		if _, ok := readOnlyTools[tool]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneToolSet(src map[string]struct{}) map[string]struct{} {

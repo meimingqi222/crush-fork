@@ -63,6 +63,14 @@ func NewRuntime(sessions session.Service) *Runtime {
 	}
 }
 
+// DeleteSession removes the in-memory goal state for a deleted session.
+func (r *Runtime) DeleteSession(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.snapshots, sessionID)
+	delete(r.wallClocks, sessionID)
+}
+
 // OnTurnStart records the baseline token usage and active goal ID at the start
 // of an agent turn. The baseline is subtracted from the usage passed to
 // PostTurn to compute the delta for the turn.

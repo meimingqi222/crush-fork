@@ -84,7 +84,7 @@ func NewWriteTool(
 			// read-modify-write critical section so that old-content reads
 			// and the subsequent write happen atomically with respect to
 			// other writers.
-			pathMu := filePathLockFor(filePath)
+			pathMu := FilePathLockFor(filePath)
 			pathMu.Lock()
 			defer pathMu.Unlock()
 

@@ -2793,7 +2793,8 @@ func computeBatchIsolationDefault(tasks []subagentTask, agents map[string]config
 	writerCount := 0
 	for _, t := range tasks {
 		agentID := config.ResolveSubagentID(agents, t.SubagentType)
-		if !subagentIDIsReadOnly(config.CanonicalSubagentID(agentID)) {
+		agent := agents[agentID]
+		if !isReadOnlyRuntime(agent) {
 			writerCount++
 		}
 	}
@@ -3698,7 +3699,7 @@ func (c *coordinator) childSessionWasBudgetAborted(ctx context.Context, childSes
 	return false
 }
 
-func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
+func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentParams) (response fantasy.ToolResponse, err error) {
 	untrackSubAgent := c.trackActiveSubAgent(params.SessionID, params.Agent)
 	defer untrackSubAgent()
 
@@ -3790,10 +3791,8 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		}
 		worktreePath := subSession.WorkspaceCWD
 		defer func() {
-			result := c.cleanupWorktreeIfNeeded(context.Background(), parentWorkDir, worktreePath, MergeBackModePatch)
-			if result.Message != "" {
-				slog.Info("Subagent worktree merge-back", "success", result.Success, "message", result.Message)
-			}
+			mergeResult := c.cleanupWorktreeIfNeeded(context.Background(), parentWorkDir, worktreePath)
+			c.applyMergeBackResult(&response, &err, mergeResult, params, subSession.ID)
 		}()
 	}
 
@@ -4004,7 +4003,7 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	}
 	eventSink.PublishSubagentEvent(ctx, SubagentEvent{Type: eventType, ParentSessionID: params.SessionID, ChildSessionID: subSession.ID, TaskID: runtime.TaskID, Message: params.SessionTitle, Status: eventStatus, Timestamp: time.Now()})
 
-	response := withSubtaskToolResponseMetadata(
+	response = withSubtaskToolResponseMetadata(
 		fantasy.NewTextResponse(content),
 		params.ToolCallID,
 		subSession.ID,
@@ -4206,26 +4205,44 @@ func (c *coordinator) removeSubagentWorktree(worktreeDir string) error {
 	return nil
 }
 
-// hasWorktreeChanges checks if a worktree has uncommitted changes.
-func (c *coordinator) hasWorktreeChanges(worktreeDir string) (bool, error) {
+// hasWorktreeChanges checks if a worktree has uncommitted or committed changes
+// relative to the parent HEAD. If the subagent committed inside its worktree,
+// the working tree may be clean but the branch is still ahead of the parent.
+func (c *coordinator) hasWorktreeChanges(parentWorkDir, worktreeDir string) (bool, error) {
 	cmd := exec.Command("git", "-C", worktreeDir, "status", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("check worktree status: %w", err)
 	}
-	return len(strings.TrimSpace(string(output))) > 0, nil
+	if len(strings.TrimSpace(string(output))) > 0 {
+		return true, nil
+	}
+
+	parentHead, err := gitRevParseHead(parentWorkDir)
+	if err != nil {
+		return false, fmt.Errorf("resolve parent HEAD: %w", err)
+	}
+	branchPoint, err := gitMergeBase(worktreeDir, "HEAD", parentHead)
+	if err != nil {
+		return false, fmt.Errorf("find branch point: %w", err)
+	}
+	diff, err := gitDiffStat(worktreeDir, branchPoint, "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("diff worktree: %w", err)
+	}
+	return len(strings.TrimSpace(diff)) > 0, nil
 }
 
 // cleanupWorktreeIfNeeded merges a worktree's changes back into the parent's
 // working tree (if it has changes) and then removes the worktree. If the
 // merge-back fails, the worktree is preserved for manual resolution.
-func (c *coordinator) cleanupWorktreeIfNeeded(ctx context.Context, parentWorkDir, worktreeDir string, mode MergeBackMode) MergeBackResult {
+func (c *coordinator) cleanupWorktreeIfNeeded(ctx context.Context, parentWorkDir, worktreeDir string) MergeBackResult {
 	worktreeDir = strings.TrimSpace(worktreeDir)
 	if worktreeDir == "" {
 		return MergeBackResult{Message: "worktree dir is empty, skipping cleanup"}
 	}
 
-	hasChanges, err := c.hasWorktreeChanges(worktreeDir)
+	hasChanges, err := c.hasWorktreeChanges(parentWorkDir, worktreeDir)
 	if err != nil {
 		slog.Warn("Failed to check worktree changes, skipping cleanup", "path", worktreeDir, "error", err)
 		return MergeBackResult{Message: fmt.Sprintf("failed to check worktree changes: %v", err)}
@@ -4240,7 +4257,7 @@ func (c *coordinator) cleanupWorktreeIfNeeded(ctx context.Context, parentWorkDir
 	}
 
 	// Has changes — merge back into parent.
-	result := c.mergeBackWorktree(ctx, parentWorkDir, worktreeDir, mode)
+	result := c.mergeBackWorktree(ctx, parentWorkDir, worktreeDir)
 	if result.Success {
 		// Merge succeeded — remove the worktree.
 		if removeErr := c.removeSubagentWorktree(worktreeDir); removeErr != nil {
@@ -4251,6 +4268,41 @@ func (c *coordinator) cleanupWorktreeIfNeeded(ctx context.Context, parentWorkDir
 		slog.Warn("Merge-back failed, preserving worktree", "path", worktreeDir, "message", result.Message)
 	}
 	return result
+}
+
+// applyMergeBackResult merges the merge-back outcome into the subagent tool
+// response. When the merge-back fails, the function turns the subagent's
+// successful response into a tool error so the parent model and user are not
+// left believing the changes landed when they did not.
+func (c *coordinator) applyMergeBackResult(response *fantasy.ToolResponse, err *error, mergeResult MergeBackResult, params subAgentParams, childSessionID string) {
+	if mergeResult.Message != "" {
+		slog.Info("Subagent worktree merge-back", "success", mergeResult.Success, "message", mergeResult.Message)
+	}
+	if *err != nil {
+		if !mergeResult.Success && mergeResult.Message != "" {
+			*err = fmt.Errorf("subagent failed: %w; merge-back: %s", *err, mergeResult.Message)
+		}
+		return
+	}
+	if mergeResult.Success && mergeResult.ConflictFile == "" && mergeResult.SavedDiffPath == "" {
+		return
+	}
+	if mergeResult.Message == "" {
+		return
+	}
+
+	content := response.Content
+	if content == "" {
+		content = subAgentNoContentText(childSessionID)
+	}
+	mergedContent := fmt.Sprintf("%s\n\n<merge_back result=\"failure\">\n%s\n</merge_back>", content, mergeResult.Message)
+	*response = withSubtaskToolResponseMetadata(
+		fantasy.NewTextErrorResponse(mergedContent),
+		params.ToolCallID,
+		childSessionID,
+		params.ParentMessageID,
+		message.ToolResultSubtaskStatusFailed,
+	)
 }
 
 // CleanupStaleWorktrees removes worktrees older than the cutoff duration.
@@ -4265,14 +4317,14 @@ func (c *coordinator) CleanupStaleWorktrees(ctx context.Context, cutoffDays int)
 	gitRoot := strings.TrimSpace(string(output))
 
 	for _, worktreesDir := range c.subagentWorktreeCleanupRoots(gitRoot) {
-		if err := c.cleanupStaleWorktreesInDir(worktreesDir, cutoffDays); err != nil {
+		if err := c.cleanupStaleWorktreesInDir(gitRoot, worktreesDir, cutoffDays); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *coordinator) cleanupStaleWorktreesInDir(worktreesDir string, cutoffDays int) error {
+func (c *coordinator) cleanupStaleWorktreesInDir(gitRoot, worktreesDir string, cutoffDays int) error {
 	entries, err := os.ReadDir(worktreesDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -4294,7 +4346,7 @@ func (c *coordinator) cleanupStaleWorktreesInDir(worktreesDir string, cutoffDays
 		}
 
 		if info.ModTime().Before(cutoffTime) {
-			hasChanges, chkErr := c.hasWorktreeChanges(worktreePath)
+			hasChanges, chkErr := c.hasWorktreeChanges(gitRoot, worktreePath)
 			if chkErr != nil {
 				slog.Warn("Failed to check worktree changes, skipping cleanup", "path", worktreePath, "error", chkErr)
 				continue

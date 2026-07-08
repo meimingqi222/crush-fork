@@ -173,7 +173,7 @@ func buildAgentLifecyclePrompt(agentCfg config.Agent) string {
 }
 
 func buildReadOnlyPrompt(agentCfg config.Agent) string {
-	if !subagentIDIsReadOnly(config.CanonicalSubagentID(agentCfg.ID)) {
+	if !isReadOnlyAgent(agentCfg) {
 		return ""
 	}
 	return `<read_only_boundary>
@@ -264,7 +264,10 @@ func promptForAgent(agentCfg config.Agent, isSubAgent bool, opts ...prompt.Optio
 
 func isReadOnlyAgent(agentCfg config.Agent) bool {
 	if len(agentCfg.AllowedTools) == 0 {
-		return false
+		if strings.TrimSpace(agentCfg.ID) == "" {
+			return false
+		}
+		return isReadOnlyAgentID(config.RequestedSubagentID(agentCfg.ID))
 	}
 	readOnlyTools := map[string]struct{}{
 		agenttools.GlobToolName:        {},
@@ -273,6 +276,7 @@ func isReadOnlyAgent(agentCfg config.Agent) bool {
 		agenttools.SourcegraphToolName: {},
 		agenttools.ToolSearchToolName:  {},
 		agenttools.LSPToolName:         {},
+		agenttools.YieldToolName:       {},
 	}
 	for _, tool := range agentCfg.AllowedTools {
 		if _, ok := readOnlyTools[tool]; !ok {

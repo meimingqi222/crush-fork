@@ -308,6 +308,9 @@ func (f *fakeCoordinator) PrepareModelSwitch(_ context.Context, _ string, _ conf
 func (f *fakeCoordinator) UpdateModels(_ context.Context) error        { return nil }
 func (f *fakeCoordinator) RefreshTools(_ context.Context) error        { return nil }
 func (f *fakeCoordinator) PrioritizeQueuedPrompt(_ string, _ int) bool { return false }
+func (f *fakeCoordinator) RecapSession(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
 
 type fakeApp struct {
 	sessions    *fakeSessionService

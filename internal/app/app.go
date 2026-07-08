@@ -106,9 +106,13 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 
 	var memoryEngine *engine.Engine
 	var app *App
+	var goalRuntime *goal.Runtime
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
 		tools.GlobalFileCache.Clear(sessionID)
 		runtimeService.DeleteSession(sessionID)
+		if goalRuntime != nil {
+			goalRuntime.DeleteSession(sessionID)
+		}
 		if app != nil && app.AgentCoordinator != nil {
 			if coord, ok := app.AgentCoordinator.(interface {
 				onSessionDeleted(context.Context, string)
@@ -142,7 +146,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	}
 	basePermissions := permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, nil)
 	pluginRuntime := plugin.NewRuntime()
-	goalRuntime := goal.NewRuntime(sessions)
+	goalRuntime = goal.NewRuntime(sessions)
 
 	app = &App{
 		Sessions:    sessions,

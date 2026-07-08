@@ -99,7 +99,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		bashOpts = agenttools.BashToolOptions{
 			DisableBackground: true,
 		}
-	} else if subagentIDIsReadOnly(canonicalID) {
+	} else if isReadOnlyRuntime(agent) {
 		bashOpts = agenttools.BashToolOptions{
 			RestrictedToGitReadOnly: true,
 			DisableBackground:       true,

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,7 +57,7 @@ func TestMergeBackPatchModeAppliesDiffToParent(t *testing.T) {
 
 	// Merge back in patch mode.
 	c := &coordinator{}
-	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir, MergeBackModePatch)
+	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir)
 
 	require.True(t, result.Success, "message: %s", result.Message)
 	require.Equal(t, MergeBackModePatch, result.Mode)
@@ -71,35 +73,10 @@ func TestMergeBackPatchModeNoChanges(t *testing.T) {
 	worktreeDir := setupWorktree(t, repo, "crush-agent-test-empty")
 
 	c := &coordinator{}
-	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir, MergeBackModePatch)
+	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir)
 
 	require.True(t, result.Success)
 	require.Contains(t, result.Message, "no changes")
-}
-
-func TestMergeBackBranchModeCherryPicksCommits(t *testing.T) {
-	repo := setupGitRepo(t)
-	worktreeDir := setupWorktree(t, repo, "crush-agent-test-branch")
-
-	// Make and commit changes in the worktree.
-	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, "a.txt"), []byte("a\n"), 0o644))
-	commitInWorktree(t, worktreeDir, "add a")
-	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, "b.txt"), []byte("b\n"), 0o644))
-	commitInWorktree(t, worktreeDir, "add b")
-
-	c := &coordinator{}
-	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir, MergeBackModeBranch)
-
-	require.True(t, result.Success, "message: %s", result.Message)
-	require.Equal(t, MergeBackModeBranch, result.Mode)
-	require.Equal(t, 2, result.TotalCommits)
-	require.Equal(t, 2, result.LandedCommits)
-
-	// Parent repo should have both files.
-	_, err := os.Stat(filepath.Join(repo, "a.txt"))
-	require.NoError(t, err)
-	_, err = os.Stat(filepath.Join(repo, "b.txt"))
-	require.NoError(t, err)
 }
 
 func TestMergeBackPreservesParentDirtyState(t *testing.T) {
@@ -113,7 +90,7 @@ func TestMergeBackPreservesParentDirtyState(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "parent.txt"), []byte("parent dirty\n"), 0o644))
 
 	c := &coordinator{}
-	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir, MergeBackModePatch)
+	result := c.mergeBackWorktree(t.Context(), repo, worktreeDir)
 
 	require.True(t, result.Success, "message: %s", result.Message)
 
@@ -146,23 +123,93 @@ func TestWorktreeBranchName(t *testing.T) {
 	}
 }
 
-func TestShortHash(t *testing.T) {
-	require.Equal(t, "abcdef12", shortHash("abcdef1234567890"))
-	require.Equal(t, "short", shortHash("short"))
+// TestHasWorktreeChangesDetectsCommittedChange guards against the data-loss
+// bug where a subagent worktree with committed changes had a clean working
+// tree and was deleted before merge-back could see those commits.
+func TestHasWorktreeChangesDetectsCommittedChange(t *testing.T) {
+	repo := setupGitRepo(t)
+	worktreeDir := setupWorktree(t, repo, "crush-agent-test-committed")
+
+	// Subagent makes a change and commits it inside the worktree.
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, "sub.txt"), []byte("sub committed\n"), 0o644))
+	runGit(t, worktreeDir, "add", "-A")
+	runGit(t, worktreeDir, "commit", "-m", "subagent commit")
+
+	c := &coordinator{}
+	hasChanges, err := c.hasWorktreeChanges(repo, worktreeDir)
+	require.NoError(t, err)
+	require.True(t, hasChanges, "hasWorktreeChanges should detect committed changes ahead of parent HEAD")
 }
 
-// commitInWorktree commits all changes in the given worktree directory.
-func commitInWorktree(t *testing.T, dir, message string) {
-	t.Helper()
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-		)
-		require.NoError(t, cmd.Run(), "git %s", strings.Join(args, " "))
+// TestCleanupWorktreeIfNeededMergesCommittedChanges ensures a subagent that
+// commits inside its worktree has those changes merged back into the parent
+// and the worktree is cleaned up.
+func TestCleanupWorktreeIfNeededMergesCommittedChanges(t *testing.T) {
+	repo := setupGitRepo(t)
+	worktreeDir := setupWorktree(t, repo, "crush-agent-test-cleanup")
+
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, "sub.txt"), []byte("sub committed\n"), 0o644))
+	runGit(t, worktreeDir, "add", "-A")
+	runGit(t, worktreeDir, "commit", "-m", "subagent commit")
+
+	c := &coordinator{}
+	result := c.cleanupWorktreeIfNeeded(t.Context(), repo, worktreeDir)
+	require.True(t, result.Success, "cleanup merge-back should succeed: %s", result.Message)
+
+	data, err := os.ReadFile(filepath.Join(repo, "sub.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "sub committed", strings.TrimRight(string(data), "\r\n"))
+
+	_, err = os.Stat(worktreeDir)
+	require.True(t, os.IsNotExist(err), "worktree should be removed after successful merge-back")
+}
+
+// TestApplyMergeBackResultMarksResponseAsErrorOnFailure ensures the parent
+// model sees a tool error when merge-back fails, instead of a silent success.
+func TestApplyMergeBackResultMarksResponseAsErrorOnFailure(t *testing.T) {
+	c := &coordinator{}
+	resp := fantasy.NewTextResponse("subagent succeeded")
+	var runErr error
+	mergeResult := MergeBackResult{
+		Success: false,
+		Message: "merge conflict in main.go",
 	}
-	run("add", "-A")
-	run("commit", "-m", message)
+	params := subAgentParams{
+		ToolCallID:      "tc-1",
+		ParentMessageID: "msg-1",
+	}
+
+	c.applyMergeBackResult(&resp, &runErr, mergeResult, params, "child-1")
+
+	require.True(t, resp.IsError, "merge-back failure should turn the response into an error")
+	require.Contains(t, resp.Content, "merge conflict in main.go")
+	require.Contains(t, resp.Content, "merge_back")
+	parsed, ok := message.ParseToolResultSubtaskResult(resp.Metadata)
+	require.True(t, ok)
+	require.Equal(t, message.ToolResultSubtaskStatusFailed, parsed.Status)
+}
+
+// TestRepoLockForCanonicalizesCaseAndSymlinks guards against isolation
+// bypasses where the same repository accessed through different case or a
+// symlink gets a different repo lock.
+func TestRepoLockForCanonicalizesCaseAndSymlinks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "repo")
+	link := filepath.Join(dir, "link")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlinks on this filesystem: %v", err)
+	}
+
+	mu1 := repoLockFor(target)
+	mu2 := repoLockFor(link)
+	require.Same(t, mu1, mu2, "repo lock must be the same for symlink-equivalent paths")
+
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		mu3 := repoLockFor(filepath.Join(dir, "REPO"))
+		require.Same(t, mu1, mu3, "repo lock must be case-insensitive on windows/darwin")
+	}
 }
