@@ -27,6 +27,7 @@ type AgentTaskParams struct {
 	Assignment   string `json:"assignment" description:"The full task instructions for the subagent to perform"`
 	SubagentType string `json:"subagent_type,omitempty" description:"The subagent type to use: general, quick_task, explore, plan, review, designer, librarian, or a configured subagent name"`
 	Role         string `json:"role,omitempty" description:"Optional specialist identity for this subagent (e.g. planner, researcher, reviewer, executor)"`
+	Isolation    string `json:"isolation,omitempty" description:"Optional isolation override for this task: 'worktree' (isolated git worktree, changes merge back on success), 'session' (shared workspace), or 'none' (use defaults). Use 'worktree' when tasks may touch overlapping files"`
 }
 
 type AgentParams struct {
@@ -37,6 +38,7 @@ type AgentParams struct {
 	Context         string            `json:"context,omitempty" description:"Shared background information for all subagents"`
 	RunInBackground bool              `json:"run_in_background,omitempty" description:"Run the agent in the background and return immediately with an agent ID"`
 	Role            string            `json:"role,omitempty" description:"Optional specialist identity for the subagent when using a single prompt (e.g. planner, researcher, reviewer, executor)"`
+	Isolation       string            `json:"isolation,omitempty" description:"Optional isolation override when using a single prompt: 'worktree', 'session', or 'none' (use defaults)"`
 }
 
 const (
@@ -99,6 +101,7 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 						Assignment:   assignment,
 						SubagentType: task.SubagentType,
 						Role:         strings.TrimSpace(task.Role),
+						Isolation:    strings.TrimSpace(task.Isolation),
 					})
 				}
 			} else {
@@ -124,6 +127,7 @@ func (c *coordinator) agentTool(_ context.Context) (fantasy.AgentTool, error) {
 					Assignment:   params.Prompt,
 					SubagentType: params.SubagentType,
 					Role:         strings.TrimSpace(params.Role),
+					Isolation:    strings.TrimSpace(params.Isolation),
 				}}
 			}
 

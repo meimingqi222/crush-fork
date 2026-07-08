@@ -2764,6 +2764,7 @@ type subagentTask struct {
 	Assignment   string
 	SubagentType string
 	Role         string
+	Isolation    string
 }
 
 type subagentBatchParams struct {
@@ -2773,6 +2774,53 @@ type subagentBatchParams struct {
 	Tasks           []subagentTask
 	Context         string
 	RunInBackground bool
+}
+
+// computeBatchIsolationDefault returns "worktree" when the batch contains
+// 2+ tasks whose resolved agent profile allows writes (i.e. not read-only
+// subagents such as explore/plan/review/librarian), to prevent concurrent
+// writers from racing on the shared workspace. Returns "" when batch-level
+// defaulting does not apply (single task, or fewer than two writer tasks),
+// leaving isolation to per-task overrides, the agent's static config, or
+// the global DefaultIsolation.
+func computeBatchIsolationDefault(tasks []subagentTask, agents map[string]config.Agent) string {
+	if len(tasks) < 2 {
+		return ""
+	}
+	writerCount := 0
+	for _, t := range tasks {
+		agentID := config.ResolveSubagentID(agents, t.SubagentType)
+		if !subagentIDIsReadOnly(config.CanonicalSubagentID(agentID)) {
+			writerCount++
+		}
+	}
+	if writerCount >= 2 {
+		return "worktree"
+	}
+	return ""
+}
+
+// resolveTaskIsolation picks the effective isolation for a single task in
+// priority order:
+//  1. task.Isolation, unless it is "none" (explicit opt-out → "" falls
+//     through to global defaults).
+//  2. batchDefaultIsolation (from computeBatchIsolationDefault).
+//  3. agentCfgIsolation (the agent's static registration value).
+//
+// The empty string falls through to prepareSubagentWorkspace's defaults
+// (global DefaultIsolation config, then "session").
+func resolveTaskIsolation(taskIsolation, batchDefaultIsolation, agentCfgIsolation string) string {
+	task := strings.TrimSpace(strings.ToLower(taskIsolation))
+	if task == "none" {
+		return ""
+	}
+	if task != "" {
+		return task
+	}
+	if batch := strings.TrimSpace(batchDefaultIsolation); batch != "" {
+		return batch
+	}
+	return strings.TrimSpace(agentCfgIsolation)
 }
 
 type subagentResult struct {
@@ -2841,6 +2889,17 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 
 	orderedResults := make([]subagentResult, len(params.Tasks))
 	prepared := make([]preparedTask, len(params.Tasks))
+
+	// Compute batch-level isolation default. When a batch contains 2+
+	// writer tasks (agent profiles that allow writes — i.e. not read-only
+	// subagents like explore/plan/review/librarian), default those tasks
+	// to worktree isolation so concurrent writers do not race on the
+	// shared workspace. Per-task Isolation overrides take precedence:
+	// "worktree"/"session" opts in, "none" explicitly opts out. This
+	// targets the concretely reachable race (parallel general/designer
+	// tasks in one agent call) without forcing single-task invocations
+	// to pay worktree overhead.
+	batchDefaultIsolation := computeBatchIsolationDefault(params.Tasks, c.cfg.Config().Agents)
 
 	baseContext := strings.TrimSpace(params.Context)
 
@@ -2947,7 +3006,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			Role:               t.Role,
 			DelegationMailbox:  params.ToolCallID,
 			AgentMemory:        agentCfg.Memory,
-			AgentIsolation:     agentCfg.Isolation,
+			AgentIsolation:     resolveTaskIsolation(t.Isolation, batchDefaultIsolation, agentCfg.Isolation),
 			AgentBackground:    agentCfg.Background,
 			SkipHandoffReview:  true,
 			IrcAgentID:         agentID,
@@ -3838,9 +3897,6 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		eventSink,
 	)
 	applySubagentRuntimeConfig(&runtime, c.cfg.Config().EffectiveSubagentRuntime())
-	if runtimeCfg := c.cfg.Config().EffectiveSubagentRuntime(); strings.TrimSpace(runtimeCfg.DefaultIsolation) != "" && strings.TrimSpace(params.AgentIsolation) == "" {
-		runtime.Isolation.Kind = subagentIsolationKind(runtimeCfg.DefaultIsolation)
-	}
 	ctx = withSubagentRuntimeContext(ctx, runtime)
 
 	if c.escalationBridge != nil {
@@ -4023,7 +4079,19 @@ func withAgentPolicyContext(ctx context.Context, agentCfg config.Agent) context.
 func (c *coordinator) prepareSubagentWorkspace(ctx context.Context, parentSession, subSession session.Session, requestedIsolation string) (session.Session, string, string, error) {
 	effectiveIsolation := strings.ToLower(strings.TrimSpace(requestedIsolation))
 	if effectiveIsolation == "" {
-		effectiveIsolation = "session"
+		// Fall through to the configured global default before "session".
+		// This makes Subagents.DefaultIsolation actually take effect when
+		// no per-task/per-batch/agent-level isolation was requested,
+		// instead of the previous dead override that mutated the runtime
+		// context after the worktree had already been (not) created.
+		if runtimeCfg := c.cfg.Config().EffectiveSubagentRuntime(); strings.TrimSpace(runtimeCfg.DefaultIsolation) != "" {
+			if def := strings.ToLower(strings.TrimSpace(runtimeCfg.DefaultIsolation)); def != "none" {
+				effectiveIsolation = def
+			}
+		}
+		if effectiveIsolation == "" {
+			effectiveIsolation = "session"
+		}
 	}
 
 	sessionWorkingDir := strings.TrimSpace(parentSession.WorkspaceCWD)
