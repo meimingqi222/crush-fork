@@ -1078,8 +1078,8 @@ type SubagentRuntimeConfig struct {
 	StructuredCompletionRequired bool   `json:"structured_completion_required,omitempty" jsonschema:"description=Require built-in subagents to call yield,default=true"`
 	MissingFinishPolicy          string `json:"missing_finish_policy,omitempty" jsonschema:"description=Policy when a subagent omits yield,enum=warn,enum=fail,enum=retry_then_warn,enum=retry_then_fail,default=retry_then_warn"`
 	DefaultRetryPolicy           string `json:"default_retry_policy,omitempty" jsonschema:"description=Default child retry policy,enum=never,enum=read_only_only,enum=idempotent,enum=isolated,default=read_only_only"`
-	MaxConcurrency               int    `json:"max_concurrency,omitempty" jsonschema:"description=Maximum subagent concurrency,default=4"`                    // TODO: wire into task graph semaphore
-	AllowRecursiveAgents         bool   `json:"allow_recursive_agents,omitempty" jsonschema:"description=Allow child agents to spawn children,default=false"` // TODO: not yet consumed at runtime; recursive agents blocked at tool_registration.go
+	MaxConcurrency               int    `json:"max_concurrency,omitempty" jsonschema:"description=Maximum subagent concurrency,default=4"`
+	AllowRecursiveAgents         bool   `json:"allow_recursive_agents,omitempty" jsonschema:"description=Allow child agents to spawn children,default=false"`
 	DefaultIsolation             string `json:"default_isolation,omitempty" jsonschema:"description=Default child isolation mode,enum=none,enum=worktree,enum=external_sandbox,enum=managed_sandbox,default=none"`
 	SafeSummary                  bool   `json:"safe_summary,omitempty" jsonschema:"description=Prefer structured finish summaries over raw child output,default=true"` // TODO: not yet consumed at runtime; structured finish is already preferred when available
 

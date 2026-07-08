@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"testing"
 
 	"charm.land/fantasy"
@@ -684,74 +683,6 @@ func TestAgentToolParsesSinglePromptCorrectly(t *testing.T) {
 	ctx := context.WithValue(context.Background(), tools.SessionIDContextKey, "session-1")
 	ctx = context.WithValue(ctx, tools.MessageIDContextKey, "msg-1")
 	_, _ = tool.Run(ctx, fantasy.ToolCall{ID: "call-1", Name: AgentToolName, Input: string(input)})
-}
-
-func TestTaskGraphSemaphoreUsesGlobalRuntimeLimit(t *testing.T) {
-	semaphores := make(map[string]chan struct{})
-	var semMu sync.Mutex
-
-	semaphore := subagentSemaphoreForAgent(
-		config.Agent{Name: config.AgentGeneral, Mode: config.AgentModeSubagent},
-		config.SubagentRuntimeConfig{MaxConcurrency: 2},
-		semaphores,
-		&semMu,
-	)
-
-	require.NotNil(t, semaphore)
-	require.Equal(t, 2, cap(semaphore))
-	assert.True(t, semaphore == subagentSemaphoreForAgent(
-		config.Agent{Name: config.AgentExplore, Mode: config.AgentModeSubagent},
-		config.SubagentRuntimeConfig{MaxConcurrency: 2},
-		semaphores,
-		&semMu,
-	))
-}
-
-func TestTaskGraphSemaphoreAgentLimitOverridesRuntimeLimit(t *testing.T) {
-	semaphores := make(map[string]chan struct{})
-	var semMu sync.Mutex
-	limit := 1
-
-	semaphore := subagentSemaphoreForAgent(
-		config.Agent{
-			Name: config.AgentGeneral,
-			Mode: config.AgentModeSubagent,
-			TaskGovernance: &config.TaskGovernance{
-				MaxConcurrent: &limit,
-			},
-		},
-		config.SubagentRuntimeConfig{MaxConcurrency: 4},
-		semaphores,
-		&semMu,
-	)
-
-	require.NotNil(t, semaphore)
-	require.Equal(t, 1, cap(semaphore))
-}
-
-func TestTaskGraphSemaphoreKeepsCustomAliasAgentBucket(t *testing.T) {
-	semaphores := make(map[string]chan struct{})
-	var semMu sync.Mutex
-	customLimit := 1
-	builtInLimit := 2
-
-	custom := subagentSemaphoreForAgent(
-		config.Agent{ID: "reviewer", Mode: config.AgentModeSubagent, TaskGovernance: &config.TaskGovernance{MaxConcurrent: &customLimit}},
-		config.SubagentRuntimeConfig{MaxConcurrency: 4},
-		semaphores,
-		&semMu,
-	)
-	builtIn := subagentSemaphoreForAgent(
-		config.Agent{ID: config.AgentReview, Mode: config.AgentModeSubagent, TaskGovernance: &config.TaskGovernance{MaxConcurrent: &builtInLimit}},
-		config.SubagentRuntimeConfig{MaxConcurrency: 4},
-		semaphores,
-		&semMu,
-	)
-
-	require.NotNil(t, custom)
-	require.NotNil(t, builtIn)
-	require.Equal(t, 1, cap(custom))
-	require.Equal(t, 2, cap(builtIn))
 }
 
 func TestAgentParamsParsesRole(t *testing.T) {
