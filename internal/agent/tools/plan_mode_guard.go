@@ -14,11 +14,15 @@ import (
 func enforcePlanModeWriteTarget(ctx context.Context, filePath string) (fantasy.ToolResponse, bool, error) {
 	sessionID := GetSessionFromContext(ctx)
 	if sessionID == "" {
+		// No session context — plan mode does not apply.
 		return fantasy.ToolResponse{}, false, nil
 	}
 	sessions := GetSessionServiceFromContext(ctx)
 	if sessions == nil {
-		return fantasy.ToolResponse{}, false, nil
+		// Session ID is present but the session service is missing from
+		// context. This is a wiring bug; fail closed rather than silently
+		// allowing writes that plan mode should block.
+		return fantasy.NewTextErrorResponse("Plan Mode write guard: session service is missing from context."), true, nil
 	}
 	sess, err := sessions.Get(ctx, sessionID)
 	if err != nil {

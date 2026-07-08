@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,6 +99,18 @@ func newWriteToolForTest(permissions permission.Service, historySvc history.Serv
 	return NewWriteTool(nil, permissions, historySvc, &mockFileTracker{}, workingDir)
 }
 
+// newNonPlanModeContext returns a context with session ID and session service
+// set up for a session that is NOT in plan mode. This lets write/edit tests
+// exercise non-plan-mode paths without triggering the plan mode write guard.
+func newNonPlanModeContext(sessionID string) context.Context {
+	sessions := &planGuardSessionService{sess: session.Session{
+		ID:                sessionID,
+		CollaborationMode: session.CollaborationModeDefault,
+	}}
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, sessionID)
+	return context.WithValue(ctx, SessionServiceContextKey, sessions)
+}
+
 func TestWriteTool_ReturnsToolErrorForAutoModePolicyBlock(t *testing.T) {
 	t.Parallel()
 
@@ -110,7 +123,7 @@ func TestWriteTool_ReturnsToolErrorForAutoModePolicyBlock(t *testing.T) {
 		),
 	}
 	tool := newWriteToolForTest(permissions, nil, workingDir)
-	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx := newNonPlanModeContext("test-session")
 
 	resp, err := runWriteTool(t, tool, ctx, WriteParams{
 		FilePath: "nested/blocked.txt",
@@ -134,7 +147,7 @@ func TestWriteTool_ReturnsFatalErrorForUserDeniedPermission(t *testing.T) {
 		granted: false,
 	}
 	tool := newWriteToolForTest(permissions, nil, workingDir)
-	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx := newNonPlanModeContext("test-session")
 
 	_, err := runWriteTool(t, tool, ctx, WriteParams{
 		FilePath: "nested/blocked.txt",
@@ -156,7 +169,7 @@ func TestWriteTool_WritesFileWhenPermissionGranted(t *testing.T) {
 		granted: true,
 	}
 	tool := newWriteToolForTest(permissions, nil, workingDir)
-	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx := newNonPlanModeContext("test-session")
 
 	resp, err := runWriteTool(t, tool, ctx, WriteParams{
 		FilePath: "allowed.txt",
@@ -190,7 +203,7 @@ func TestWriteTool_WritesFileWhenHistoryDoesNotExist(t *testing.T) {
 		mockHistoryService: &mockHistoryService{Broker: pubsub.NewBroker[history.File]()},
 	}
 	tool := newWriteToolForTest(permissions, historySvc, workingDir)
-	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx := newNonPlanModeContext("test-session")
 
 	resp, err := runWriteTool(t, tool, ctx, WriteParams{
 		FilePath: "first-write.txt",
@@ -213,7 +226,7 @@ func TestWriteTool_WritesEmptyFileContent(t *testing.T) {
 		granted: true,
 	}
 	tool := newWriteToolForTest(permissions, nil, workingDir)
-	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx := newNonPlanModeContext("test-session")
 
 	resp, err := runWriteTool(t, tool, ctx, WriteParams{
 		FilePath: "empty.txt",
