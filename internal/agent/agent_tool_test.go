@@ -443,6 +443,54 @@ func TestDeriveSubagentPermissionsReadOnlyDeniesStateMutatingTools(t *testing.T)
 	assert.Contains(t, denied, tools.IrcToolName)
 }
 
+func TestDeriveSubagentPermissionsGloballyDeniesGoalTool(t *testing.T) {
+	// The goal tool is denied for ALL subagents (not just read-only ones)
+	// because subagent runs bypass coordinator.Run and the goalRuntime
+	// OnTurnStart/PostTurn accounting. A goal created by a subagent would
+	// silently never accumulate tokens/time and never trigger continuation.
+	allTools := []string{
+		"bash", "edit", "read", "write", "glob", "grep", "yield",
+		"goal", "job", "irc",
+	}
+
+	profiles := []struct {
+		name    string
+		profile SubagentProfile
+	}{
+		{
+			name: "general writer",
+			profile: SubagentProfile{
+				Name:      config.AgentGeneral,
+				Kind:      SubagentProfileGeneral,
+				CanSpawn:  true,
+				ToolNames: allTools,
+			},
+		},
+		{
+			name: "explore read-only",
+			profile: SubagentProfile{
+				Name:      config.AgentExplore,
+				Kind:      SubagentProfileExplore,
+				ReadOnly:  true,
+				ToolNames: allTools,
+			},
+		},
+	}
+
+	for _, tc := range profiles {
+		t.Run(tc.name, func(t *testing.T) {
+			derived := DeriveSubagentPermissions(ParentPermissionContext{
+				AllowedTools: allTools,
+			}, tc.profile, allTools)
+
+			allowed := toolNamesFromSet(derived.AllowedTools)
+			denied := toolNamesFromSet(derived.DeniedTools)
+			assert.NotContains(t, allowed, tools.GoalToolName)
+			assert.Contains(t, denied, tools.GoalToolName)
+		})
+	}
+}
+
 func TestDeriveSubagentPermissionsFiltersUnallowedMCPAndPlugins(t *testing.T) {
 	profile := SubagentProfile{
 		Name:      config.AgentGeneral,
