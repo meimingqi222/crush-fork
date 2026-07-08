@@ -112,16 +112,22 @@ func TestAgentToolMessageItemRendersTaskStatuses(t *testing.T) {
 	require.NoError(t, err)
 
 	resultContent := "All good\n- t1: completed\n- t2: failed\n\nTask outputs:\n- t1 ..."
+	result := message.ToolResult{
+		ToolCallID: "tool-graph",
+		Content:    resultContent,
+	}.WithReducer(message.ToolResultReducer{
+		ChildSessions: []message.ToolResultReducerChildSession{
+			{TaskID: "t1", Status: message.ToolResultSubtaskStatusCompleted},
+			{TaskID: "t2", Status: message.ToolResultSubtaskStatusFailed},
+		},
+	})
 	theme := styles.DefaultStyles()
 	item := NewAgentToolMessageItem(&theme, message.ToolCall{
 		ID:       "tool-graph",
 		Name:     agent.AgentToolName,
 		Input:    string(params),
 		Finished: true,
-	}, &message.ToolResult{
-		ToolCallID: "tool-graph",
-		Content:    resultContent,
-	}, false)
+	}, &result, false)
 
 	rendered := ansi.Strip(item.Render(140))
 	require.Contains(t, rendered, "done 1 · running 0 · pending 0 · failed 1")
@@ -141,16 +147,22 @@ func TestAgentToolMessageItemRendersCompletedWarningsStatuses(t *testing.T) {
 	require.NoError(t, err)
 
 	resultContent := "Summary\n- t1: completed_with_warnings\n- t2: completed"
+	result := message.ToolResult{
+		ToolCallID: "tool-warn-blocked",
+		Content:    resultContent,
+	}.WithReducer(message.ToolResultReducer{
+		ChildSessions: []message.ToolResultReducerChildSession{
+			{TaskID: "t1", Status: message.ToolResultSubtaskStatusCompletedWithWarnings},
+			{TaskID: "t2", Status: message.ToolResultSubtaskStatusCompleted},
+		},
+	})
 	theme := styles.DefaultStyles()
 	item := NewAgentToolMessageItem(&theme, message.ToolCall{
 		ID:       "tool-warn-blocked",
 		Name:     agent.AgentToolName,
 		Input:    string(params),
 		Finished: true,
-	}, &message.ToolResult{
-		ToolCallID: "tool-warn-blocked",
-		Content:    resultContent,
-	}, false)
+	}, &result, false)
 
 	rendered := ansi.Strip(item.Render(140))
 	require.Contains(t, rendered, "done 2 · running 0 · pending 0")

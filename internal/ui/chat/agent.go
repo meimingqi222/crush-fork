@@ -3,7 +3,6 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -72,9 +71,10 @@ type AgentToolMessageItem struct {
 	cachedParamInput string
 	cachedTasks      []agentTaskRenderEntry
 
-	// Cached task status parsing to avoid repeated regexp during renders.
-	cachedTaskStatuses      map[string]message.ToolResultSubtaskStatus
-	cachedTaskStatusContent string
+	// Cached task status parsing to avoid re-parsing reducer metadata
+	// during renders.
+	cachedTaskStatuses   map[string]message.ToolResultSubtaskStatus
+	cachedTaskStatusMeta string
 }
 
 var (
@@ -224,7 +224,7 @@ func (a *AgentToolMessageItem) SetToolCall(tc message.ToolCall) {
 // when the result changes.
 func (a *AgentToolMessageItem) SetResult(res *message.ToolResult) {
 	a.cachedTaskStatuses = nil
-	a.cachedTaskStatusContent = ""
+	a.cachedTaskStatusMeta = ""
 	a.baseToolMessageItem.SetResult(res)
 }
 
@@ -246,18 +246,18 @@ func (a *AgentToolMessageItem) getCachedAgentParams(input string) (agent.AgentPa
 }
 
 // getCachedTaskStatuses lazily parses and caches per-task statuses from the
-// tool result content using regexp. This avoids re-running the regex on every
-// render frame once the result is available.
+// structured reducer metadata attached to the tool result. This avoids
+// re-parsing the metadata on every render frame once the result is available.
 func (a *AgentToolMessageItem) getCachedTaskStatuses(result *message.ToolResult) map[string]message.ToolResultSubtaskStatus {
 	if result == nil {
 		return make(map[string]message.ToolResultSubtaskStatus)
 	}
-	if a.cachedTaskStatuses != nil && a.cachedTaskStatusContent == result.Content {
+	if a.cachedTaskStatuses != nil && a.cachedTaskStatusMeta == result.Metadata {
 		return a.cachedTaskStatuses
 	}
 	statuses := ParseTaskStatusesFromAgentResult(result)
 	a.cachedTaskStatuses = statuses
-	a.cachedTaskStatusContent = result.Content
+	a.cachedTaskStatusMeta = result.Metadata
 	return statuses
 }
 
@@ -637,7 +637,8 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 		return lipgloss.JoinVertical(lipgloss.Left, header, taskTag)
 	}
 
-	// Use cached task statuses to avoid repeated regexp execution during spinning renders.
+	// Use cached task statuses to avoid re-parsing reducer metadata during
+	// spinning renders.
 	var statusesByID map[string]message.ToolResultSubtaskStatus
 	if agentItem != nil {
 		statusesByID = agentItem.getCachedTaskStatuses(opts.Result)
@@ -700,8 +701,6 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 	return lipgloss.JoinVertical(lipgloss.Left, header, summaryLine, taskText)
 }
 
-var taskStatusLinePattern = regexp.MustCompile(`(?m)^-\s+([^:]+):\s*(completed|completed_with_warnings|failed|canceled|blocked)\s*$`)
-
 func parseTaskStatusesFromAgentResult(opts *ToolRenderOpts) map[string]message.ToolResultSubtaskStatus {
 	statuses := make(map[string]message.ToolResultSubtaskStatus)
 	if opts == nil || opts.Result == nil {
@@ -711,37 +710,25 @@ func parseTaskStatusesFromAgentResult(opts *ToolRenderOpts) map[string]message.T
 }
 
 // ParseTaskStatusesFromAgentResult extracts per-task completion statuses from
-// an agent tool result's content (lines like "- task_id: completed").
+// the structured reducer metadata attached to an agent tool result. The
+// coordinator populates ChildSessions with each task's TaskID and Status, so
+// the UI can render per-task status without regex-parsing the human-readable
+// summary line.
 func ParseTaskStatusesFromAgentResult(result *message.ToolResult) map[string]message.ToolResultSubtaskStatus {
 	statuses := make(map[string]message.ToolResultSubtaskStatus)
 	if result == nil {
 		return statuses
 	}
-	content := result.Content
-	if strings.TrimSpace(content) == "" {
+	reducer, ok := result.Reducer()
+	if !ok {
 		return statuses
 	}
-	matches := taskStatusLinePattern.FindAllStringSubmatch(content, -1)
-	for _, match := range matches {
-		if len(match) < 3 {
+	for _, child := range reducer.ChildSessions {
+		taskID := strings.TrimSpace(child.TaskID)
+		if taskID == "" || child.Status == "" {
 			continue
 		}
-		taskID := strings.TrimSpace(match[1])
-		if taskID == "" {
-			continue
-		}
-		switch strings.TrimSpace(match[2]) {
-		case string(message.ToolResultSubtaskStatusCompleted):
-			statuses[taskID] = message.ToolResultSubtaskStatusCompleted
-		case string(taskStatusCompletedWithWarnings):
-			statuses[taskID] = taskStatusCompletedWithWarnings
-		case string(message.ToolResultSubtaskStatusFailed):
-			statuses[taskID] = message.ToolResultSubtaskStatusFailed
-		case string(message.ToolResultSubtaskStatusCanceled):
-			statuses[taskID] = message.ToolResultSubtaskStatusCanceled
-		case string(taskStatusBlocked):
-			statuses[taskID] = taskStatusBlocked
-		}
+		statuses[taskID] = child.Status
 	}
 	return statuses
 }

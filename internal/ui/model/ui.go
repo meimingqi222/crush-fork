@@ -1758,7 +1758,8 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 			agentItem.SetHasTaskNodes(true)
 		}
 
-		// Parse task completion statuses from the agent tool result.
+		// Parse task completion statuses from the structured reducer
+		// metadata attached to the agent tool result.
 		var statuses map[string]message.ToolResultSubtaskStatus
 		if tr, exists := toolResultMap[toolItem.ToolCall().ID]; exists {
 			statuses = chat.ParseTaskStatusesFromAgentResult(&tr)
@@ -1801,7 +1802,7 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 }
 
 // propagateTaskStatusesToNodes updates TaskNodeItems with completion statuses
-// parsed from an agent tool result (lines like "- task_id: completed").
+// parsed from the structured reducer metadata of an agent tool result.
 func (m *UI) propagateTaskStatusesToNodes(toolCallID string, result *message.ToolResult) {
 	statuses := chat.ParseTaskStatusesFromAgentResult(result)
 	for taskID, status := range statuses {
