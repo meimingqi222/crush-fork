@@ -296,7 +296,7 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 		if a.message.IsSummaryMessage {
 			a.summaryBoxStart = summaryStart
 			messageParts = append(messageParts, a.renderSummary(content, width))
-		} else if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasPlanExitOrResolveApply() {
+		} else if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasResolveApply() {
 			messageParts = append(messageParts, a.renderPlan(plan, width))
 		} else {
 			messageParts = append(messageParts, a.renderMarkdown(content, width))
@@ -474,21 +474,9 @@ func (a *AssistantMessageItem) renderPlan(plan string, width int) string {
 	return strings.Join([]string{header, "", body}, "\n")
 }
 
-func (a *AssistantMessageItem) hasToolCall(toolName string) bool {
-	for _, toolCall := range a.message.ToolCalls() {
-		if toolCall.Name == toolName {
-			return true
-		}
-	}
-	return false
-}
-
-// hasPlanExitOrResolveApply reports whether the message contains a plan_exit
-// tool call or a resolve tool call with action "apply".
-func (a *AssistantMessageItem) hasPlanExitOrResolveApply() bool {
-	if a.hasToolCall(tools.PlanExitToolName) {
-		return true
-	}
+// hasResolveApply reports whether the message contains a resolve tool call
+// with action "apply".
+func (a *AssistantMessageItem) hasResolveApply() bool {
 	type resolveInput struct {
 		Action string `json:"action"`
 	}

@@ -3131,7 +3131,7 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 		return nil
 	}
 	plan, ok := planmode.ExtractProposedPlan(msg.Content().Text)
-	title, hasPlanTool := hasPlanExitOrResolveApply(msg)
+	title, hasPlanTool := hasResolveApply(msg)
 	if !hasPlanTool {
 		return nil
 	}
@@ -3157,15 +3157,6 @@ func (m *UI) loadPlanReview(sessionID, planFilePath string) tea.Cmd {
 		}
 		return planReviewLoadedMsg{SessionID: sessionID, Plan: string(data)}
 	}
-}
-
-func hasToolCall(msg message.Message, toolName string) bool {
-	for _, tc := range msg.ToolCalls() {
-		if tc.Name == toolName {
-			return true
-		}
-	}
-	return false
 }
 
 type resolveToolInput struct {
@@ -3194,17 +3185,10 @@ func findResolveApplyToolCall(msg message.Message) (string, bool) {
 	return "", false
 }
 
-// hasPlanExitOrResolveApply reports whether the message contains a plan exit
-// tool call or a resolve(action="apply") tool call. It returns an optional
-// title when resolve provided one.
-func hasPlanExitOrResolveApply(msg message.Message) (string, bool) {
-	if title, ok := findResolveApplyToolCall(msg); ok {
-		return title, true
-	}
-	if hasToolCall(msg, agenttools.PlanExitToolName) {
-		return "", true
-	}
-	return "", false
+// hasResolveApply reports whether the message contains a resolve(action="apply")
+// tool call. It returns an optional title when resolve provided one.
+func hasResolveApply(msg message.Message) (string, bool) {
+	return findResolveApplyToolCall(msg)
 }
 
 func (m *UI) openRequestUserInputDialog(request userinput.Request) tea.Cmd {

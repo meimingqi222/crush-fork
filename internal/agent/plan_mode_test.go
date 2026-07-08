@@ -114,7 +114,6 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 		tools.ReadToolName,
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
-		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModePlan, []string{tools.ReadToolName}))
 
 	require.Equal(t, []string{
@@ -122,14 +121,12 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 		tools.ReadToolName,
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
-		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy([]string{AgentToolName, tools.AgenticFetchToolName, tools.ReadToolName}, session.CollaborationModePlan, nil))
 
 	require.Equal(t, []string{
 		tools.LSPToolName,
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
-		tools.PlanExitToolName,
 	}, filterToolsForRiskPolicy([]string{
 		tools.LSPToolName,
 	}, session.CollaborationModePlan, nil))
@@ -180,6 +177,5 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
 		tools.LSPToolName,
-		tools.PlanExitToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModePlan))
 }

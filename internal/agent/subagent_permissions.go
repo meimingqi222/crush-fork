@@ -84,7 +84,6 @@ func mandatorySubagentToolNames() []string {
 
 func globalSubagentDeniedTools() []string {
 	return []string{
-		agenttools.PlanExitToolName,
 		agenttools.ResolveToolName,
 		agenttools.RequestUserInputToolName,
 		// goal is denied for all subagents because subagent runs invoke

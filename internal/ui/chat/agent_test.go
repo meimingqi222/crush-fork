@@ -409,33 +409,38 @@ func TestBashToolMessageItemFinalResultPrefersResultOverStaleRuntimeSnapshot(t *
 	require.NotContains(t, rendered, "stale partial output")
 }
 
-func TestAssistantMessageOnlyRendersProposedPlanWithPlanExitToolCall(t *testing.T) {
+func TestAssistantMessageOnlyRendersProposedPlanWithResolveToolCall(t *testing.T) {
 	t.Parallel()
 
 	theme := styles.DefaultStyles()
 	content := planmode.WrapProposedPlan("- Step 1")
 
-	withoutPlanExit := message.Message{
-		ID:   "assistant-without-plan-exit",
+	withoutResolve := message.Message{
+		ID:   "assistant-without-resolve",
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: content},
 		},
 	}
-	item := NewAssistantMessageItem(&theme, &withoutPlanExit)
+	item := NewAssistantMessageItem(&theme, &withoutResolve)
 	rendered := ansi.Strip(item.Render(120))
 	require.NotContains(t, rendered, "Proposed Plan")
 	require.Contains(t, rendered, "<proposed_plan>")
 
-	withPlanExit := message.Message{
-		ID:   "assistant-with-plan-exit",
+	withResolve := message.Message{
+		ID:   "assistant-with-resolve",
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: content},
-			message.ToolCall{ID: "tool-1", Name: agenttools.PlanExitToolName, Finished: true},
+			message.ToolCall{
+				ID:       "tool-1",
+				Name:     agenttools.ResolveToolName,
+				Input:    `{"action":"apply","reason":"plan is ready","extra":{"title":"auth-refactor"}}`,
+				Finished: true,
+			},
 		},
 	}
-	item = NewAssistantMessageItem(&theme, &withPlanExit)
+	item = NewAssistantMessageItem(&theme, &withResolve)
 	rendered = ansi.Strip(item.Render(120))
 	require.Contains(t, rendered, "Proposed Plan")
 	require.NotContains(t, rendered, "<proposed_plan>")

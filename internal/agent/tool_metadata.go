@@ -46,7 +46,7 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "request task cancellation through mailbox protocol", SearchTags: []string{"mailbox", "taskgraph", "cancel", "stop-task"}, Direct: true}
 	case tools.LSPToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "query language-server code intelligence", SearchTags: []string{"lsp", "code-intelligence", "symbols", "definitions", "references", "diagnostics"}, Direct: true}
-	case tools.RequestUserInputToolName, tools.PlanExitToolName, tools.ResolveToolName:
+	case tools.RequestUserInputToolName, tools.ResolveToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan-mode", "user-input", "interaction", "approval"}, Direct: true}
 	case tools.YieldToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "result", "metadata"}}

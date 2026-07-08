@@ -318,7 +318,7 @@ func TestHandleChildSessionMessageClearsRetryStatusOnDelete(t *testing.T) {
 	require.NotContains(t, rendered, "Retrying in 3 seconds")
 }
 
-func TestMaybeOpenProposedPlanDialogRequiresPlanExit(t *testing.T) {
+func TestMaybeOpenProposedPlanDialogRequiresResolveApply(t *testing.T) {
 	t.Parallel()
 
 	theme := styles.DefaultStyles()
@@ -343,7 +343,12 @@ func TestMaybeOpenProposedPlanDialogRequiresPlanExit(t *testing.T) {
 	require.False(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
 
 	msg.Parts = append(msg.Parts,
-		message.ToolCall{ID: "tool-1", Name: agenttools.PlanExitToolName, Finished: true},
+		message.ToolCall{
+			ID:       "tool-1",
+			Name:     agenttools.ResolveToolName,
+			Input:    `{"action":"apply","reason":"plan is ready","extra":{"title":"auth-refactor"}}`,
+			Finished: true,
+		},
 	)
 
 	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))

@@ -120,7 +120,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 
 	builtin := []fantasy.AgentTool{
 		agenttools.NewRequestUserInputTool(c.userInput),
-		agenttools.NewPlanExitTool(c.sessions),
 		agenttools.NewResolveTool(c.sessions),
 		agenttools.NewBashToolWithSessions(c.sessions, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelName, c.hookManager, bashOpts),
 		agenttools.NewJobTool(),

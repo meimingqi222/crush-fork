@@ -153,7 +153,6 @@ func TestBuildToolsForSubagentsUseExpectedCapabilities(t *testing.T) {
 		coderNames = append(coderNames, tool.Info().Name)
 	}
 	assert.Contains(t, coderNames, "request_user_input")
-	assert.NotContains(t, coderNames, "plan_exit")
 
 	generalTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentGeneral], session.CollaborationModeDefault)
 	require.NoError(t, err)
@@ -558,7 +557,6 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"grep",
 		"lsp",
 		"memory_status",
-		"plan_exit",
 		"read",
 		"recall",
 		"reflect",

@@ -219,7 +219,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.WriteToolName:            toolRiskWrite,
 	tools.LSPToolName:              toolRiskRead,
 	tools.RequestUserInputToolName: toolRiskRead,
-	tools.PlanExitToolName:         toolRiskRead,
 	tools.ResolveToolName:          toolRiskRead,
 	tools.ToolSearchToolName:       toolRiskRead,
 	tools.GoalToolName:             toolRiskWrite,
@@ -331,7 +330,7 @@ func riskLevelForTool(toolName string) toolRiskLevel {
 }
 
 func isPlanModeToolAllowed(toolName string) bool {
-	if toolName == tools.RequestUserInputToolName || toolName == tools.ResolveToolName || toolName == tools.PlanExitToolName {
+	if toolName == tools.RequestUserInputToolName || toolName == tools.ResolveToolName {
 		return true
 	}
 	if toolName == tools.WriteToolName || toolName == tools.EditToolName {
@@ -393,10 +392,6 @@ func filterToolsForRiskPolicy(toolNames []string, mode session.CollaborationMode
 		}
 		if !slices.Contains(planModeTools, tools.ResolveToolName) {
 			planModeTools = append(planModeTools, tools.ResolveToolName)
-		}
-		// Keep plan_exit available for backward compatibility.
-		if !slices.Contains(planModeTools, tools.PlanExitToolName) {
-			planModeTools = append(planModeTools, tools.PlanExitToolName)
 		}
 		return planModeTools
 
