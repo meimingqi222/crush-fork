@@ -249,6 +249,18 @@ func (r *backgroundAgentRegistry) Cancel(agentID, reason string) {
 	r.mu.Unlock()
 }
 
+// AttachCancel associates a cancel function with a background agent so that
+// Cancel(agentID, reason) can signal the running goroutine. This is needed
+// for agents created via Register (nil runner), whose cancel func is never
+// set by processQueuedCommands (it only runs when a runner is attached).
+func (r *backgroundAgentRegistry) AttachCancel(agentID string, cancel context.CancelFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if entry, ok := r.agents[agentID]; ok {
+		entry.cancel = cancel
+	}
+}
+
 func (r *backgroundAgentRegistry) Enqueue(agentID string, command backgroundAgentCommand) (int, error) {
 	r.mu.RLock()
 	entry, ok := r.agents[agentID]
@@ -488,14 +500,18 @@ func (c *coordinator) runBackgroundTask(ctx context.Context, params subagentBatc
 
 	agentID := c.backgroundAgents.Register(description)
 
+	// Create a cancellable context for the background task. Detach from
+	// parent cancellation so the task survives parent context termination,
+	// but allow Cancel(agentID, reason) to signal the goroutine.
+	bgCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if runtime, ok := subagentRuntimeFromContext(ctx); ok {
+		bgCtx = withSubagentRuntimeContext(bgCtx, runtime)
+	}
+	c.backgroundAgents.AttachCancel(agentID, cancel)
+
 	// Launch the task in a background goroutine.
 	go func() {
-		// Detach from parent cancellation so the background task survives
-		// parent context termination, but preserve tracing/metadata values.
-		bgCtx := context.WithoutCancel(ctx)
-		if runtime, ok := subagentRuntimeFromContext(ctx); ok {
-			bgCtx = withSubagentRuntimeContext(bgCtx, runtime)
-		}
+		defer cancel()
 		result, err := c.runSubagents(bgCtx, params)
 		if err != nil {
 			slog.Error("Background agent failed", "agent_id", agentID, "error", err)

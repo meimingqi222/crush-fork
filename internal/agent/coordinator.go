@@ -2322,6 +2322,13 @@ func (c *coordinator) activeSubAgentsForSession(parentSessionID string) []Sessio
 
 func (c *coordinator) CancelAll() {
 	c.currentAgent.CancelAll()
+	c.activeSubAgentsMu.Lock()
+	defer c.activeSubAgentsMu.Unlock()
+	for _, subAgents := range c.activeSubAgents {
+		for subAgent := range subAgents {
+			subAgent.CancelAll()
+		}
+	}
 }
 
 func (c *coordinator) RemoveQueuedPrompt(sessionID string, index int) bool {
@@ -2349,11 +2356,24 @@ func (c *coordinator) PrioritizeQueuedPrompt(sessionID string, index int) bool {
 }
 
 func (c *coordinator) IsBusy() bool {
-	return c.currentAgent.IsBusy()
+	if c.currentAgent.IsBusy() {
+		return true
+	}
+	c.activeSubAgentsMu.Lock()
+	defer c.activeSubAgentsMu.Unlock()
+	for _, subAgents := range c.activeSubAgents {
+		if len(subAgents) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *coordinator) IsSessionBusy(sessionID string) bool {
-	return c.currentAgent.IsSessionBusy(sessionID)
+	if c.currentAgent.IsSessionBusy(sessionID) {
+		return true
+	}
+	return len(c.activeSubAgentsForSession(sessionID)) > 0
 }
 
 func (c *coordinator) Model() Model {
@@ -2938,10 +2958,11 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 
 	// Build the executor and run all prepared tasks in parallel.
 	runtimeCfg := c.cfg.Config().EffectiveSubagentRuntime()
-	runner := func(ctx context.Context, p subAgentParams) (fantasy.ToolResponse, error) {
+	runner := func(ctx context.Context, p subAgentParams) (resp fantasy.ToolResponse, err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				slog.Error("Subagent task panicked", "tool_call_id", p.ToolCallID, "panic", recovered)
+				err = fmt.Errorf("subagent panicked: %v", recovered)
 			}
 		}()
 		if c.hookManager != nil {
