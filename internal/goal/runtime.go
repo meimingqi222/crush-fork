@@ -32,13 +32,15 @@ func TokenUsageFromFantasy(u fantasy.Usage) TokenUsage {
 }
 
 // Runtime tracks goal execution state across agent turns, including token
-// budget accounting, time tracking, and continuation logic.
+// budget accounting, time tracking, and continuation logic. All in-memory
+// state is keyed by session ID so that concurrent sessions with active goals
+// do not interfere with each other's baseline or wall-clock accounting.
 type Runtime struct {
 	sessions session.Service
 
-	mu        sync.Mutex
-	snapshot  turnSnapshot
-	wallClock wallClock
+	mu         sync.Mutex
+	snapshots  map[string]turnSnapshot
+	wallClocks map[string]wallClock
 }
 
 type turnSnapshot struct {
@@ -55,7 +57,9 @@ type wallClock struct {
 // NewRuntime creates a new goal runtime.
 func NewRuntime(sessions session.Service) *Runtime {
 	return &Runtime{
-		sessions: sessions,
+		sessions:   sessions,
+		snapshots:  make(map[string]turnSnapshot),
+		wallClocks: make(map[string]wallClock),
 	}
 }
 
@@ -70,7 +74,7 @@ func (r *Runtime) OnTurnStart(ctx context.Context, sessionID, turnID string, bas
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.snapshot = turnSnapshot{
+	r.snapshots[sessionID] = turnSnapshot{
 		turnID:       turnID,
 		baseline:     baseline,
 		activeGoalID: sess.Goal.ID,
@@ -88,8 +92,8 @@ func (r *Runtime) OnTurnStart(ctx context.Context, sessionID, turnID string, bas
 // token accounting is performed.
 func (r *Runtime) PostTurn(ctx context.Context, sessionID string, currentUsage TokenUsage) (session.Goal, bool, error) {
 	r.mu.Lock()
-	snapshot := r.snapshot
-	r.snapshot = turnSnapshot{}
+	snapshot := r.snapshots[sessionID]
+	delete(r.snapshots, sessionID)
 	r.mu.Unlock()
 
 	sess, err := r.sessions.Get(ctx, sessionID)
@@ -116,12 +120,12 @@ func (r *Runtime) PostTurn(ctx context.Context, sessionID string, currentUsage T
 
 	now := time.Now().Unix()
 	goal.TokensUsed += delta
-	r.settleWallClockToNow(goal.ID, &goal, now)
+	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.UpdatedAt = now
 
 	// Continue timing if the goal is still active.
 	if goal.IsActive() {
-		r.startWallClock(goal.ID, now)
+		r.startWallClock(sessionID, goal.ID, now)
 	}
 
 	// Check budget exhaustion.
@@ -178,7 +182,7 @@ func (r *Runtime) CreateGoal(ctx context.Context, sessionID, objective string, b
 		goal.TokenBudget = budget
 	}
 
-	r.startWallClock(goal.ID, now)
+	r.startWallClock(sessionID, goal.ID, now)
 	sess.Goal = goal
 	updated, err := r.sessions.Save(ctx, sess)
 	if err != nil {
@@ -211,7 +215,7 @@ func (r *Runtime) ReplaceGoal(ctx context.Context, sessionID, objective string, 
 	if oldGoal.Status != "" {
 		// Settle any active time on the existing goal before replacing it.
 		if oldGoal.IsActive() {
-			r.settleWallClockToNow(oldGoal.ID, &oldGoal, now)
+			r.settleWallClockToNow(sessionID, oldGoal.ID, &oldGoal, now)
 		}
 		preservedTokens = oldGoal.TokensUsed
 		preservedTime = oldGoal.TimeSeconds
@@ -230,7 +234,7 @@ func (r *Runtime) ReplaceGoal(ctx context.Context, sessionID, objective string, 
 		goal.TokenBudget = budget
 	}
 
-	r.startWallClock(goal.ID, now)
+	r.startWallClock(sessionID, goal.ID, now)
 	sess.Goal = goal
 	updated, err := r.sessions.Save(ctx, sess)
 	if err != nil {
@@ -252,7 +256,7 @@ func (r *Runtime) PauseGoal(ctx context.Context, sessionID string) (session.Goal
 	}
 
 	now := time.Now().Unix()
-	r.settleWallClockToNow(goal.ID, &goal, now)
+	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Status = session.GoalStatusPaused
 	goal.UpdatedAt = now
 
@@ -283,7 +287,7 @@ func (r *Runtime) ResumeGoal(ctx context.Context, sessionID string) (session.Goa
 	now := time.Now().Unix()
 	goal.Status = session.GoalStatusActive
 	goal.UpdatedAt = now
-	r.startWallClock(goal.ID, now)
+	r.startWallClock(sessionID, goal.ID, now)
 
 	sess.Goal = goal
 	updated, err := r.sessions.Save(ctx, sess)
@@ -306,7 +310,7 @@ func (r *Runtime) CompleteGoal(ctx context.Context, sessionID string) (session.G
 	}
 
 	now := time.Now().Unix()
-	r.settleWallClockToNow(goal.ID, &goal, now)
+	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Status = session.GoalStatusComplete
 	goal.UpdatedAt = now
 
@@ -334,9 +338,9 @@ func (r *Runtime) DropGoal(ctx context.Context, sessionID string) (session.Goal,
 
 	now := time.Now().Unix()
 	if goal.IsActive() {
-		r.settleWallClockToNow(goal.ID, &goal, now)
+		r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	}
-	r.stopWallClock()
+	r.stopWallClock(sessionID)
 
 	goal.Status = session.GoalStatusDropped
 	goal.UpdatedAt = now
@@ -373,10 +377,10 @@ func (r *Runtime) SetBudgetGoal(ctx context.Context, sessionID string, budget in
 
 	if wasActive && !goal.IsActive() {
 		// Budget exhaustion moved the goal out of active; settle active time.
-		r.settleWallClockToNow(goal.ID, &goal, now)
+		r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	} else if !wasActive && goal.IsActive() {
 		// Budget increase moved the goal back to active; restart the clock.
-		r.startWallClock(goal.ID, now)
+		r.startWallClock(sessionID, goal.ID, now)
 	}
 
 	sess.Goal = goal
@@ -407,7 +411,7 @@ func (r *Runtime) PauseActiveGoalOnLoad(ctx context.Context, sessionID string, p
 	}
 
 	now := time.Now().Unix()
-	r.settleWallClockToNow(goal.ID, &goal, now)
+	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Status = session.GoalStatusPaused
 	goal.UpdatedAt = now
 
@@ -420,31 +424,33 @@ func (r *Runtime) PauseActiveGoalOnLoad(ctx context.Context, sessionID string, p
 }
 
 // startWallClock begins tracking active time for goalID from the given
-// timestamp.
-func (r *Runtime) startWallClock(goalID string, now int64) {
+// timestamp, keyed by sessionID so concurrent sessions keep independent clocks.
+func (r *Runtime) startWallClock(sessionID, goalID string, now int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if goalID == "" {
 		return
 	}
-	r.wallClock.activeGoalID = goalID
-	r.wallClock.lastAccountedAt = now
+	r.wallClocks[sessionID] = wallClock{
+		activeGoalID:    goalID,
+		lastAccountedAt: now,
+	}
 }
 
-// stopWallClock stops active time tracking.
-func (r *Runtime) stopWallClock() {
+// stopWallClock stops active time tracking for the given session.
+func (r *Runtime) stopWallClock(sessionID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.wallClock.activeGoalID = ""
-	r.wallClock.lastAccountedAt = 0
+	delete(r.wallClocks, sessionID)
 }
 
 // settleWallClockToNow adds any elapsed active time since the last accounted
 // timestamp to goal.TimeSeconds when goalID matches the active wall-clock
-// goal. If the runtime has no active wall-clock state for this goal, it falls
-// back to the goal's UpdatedAt timestamp so that sessions resumed from storage
-// still account for time spent active before the load.
-func (r *Runtime) settleWallClockToNow(goalID string, goal *session.Goal, now int64) {
+// goal for sessionID. If the runtime has no active wall-clock state for this
+// session/goal, it falls back to the goal's UpdatedAt timestamp so that
+// sessions resumed from storage still account for time spent active before
+// the load.
+func (r *Runtime) settleWallClockToNow(sessionID, goalID string, goal *session.Goal, now int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -452,10 +458,11 @@ func (r *Runtime) settleWallClockToNow(goalID string, goal *session.Goal, now in
 		return
 	}
 
+	wc := r.wallClocks[sessionID]
 	var elapsed int64
-	if r.wallClock.activeGoalID == goalID && r.wallClock.lastAccountedAt > 0 {
-		if now > r.wallClock.lastAccountedAt {
-			elapsed = now - r.wallClock.lastAccountedAt
+	if wc.activeGoalID == goalID && wc.lastAccountedAt > 0 {
+		if now > wc.lastAccountedAt {
+			elapsed = now - wc.lastAccountedAt
 		}
 	} else if goal.UpdatedAt > 0 && now > goal.UpdatedAt {
 		elapsed = now - goal.UpdatedAt
@@ -464,18 +471,7 @@ func (r *Runtime) settleWallClockToNow(goalID string, goal *session.Goal, now in
 	if elapsed > 0 {
 		goal.TimeSeconds += elapsed
 	}
-	r.wallClock.activeGoalID = ""
-	r.wallClock.lastAccountedAt = 0
-}
-
-// accountWallClock is a convenience helper that settles active time for the
-// given goal and restarts the clock if the goal is still active.
-func (r *Runtime) accountWallClock(goalID string, goal *session.Goal) {
-	now := time.Now().Unix()
-	r.settleWallClockToNow(goalID, goal, now)
-	if goal.IsActive() {
-		r.startWallClock(goalID, now)
-	}
+	delete(r.wallClocks, sessionID)
 }
 
 // NeedsContinuation returns true if the goal is still active and needs

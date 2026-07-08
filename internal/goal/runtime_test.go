@@ -349,3 +349,61 @@ func TestPauseActiveGoalOnLoadPreserve(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, loaded.Goal.IsActive())
 }
+
+// TestPostTurnIsolatesConcurrentSessions verifies that two sessions sharing a
+// single Runtime instance do not clobber each other's turn baseline or
+// wall-clock state when their turns interleave. This is the regression test
+// for the cross-session data race where snapshot/wallClock were single struct
+// fields instead of per-session maps.
+func TestPostTurnIsolatesConcurrentSessions(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(context.Background(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	svc := session.NewService(db.New(conn), conn)
+	runtime := NewRuntime(svc)
+
+	sessA, err := svc.Create(context.Background(), "session-A")
+	require.NoError(t, err)
+	sessB, err := svc.Create(context.Background(), "session-B")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Both sessions have active goals with generous budgets.
+	_, err = runtime.CreateGoal(ctx, sessA.ID, "Goal A", 10000)
+	require.NoError(t, err)
+	_, err = runtime.CreateGoal(ctx, sessB.ID, "Goal B", 10000)
+	require.NoError(t, err)
+
+	// Session A starts a turn, then session B starts a turn before A's
+	// PostTurn fires. With the old single-field design, B's baseline would
+	// overwrite A's.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessA.ID, "turn-a-1", TokenUsage{Input: 100, Output: 50, CacheWrite: 10}))
+	require.NoError(t, runtime.OnTurnStart(ctx, sessB.ID, "turn-b-1", TokenUsage{Input: 500, Output: 200, CacheWrite: 5}))
+
+	// Session A finishes its turn. Its delta must be computed against A's
+	// baseline (100+50+10=160), not B's baseline.
+	currentA := TokenUsage{Input: 300, Output: 150, CacheWrite: 40} // delta = 200+100+30 = 330
+	goalA, exhaustedA, err := runtime.PostTurn(ctx, sessA.ID, currentA)
+	require.NoError(t, err)
+	require.False(t, exhaustedA)
+	require.Equal(t, int64(330), goalA.TokensUsed, "session A delta must use A's baseline, not B's")
+
+	// Session B finishes its turn. Its delta must be computed against B's
+	// baseline (500+200+5=705), not A's already-consumed baseline.
+	currentB := TokenUsage{Input: 700, Output: 300, CacheWrite: 25} // delta = 200+100+20 = 320
+	goalB, exhaustedB, err := runtime.PostTurn(ctx, sessB.ID, currentB)
+	require.NoError(t, err)
+	require.False(t, exhaustedB)
+	require.Equal(t, int64(320), goalB.TokensUsed, "session B delta must use B's baseline, not A's")
+
+	// Neither session's persisted goal picked up the other's tokens.
+	loadedA, err := svc.Get(ctx, sessA.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(330), loadedA.Goal.TokensUsed)
+	loadedB, err := svc.Get(ctx, sessB.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(320), loadedB.Goal.TokensUsed)
+}
