@@ -120,6 +120,14 @@ func (f *fakeSessionService) UpdatePermissionMode(_ context.Context, id string, 
 	return s, nil
 }
 
+func (f *fakeSessionService) UpdatePlanFilePath(_ context.Context, id, planFilePath string) (session.Session, error) {
+	s := f.sessions[id]
+	s.ID = id
+	s.PlanFilePath = planFilePath
+	f.sessions[id] = s
+	return s, nil
+}
+
 func (f *fakeSessionService) SetDefaultPermissionMode(session.PermissionMode) {}
 
 func (f *fakeSessionService) UpdateTitleAndUsage(_ context.Context, id, title string, p, c int64, cost float64) error {

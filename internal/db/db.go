@@ -234,6 +234,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.updateSessionPermissionModeStmt, err = db.PrepareContext(ctx, updateSessionPermissionMode); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionPermissionMode: %w", err)
 	}
+	if q.updateSessionPlanFilePathStmt, err = db.PrepareContext(ctx, updateSessionPlanFilePath); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateSessionPlanFilePath: %w", err)
+	}
 	if q.updateSessionTitleAndUsageStmt, err = db.PrepareContext(ctx, updateSessionTitleAndUsage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionTitleAndUsage: %w", err)
 	}
@@ -604,6 +607,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateSessionPermissionModeStmt: %w", cerr)
 		}
 	}
+	if q.updateSessionPlanFilePathStmt != nil {
+		if cerr := q.updateSessionPlanFilePathStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateSessionPlanFilePathStmt: %w", cerr)
+		}
+	}
 	if q.updateSessionTitleAndUsageStmt != nil {
 		if cerr := q.updateSessionTitleAndUsageStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateSessionTitleAndUsageStmt: %w", cerr)
@@ -738,6 +746,7 @@ type Queries struct {
 	updateSessionStmt                  *sql.Stmt
 	updateSessionCollaborationModeStmt *sql.Stmt
 	updateSessionPermissionModeStmt    *sql.Stmt
+	updateSessionPlanFilePathStmt      *sql.Stmt
 	updateSessionTitleAndUsageStmt     *sql.Stmt
 	upsertMCPOAuthTokenStmt            *sql.Stmt
 	upsertMCPToolCacheStmt             *sql.Stmt
@@ -819,6 +828,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateSessionStmt:                  q.updateSessionStmt,
 		updateSessionCollaborationModeStmt: q.updateSessionCollaborationModeStmt,
 		updateSessionPermissionModeStmt:    q.updateSessionPermissionModeStmt,
+		updateSessionPlanFilePathStmt:      q.updateSessionPlanFilePathStmt,
 		updateSessionTitleAndUsageStmt:     q.updateSessionTitleAndUsageStmt,
 		upsertMCPOAuthTokenStmt:            q.upsertMCPOAuthTokenStmt,
 		upsertMCPToolCacheStmt:             q.upsertMCPToolCacheStmt,

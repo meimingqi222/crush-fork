@@ -633,6 +633,57 @@ func (q *Queries) UpdateSessionPermissionMode(ctx context.Context, arg UpdateSes
 	return i, err
 }
 
+const updateSessionPlanFilePath = `-- name: UpdateSessionPlanFilePath :one
+UPDATE sessions
+SET plan_file_path = ?
+WHERE id = ?
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+`
+
+type UpdateSessionPlanFilePathParams struct {
+	PlanFilePath string `json:"plan_file_path"`
+	ID           string `json:"id"`
+}
+
+func (q *Queries) UpdateSessionPlanFilePath(ctx context.Context, arg UpdateSessionPlanFilePathParams) (Session, error) {
+	row := q.queryRow(ctx, q.updateSessionPlanFilePathStmt, updateSessionPlanFilePath, arg.PlanFilePath, arg.ID)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.ParentSessionID,
+		&i.Title,
+		&i.MessageCount,
+		&i.PromptTokens,
+		&i.CompletionTokens,
+		&i.Cost,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.SummaryMessageID,
+		&i.Todos,
+		&i.CollaborationMode,
+		&i.LastPromptTokens,
+		&i.LastCompletionTokens,
+		&i.WorkspaceCwd,
+		&i.Kind,
+		&i.HandoffSourceSessionID,
+		&i.HandoffGoal,
+		&i.HandoffDraftPrompt,
+		&i.HandoffRelevantFiles,
+		&i.PermissionMode,
+		&i.LastSummaryAt,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
+		&i.GoalID,
+	)
+	return i, err
+}
+
 const updateSessionTitleAndUsage = `-- name: UpdateSessionTitleAndUsage :one
 UPDATE sessions
 SET

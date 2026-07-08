@@ -351,23 +351,19 @@ func (c *coordinator) plugins() *plugin.Runtime {
 }
 
 func (c *coordinator) ensurePlanFileForSession(ctx context.Context, sess session.Session) (session.Session, error) {
-	if strings.TrimSpace(sess.PlanFilePath) != "" {
-		return sess, nil
-	}
 	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
 	if workspaceRoot == "" {
 		workspaceRoot = c.cfg.WorkingDir()
 	}
-	planPath, err := plan.EnsureSessionFile(workspaceRoot, sess.ID)
+	planPath, err := plan.EnsureSessionPlanPath(workspaceRoot, sess.ID, sess.PlanFilePath)
 	if err != nil {
 		return session.Session{}, err
+	}
+	if planPath == sess.PlanFilePath {
+		return sess, nil
 	}
 	sess.PlanFilePath = planPath
-	updated, err := c.sessions.Save(ctx, sess)
-	if err != nil {
-		return session.Session{}, err
-	}
-	return updated, nil
+	return c.sessions.Save(ctx, sess)
 }
 
 // getDiscoveredSkills returns cached skills for the given paths. Caching is

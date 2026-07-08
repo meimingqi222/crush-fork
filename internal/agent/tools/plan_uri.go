@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/plan"
-	"github.com/charmbracelet/crush/internal/session"
 )
 
 // resolveLocalPlanURI converts a local plan URI (local://<slug>-plan.md) into
@@ -71,8 +70,10 @@ func adoptPlanFilePathIfNeeded(ctx context.Context, filePath string) error {
 		return nil
 	}
 
-	sess.PlanFilePath = filePath
-	if _, err := sessions.Save(ctx, sess); err != nil {
+	// Use the narrow updater so we don't clobber concurrent writes to other
+	// session fields (e.g. usage counters, goal state) that may land between
+	// the Get above and this Save.
+	if _, err := sessions.UpdatePlanFilePath(ctx, sessionID, filePath); err != nil {
 		return fmt.Errorf("failed to adopt plan file path: %w", err)
 	}
 	return nil
@@ -94,28 +95,4 @@ func activePlanFilePath(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(sess.PlanFilePath)
-}
-
-// ensureSessionPlanFilePath makes sure the session has an active plan file
-// path. If it does not, it creates a default plan file and persists the path.
-func ensureSessionPlanFilePath(ctx context.Context, sessions session.Service, workspaceRoot, sessionID string) (string, error) {
-	sess, err := sessions.Get(ctx, sessionID)
-	if err != nil {
-		return "", fmt.Errorf("failed to load session: %w", err)
-	}
-
-	if existing := strings.TrimSpace(sess.PlanFilePath); existing != "" {
-		return existing, nil
-	}
-
-	path, err := plan.EnsureSessionFile(workspaceRoot, sessionID)
-	if err != nil {
-		return "", err
-	}
-
-	sess.PlanFilePath = path
-	if _, err := sessions.Save(ctx, sess); err != nil {
-		return "", fmt.Errorf("failed to save plan file path: %w", err)
-	}
-	return path, nil
 }

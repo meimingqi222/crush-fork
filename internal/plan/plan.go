@@ -125,6 +125,19 @@ func EnsureSessionFile(workspaceRoot, sessionID string) (string, error) {
 	return path, nil
 }
 
+// EnsureSessionPlanPath returns existingPath if non-empty, otherwise creates
+// a default plan file under workspaceRoot for sessionID and returns its path.
+// This is the shared helper used by both coordinator.ensurePlanFileForSession
+// and session.service.ensurePlanFile so the "create if missing" logic lives in
+// one place. Callers are responsible for persisting the returned path to the
+// session if it differs from existingPath.
+func EnsureSessionPlanPath(workspaceRoot, sessionID, existingPath string) (string, error) {
+	if strings.TrimSpace(existingPath) != "" {
+		return existingPath, nil
+	}
+	return EnsureSessionFile(workspaceRoot, sessionID)
+}
+
 // Read reads plan content from a file.
 func Read(path string) (string, error) {
 	data, err := os.ReadFile(path)

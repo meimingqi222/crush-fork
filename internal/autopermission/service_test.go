@@ -137,6 +137,10 @@ func (m *mockSessionService) UpdateCollaborationMode(context.Context, string, se
 func (m *mockSessionService) UpdatePermissionMode(context.Context, string, session.PermissionMode) (session.Session, error) {
 	return session.Session{}, nil
 }
+
+func (m *mockSessionService) UpdatePlanFilePath(context.Context, string, string) (session.Session, error) {
+	return session.Session{}, nil
+}
 func (m *mockSessionService) SetDefaultPermissionMode(session.PermissionMode) {}
 func (m *mockSessionService) UpdateTitleAndUsage(context.Context, string, string, int64, int64, float64) error {
 	return nil

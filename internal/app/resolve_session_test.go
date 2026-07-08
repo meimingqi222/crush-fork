@@ -87,6 +87,10 @@ func (m *mockSessionService) UpdatePermissionMode(_ context.Context, sessionID s
 	return session.Session{ID: sessionID, PermissionMode: mode}, nil
 }
 
+func (m *mockSessionService) UpdatePlanFilePath(_ context.Context, sessionID, planFilePath string) (session.Session, error) {
+	return session.Session{ID: sessionID, PlanFilePath: planFilePath}, nil
+}
+
 func (m *mockSessionService) SetDefaultPermissionMode(session.PermissionMode) {}
 
 func (m *mockSessionService) UpdateTitleAndUsage(context.Context, string, string, int64, int64, float64) error {

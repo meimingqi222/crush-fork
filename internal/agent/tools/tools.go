@@ -25,6 +25,7 @@ type (
 type sessionLookupService interface {
 	Get(context.Context, string) (session.Session, error)
 	Save(context.Context, session.Session) (session.Session, error)
+	UpdatePlanFilePath(context.Context, string, string) (session.Session, error)
 }
 
 const (

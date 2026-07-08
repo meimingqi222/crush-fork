@@ -139,6 +139,37 @@ func TestUpdatePermissionModePersistsAndNormalizes(t *testing.T) {
 	require.Equal(t, PermissionModeDefault, loaded.PermissionMode)
 }
 
+func TestUpdatePlanFilePathPersistsNarrowly(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(context.Background(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+
+	q := db.New(conn)
+	svc := NewService(q, conn)
+
+	created, err := svc.Create(context.Background(), "Plan path updates")
+	require.NoError(t, err)
+	require.Empty(t, created.PlanFilePath)
+
+	// Update the plan file path.
+	updated, err := svc.UpdatePlanFilePath(context.Background(), created.ID, "/plans/abc.md")
+	require.NoError(t, err)
+	require.Equal(t, "/plans/abc.md", updated.PlanFilePath)
+
+	// Reload to confirm persistence.
+	loaded, err := svc.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "/plans/abc.md", loaded.PlanFilePath)
+
+	// Noop when the path is unchanged (whitespace-trimmed comparison).
+	_, err = svc.UpdatePlanFilePath(context.Background(), created.ID, "  /plans/abc.md  ")
+	require.NoError(t, err)
+}
+
 func TestUpdateModesNoopWhenStateUnchanged(t *testing.T) {
 	t.Parallel()
 

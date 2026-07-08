@@ -118,6 +118,12 @@ SET permission_mode = ?
 WHERE id = ?
 RETURNING *;
 
+-- name: UpdateSessionPlanFilePath :one
+UPDATE sessions
+SET plan_file_path = ?
+WHERE id = ?
+RETURNING *;
+
 -- name: UpdateSessionTitleAndUsage :one
 UPDATE sessions
 SET

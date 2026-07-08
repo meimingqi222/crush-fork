@@ -80,6 +80,7 @@ type Querier interface {
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionCollaborationMode(ctx context.Context, arg UpdateSessionCollaborationModeParams) (Session, error)
 	UpdateSessionPermissionMode(ctx context.Context, arg UpdateSessionPermissionModeParams) (Session, error)
+	UpdateSessionPlanFilePath(ctx context.Context, arg UpdateSessionPlanFilePathParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) (Session, error)
 	UpsertMCPOAuthToken(ctx context.Context, arg UpsertMCPOAuthTokenParams) error
 	UpsertMCPToolCache(ctx context.Context, arg UpsertMCPToolCacheParams) error

@@ -156,3 +156,9 @@ func (m *mockPermissionSessionLookup) Save(_ context.Context, s session.Session)
 	m.session = s
 	return s, nil
 }
+
+func (m *mockPermissionSessionLookup) UpdatePlanFilePath(_ context.Context, sessionID, planFilePath string) (session.Session, error) {
+	m.session.ID = sessionID
+	m.session.PlanFilePath = planFilePath
+	return m.session, nil
+}

@@ -351,6 +351,7 @@ type Service interface {
 	Save(ctx context.Context, session Session) (Session, error)
 	UpdateCollaborationMode(ctx context.Context, sessionID string, mode CollaborationMode) (Session, error)
 	UpdatePermissionMode(ctx context.Context, sessionID string, mode PermissionMode) (Session, error)
+	UpdatePlanFilePath(ctx context.Context, sessionID, planFilePath string) (Session, error)
 	SetDefaultPermissionMode(mode PermissionMode)
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
@@ -617,9 +618,6 @@ func (s *service) UpdateCollaborationMode(ctx context.Context, sessionID string,
 }
 
 func (s *service) ensurePlanFile(ctx context.Context, sess Session) (Session, error) {
-	if strings.TrimSpace(sess.PlanFilePath) != "" {
-		return sess, nil
-	}
 	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
 	if workspaceRoot == "" {
 		cwd, err := os.Getwd()
@@ -628,9 +626,12 @@ func (s *service) ensurePlanFile(ctx context.Context, sess Session) (Session, er
 		}
 		workspaceRoot = cwd
 	}
-	planPath, err := plan.EnsureSessionFile(workspaceRoot, sess.ID)
+	planPath, err := plan.EnsureSessionPlanPath(workspaceRoot, sess.ID, sess.PlanFilePath)
 	if err != nil {
 		return Session{}, err
+	}
+	if planPath == sess.PlanFilePath {
+		return sess, nil
 	}
 	sess.PlanFilePath = planPath
 	return s.Save(ctx, sess)
@@ -649,6 +650,30 @@ func (s *service) UpdatePermissionMode(ctx context.Context, sessionID string, mo
 	dbSession, err := s.q.UpdateSessionPermissionMode(ctx, db.UpdateSessionPermissionModeParams{
 		ID:             sessionID,
 		PermissionMode: string(transition.Current.PermissionMode),
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	updated := s.fromDBItem(dbSession)
+	updated.EstimatedUsage = current.EstimatedUsage
+	s.Publish(pubsub.UpdatedEvent, updated)
+	return updated, nil
+}
+
+// UpdatePlanFilePath updates only the plan_file_path column for a session.
+// This narrow updater avoids the whole-row Save pattern that can clobber
+// concurrent writes to other fields (e.g. usage counters, goal state).
+func (s *service) UpdatePlanFilePath(ctx context.Context, sessionID, planFilePath string) (Session, error) {
+	current, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return Session{}, err
+	}
+	if strings.TrimSpace(planFilePath) == strings.TrimSpace(current.PlanFilePath) {
+		return current, nil
+	}
+	dbSession, err := s.q.UpdateSessionPlanFilePath(ctx, db.UpdateSessionPlanFilePathParams{
+		ID:           sessionID,
+		PlanFilePath: planFilePath,
 	})
 	if err != nil {
 		return Session{}, err
