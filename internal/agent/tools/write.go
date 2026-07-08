@@ -77,6 +77,17 @@ func NewWriteTool(
 				return response, guardErr
 			}
 
+			// Serialize concurrent writers to the same file path. This is
+			// a stopgap (P1.a) that removes undefined interleaving
+			// between concurrent "session"-isolated subagents racing on
+			// the same path. The lock spans the entire
+			// read-modify-write critical section so that old-content reads
+			// and the subsequent write happen atomically with respect to
+			// other writers.
+			pathMu := filePathLockFor(filePath)
+			pathMu.Lock()
+			defer pathMu.Unlock()
+
 			fileInfo, err := os.Stat(filePath)
 			if err == nil {
 				if fileInfo.IsDir() {

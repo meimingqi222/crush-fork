@@ -114,6 +114,16 @@ func NewEditTool(
 				}
 			}
 
+			// Serialize concurrent writers to the same file path. This is
+			// a stopgap (P1.a) that removes undefined interleaving between
+			// concurrent "session"-isolated subagents racing on the same
+			// path. For patch mode the primary file path is locked; the
+			// patch applier handles multi-file patches atomically within
+			// this critical section.
+			pathMu := filePathLockFor(params.FilePath)
+			pathMu.Lock()
+			defer pathMu.Unlock()
+
 			var response fantasy.ToolResponse
 			var opErr error
 
