@@ -487,14 +487,26 @@ func IsSteerPrompt(prompt string) bool {
 		strings.HasPrefix(prompt, "Token budget exhausted for the active goal.")
 }
 
+// IsGuidedGoalPrompt reports whether prompt was produced by the guided-goal
+// dialog. The coordinator calls this once at entry to set the
+// GuidedGoalSetup flag on SessionAgentCall; downstream code (continuation
+// chaining, plan-mode enforcement) checks that flag instead of re-scanning
+// the user-controllable prompt text.
+func IsGuidedGoalPrompt(prompt string) bool {
+	return strings.HasPrefix(strings.TrimSpace(prompt), "<guided_goal>")
+}
+
 // ShouldChainContinuation reports whether another autonomous goal turn should
 // run after the current one completes. User-initiated prompts do not chain;
 // only internal steers and guided-goal setup kick off autonomous continuation.
-func ShouldChainContinuation(prompt string, depth int) bool {
+// The guidedGoalSetup flag is set by the coordinator from IsGuidedGoalPrompt,
+// decoupling continuation triggering from substring matching on
+// user-controllable prompt text.
+func ShouldChainContinuation(prompt string, depth int, guidedGoalSetup bool) bool {
 	if IsSteerPrompt(prompt) {
 		return true
 	}
-	return depth == 0 && strings.Contains(prompt, "<guided_goal>")
+	return depth == 0 && guidedGoalSetup
 }
 
 // BuildContinuationPrompt generates a hidden steer message injected between

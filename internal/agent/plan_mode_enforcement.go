@@ -68,11 +68,11 @@ func assistantTurnFailed(msgs []message.Message) bool {
 	return false
 }
 
-func (c *coordinator) maybeEnforcePlanModeToolDecision(ctx context.Context, sessionID, prompt string, sess session.Session) error {
+func (c *coordinator) maybeEnforcePlanModeToolDecision(ctx context.Context, sessionID, prompt string, sess session.Session, guidedGoalSetup bool) error {
 	if !sess.IsActivePlanMode() {
 		return nil
 	}
-	if isPlanModeEnforcementPrompt(prompt) || strings.Contains(prompt, "<guided_goal>") {
+	if isPlanModeEnforcementPrompt(prompt) || guidedGoalSetup {
 		return nil
 	}
 	depth, _ := ctx.Value(planModeEnforcementDepthKey{}).(int)

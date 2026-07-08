@@ -770,6 +770,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 
 	transientPrompt := goalruntime.IsSteerPrompt(prompt) || isPlanModeEnforcementPrompt(prompt)
+	// Detect the guided-goal dialog prompt prefix once at entry and stash it
+	// in a typed flag. Downstream code (continuation chaining, plan-mode
+	// enforcement) reads the flag instead of substring-scanning the
+	// user-controllable prompt text.
+	guidedGoalSetup := goalruntime.IsGuidedGoalPrompt(prompt)
 	var userMessage *message.Message
 	if !transientPrompt {
 		// Create the user message immediately with the original attachments so the
@@ -860,20 +865,22 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	run := func() (*fantasy.AgentResult, error) {
 		slog.Debug("[PERF] coordinator: starting sessionAgent.Run", "duration", time.Since(start), "session_id", sessionID)
 		call := SessionAgentCall{
-			SessionID:        sessionID,
-			Prompt:           prompt,
-			Attachments:      attachments,
-			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  runtimeConfig.ProviderOptions,
-			Temperature:      runtimeConfig.Temperature,
-			TopP:             runtimeConfig.TopP,
-			TopK:             runtimeConfig.TopK,
-			FrequencyPenalty: runtimeConfig.FrequencyPenalty,
-			PresencePenalty:  runtimeConfig.PresencePenalty,
-			UserMessage:      userMessage,
-			MemoryPrefetch:   memoryPrefetch,
-			TransientPrompt:  transientPrompt,
-			NonInteractive:   transientPrompt,
+			SessionID:           sessionID,
+			Prompt:              prompt,
+			Attachments:         attachments,
+			MaxOutputTokens:     maxTokens,
+			ProviderOptions:     runtimeConfig.ProviderOptions,
+			Temperature:         runtimeConfig.Temperature,
+			TopP:                runtimeConfig.TopP,
+			TopK:                runtimeConfig.TopK,
+			FrequencyPenalty:    runtimeConfig.FrequencyPenalty,
+			PresencePenalty:     runtimeConfig.PresencePenalty,
+			UserMessage:         userMessage,
+			MemoryPrefetch:      memoryPrefetch,
+			TransientPrompt:     transientPrompt,
+			NonInteractive:      transientPrompt,
+			GoalBudgetExhausted: transientPrompt && sess.Goal.Status == session.GoalStatusBudgetLimited,
+			GuidedGoalSetup:     guidedGoalSetup,
 		}
 		if transientPrompt {
 			call.InitiatorType = copilot.InitiatorAgent
@@ -929,7 +936,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			slog.Warn("Failed to update goal runtime", "error", goalErr, "session_id", sessionID)
 		} else if c.currentAgent.QueuedPrompts(sessionID) == 0 {
 			depth, _ := ctx.Value(goalContinuationDepthKey{}).(int)
-			if depth < maxGoalContinuationsPerRun && goalruntime.ShouldChainContinuation(prompt, depth) {
+			if depth < maxGoalContinuationsPerRun && goalruntime.ShouldChainContinuation(prompt, depth, guidedGoalSetup) {
 				continuationCtx := context.WithValue(ctx, goalContinuationDepthKey{}, depth+1)
 				var continuationPrompt string
 				if budgetExhausted {
@@ -948,7 +955,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		}
 
 		if originalErr == nil && !transientPrompt && c.currentAgent.QueuedPrompts(sessionID) == 0 {
-			if enforceErr := c.maybeEnforcePlanModeToolDecision(ctx, sessionID, prompt, sess); enforceErr != nil {
+			if enforceErr := c.maybeEnforcePlanModeToolDecision(ctx, sessionID, prompt, sess, guidedGoalSetup); enforceErr != nil {
 				originalErr = enforceErr
 			}
 		}

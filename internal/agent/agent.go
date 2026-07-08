@@ -152,6 +152,21 @@ type SessionAgentCall struct {
 	// TransientPrompt skips persisting the prompt as a user message. Used for
 	// internal goal continuation steers that should not appear in chat history.
 	TransientPrompt bool
+	// GoalBudgetExhausted indicates this turn is the budget-limit wrap-up
+	// continuation injected by goal.Runtime. When true, the step loop halts
+	// after the first step so the model cannot keep calling tools against
+	// the exhausted budget — it gets one chance to emit its summary, then
+	// the turn ends. This reuses the existing StopWhen mechanism rather than
+	// building a second advisory-only enforcement path.
+	GoalBudgetExhausted bool
+	// GuidedGoalSetup indicates this turn originated from the guided-goal
+	// dialog and should kick off autonomous continuation. This replaces the
+	// previous substring match on "<guided_goal>" in the user-controllable
+	// prompt text, which could be triggered by a user typing the tag
+	// themselves. The flag is set by the coordinator when it detects the
+	// guided-goal prompt prefix, keeping prompt content (for the model) and
+	// continuation triggering (system logic) separate.
+	GuidedGoalSetup bool
 	UserMessage     *message.Message
 	// MemoryPrefetch is an async memory recall result. The coordinator starts
 	// the prefetch goroutine, and the agent consumes it if ready. The result
@@ -1567,6 +1582,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						"hard_budget", runtimeConfig.HardRequestBudget,
 						"model", largeModel.ModelCfg.Model,
 						"provider", largeModel.ModelCfg.Provider,
+					)
+					return true
+				},
+				// Goal budget exhausted: this turn is the budget-limit
+				// wrap-up continuation injected by goal.Runtime. Let the
+				// model emit its summary in a single step, then halt so it
+				// cannot keep calling tools against the exhausted budget.
+				// Without this, BuildBudgetLimitPrompt is advisory-only and
+				// the model can continue substantive work indefinitely.
+				func(steps []fantasy.StepResult) bool {
+					if !call.GoalBudgetExhausted {
+						return false
+					}
+					if len(steps) < 1 {
+						return false
+					}
+					slog.Info("Goal budget exhausted; halting after wrap-up step",
+						"session_id", call.SessionID,
+						"completed_steps", len(steps),
 					)
 					return true
 				},

@@ -68,10 +68,27 @@ func TestIsSteerPrompt(t *testing.T) {
 func TestShouldChainContinuation(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, ShouldChainContinuation("Continue work on the active goal.", 3))
-	require.True(t, ShouldChainContinuation("<guided_goal>\nRefine this goal\n</guided_goal>", 0))
-	require.False(t, ShouldChainContinuation("Please add logging to the handler", 0))
-	require.False(t, ShouldChainContinuation("Please add logging to the handler", 2))
+	// Steer prompts always chain, regardless of depth or guided-goal flag.
+	require.True(t, ShouldChainContinuation("Continue work on the active goal.", 3, false))
+	require.True(t, ShouldChainContinuation("Token budget exhausted for the active goal.", 1, false))
+	// Guided-goal setup chains only at depth 0.
+	require.True(t, ShouldChainContinuation("Refine this goal", 0, true))
+	require.False(t, ShouldChainContinuation("Refine this goal", 2, true))
+	// Non-steer, non-guided prompts never chain even at depth 0.
+	require.False(t, ShouldChainContinuation("Please add logging to the handler", 0, false))
+	// A user typing "<guided_goal>" mid-prompt no longer triggers chaining
+	// because continuation now keys off the typed flag, not substring match.
+	require.False(t, ShouldChainContinuation("Please <guided_goal> add logging", 0, false))
+}
+
+func TestIsGuidedGoalPrompt(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, IsGuidedGoalPrompt("<guided_goal>\nRefine this goal\n</guided_goal>"))
+	require.True(t, IsGuidedGoalPrompt("  <guided_goal>\nShip it"))
+	// Substring occurrences without the prefix must not match.
+	require.False(t, IsGuidedGoalPrompt("Please review <guided_goal> in my message"))
+	require.False(t, IsGuidedGoalPrompt("Regular user prompt"))
 }
 
 func TestCreateGoalRejectsPlanMode(t *testing.T) {
