@@ -805,6 +805,18 @@ type Options struct {
 	AutoLSP                    *bool         `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
 	Progress                   *bool         `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	DisableNotifications       bool          `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
+	Recap                      *RecapConfig  `json:"recap,omitempty" jsonschema:"description=Idle recap configuration"`
+}
+
+// RecapConfig controls the idle-recap feature: after the user has been away
+// for a configurable period, a brief LLM summary is shown in the status bar
+// to help them re-orient when they return.
+type RecapConfig struct {
+	// Disabled prevents the idle recap from running when set to true.
+	Disabled bool `json:"disabled,omitempty" jsonschema:"description=Disable the idle recap feature,default=false"`
+	// IdleSeconds is the number of seconds of inactivity before the recap is
+	// triggered. Must be between 30 and 3600. Defaults to 240 (4 minutes).
+	IdleSeconds int `json:"idle_seconds,omitempty" jsonschema:"description=Seconds of inactivity before showing the recap (30–3600),default=240,minimum=30,maximum=3600"`
 }
 
 type MCPs map[string]MCPConfig

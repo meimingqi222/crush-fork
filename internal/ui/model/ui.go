@@ -228,6 +228,13 @@ type (
 		title     string
 		err       error
 	}
+	// idleRecapTickMsg fires when the idle-recap timer expires.
+	idleRecapTickMsg struct{ seq uint64 }
+	// idleRecapResultMsg carries the recap text back to the Update loop.
+	idleRecapResultMsg struct {
+		recap string
+		err   error
+	}
 )
 
 // UI represents the main user interface model.
@@ -411,6 +418,11 @@ type UI struct {
 		index    int
 		draft    string
 	}
+
+	// idleRecapSeq is incremented whenever a new idle-recap timer is armed or
+	// cancelled. A firing tick carries the sequence number at arm time so stale
+	// ticks are silently ignored.
+	idleRecapSeq uint64
 }
 
 type executionMode string
@@ -1017,6 +1029,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.agentRunInProgress = true
 			m.sessionAgentLockSeen = false
 			m.refreshEditorPlaceholder()
+			// Cancel any pending idle recap when a new run starts.
+			m.idleRecapSeq++
 		}
 	case agentRunFinishedMsg:
 		if m.session != nil && m.session.ID == msg.SessionID {
@@ -1027,6 +1041,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.renderPills()
 			}
 			m.refreshEditorPlaceholder()
+			// Schedule idle recap only after a fully successful turn.
+			// Cancelled turns mean the user is still active, so skip.
+			if msg.Err == nil {
+				if cmd := m.scheduleIdleRecap(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
 		}
 		if msg.Err != nil {
 			err := msg.Err
@@ -1045,6 +1066,27 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return sessionUsageRefreshedMsg{session: &refreshed}
 		})
+	case idleRecapTickMsg:
+		// Ignore stale ticks (cancelled by a new run or bumped seq).
+		if msg.seq == m.idleRecapSeq && m.hasSession() && !m.agentRunInProgress {
+			cmds = append(cmds, m.runIdleRecapCmd())
+		}
+	case idleRecapResultMsg:
+		if msg.err != nil {
+			slog.Debug("Idle recap failed", "err", msg.err)
+			break
+		}
+		// Drop stale results: if the agent is already running again the user
+		// is active and does not need a recap painted over their session.
+		if msg.recap != "" && !m.agentRunInProgress {
+			cmds = append(cmds, func() tea.Msg {
+				return util.InfoMsg{
+					Type: util.InfoTypeInfo,
+					Msg:  "※ " + msg.recap,
+					TTL:  idleRecapStatusTTL,
+				}
+			})
+		}
 	case DelayedClickMsg:
 		// Handle delayed single-click action (e.g., expansion).
 		if _, cmd := m.chat.HandleDelayedClick(msg); cmd != nil {
@@ -5374,6 +5416,73 @@ func cancelTimerCmd() tea.Cmd {
 	return tea.Tick(cancelTimerDuration, func(time.Time) tea.Msg {
 		return cancelTimerExpiredMsg{}
 	})
+}
+
+const (
+	idleRecapDefaultSeconds = 240
+	idleRecapMinSeconds     = 30
+	idleRecapMaxSeconds     = 3600
+	// idleRecapStatusTTL is how long the recap message stays in the status
+	// bar. Longer than the default 5 s so that a returning user has time to
+	// read it.
+	idleRecapStatusTTL = 30 * time.Second
+)
+
+// scheduleIdleRecap arms the idle-recap timer, cancelling any previously
+// armed timer by bumping the sequence number. Should be called after an
+// agent turn completes.
+func (m *UI) scheduleIdleRecap() tea.Cmd {
+	if m.com.App == nil || m.com.App.AgentCoordinator == nil {
+		return nil
+	}
+
+	// Respect user configuration.
+	cfg := m.com.App.Config()
+	if cfg != nil && cfg.Options != nil && cfg.Options.Recap != nil && cfg.Options.Recap.Disabled {
+		return nil
+	}
+
+	// Only schedule when there is an active session with messages.
+	if !m.hasSession() {
+		return nil
+	}
+
+	idleSeconds := idleRecapDefaultSeconds
+	if cfg != nil && cfg.Options != nil && cfg.Options.Recap != nil && cfg.Options.Recap.IdleSeconds > 0 {
+		idleSeconds = cfg.Options.Recap.IdleSeconds
+	}
+	if idleSeconds < idleRecapMinSeconds {
+		idleSeconds = idleRecapMinSeconds
+	}
+	if idleSeconds > idleRecapMaxSeconds {
+		idleSeconds = idleRecapMaxSeconds
+	}
+
+	m.idleRecapSeq++
+	seq := m.idleRecapSeq
+	delay := time.Duration(idleSeconds) * time.Second
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return idleRecapTickMsg{seq: seq}
+	})
+}
+
+// runIdleRecapCmd calls RecapSession in the background and returns the result
+// as an idleRecapResultMsg.
+func (m *UI) runIdleRecapCmd() tea.Cmd {
+	if m.com.App == nil || m.com.App.AgentCoordinator == nil {
+		return nil
+	}
+	if !m.hasSession() {
+		return nil
+	}
+	sessionID := m.session.ID
+	coordinator := m.com.App.AgentCoordinator
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		recap, err := coordinator.RecapSession(ctx, sessionID)
+		return idleRecapResultMsg{recap: recap, err: err}
+	}
 }
 
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true

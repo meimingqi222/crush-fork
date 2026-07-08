@@ -50,6 +50,10 @@ func (m *mockQueueCoordinator) EnhancePrompt(context.Context, string, string) (s
 	return "", nil
 }
 
+func (m *mockQueueCoordinator) RecapSession(context.Context, string) (string, error) {
+	return "", nil
+}
+
 func (m *mockQueueCoordinator) GenerateHandoff(context.Context, string, string) (agent.HandoffDraft, error) {
 	return agent.HandoffDraft{}, nil
 }

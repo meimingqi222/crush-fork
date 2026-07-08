@@ -127,6 +127,13 @@ type Coordinator interface {
 	// sessionID is the current session; pass empty string to skip history.
 	EnhancePrompt(ctx context.Context, sessionID, prompt string) (string, error)
 
+	// RecapSession generates a brief recap of the current session state using
+	// the small model (falling back to large). It is intended to be called
+	// after a period of user inactivity so the user can quickly re-orient
+	// when they return. Returns an empty string when there is nothing worth
+	// summarising (e.g. empty session).
+	RecapSession(ctx context.Context, sessionID string) (string, error)
+
 	// EscalationBridge returns the permission escalation bridge for worker-to-leader communication.
 	EscalationBridge() *permission.EscalationBridge
 }
