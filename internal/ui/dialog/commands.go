@@ -61,7 +61,6 @@ type Commands struct {
 	queuePaused    bool
 	mode           session.CollaborationMode
 	permissionMode session.PermissionMode
-	proposedPlan   string
 	goal           session.Goal
 	selected       CommandType
 	denialCount    int // Number of items in denial queue
@@ -85,7 +84,7 @@ type Commands struct {
 var _ Dialog = (*Commands)(nil)
 
 // NewCommands creates a new commands dialog.
-func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue, queuePaused bool, mode session.CollaborationMode, permissionMode session.PermissionMode, proposedPlan string, goal session.Goal, denialCount int, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
+func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue, queuePaused bool, mode session.CollaborationMode, permissionMode session.PermissionMode, goal session.Goal, denialCount int, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
 	c := &Commands{
 		com:            com,
 		selected:       SystemCommands,
@@ -96,7 +95,6 @@ func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, has
 		queuePaused:    queuePaused,
 		mode:           mode,
 		permissionMode: permissionMode,
-		proposedPlan:   proposedPlan,
 		goal:           goal,
 		denialCount:    denialCount,
 		customCommands: customCommands,
@@ -445,9 +443,6 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		switch c.mode {
 		case session.CollaborationModePlan:
 			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Pause Plan Mode", "", ActionTogglePlanMode{SessionID: c.sessionID, NextMode: session.CollaborationModePlanPaused}))
-			if strings.TrimSpace(c.proposedPlan) != "" {
-				commands = append(commands, NewCommandItem(c.com.Styles, "execute_proposed_plan", "Execute Proposed Plan", "", ActionExecuteProposedPlan{SessionID: c.sessionID, Plan: c.proposedPlan}))
-			}
 		case session.CollaborationModePlanPaused:
 			commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Resume Plan Mode", "", ActionTogglePlanMode{SessionID: c.sessionID, NextMode: session.CollaborationModePlan}))
 			commands = append(commands, NewCommandItem(c.com.Styles, "exit_plan_mode", "Exit Plan Mode", "", ActionTogglePlanMode{SessionID: c.sessionID, NextMode: session.CollaborationModeDefault}))

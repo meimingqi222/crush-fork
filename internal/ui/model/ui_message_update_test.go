@@ -794,69 +794,6 @@ func TestHandleChildSessionMessageShowsBlockedAndWarningStatuses(t *testing.T) {
 	require.Contains(t, rendered, "Completed with warnings")
 }
 
-func TestUpdateLatestProposedPlanRequiresPlanModeAndPlanExit(t *testing.T) {
-	t.Parallel()
-
-	theme := styles.DefaultStyles()
-	com := &common.Common{Styles: &theme}
-	ui := &UI{
-		com:     com,
-		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModeDefault},
-	}
-
-	planMsg := message.Message{
-		ID:        "assistant-1",
-		SessionID: "session-1",
-		Role:      message.Assistant,
-		Parts: []message.ContentPart{
-			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
-			message.ToolCall{ID: "tool-1", Name: agenttools.PlanExitToolName, Finished: true},
-		},
-	}
-
-	ui.updateLatestProposedPlan(planMsg)
-	require.Empty(t, ui.latestProposedPlan)
-
-	ui.session.CollaborationMode = session.CollaborationModePlan
-	planMsg.Parts = []message.ContentPart{message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")}}
-	ui.updateLatestProposedPlan(planMsg)
-	require.Empty(t, ui.latestProposedPlan)
-
-	planMsg.Parts = append(planMsg.Parts, message.ToolCall{ID: "tool-2", Name: agenttools.PlanExitToolName, Finished: true})
-	ui.updateLatestProposedPlan(planMsg)
-	require.Equal(t, "- Step 1", ui.latestProposedPlan)
-}
-
-func TestUpdateLatestProposedPlanWithResolveApply(t *testing.T) {
-	t.Parallel()
-
-	theme := styles.DefaultStyles()
-	com := &common.Common{Styles: &theme}
-	ui := &UI{
-		com:     com,
-		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan},
-	}
-
-	planMsg := message.Message{
-		ID:        "assistant-1",
-		SessionID: "session-1",
-		Role:      message.Assistant,
-		Parts: []message.ContentPart{
-			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
-			message.ToolCall{
-				ID:       "tool-1",
-				Name:     agenttools.ResolveToolName,
-				Input:    `{"action":"apply","reason":"plan is ready","extra":{"title":"auth-refactor"}}`,
-				Finished: true,
-			},
-		},
-	}
-
-	ui.updateLatestProposedPlan(planMsg)
-	require.Equal(t, "- Step 1", ui.latestProposedPlan)
-	require.Equal(t, "auth-refactor", ui.latestProposedPlanTitle)
-}
-
 func TestStatusErrorPersistsAndIgnoresStaleClear(t *testing.T) {
 	t.Parallel()
 

@@ -265,10 +265,8 @@ type UI struct {
 	// continueLastSession is set to continue the most recent session on startup.
 	continueLastSession bool
 
-	lastUserMessageTime     int64
-	latestProposedPlan      string
-	latestProposedPlanTitle string
-	lastPromptedPlanMsg     string
+	lastUserMessageTime int64
+	lastPromptedPlanMsg string
 
 	// The width and height of the terminal in cells.
 	width  int
@@ -794,14 +792,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, util.ReportWarn("No proposed plan found in the active plan file."))
 			break
 		}
-		m.latestProposedPlan = plan
-		if m.dialog.ContainsDialog(dialog.ProposedPlanID) {
-			m.dialog.CloseDialog(dialog.ProposedPlanID)
-		}
 		if m.dialog.ContainsDialog(dialog.PlanReviewID) {
 			m.dialog.CloseDialog(dialog.PlanReviewID)
 		}
-		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, m.latestProposedPlanTitle))
+		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, ""))
 
 	case planCompactedForExecutionMsg:
 		if msg.Err != nil {
@@ -1494,8 +1488,6 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	if len(msgPtrs) > 0 {
 		m.lastUserMessageTime = msgPtrs[0].CreatedAt
 	}
-	m.latestProposedPlan = ""
-	m.latestProposedPlanTitle = ""
 
 	// Add messages to chat with linked tool results.
 	// Filter out incomplete summary messages with no content only when the
@@ -1511,7 +1503,6 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 			m.lastUserMessageTime = msg.CreatedAt
 			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
 		case message.Assistant:
-			m.updateLatestProposedPlan(*msg)
 			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
 			if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
 				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
@@ -1962,7 +1953,6 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case message.Assistant:
-		m.updateLatestProposedPlan(msg)
 		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
 		if cmd := m.startAnimations(items); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -2079,7 +2069,6 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 		}
 		existingItem = assistantItem
 	}
-	m.updateLatestProposedPlan(msg)
 
 	// if the message of the assistant does not have any  response just tool calls we need to remove it
 	if !shouldRenderAssistant && len(msg.ToolCalls()) > 0 && existingItem != nil {
@@ -2566,7 +2555,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteDirect))
 		m.dialog.CloseDialog(dialog.CommandsID)
-		m.dialog.CloseDialog(dialog.ProposedPlanID)
 		m.dialog.CloseDialog(dialog.PlanReviewID)
 	case dialog.ActionExecuteWithCompact:
 		if m.isAgentBusy() {
@@ -2579,7 +2567,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteWithCompact))
 		m.dialog.CloseDialog(dialog.CommandsID)
-		m.dialog.CloseDialog(dialog.ProposedPlanID)
 		m.dialog.CloseDialog(dialog.PlanReviewID)
 	case dialog.ActionExecuteKeepContext:
 		if m.isAgentBusy() {
@@ -2592,7 +2579,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteKeepContext))
 		m.dialog.CloseDialog(dialog.CommandsID)
-		m.dialog.CloseDialog(dialog.ProposedPlanID)
 		m.dialog.CloseDialog(dialog.PlanReviewID)
 	case dialog.ActionSubmitPlanFeedback:
 		feedback := strings.TrimSpace(msg.Feedback)
@@ -2601,7 +2587,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 		cmds = append(cmds, m.sendMessage(feedback))
-		m.dialog.CloseDialog(dialog.ProposedPlanID)
 		m.dialog.CloseDialog(dialog.PlanReviewID)
 	case dialog.ActionSetGoal:
 		if m.session != nil {
@@ -3138,28 +3123,6 @@ func substituteArgs(content string, args map[string]string) string {
 	return content
 }
 
-func (m *UI) updateLatestProposedPlan(msg message.Message) {
-	if msg.Role != message.Assistant {
-		return
-	}
-	if m.session == nil || m.session.CollaborationMode != session.CollaborationModePlan {
-		return
-	}
-	title, ok := hasPlanExitOrResolveApply(msg)
-	if !ok {
-		return
-	}
-	if strings.TrimSpace(m.session.PlanFilePath) != "" {
-		return
-	}
-	plan, extracted := planmode.ExtractProposedPlan(msg.Content().Text)
-	if !extracted {
-		return
-	}
-	m.latestProposedPlan = plan
-	m.latestProposedPlanTitle = title
-}
-
 func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 	if m.session == nil || m.session.CollaborationMode != session.CollaborationModePlan {
 		return nil
@@ -3181,9 +3144,6 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 	}
 	if !ok || strings.TrimSpace(plan) == "" {
 		return nil
-	}
-	if m.dialog.ContainsDialog(dialog.ProposedPlanID) {
-		m.dialog.CloseDialog(dialog.ProposedPlanID)
 	}
 	m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, title))
 	return nil
@@ -5084,16 +5044,6 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 			return cmd
 		}
 	}
-	if m.session != nil &&
-		m.session.CollaborationMode == session.CollaborationModePlan &&
-		strings.TrimSpace(m.latestProposedPlan) != "" &&
-		len(attachments) == 0 &&
-		trimmedContent != "" {
-		if isPlanApprovalMessage(trimmedContent) {
-			return m.executeApprovedPlan(m.session.ID, m.latestProposedPlan, planmode.ExecuteDirect)
-		}
-		content = buildPlanRevisionPrompt(m.latestProposedPlan, trimmedContent)
-	}
 
 	return m.runAgentMessage(content, attachments...)
 }
@@ -5326,24 +5276,6 @@ func (m *UI) runAgentMessage(content string, attachments ...message.Attachment) 
 	}
 
 	return tea.Sequence(preRunCmd, runCmd)
-}
-
-func isPlanApprovalMessage(content string) bool {
-	switch strings.ToLower(strings.TrimSpace(content)) {
-	case "y", "yes", "ok", "okay", "sure", "start", "run", "execute", "implement", "go",
-		"\u662f", "\u597d\u7684", "\u597d", "\u5f00\u59cb", "\u5f00\u59cb\u5427", "\u6267\u884c", "\u6267\u884c\u5427", "\u5b9e\u73b0", "\u5b9e\u73b0\u5427", "\u53ef\u4ee5", "\u786e\u8ba4", "\u7ee7\u7eed":
-		return true
-	default:
-		return false
-	}
-}
-
-func buildPlanRevisionPrompt(plan, feedback string) string {
-	return fmt.Sprintf(
-		"Revise the proposed plan below using the user's feedback. Stay in Plan Mode. Explore further if needed, then respond with exactly one <proposed_plan>...</proposed_plan> block.\n\nCurrent plan:\n%s\n\nUser feedback:\n%s",
-		planmode.WrapProposedPlan(plan),
-		feedback,
-	)
 }
 
 const cancelTimerDuration = 2 * time.Second
@@ -5753,7 +5685,7 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 			denialCount = dq.Size()
 		}
 	}
-	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, queuePaused, mode, permissionMode, m.latestProposedPlan, goal, denialCount, m.customCommands, m.mcpPrompts)
+	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, queuePaused, mode, permissionMode, goal, denialCount, m.customCommands, m.mcpPrompts)
 	if err != nil {
 		return util.ReportError(err)
 	}
