@@ -141,7 +141,7 @@ func defaultProviderContext() plugin.ProviderContext {
 }
 
 func transientUserMessage(sessionID, prompt string, attachments []message.Attachment) message.Message {
-	parts := []message.ContentPart{message.TextContent{Text: prompt}}
+	parts := []message.ContentPart{message.TextContent{Text: prompt, Hidden: true}}
 	for _, attachment := range attachments {
 		parts = append(parts, message.BinaryContent{
 			Path:     attachment.FilePath,
@@ -153,6 +153,7 @@ func transientUserMessage(sessionID, prompt string, attachments []message.Attach
 		SessionID: sessionID,
 		Role:      message.User,
 		Parts:     parts,
+		Hidden:    true,
 	}
 }
 

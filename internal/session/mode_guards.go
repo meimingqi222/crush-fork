@@ -22,11 +22,6 @@ func (g Goal) OccupiesSession() bool {
 	}
 }
 
-// IsPlanMode reports whether the session is in active plan collaboration mode.
-func (s Session) IsPlanMode() bool {
-	return s.IsActivePlanMode()
-}
-
 // IsActivePlanMode reports whether plan tools, prompts, and write guards apply.
 func (s Session) IsActivePlanMode() bool {
 	return NormalizeCollaborationMode(string(s.CollaborationMode)) == CollaborationModePlan

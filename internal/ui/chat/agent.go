@@ -689,7 +689,7 @@ func renderAgentTaskList(sty *styles.Styles, header string, tasks []agentTaskRen
 			label = fmt.Sprintf("[%s] %s", subagentLabel, label)
 		}
 
-		status := taskStatusIcon(sty, statusesByID[entry.id], opts, entry.id)
+		status := taskStatusIcon(sty, statusesByID[entry.id])
 		lineText := strings.ReplaceAll(label, "\n", " ")
 		lines = append(lines, fmt.Sprintf("%s %s", status, lineText))
 	}
@@ -734,12 +734,6 @@ func ParseTaskStatusesFromAgentResult(result *message.ToolResult) map[string]mes
 }
 
 func summarizeTaskStatusCounts(tasks []agentTaskRenderEntry, statuses map[string]message.ToolResultSubtaskStatus) (completed, failed, canceled, blocked, inProgress, pending int) {
-	completedSet := make(map[string]struct{}, len(tasks))
-	for _, task := range tasks {
-		if taskStatusReleasesDependents(statuses[task.id]) {
-			completedSet[task.id] = struct{}{}
-		}
-	}
 	for _, task := range tasks {
 		status := statuses[task.id]
 		switch status {
@@ -751,8 +745,12 @@ func summarizeTaskStatusCounts(tasks []agentTaskRenderEntry, statuses map[string
 			canceled++
 		case taskStatusBlocked:
 			blocked++
-		default:
+		case message.ToolResultSubtaskStatusInProgress, message.ToolResultSubtaskStatusRunning:
 			inProgress++
+		case message.ToolResultSubtaskStatusPending:
+			pending++
+		default:
+			pending++
 		}
 	}
 	return completed, failed, canceled, blocked, inProgress, pending
@@ -767,7 +765,7 @@ func taskStatusReleasesDependents(status message.ToolResultSubtaskStatus) bool {
 	}
 }
 
-func taskStatusIcon(sty *styles.Styles, status message.ToolResultSubtaskStatus, opts *ToolRenderOpts, taskID string) string {
+func taskStatusIcon(sty *styles.Styles, status message.ToolResultSubtaskStatus) string {
 	switch status {
 	case message.ToolResultSubtaskStatusCompleted, taskStatusCompletedWithWarnings:
 		return sty.Tool.IconSuccess.String()
@@ -775,10 +773,11 @@ func taskStatusIcon(sty *styles.Styles, status message.ToolResultSubtaskStatus, 
 		return sty.Tool.IconError.String()
 	case message.ToolResultSubtaskStatusCanceled:
 		return sty.Tool.IconCancelled.String()
+	case message.ToolResultSubtaskStatusInProgress, message.ToolResultSubtaskStatusRunning:
+		return sty.Tool.IconWorking.String()
+	case message.ToolResultSubtaskStatusPending:
+		return sty.Tool.IconPending.String()
 	default:
-		if opts != nil && !opts.HasResult() && taskID != "" {
-			return sty.Tool.IconPending.String()
-		}
 		return sty.Tool.IconPending.String()
 	}
 }
@@ -1038,8 +1037,10 @@ func (t *TaskNodeItem) renderContent(width int) string {
 		statusIcon = t.sty.Tool.IconError.String()
 	case t.completionStatus == message.ToolResultSubtaskStatusCanceled:
 		statusIcon = t.sty.Tool.IconCancelled.String()
+	case t.completionStatus == message.ToolResultSubtaskStatusInProgress, t.completionStatus == message.ToolResultSubtaskStatusRunning:
+		statusIcon = t.sty.Tool.IconWorking.String()
 	case t.childStatusText != "":
-		statusIcon = t.sty.Tool.IconPending.String()
+		statusIcon = t.sty.Tool.IconWorking.String()
 	default:
 		statusIcon = t.sty.Tool.IconPending.String()
 	}

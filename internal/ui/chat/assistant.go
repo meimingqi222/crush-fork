@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/planmode"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
@@ -296,8 +295,8 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 		if a.message.IsSummaryMessage {
 			a.summaryBoxStart = summaryStart
 			messageParts = append(messageParts, a.renderSummary(content, width))
-		} else if plan, ok := planmode.ExtractProposedPlan(content); ok && a.hasResolveApply() {
-			messageParts = append(messageParts, a.renderPlan(plan, width))
+		} else if a.hasResolveApply() {
+			messageParts = append(messageParts, a.renderPlan(content, width))
 		} else {
 			messageParts = append(messageParts, a.renderMarkdown(content, width))
 		}

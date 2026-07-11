@@ -11,6 +11,8 @@ const (
 	TypeAgentFinished Type = "agent_finished"
 	// TypeSubagentFinished indicates a background subagent has completed.
 	TypeSubagentFinished Type = "subagent_finished"
+	// TypeWarning indicates a non-fatal warning that should be shown in the UI.
+	TypeWarning Type = "warning"
 )
 
 // Notification represents a domain event published by the agent.

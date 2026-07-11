@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,7 +15,6 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/planmode"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
@@ -321,12 +322,16 @@ func TestHandleChildSessionMessageClearsRetryStatusOnDelete(t *testing.T) {
 func TestMaybeOpenProposedPlanDialogRequiresResolveApply(t *testing.T) {
 	t.Parallel()
 
+	tmpDir := t.TempDir()
+	planPath := filepath.Join(tmpDir, "plan.md")
+	require.NoError(t, os.WriteFile(planPath, []byte("- Step 1"), 0o644))
+
 	theme := styles.DefaultStyles()
 	com := &common.Common{Styles: &theme}
 	ui := &UI{
 		com:     com,
 		dialog:  dialog.NewOverlay(),
-		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan},
+		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan, PlanFilePath: planPath},
 	}
 
 	msg := message.Message{
@@ -334,7 +339,7 @@ func TestMaybeOpenProposedPlanDialogRequiresResolveApply(t *testing.T) {
 		SessionID: "session-1",
 		Role:      message.Assistant,
 		Parts: []message.ContentPart{
-			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
+			message.TextContent{Text: "The plan is ready for review."},
 			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
 		},
 	}
@@ -351,19 +356,28 @@ func TestMaybeOpenProposedPlanDialogRequiresResolveApply(t *testing.T) {
 		},
 	)
 
-	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))
+	cmd := ui.maybeOpenProposedPlanDialog(msg)
+	require.NotNil(t, cmd)
+	loaded, ok := cmd().(planReviewLoadedMsg)
+	require.True(t, ok)
+	m, _ := ui.Update(loaded)
+	ui = m.(*UI)
 	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
 }
 
 func TestMaybeOpenProposedPlanDialogWithResolve(t *testing.T) {
 	t.Parallel()
 
+	tmpDir := t.TempDir()
+	planPath := filepath.Join(tmpDir, "plan.md")
+	require.NoError(t, os.WriteFile(planPath, []byte("- Step 1"), 0o644))
+
 	theme := styles.DefaultStyles()
 	com := &common.Common{Styles: &theme}
 	ui := &UI{
 		com:     com,
 		dialog:  dialog.NewOverlay(),
-		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan},
+		session: &session.Session{ID: "session-1", CollaborationMode: session.CollaborationModePlan, PlanFilePath: planPath},
 	}
 
 	msg := message.Message{
@@ -371,7 +385,7 @@ func TestMaybeOpenProposedPlanDialogWithResolve(t *testing.T) {
 		SessionID: "session-1",
 		Role:      message.Assistant,
 		Parts: []message.ContentPart{
-			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
+			message.TextContent{Text: "The plan is ready for review."},
 			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
 			message.ToolCall{
 				ID:       "tool-1",
@@ -382,7 +396,12 @@ func TestMaybeOpenProposedPlanDialogWithResolve(t *testing.T) {
 		},
 	}
 
-	require.Nil(t, ui.maybeOpenProposedPlanDialog(msg))
+	cmd := ui.maybeOpenProposedPlanDialog(msg)
+	require.NotNil(t, cmd)
+	loaded, ok := cmd().(planReviewLoadedMsg)
+	require.True(t, ok)
+	m, _ := ui.Update(loaded)
+	ui = m.(*UI)
 	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
 }
 
@@ -402,7 +421,7 @@ func TestMaybeOpenProposedPlanDialogIgnoresNonApplyResolve(t *testing.T) {
 		SessionID: "session-1",
 		Role:      message.Assistant,
 		Parts: []message.ContentPart{
-			message.TextContent{Text: planmode.WrapProposedPlan("- Step 1")},
+			message.TextContent{Text: "The plan is ready for review."},
 			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
 			message.ToolCall{
 				ID:       "tool-1",

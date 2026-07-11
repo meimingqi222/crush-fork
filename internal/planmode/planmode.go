@@ -6,36 +6,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 )
 
-const (
-	ProposedPlanOpenTag  = "<proposed_plan>"
-	ProposedPlanCloseTag = "</proposed_plan>"
-)
-
-func ExtractProposedPlan(content string) (string, bool) {
-	start := strings.Index(content, ProposedPlanOpenTag)
-	if start == -1 {
-		return "", false
-	}
-	start += len(ProposedPlanOpenTag)
-	end := strings.Index(content[start:], ProposedPlanCloseTag)
-	if end == -1 {
-		return "", false
-	}
-	plan := strings.TrimSpace(content[start : start+end])
-	if plan == "" {
-		return "", false
-	}
-	return plan, true
-}
-
-func WrapProposedPlan(plan string) string {
-	plan = strings.TrimSpace(plan)
-	if plan == "" {
-		return ProposedPlanOpenTag + "\n" + ProposedPlanCloseTag
-	}
-	return ProposedPlanOpenTag + "\n" + plan + "\n" + ProposedPlanCloseTag
-}
-
 // ExecutionContextMode controls how the session context is handled when
 // transitioning from plan mode to execution.
 type ExecutionContextMode int

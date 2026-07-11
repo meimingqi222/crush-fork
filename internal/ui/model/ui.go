@@ -3153,8 +3153,7 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 	if msg.FinishPart() == nil || msg.FinishPart().Reason != message.FinishReasonEndTurn {
 		return nil
 	}
-	plan, ok := planmode.ExtractProposedPlan(msg.Content().Text)
-	title, hasPlanTool := hasResolveApply(msg)
+	_, hasPlanTool := hasResolveApply(msg)
 	if !hasPlanTool {
 		return nil
 	}
@@ -3162,14 +3161,11 @@ func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
 		return nil
 	}
 	m.lastPromptedPlanMsg = msg.ID
-	if (!ok || strings.TrimSpace(plan) == "") && strings.TrimSpace(m.session.PlanFilePath) != "" {
-		return m.loadPlanReview(msg.SessionID, m.session.PlanFilePath)
+	planFilePath := strings.TrimSpace(m.session.PlanFilePath)
+	if planFilePath == "" {
+		return util.ReportWarn("Plan file path is missing; cannot review the proposed plan.")
 	}
-	if !ok || strings.TrimSpace(plan) == "" {
-		return nil
-	}
-	m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, title))
-	return nil
+	return m.loadPlanReview(msg.SessionID, planFilePath)
 }
 
 func (m *UI) loadPlanReview(sessionID, planFilePath string) tea.Cmd {
@@ -4065,7 +4061,7 @@ func (m *UI) View() tea.View {
 	v.Cursor = m.Draw(canvas, canvas.Bounds())
 
 	content := canvas.Render()
-	// Single-pass post-processing: normalize \r\n and trim trailing spaces
+	// Single-pass post-processing: normalize \n and trim trailing spaces
 	// per line. Avoids allocating a full string slice for every line (the
 	// old Split/TrimRight/Join approach allocated O(height) strings).
 	var buf strings.Builder
@@ -5836,7 +5832,7 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 }
 
 // handleAgentNotification translates domain agent events into desktop
-// notifications using the UI notification backend.
+// notifications and status warnings using the UI notification backend.
 func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	switch n.Type {
 	case notify.TypeAgentFinished:
@@ -5905,6 +5901,9 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 				Message: fmt.Sprintf("Subagent task %s completed. Notification has been queued.", n.SubagentID),
 			})
 		}
+
+	case notify.TypeWarning:
+		return util.ReportWarn(n.Summary)
 
 	default:
 		return nil
@@ -6253,7 +6252,7 @@ func attachmentFromClipboardPath(rawPath string) (message.Attachment, error) {
 }
 
 func clipboardPathCandidates(text string) []string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n", "\n")
 	parts := strings.FieldsFunc(text, func(r rune) bool {
 		return r == '\n' || r == 0
 	})

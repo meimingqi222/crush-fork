@@ -233,6 +233,8 @@ var planModeFileInspectToolNames = map[string]struct{}{
 	tools.ReflectToolName:      {},
 	tools.MemoryStatusToolName: {},
 	AgentToolName:              {}, // Allow read-only sub-agents during planning.
+	// Bash is intentionally absent here: it is not a read-only tool by risk,
+	// but the tool registration layer narrows it to git read-only during plan mode.
 }
 
 var orchestrateModeAllowedToolNames = map[string]struct{}{
@@ -334,6 +336,15 @@ func isPlanModeToolAllowed(toolName string) bool {
 		return true
 	}
 	if toolName == tools.WriteToolName || toolName == tools.EditToolName {
+		return true
+	}
+	// Allow bash in plan mode. The tool registration layer narrows it to
+	// read-only git commands and disables background jobs.
+	if toolName == tools.BashToolName {
+		return true
+	}
+	// Allow external research tools that only read data.
+	if toolName == tools.AgenticFetchToolName || toolName == tools.SourcegraphToolName {
 		return true
 	}
 	// Allow the agent tool in plan mode for spawning read-only sub-agents.

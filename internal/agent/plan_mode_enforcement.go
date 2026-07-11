@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 
+	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -75,16 +77,22 @@ func (c *coordinator) maybeEnforcePlanModeToolDecision(ctx context.Context, sess
 	if isPlanModeEnforcementPrompt(prompt) || guidedGoalSetup {
 		return nil
 	}
-	depth, _ := ctx.Value(planModeEnforcementDepthKey{}).(int)
-	if depth > 0 {
-		return nil
-	}
 
 	msgs, err := c.messages.List(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	if assistantTurnFailed(msgs) || assistantCalledPlanRequiredTool(msgs) {
+		return nil
+	}
+
+	depth, _ := ctx.Value(planModeEnforcementDepthKey{}).(int)
+	if depth > 0 {
+		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			Type:      notify.TypeWarning,
+			SessionID: sessionID,
+			Summary:   "Plan 轮次未以 resolve/request_user_input 结束",
+		})
 		return nil
 	}
 

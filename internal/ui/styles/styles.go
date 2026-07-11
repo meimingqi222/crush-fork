@@ -25,6 +25,7 @@ const (
 	ArrowRightIcon string = "→"
 
 	ToolPending string = "●"
+	ToolRunning string = "⟳"
 	ToolSuccess string = "✓"
 	ToolError   string = "×"
 
@@ -262,6 +263,7 @@ type Styles struct {
 	Tool struct {
 		// Icon styles with tool status
 		IconPending   lipgloss.Style // Pending operation icon
+		IconWorking   lipgloss.Style // In-progress operation icon
 		IconSuccess   lipgloss.Style // Successful operation icon
 		IconError     lipgloss.Style // Error operation icon
 		IconCancelled lipgloss.Style // Cancelled operation icon
@@ -1134,6 +1136,7 @@ func DefaultStyles() Styles {
 
 	// Tool rendering styles
 	s.Tool.IconPending = base.Foreground(greenDark).SetString(ToolPending)
+	s.Tool.IconWorking = base.Foreground(greenDark).SetString(ToolRunning)
 	s.Tool.IconSuccess = base.Foreground(green).SetString(ToolSuccess)
 	s.Tool.IconError = base.Foreground(redDark).SetString(ToolError)
 	s.Tool.IconCancelled = s.Muted.SetString(ToolPending)

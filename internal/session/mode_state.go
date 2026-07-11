@@ -33,10 +33,6 @@ func (s ModeState) CurrentModeID() string {
 	return string(NormalizePermissionMode(string(s.PermissionMode)))
 }
 
-func (s ModeState) IsPlanMode() bool {
-	return s.IsActivePlanMode()
-}
-
 func (s ModeState) IsActivePlanMode() bool {
 	return NormalizeCollaborationMode(string(s.CollaborationMode)) == CollaborationModePlan
 }

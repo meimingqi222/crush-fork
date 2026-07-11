@@ -72,7 +72,8 @@ func (tc ReasoningContent) String() string {
 func (ReasoningContent) isPart() {}
 
 type TextContent struct {
-	Text string `json:"text"`
+	Text   string `json:"text"`
+	Hidden bool   `json:"hidden,omitempty"`
 }
 
 func (tc TextContent) String() string {
@@ -191,6 +192,8 @@ type Message struct {
 	UpdatedAt              int64
 	IsSummaryMessage       bool
 	ActivatedDeferredTools []string
+	// Hidden marks the message as machine-generated and suppresses it from the UI.
+	Hidden bool
 }
 
 func (m *Message) Content() TextContent {

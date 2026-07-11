@@ -9,7 +9,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/planmode"
 	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
@@ -69,8 +68,7 @@ func TestAgentToolMessageItemRendersTaskListForTaskGraph(t *testing.T) {
 
 	rendered := ansi.Strip(item.Render(120))
 	require.Contains(t, rendered, "Tasks")
-	require.Contains(t, rendered, "Tasks")
-	require.Contains(t, rendered, "done 0 · running 4 · pending 0")
+	require.Contains(t, rendered, "done 0 · running 0 · pending 4")
 	require.Contains(t, rendered, "[Explore] Search references")
 	require.Contains(t, rendered, "[General] Apply patch")
 	require.Contains(t, rendered, "[General] Run tests")
@@ -168,6 +166,49 @@ func TestAgentToolMessageItemRendersCompletedWarningsStatuses(t *testing.T) {
 	require.Contains(t, rendered, "done 2 · running 0 · pending 0")
 	require.Contains(t, rendered, "[Explore] Collect data")
 	require.Contains(t, rendered, "[General] Patch config")
+}
+
+func TestAgentToolMessageItemRendersMixedTaskStatusCounts(t *testing.T) {
+	t.Parallel()
+
+	params, err := json.Marshal(agent.AgentParams{
+		Tasks: []agent.AgentTaskParams{
+			{Name: "t1", Description: "Index code", Assignment: "Build map", SubagentType: "explore"},
+			{Name: "t2", Description: "Apply fix", Assignment: "Patch", SubagentType: "general"},
+			{Name: "t3", Description: "Run tests", Assignment: "Run targeted tests", SubagentType: "general"},
+			{Name: "t4", Description: "Summarize", Assignment: "Write summary", SubagentType: "general"},
+			{Name: "t5", Description: "Blocked task", Assignment: "Wait", SubagentType: "general"},
+		},
+	})
+	require.NoError(t, err)
+
+	result := message.ToolResult{
+		ToolCallID: "tool-mixed",
+		Content:    "mixed",
+	}.WithReducer(message.ToolResultReducer{
+		ChildSessions: []message.ToolResultReducerChildSession{
+			{TaskID: "t1", Status: message.ToolResultSubtaskStatusCompleted},
+			{TaskID: "t2", Status: message.ToolResultSubtaskStatusInProgress},
+			{TaskID: "t3", Status: message.ToolResultSubtaskStatusRunning},
+			{TaskID: "t4", Status: message.ToolResultSubtaskStatusPending},
+			{TaskID: "t5", Status: message.ToolResultSubtaskStatusBlocked},
+		},
+	})
+	theme := styles.DefaultStyles()
+	item := NewAgentToolMessageItem(&theme, message.ToolCall{
+		ID:       "tool-mixed",
+		Name:     agent.AgentToolName,
+		Input:    string(params),
+		Finished: true,
+	}, &result, false)
+
+	rendered := ansi.Strip(item.Render(140))
+	require.Contains(t, rendered, "done 1 · running 2 · pending 1 · blocked 1")
+	require.Contains(t, rendered, "[Explore] Index code")
+	require.Contains(t, rendered, "[General] Apply fix")
+	require.Contains(t, rendered, "[General] Run tests")
+	require.Contains(t, rendered, "[General] Summarize")
+	require.Contains(t, rendered, "[General] Blocked task")
 }
 
 func TestAgentToolMessageItemCollapsesNestedToolsByDefault(t *testing.T) {
@@ -425,7 +466,7 @@ func TestAssistantMessageOnlyRendersProposedPlanWithResolveToolCall(t *testing.T
 	t.Parallel()
 
 	theme := styles.DefaultStyles()
-	content := planmode.WrapProposedPlan("- Step 1")
+	content := "The plan is ready for review."
 
 	withoutResolve := message.Message{
 		ID:   "assistant-without-resolve",
@@ -437,7 +478,7 @@ func TestAssistantMessageOnlyRendersProposedPlanWithResolveToolCall(t *testing.T
 	item := NewAssistantMessageItem(&theme, &withoutResolve)
 	rendered := ansi.Strip(item.Render(120))
 	require.NotContains(t, rendered, "Proposed Plan")
-	require.Contains(t, rendered, "<proposed_plan>")
+	require.Contains(t, rendered, content)
 
 	withResolve := message.Message{
 		ID:   "assistant-with-resolve",
@@ -455,6 +496,5 @@ func TestAssistantMessageOnlyRendersProposedPlanWithResolveToolCall(t *testing.T
 	item = NewAssistantMessageItem(&theme, &withResolve)
 	rendered = ansi.Strip(item.Render(120))
 	require.Contains(t, rendered, "Proposed Plan")
-	require.NotContains(t, rendered, "<proposed_plan>")
-	require.Contains(t, rendered, "Step 1")
+	require.Contains(t, rendered, content)
 }

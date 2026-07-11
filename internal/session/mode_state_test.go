@@ -37,6 +37,6 @@ func TestModeTransitionPreservesPermissionWhileEnteringPlanMode(t *testing.T) {
 
 	require.Equal(t, CollaborationModePlan, transition.Current.CollaborationMode)
 	require.Equal(t, PermissionModeYolo, transition.Current.PermissionMode)
-	require.True(t, transition.Current.IsPlanMode())
+	require.True(t, transition.Current.IsActivePlanMode())
 	require.False(t, transition.ExitedAutoMode())
 }

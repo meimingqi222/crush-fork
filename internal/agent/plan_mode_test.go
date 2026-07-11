@@ -112,12 +112,14 @@ func TestFilterToolsForRiskPolicy(t *testing.T) {
 
 	require.Equal(t, []string{
 		tools.ReadToolName,
+		tools.BashToolName,
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
 	}, filterToolsForRiskPolicy(baseTools, session.CollaborationModePlan, []string{tools.ReadToolName}))
 
 	require.Equal(t, []string{
 		AgentToolName,
+		tools.AgenticFetchToolName,
 		tools.ReadToolName,
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
@@ -169,13 +171,16 @@ func TestFilterToolsForCollaborationMode(t *testing.T) {
 
 	require.Equal(t, []string{
 		AgentToolName,
+		"bash",
 		"grep",
 		tools.ReadToolName,
 		tools.GlobToolName,
+		tools.AgenticFetchToolName,
 		tools.EditToolName,
 		tools.WriteToolName,
 		tools.RequestUserInputToolName,
 		tools.ResolveToolName,
 		tools.LSPToolName,
+		tools.SourcegraphToolName,
 	}, filterToolsForCollaborationMode(baseTools, session.CollaborationModePlan))
 }
