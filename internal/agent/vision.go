@@ -178,8 +178,11 @@ func (v *VisionService) recordVisionUsage(ctx context.Context, model Model, usag
 	}
 
 	modelConfig := model.CatwalkCfg
-	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
-		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
+	// CostPer1MInCached is the rate for cache reads, CostPer1MOutCached is the
+	// rate for cache writes (creation). They are not named after the token
+	// direction but after the cache operation: read-in vs write-out.
+	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheReadTokens) +
+		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheCreationTokens) +
 		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
 		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
 

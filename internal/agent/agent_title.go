@@ -202,8 +202,11 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	}
 
 	modelConfig := model.CatwalkCfg
-	cost := modelConfig.CostPer1MInCached/1e6*float64(resp.TotalUsage.CacheCreationTokens) +
-		modelConfig.CostPer1MOutCached/1e6*float64(resp.TotalUsage.CacheReadTokens) +
+	// CostPer1MInCached is the rate for cache reads, CostPer1MOutCached is the
+	// rate for cache writes (creation). They are not named after the token
+	// direction but after the cache operation: read-in vs write-out.
+	cost := modelConfig.CostPer1MInCached/1e6*float64(resp.TotalUsage.CacheReadTokens) +
+		modelConfig.CostPer1MOutCached/1e6*float64(resp.TotalUsage.CacheCreationTokens) +
 		modelConfig.CostPer1MIn/1e6*float64(resp.TotalUsage.InputTokens) +
 		modelConfig.CostPer1MOut/1e6*float64(resp.TotalUsage.OutputTokens)
 

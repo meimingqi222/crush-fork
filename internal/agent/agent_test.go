@@ -669,6 +669,39 @@ func TestUpdateSessionUsage_FallbackWhenAPIReportsStaleValue(t *testing.T) {
 	require.Equal(t, estimatedTokens, sess.PromptTokens)
 }
 
+func TestUpdateSessionUsage_CacheCostUsesCorrectRate(t *testing.T) {
+	t.Parallel()
+
+	agent := &sessionAgent{}
+	model := Model{
+		CatwalkCfg: catwalk.Model{
+			CostPer1MIn:        1.0,
+			CostPer1MOut:       2.0,
+			CostPer1MInCached:  0.1,
+			CostPer1MOutCached: 0.5,
+		},
+		ModelCfg: config.SelectedModel{Provider: "anthropic"},
+	}
+	sess := session.Session{}
+
+	usage := fantasy.Usage{
+		InputTokens:         1000,
+		CacheCreationTokens: 300,
+		CacheReadTokens:     900,
+		OutputTokens:        200,
+	}
+
+	agent.updateSessionUsage(model, &sess, usage, nil, 0, false, usagePurposeConversation)
+
+	// Expected cost:
+	// input: 1000 * 1.0 / 1e6 = 0.001
+	// output: 200 * 2.0 / 1e6 = 0.0004
+	// cache read: 900 * 0.1 / 1e6 = 0.00009
+	// cache write: 300 * 0.5 / 1e6 = 0.00015
+	// total: 0.00164
+	require.InDelta(t, 0.00164, sess.Cost, 1e-9)
+}
+
 func TestEstimatePromptTokens(t *testing.T) {
 	t.Parallel()
 
