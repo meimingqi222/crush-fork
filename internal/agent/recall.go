@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 )
 
@@ -23,24 +24,31 @@ type backgroundModel struct {
 	provider config.ProviderConfig
 }
 
-func buildAutoRecallBlock(ctx context.Context, retriever engine.Retriever, prompt, recentContext, sessionID, backend string) string {
+func buildAutoRecallBlock(ctx context.Context, retriever engine.Retriever, prompt, recentContext, sessionID string, caps memory.Capabilities) string {
 	if retriever == nil || !autoRecallMemoryEnabled(ctx) {
 		return ""
 	}
 
 	query := composeRecallQuery(prompt, recentContext)
-	if backend == "hindsight" {
+	if caps.TruncateRecallQuery {
 		query = truncateRecallQuery(query, prompt, maxAutoRecallQueryChars)
 	}
 	query = strings.TrimSpace(query)
 
 	if query != "" {
-		events, err := retriever.Retrieve(ctx, query, map[string]any{"session_id": sessionID, "limit": 8})
+		// rerank: false skips the embedding-based vector voice and final
+		// heuristic pass for this per-turn background path, avoiding an
+		// embedding computation on every single turn (see
+		// docs/refactor-memory.md Phase 5, P5.5). The explicit `recall` tool
+		// call (internal/agent/tools/recall.go) leaves this unset so it keeps
+		// the reranker. Hindsight's Retriever ignores unknown opts keys.
+		events, err := retriever.Retrieve(ctx, query, map[string]any{"session_id": sessionID, "limit": 8, "rerank": false})
 		if err == nil && len(events) > 0 {
 			return formatEventsAsRecall(events)
 		}
-		// Hindsight backend has no fallback to static broad recall to avoid polluting context
-		if backend == "hindsight" {
+		// Some backends (e.g. hindsight) have no fallback to static broad
+		// recall, to avoid polluting context with irrelevant results.
+		if !caps.BroadRecallFallback {
 			return ""
 		}
 	}

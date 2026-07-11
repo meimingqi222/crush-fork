@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,8 +35,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/memory/engine"
-	"github.com/charmbracelet/crush/internal/memory/hindsight"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -76,7 +74,7 @@ type App struct {
 	ToolRuntime   toolruntime.Service
 	Timeline      timeline.Service
 	PluginRuntime *plugin.Runtime
-	MemoryEngine  *engine.Engine
+	MemoryBackend memory.Backend
 
 	AgentCoordinator agent.Coordinator
 	GoalRuntime      *goal.Runtime
@@ -104,7 +102,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	runtimeService := toolruntime.NewService()
 	timelineService := timeline.NewService()
 
-	var memoryEngine *engine.Engine
 	var app *App
 	var goalRuntime *goal.Runtime
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
@@ -121,9 +118,9 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 				return
 			}
 		}
-		if memoryEngine != nil {
-			if err := memoryEngine.OnSessionDeleted(context.Background(), sessionID); err != nil {
-				slog.Warn("Memory engine OnSessionDeleted failed", "error", err, "session_id", sessionID)
+		if app != nil && app.MemoryBackend != nil {
+			if err := app.MemoryBackend.OnSessionDeleted(context.Background(), sessionID); err != nil {
+				slog.Warn("Memory backend OnSessionDeleted failed", "error", err, "session_id", sessionID)
 			}
 		}
 	}, session.CollaborationModeDefault)
@@ -229,124 +226,24 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		func(ctx context.Context) error { return mcp.Close(ctx) },
 	)
 
-	// Wire the local memory engine before creating the coder agent so the
-	// agent receives working-memory stores and compaction hooks at construction.
-	if cfg.Options != nil && memoryConfigEnabled(cfg.Options.Memory) {
-		memCfg := cfg.Options.Memory
-		if memCfg == nil {
-			memCfg = &config.MemoryConfig{}
-		}
-		backend := memCfg.BackendName()
-		var bgInterval time.Duration
-		var bgEveryNTurns int
-		if backend == "local" && memCfg.BackgroundMaterialize.IsEnabled() {
-			bgInterval = time.Duration(memCfg.BackgroundMaterialize.GetIntervalSeconds()) * time.Second
-			bgEveryNTurns = memCfg.BackgroundMaterialize.GetEveryNTurns()
-		}
-		var consBgInterval time.Duration
-		if backend == "local" && memCfg.BackgroundConsolidation.IsEnabled() {
-			consBgInterval = time.Duration(memCfg.BackgroundConsolidation.GetIntervalSeconds()) * time.Second
-		}
-		eng := engine.New(conn, engine.Config{
-			Enabled:               true,
-			Backend:               backend,
-			BackgroundInterval:    bgInterval,
-			BackgroundEveryNTurns: bgEveryNTurns,
-			ConsolidationInterval: consBgInterval,
-		})
-		startupMaterialization := true
-
-		switch backend {
-		case "hindsight":
-			if memCfg.Remote == "" {
-				eng.SetDegraded(true, "hindsight backend configured without memory.remote")
-				slog.Warn("Hindsight memory backend requires memory.remote")
-				break
-			}
-			token := memCfg.RemoteToken
-			if token == "" {
-				token = os.Getenv("HINDSIGHT_API_TOKEN")
-			}
-			projectLabel := config.ProjectSlug(store.WorkingDir())
-			scope := hindsight.ResolveScope(memCfg.RemoteBankID, memCfg.RemoteScopingName(), projectLabel)
-			hsClient := hindsight.NewClient(memCfg.Remote, scope.BankID, token)
-			eng.SetTranscriptRetainer(hindsight.NewTranscriptRetainer(
-				hsClient,
-				hindsight.WithRetainTags(scope.RetainTags),
-			))
-			eng.SetRetriever(hindsight.NewRetriever(
-				hsClient,
-				hindsight.WithRecallTags(scope.RecallTags, scope.RecallTagsMatch),
-			))
-			startupMaterialization = false
-			go func() {
-				if err := hsClient.EnsureBank(context.Background(), ""); err != nil {
-					slog.Warn("Hindsight EnsureBank failed", "error", err)
-				}
-			}()
-			slog.Info(
-				"Hindsight remote memory enabled",
-				"url", memCfg.Remote,
-				"bank", hsClient.BankID(),
-				"scoping", memCfg.RemoteScopingName(),
-				"project", projectLabel,
-			)
-		default:
-			writer := engine.NewArtifactWriter(filepath.Join(cfg.Options.DataDirectory, "memory"))
-			eng.SetMaterializer(engine.NewSummaryMaterializer(conn, eng.EventStore(), writer))
-			eng.SetMaterializer(engine.NewMemoryMDMaterializer(conn, eng.EventStore(), writer))
-			eng.SetMaterializer(engine.NewSkillsMaterializer(conn, eng.EventStore(), writer))
-			if memCfg.MentalModels.IsEnabled() {
-				eng.SetMaterializer(engine.NewMentalModelsMaterializer(conn, eng.EventStore(), writer, engine.DefaultMentalModels()))
-			}
-			if memCfg.Rollout.IsEnabled() {
-				eng.SetMaterializer(engine.NewRolloutSummaryMaterializer(
-					conn, eng.EventStore(), writer,
-					memCfg.Rollout.GetMaxKeep(),
-					memCfg.Rollout.GetMinEvents(),
-				))
-			}
-			summaryRetriever := engine.NewSummaryRetriever(eng.EventStore(), conn, writer.OutputDir()).
-				WithTripleStore(eng.TripleStore())
-			if memCfg.Reranker.GetMaxCandidates() > 0 {
-				summaryRetriever.WithMaxCandidates(memCfg.Reranker.GetMaxCandidates())
-			}
-			if rerank := buildLocalMemoryReranker(memCfg); rerank != nil {
-				eng.SetReranker(rerank)
-				summaryRetriever.WithReranker(rerank)
-			}
-			summaryRetriever.WithEmbeddingPipeline(eng.EmbeddingPipeline())
-			eng.SetRetriever(summaryRetriever)
-		}
-
-		if startupMaterialization {
-			go func() {
-				if err := eng.TriggerMaterialization(context.Background()); err != nil {
-					slog.Warn("Startup memory materialization failed", "error", err)
-				}
-			}()
-		}
-
-		// Start the background materializer goroutine. It is a no-op when
-		// the configured interval is 0 (e.g. hindsight backend has none).
-		eng.StartBackgroundMaterializer(context.Background())
-
-		// Start the background consolidator goroutine. It is a no-op when
-		// the configured interval is 0 (e.g. hindsight backend has none,
-		// since it delegates consolidation to its remote service). For the
-		// local backend, background consolidation is enabled by default so
-		// long-running sessions merge episodic events into durable memory
-		// on a timer instead of only on session close.
-		eng.StartBackgroundConsolidator(context.Background())
-
-		memoryEngine = eng
-		app.MemoryEngine = eng
-		// Note: eng.Close() is called from the serial section of Shutdown()
-		// (before the parallel cleanup that closes the DB), NOT from
-		// cleanupFuncs. This ordering guarantees the background loops have
-		// fully stopped before conn.Close() runs, avoiding a race where an
-		// in-flight pass uses a closed DB connection.
+	// Wire the memory backend before creating the coder agent so the agent
+	// receives working-memory stores and compaction hooks at construction.
+	// memory.Resolve is the single resolution point; it returns nil when
+	// memory is disabled.
+	var memCfg *config.MemoryConfig
+	if cfg.Options != nil {
+		memCfg = cfg.Options.Memory
 	}
+	// Note: backend.Close() is called from the serial section of Shutdown()
+	// (before the parallel cleanup that closes the DB), NOT from
+	// cleanupFuncs. This ordering guarantees the background loops have fully
+	// stopped before conn.Close() runs, avoiding a race where an in-flight
+	// pass uses a closed DB connection.
+	app.MemoryBackend = memory.Resolve(memCfg, memory.Deps{
+		DB:            conn,
+		DataDirectory: cfg.Options.DataDirectory,
+		WorkingDir:    store.WorkingDir(),
+	})
 
 	// TODO: remove the concept of agent config, most likely.
 	if !cfg.IsConfigured() {
@@ -887,7 +784,7 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.ToolRuntime,
 		app.Timeline,
 		app.PluginRuntime,
-		app.MemoryEngine,
+		app.MemoryBackend,
 		app.GoalRuntime,
 	)
 	if err != nil {
@@ -895,54 +792,6 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-func memoryConfigEnabled(memCfg *config.MemoryConfig) bool {
-	if memCfg == nil {
-		return true
-	}
-	return memCfg.IsEnabled()
-}
-
-func buildLocalMemoryReranker(memCfg *config.MemoryConfig) engine.Reranker {
-	if memCfg == nil {
-		return nil
-	}
-	if memCfg.Embeddings != nil && memCfg.Embeddings.IsEnabled() {
-		switch memCfg.Embeddings.BackendName() {
-		case "hashing", "":
-			return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(memCfg.Embeddings.GetDimensions()))
-		case "provider":
-			embedder := engine.NewProviderEmbedder(engine.ProviderEmbedderConfig{
-				APIURL:     memCfg.Embeddings.ProviderAPIURL,
-				APIKey:     memCfg.Embeddings.ProviderAPIKey,
-				Model:      memCfg.Embeddings.ProviderModel,
-				Dimensions: memCfg.Embeddings.GetDimensions(),
-			})
-			return engine.NewEmbeddingReranker(embedder)
-		default:
-			slog.Warn("Memory embedding backend not implemented, falling back to hashing",
-				"backend", memCfg.Embeddings.BackendName())
-			return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(memCfg.Embeddings.GetDimensions()))
-		}
-	}
-	if !memCfg.Reranker.IsEnabled() {
-		return nil
-	}
-	switch memCfg.Reranker.GetType() {
-	case "embedding", "hybrid":
-		dimensions := 384
-		if memCfg.Embeddings != nil {
-			dimensions = memCfg.Embeddings.GetDimensions()
-		}
-		return engine.NewEmbeddingReranker(engine.NewHashingEmbedder(dimensions))
-	case "heuristic", "":
-		return engine.NewHeuristicReranker()
-	default:
-		slog.Warn("Memory reranker type not implemented, falling back to heuristic",
-			"type", memCfg.Reranker.GetType())
-		return engine.NewHeuristicReranker()
-	}
 }
 
 // Subscribe sends events to the TUI as tea.Msgs.
@@ -1005,12 +854,13 @@ func (app *App) Shutdown() {
 		app.AgentCoordinator.CancelAll()
 	}
 
-	// Tear down the engine serially before the parallel cleanup closes the DB
-	// connection. Close() stops the background goroutines, cancelling any
-	// in-flight pass so it returns quickly (no LLM call on this path).
-	if app.MemoryEngine != nil {
-		if err := app.MemoryEngine.Close(); err != nil {
-			slog.Warn("Memory engine close failed", "error", err)
+	// Tear down the memory backend serially before the parallel cleanup
+	// closes the DB connection. Close() stops the background goroutines,
+	// cancelling any in-flight pass so it returns quickly (no LLM call on
+	// this path).
+	if app.MemoryBackend != nil {
+		if err := app.MemoryBackend.Close(); err != nil {
+			slog.Warn("Memory backend close failed", "error", err)
 		}
 	}
 

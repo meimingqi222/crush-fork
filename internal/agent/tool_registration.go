@@ -129,18 +129,13 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),
-		agenttools.NewCrushTool(c.cfg, c.lspManager, c.memoryEngine, filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
-		agenttools.NewRetainTool(c.memoryEngineEventStore(), c.permissions, c.cfg.WorkingDir(), c.memoryEngine),
-		agenttools.NewRecallTool(c.memoryEngineRetriever(), c.memoryEngineEventStore()),
-		agenttools.NewReflectTool(c.memoryEngineRetriever()),
-		agenttools.NewGraphQueryTool(c.memoryEngineTripleStore()),
-		agenttools.NewTripleQueryTool(c.memoryEngineTripleStore()),
-		agenttools.NewMemoryStatusTool(c.memoryEngine),
+		agenttools.NewCrushTool(c.cfg, c.lspManager, c.memoryEngine(), filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
 		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewGoalTool(c.sessions, c.goalRuntime),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
+	builtin = append(builtin, c.memoryTools()...)
 	isSubagent := config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent
 	if isSubagent || allowAgentTool {
 		builtin = append(builtin,
@@ -215,6 +210,36 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 	}
 
 	return registered, nil
+}
+
+// memoryTools returns the LLM-facing memory tools, gated by the active
+// backend's Capabilities rather than registered unconditionally. When memory
+// is disabled (nil backend or Enabled() == false) no memory tools are
+// returned at all, so the LLM never sees a tool whose only possible outcome
+// is "memory engine is not available" -- mirrors oh-my-pi's
+// `createIf(session)` tool gating. Capability-specific tools (reflect,
+// graph) are only included when the backend actually supports them: e.g.
+// hindsight has no local triple store, so graph is omitted for it.
+func (c *coordinator) memoryTools() []fantasy.AgentTool {
+	if c.memoryBackend == nil || !c.memoryBackend.Enabled() {
+		return nil
+	}
+	caps := c.memoryBackend.Capabilities()
+
+	memTools := []fantasy.AgentTool{
+		agenttools.NewRecallTool(c.memoryEngineRetriever(), c.memoryEngineEventStore()),
+		agenttools.NewMemoryStatusTool(c.memoryBackend),
+	}
+	if caps.Retain {
+		memTools = append(memTools, agenttools.NewRetainTool(c.memoryEngineEventStore(), c.cfg.WorkingDir(), c.memoryBackend))
+	}
+	if caps.Reflect {
+		memTools = append(memTools, agenttools.NewReflectTool(c.memoryEngineRetriever()))
+	}
+	if caps.Triples {
+		memTools = append(memTools, agenttools.NewGraphTool(c.memoryEngineTripleStore()))
+	}
+	return memTools
 }
 
 func metadataForMCPTool(tool *agenttools.Tool) agenttools.ToolMetadata {

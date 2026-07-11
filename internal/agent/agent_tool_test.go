@@ -10,11 +10,79 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/memory"
+	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMemoryToolsGatedByCapabilities exercises the Phase 3 tool-gating
+// contract: memory tools are entirely absent when no backend is configured,
+// and capability-specific tools (graph, reflect) only appear when the
+// active backend actually supports them (see memory.Capabilities and
+// coordinator.memoryTools()).
+func TestMemoryToolsGatedByCapabilities(t *testing.T) {
+	t.Parallel()
+
+	toolNames := func(c *coordinator) []string {
+		names := make([]string, 0)
+		for _, tool := range c.memoryTools() {
+			names = append(names, tool.Info().Name)
+		}
+		return names
+	}
+
+	t.Run("no backend registers nothing", func(t *testing.T) {
+		t.Parallel()
+		coord := &coordinator{}
+		assert.Empty(t, toolNames(coord))
+	})
+
+	t.Run("local backend registers recall, retain, reflect, graph, memory_status", func(t *testing.T) {
+		t.Parallel()
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { conn.Close() })
+
+		eng := engine.New(conn, engine.Config{Enabled: true, Backend: "local"})
+		coord := &coordinator{cfg: cfg}
+		coord.SetMemoryBackend(memory.NewLocalBackend(eng))
+
+		names := toolNames(coord)
+		assert.Contains(t, names, tools.RecallToolName)
+		assert.Contains(t, names, tools.RetainToolName)
+		assert.Contains(t, names, tools.ReflectToolName)
+		assert.Contains(t, names, tools.GraphToolName)
+		assert.Contains(t, names, tools.MemoryStatusToolName)
+	})
+
+	t.Run("hindsight backend has no graph tool (no local triple store)", func(t *testing.T) {
+		t.Parallel()
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		conn, err := db.Connect(t.Context(), t.TempDir())
+		require.NoError(t, err)
+		t.Cleanup(func() { conn.Close() })
+
+		eng := engine.New(conn, engine.Config{Enabled: true, Backend: "hindsight"})
+		coord := &coordinator{cfg: cfg}
+		coord.SetMemoryBackend(memory.NewHindsightBackend(eng, nil, nil))
+
+		names := toolNames(coord)
+		assert.Contains(t, names, tools.RecallToolName)
+		assert.Contains(t, names, tools.RetainToolName)
+		assert.Contains(t, names, tools.ReflectToolName)
+		assert.Contains(t, names, tools.MemoryStatusToolName)
+		assert.NotContains(t, names, tools.GraphToolName)
+	})
+}
 
 func TestSubagentConfigUsesCanonicalExplore(t *testing.T) {
 	env := testEnv(t)
@@ -549,6 +617,9 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		planNames = append(planNames, tool.Info().Name)
 	}
 
+	// No memory backend is configured for this coordinator (memoryBackend is
+	// nil), so memory tools (recall/reflect/memory_status/retain/graph) are
+	// gated off entirely -- see coordinator.memoryTools().
 	assert.Equal(t, []string{
 		"agent",
 		"agentic_fetch",
@@ -557,19 +628,18 @@ func TestBuildToolsForPlanModeUsesReadOnlyCapabilities(t *testing.T) {
 		"glob",
 		"grep",
 		"lsp",
-		"memory_status",
 		"read",
-		"recall",
-		"reflect",
 		"request_user_input",
 		"resolve",
+		"sourcegraph",
 		"write",
 	}, planNames)
 	assert.Contains(t, planNames, AgentToolName)
 	assert.NotContains(t, planNames, "fetch")
-	assert.NotContains(t, planNames, "sourcegraph")
+	assert.Contains(t, planNames, "sourcegraph")
 	assert.NotContains(t, planNames, "tool_search")
 	assert.NotContains(t, planNames, tools.RetainToolName)
+	assert.NotContains(t, planNames, tools.MemoryStatusToolName)
 	assert.NotContains(t, planNames, "todos")
 }
 

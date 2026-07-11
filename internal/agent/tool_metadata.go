@@ -37,7 +37,9 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 	case tools.ReflectToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "reflect on memories across sessions", SearchTags: []string{"memory", "reflection", "synthesis", "cross-session"}}
 	case tools.MemoryStatusToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory engine pipeline status", SearchTags: []string{"memory", "status", "observability"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory backend status", SearchTags: []string{"memory", "status", "observability"}}
+	case tools.GraphToolName:
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "traverse the memory knowledge graph or query structured triples", SearchTags: []string{"memory", "knowledge-graph", "triples", "traversal", "facts"}}
 	case tools.TodosToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track structured task progress", SearchTags: []string{"todo", "task-list", "planning", "progress"}, Direct: true}
 	case tools.SendMessageToolName:

@@ -6,9 +6,19 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/require"
+)
+
+// localCaps and hindsightCaps mirror the capability sets returned by
+// memory.LocalBackend and memory.HindsightBackend for table-driven tests
+// that need to exercise both recall behaviors without constructing a full
+// backend.
+var (
+	localCaps     = memory.Capabilities{BroadRecallFallback: true, TruncateRecallQuery: false}
+	hindsightCaps = memory.Capabilities{BroadRecallFallback: false, TruncateRecallQuery: true}
 )
 
 type staticRetriever struct {
@@ -30,28 +40,28 @@ func (r staticRetriever) Reflect(context.Context, string, map[string]any) (strin
 func TestBuildAutoRecallBlockUsesRetriever(t *testing.T) {
 	t.Parallel()
 
-	block := buildAutoRecallBlock(context.Background(), staticRetriever{recall: "Memory Summary"}, "", "", "sess-1", "local")
+	block := buildAutoRecallBlock(context.Background(), staticRetriever{recall: "Memory Summary"}, "", "", "sess-1", localCaps)
 	require.Equal(t, "Memory Summary", block)
 }
 
 func TestBuildAutoRecallBlockSkipsNilRetriever(t *testing.T) {
 	t.Parallel()
 
-	require.Empty(t, buildAutoRecallBlock(context.Background(), nil, "", "", "sess-1", "local"))
+	require.Empty(t, buildAutoRecallBlock(context.Background(), nil, "", "", "sess-1", localCaps))
 }
 
 func TestBuildAutoRecallBlockRespectsEphemeralMemoryPolicy(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.WithValue(context.Background(), tools.AgentMemoryContextKey, "ephemeral")
-	require.Empty(t, buildAutoRecallBlock(ctx, staticRetriever{recall: "Memory Summary"}, "", "", "sess-1", "local"))
+	require.Empty(t, buildAutoRecallBlock(ctx, staticRetriever{recall: "Memory Summary"}, "", "", "sess-1", localCaps))
 }
 
 func TestBuildAutoRecallBlockHindsightNoFallback(t *testing.T) {
 	t.Parallel()
 
 	// In hindsight mode, retrieve yielding empty results returns empty without fallback to Recall
-	block := buildAutoRecallBlock(context.Background(), staticRetriever{recall: "Memory Summary"}, "non-empty-query", "", "sess-1", "hindsight")
+	block := buildAutoRecallBlock(context.Background(), staticRetriever{recall: "Memory Summary"}, "non-empty-query", "", "sess-1", hindsightCaps)
 	require.Empty(t, block)
 }
 

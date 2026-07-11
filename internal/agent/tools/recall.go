@@ -33,7 +33,12 @@ func NewRecallTool(retriever engine.Retriever, eventStore engine.EventStore) fan
 			sessionID := GetSessionFromContext(ctx)
 
 			if params.Query != "" || params.Scope != "" || params.Kind != "" {
-				opts := map[string]any{}
+				// rerank: true is explicit (it's also the default) to
+				// document that this user/model-initiated recall call should
+				// use the full reranker, unlike the per-turn auto-recall
+				// prefetch path which disables it (see
+				// docs/refactor-memory.md Phase 5, P5.5).
+				opts := map[string]any{"rerank": true}
 				if params.Scope != "" {
 					opts["scope"] = params.Scope
 				}

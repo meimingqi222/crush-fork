@@ -860,6 +860,11 @@
           "description": "Retain transcript window every N turns (hindsight backend)",
           "default": 3
         },
+        "working_memory_min_discarded_tokens": {
+          "type": "integer",
+          "description": "Minimum tokens a compaction must discard before triggering session working-memory generation",
+          "default": 20000
+        },
         "mental_models": {
           "$ref": "#/$defs/MemoryMentalModelsConfig",
           "description": "Mental Models materializer configuration"

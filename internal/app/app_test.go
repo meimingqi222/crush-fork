@@ -249,8 +249,8 @@ func TestNew_EnablesDefaultLocalMemoryWhenMemoryConfigMissing(t *testing.T) {
 	app, err := New(t.Context(), conn, store)
 	require.NoError(t, err)
 	require.NotNil(t, app)
-	require.NotNil(t, app.MemoryEngine)
-	require.Equal(t, "local", app.MemoryEngine.Backend())
+	require.NotNil(t, app.MemoryBackend)
+	require.Equal(t, "local", app.MemoryBackend.ID())
 	t.Cleanup(func() {
 		app.Shutdown()
 	})

@@ -107,3 +107,52 @@ func TestSummaryRetrieverRetrieveWithEmbeddingReranker(t *testing.T) {
 	require.Len(t, events, 1)
 	require.Equal(t, relevant.ID, events[0].ID)
 }
+
+// countingEmbedder wraps an Embedder and counts Embed calls, used to verify
+// that the "rerank" opt actually gates whether the embedding-based vector
+// voice runs, rather than just changing the final ordering (which could be
+// coincidental).
+type countingEmbedder struct {
+	Embedder
+	calls int
+}
+
+func (c *countingEmbedder) Embed(ctx context.Context, text string) ([]float64, error) {
+	c.calls++
+	return c.Embedder.Embed(ctx, text)
+}
+
+// TestSummaryRetrieverRetrieveRerankOptGatesEmbeddingVoice is a regression
+// test for docs/refactor-memory.md Phase 5 (P5.5): the per-turn auto-recall
+// prefetch path (coordinator.buildAutoRecallBlock) passes "rerank": false to
+// skip the embedding-based vector voice and the final heuristic rerank pass,
+// while the explicit `recall` tool call leaves the option unset (defaulting
+// to enabled) to preserve full-quality ranking. This asserts the embedder is
+// not invoked at all when rerank is explicitly disabled, and is invoked when
+// left at its default.
+func TestSummaryRetrieverRetrieveRerankOptGatesEmbeddingVoice(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewSQLiteEventStore(db)
+	ctx := context.Background()
+
+	relevant := testEvent(MemoryScopeProject, MemoryKindProcedure, "Before compaction, retrieve relevant memories and inject recall into the summary prompt.")
+	unrelated := testEvent(MemoryScopeProject, MemoryKindDecision, "Use SQLite for local durable event storage.")
+	require.NoError(t, store.Append(ctx, unrelated))
+	require.NoError(t, store.Append(ctx, relevant))
+
+	spy := &countingEmbedder{Embedder: NewHashingEmbedder(128)}
+	retriever := NewSummaryRetriever(store, db, "").WithReranker(NewEmbeddingReranker(spy))
+
+	// Explicit recall path (rerank left unset, defaults to enabled): the
+	// embedder must be invoked.
+	_, err := retriever.Retrieve(ctx, "压缩前 recall", map[string]any{"limit": 1})
+	require.NoError(t, err)
+	require.Positive(t, spy.calls, "reranker must run when the rerank opt is left at its default")
+
+	// Auto-recall prefetch path (rerank explicitly disabled): the embedder
+	// must not be invoked at all.
+	spy.calls = 0
+	_, err = retriever.Retrieve(ctx, "压缩前 recall", map[string]any{"limit": 1, "rerank": false})
+	require.NoError(t, err)
+	require.Zero(t, spy.calls, "reranker must not run when rerank:false is set (auto-recall path)")
+}

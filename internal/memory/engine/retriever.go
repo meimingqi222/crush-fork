@@ -81,6 +81,25 @@ func (r *SummaryRetriever) WithMaxCandidates(maxCandidates int) *SummaryRetrieve
 	return r
 }
 
+// rerankEnabled reports whether Retrieve should apply the configured
+// reranker (both the embedding-based vector voice and the final heuristic
+// pass). It defaults to true so callers that don't set the "rerank" option
+// -- such as the explicit `recall` tool -- keep today's behavior unchanged.
+// The per-turn auto-recall prefetch path (coordinator.buildAutoRecallBlock)
+// explicitly passes "rerank": false to skip the embedding computation on
+// every turn (see docs/refactor-memory.md Phase 5, P5.5). Unknown/missing
+// keys are treated as "not disabled" so backends that ignore this option
+// entirely (e.g. hindsight's Retriever) are unaffected.
+func rerankEnabled(opts map[string]any) bool {
+	if opts == nil {
+		return true
+	}
+	if v, ok := opts["rerank"].(bool); ok {
+		return v
+	}
+	return true
+}
+
 // Recall returns a formatted summary block for prompt injection.
 // It reads from:
 //  1. mental_models/*.md (stable layer: preferences, conventions, pitfalls)
@@ -360,9 +379,13 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 	}
 
 	// --- Voice 2: Vector (semantic) ---
-	if embReranker, ok := r.reranker.(*EmbeddingReranker); ok && embReranker != nil && embReranker.embedder != nil {
-		if vecEvents, verr := r.vectorSearch(ctx, query, filter, fetchLimit, embReranker.embedder); verr == nil && len(vecEvents) > 0 {
-			voices = append(voices, RankedList{Events: vecEvents, Weight: r.voiceWeights.Vector})
+	// Gated on rerankEnabled: this voice depends on the embedding reranker,
+	// so computing it defeats the point of skipping the reranker.
+	if rerankEnabled(opts) {
+		if embReranker, ok := r.reranker.(*EmbeddingReranker); ok && embReranker != nil && embReranker.embedder != nil {
+			if vecEvents, verr := r.vectorSearch(ctx, query, filter, fetchLimit, embReranker.embedder); verr == nil && len(vecEvents) > 0 {
+				voices = append(voices, RankedList{Events: vecEvents, Weight: r.voiceWeights.Vector})
+			}
 		}
 	}
 
@@ -410,7 +433,7 @@ func (r *SummaryRetriever) Retrieve(ctx context.Context, query string, opts map[
 	// Apply a final light heuristic rerank to blend edge signals (scope/kind
 	// priority) that RRF alone does not capture.  Skip embedding rerank since
 	// vector voice already contributed its signal.
-	if r.reranker != nil {
+	if rerankEnabled(opts) && r.reranker != nil {
 		if hr, ok := r.reranker.(*HeuristicReranker); ok && hr != nil {
 			if reranked, rerr := hr.Rerank(ctx, query, events); rerr == nil && len(reranked) > 0 {
 				events = reranked

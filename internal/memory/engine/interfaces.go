@@ -31,6 +31,12 @@ type EventStore interface {
 	// Query retrieves events matching the given filter.
 	Query(ctx context.Context, filter EventFilter) ([]MemoryEvent, error)
 
+	// Count returns the number of events matching the given filter, using a
+	// SQL COUNT(*) rather than loading rows. It honors the same filter
+	// semantics as Query (including excluding expired events by default),
+	// but ignores Limit/OrderDesc since no rows are materialized.
+	Count(ctx context.Context, filter EventFilter) (int64, error)
+
 	// GetByID retrieves a single event by its ID.
 	GetByID(ctx context.Context, id string) (*MemoryEvent, error)
 

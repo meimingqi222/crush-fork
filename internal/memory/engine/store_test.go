@@ -425,6 +425,50 @@ func TestEventStore_QueryOrderDesc(t *testing.T) {
 	require.Equal(t, evt2.Content, events[0].Content)
 }
 
+func TestEventStore_CountExceedsQueryDefaultLimit(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewSQLiteEventStore(db)
+	ctx := context.Background()
+
+	const total = 150
+	for i := 0; i < total; i++ {
+		evt := testEvent(MemoryScopeProject, MemoryKindReference, fmt.Sprintf("reference doc %d", i))
+		require.NoError(t, store.Append(ctx, evt))
+	}
+
+	// Query's default limit (100, see Query's `if limit <= 0 { limit = 100 }`)
+	// caps the number of rows returned, so counting via len(Query(...))
+	// under-reports once more than 100 events exist.
+	events, err := store.Query(ctx, EventFilter{})
+	require.NoError(t, err)
+	require.Len(t, events, 100, "Query without an explicit limit is capped at the default")
+
+	count, err := store.Count(ctx, EventFilter{})
+	require.NoError(t, err)
+	require.Equal(t, int64(total), count, "Count must not be capped by Query's default/max limit")
+}
+
+func TestEventStore_CountHonorsFilters(t *testing.T) {
+	db := setupTestDB(t)
+	store := NewSQLiteEventStore(db)
+	ctx := context.Background()
+
+	sessionScope := MemoryScopeSession
+	projectScope := MemoryScopeProject
+
+	require.NoError(t, store.Append(ctx, testEvent(sessionScope, MemoryKindTaskState, "task in progress")))
+	require.NoError(t, store.Append(ctx, testEvent(projectScope, MemoryKindDecision, "adopt event sourcing")))
+	require.NoError(t, store.Append(ctx, testEvent(projectScope, MemoryKindDecision, "adopt sqlite")))
+
+	count, err := store.Count(ctx, EventFilter{Scope: &projectScope})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count)
+
+	count, err = store.Count(ctx, EventFilter{Scope: &sessionScope})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+}
+
 func TestEngine_Disabled(t *testing.T) {
 	db := setupTestDB(t)
 	engine := New(db, Config{Enabled: false})

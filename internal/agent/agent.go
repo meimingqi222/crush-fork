@@ -242,9 +242,9 @@ type sessionAgent struct {
 	// enhancedPromptContextSig is the tool/MCP/date fingerprint used when
 	// enhancedSystemPrompt was last built.
 	enhancedPromptContextSig string
-	workingDir           string
-	tools                *csync.Slice[fantasy.AgentTool]
-	agentFactory         func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
+	workingDir               string
+	tools                    *csync.Slice[fantasy.AgentTool]
+	agentFactory             func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
 
 	refreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
 	deferredToolRuntime  deferredToolRuntime
@@ -278,6 +278,12 @@ type sessionAgent struct {
 	sessionMemoryEnabled bool
 	memoryEngineEnabled  bool
 
+	// workingMemoryMinDiscardedTokens gates session working-memory generation
+	// after compaction: it only fires when the compaction discarded at least
+	// this many tokens, avoiding an LLM call for compactions that barely
+	// trimmed the transcript. See docs/refactor-memory.md Phase 5 (P5.4).
+	workingMemoryMinDiscardedTokens int64
+
 	// memoryEngineEventStore provides direct EventStore access when the memory
 	// engine is enabled. Used for Working Memory read/write operations.
 	memoryEngineEventStore engine.EventStore
@@ -287,7 +293,6 @@ type sessionAgent struct {
 	memoryEngineHooks *MemoryEngineHooks
 
 	memoryEngineRetriever engine.Retriever
-	memoryEngineBackend   string
 	dataDirectory         string
 
 	// visionService describes images when the primary model lacks vision.
@@ -322,9 +327,12 @@ type SessionAgentOptions struct {
 	MemoryEngineEventStore engine.EventStore
 	MemoryEngineHooks      *MemoryEngineHooks
 	MemoryEngineRetriever  engine.Retriever
-	MemoryEngineBackend    string
-	RetryWaitFunc          func(context.Context, time.Duration) error
-	DataDirectory          string
+	// WorkingMemoryMinDiscardedTokens gates post-compaction session
+	// working-memory generation to compactions that discarded at least this
+	// many tokens. Zero disables the gate (always triggers, when enabled).
+	WorkingMemoryMinDiscardedTokens int64
+	RetryWaitFunc                   func(context.Context, time.Duration) error
+	DataDirectory                   string
 
 	// VisionService describes images when the primary model lacks vision.
 	VisionService *VisionService
@@ -410,10 +418,10 @@ func NewSessionAgent(
 		pendingExtractions:     make(map[string][]pendingExtraction),
 		sessionMemoryEnabled:   opts.EnableSessionMemory,
 		memoryEngineEnabled:    opts.MemoryEngineEnabled,
+		workingMemoryMinDiscardedTokens: opts.WorkingMemoryMinDiscardedTokens,
 		memoryEngineEventStore: opts.MemoryEngineEventStore,
 		memoryEngineHooks:      opts.MemoryEngineHooks,
 		memoryEngineRetriever:  opts.MemoryEngineRetriever,
-		memoryEngineBackend:    opts.MemoryEngineBackend,
 		dataDirectory:          opts.DataDirectory,
 		visionService:          opts.VisionService,
 	}
@@ -2689,12 +2697,13 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// Copy mutable fields under lock to avoid races with SetModels.
 	summaryModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
-	// 选择摘要模型：优先使用 background model，否则回退到 large model
+	// Select the summary model: prefer the background model, falling back
+	// to the large model when none is configured.
 	if a.backgroundModel != nil {
 		summaryModel = a.backgroundModel.model
-		// 为 background model 重新计算 provider options
+		// Recompute provider options for the background model.
 		opts = getProviderOptions(summaryModel, a.backgroundModel.provider)
-		// 切换为 background model provider 的 system prompt prefix
+		// Switch to the background model provider's system prompt prefix.
 		systemPromptPrefix = a.backgroundModel.provider.SystemPromptPrefix
 	}
 	providerCtx := defaultProviderContext()
@@ -2786,7 +2795,13 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		transformedMsgs = msgs
 	}
 	aiMsgs, _ := a.preparePrompt(transformedMsgs)
-	compactUsage := usageSnapshotFromMessages(msgs, a.estimatePromptForMessages(msgs))
+	// preCompactionTokens is the estimated prompt size just before
+	// compaction. Compared against the post-compaction baseline below, this
+	// yields the number of tokens compaction actually discarded, used to
+	// gate session working-memory generation (see enableSessionMemory /
+	// workingMemoryMinDiscardedTokens).
+	preCompactionTokens := a.estimatePromptForMessages(msgs)
+	compactUsage := usageSnapshotFromMessages(msgs, preCompactionTokens)
 	compacting, err := a.plugins().TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
 		SessionID: sessionID,
 		Agent:     "session",
@@ -3068,11 +3083,17 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// summary message plus any tail retained after it -- so the UI and the
 	// auto-summarize threshold see the post-compaction size rather than the
 	// input that produced the summary.
+	// discardedTokens is how many tokens this compaction actually freed:
+	// the pre-compaction estimate minus the post-compaction baseline. Used
+	// below to gate session working-memory generation so a compaction that
+	// barely trimmed the transcript doesn't still trigger an LLM call.
+	var discardedTokens int64
 	if retainedMsgs, retainErr := a.getSessionMessages(genCtx, currentSession); retainErr == nil {
 		baseline := a.estimatePromptForMessages(retainedMsgs)
 		currentSession.PromptTokens = baseline
 		currentSession.LastPromptTokens = baseline
 		currentSession.LastCompletionTokens = 0
+		discardedTokens = preCompactionTokens - baseline
 	} else {
 		slog.Warn("Failed to recompute post-summarize prompt baseline; context display may lag until the next turn",
 			"error", retainErr, "session_id", sessionID)
@@ -3086,8 +3107,11 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			a.hookManager.RunPostCompact(ctx, sessionID)
 		}
 	}
-	// Compact 后生成 session working memory，供后续 turn 快速恢复上下文。
-	if err == nil && a.enableSessionMemory() {
+	// Generate session working memory after compaction so subsequent turns
+	// can quickly restore context. Gated on discardedTokens so a compaction
+	// that only trimmed a small amount doesn't still trigger an LLM call
+	// (see docs/refactor-memory.md Phase 5, P5.4).
+	if err == nil && a.enableSessionMemory() && discardedTokens >= a.workingMemoryMinDiscardedTokens {
 		a.asyncUpdateSessionMemory(ctx, sessionID)
 	}
 	return err

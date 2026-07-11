@@ -60,8 +60,9 @@ func (a *sessionAgent) enableSessionMemory() bool {
 	return a.sessionMemoryEnabled && a.memoryEngineEnabled && a.memoryEngineEventStore != nil && a.backgroundModel != nil
 }
 
-// asyncUpdateSessionMemory 在 compact 后异步生成 session working memory。
-// 提取最后一条 user message 作为 prompt，结合完整对话历史生成状态快照。
+// asyncUpdateSessionMemory generates session working memory asynchronously
+// after compaction. It extracts the last user message as the prompt and
+// combines it with the full conversation history to produce a state snapshot.
 func (a *sessionAgent) asyncUpdateSessionMemory(ctx context.Context, sessionID string) {
 	history := a.getHistoryForMemoryExtraction(ctx, sessionID)
 

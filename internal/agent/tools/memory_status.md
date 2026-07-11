@@ -1,17 +1,16 @@
-Shows the current status of the memory engine pipeline, including event store
-health, extraction and consolidation pipeline state, materialized view
-statuses, and background job information.
+Shows a one-line summary of the active memory backend: which backend is in
+use, whether it is enabled, degraded, and rough activity counters.
 
 <usage>
-- Call without parameters to see the full pipeline status.
-- Use `view_name` to inspect a specific materialized view.
+- Call without parameters. There is nothing to configure.
 </usage>
 
 <notes>
 - Memory status is read-only. It does not modify any state.
-- The event store status indicates whether the SQLite-backed event log is
-  operational, disabled, or unavailable.
-- Degraded mode is displayed when the background model is unavailable and
-  the pipeline has paused extraction/consolidation.
-- Materialized views show per-view watermark tracking for incremental rebuild.
+- Degraded mode is reported when the backend has paused extraction or
+  consolidation (e.g. the background model is unavailable, or a hindsight
+  backend is missing its remote configuration).
+- For deeper pipeline diagnostics (per-view watermarks, background job
+  leases), use the Commands panel's Memory: Status entry instead — this
+  tool is intentionally terse to keep it cheap to call from the model.
 </notes>

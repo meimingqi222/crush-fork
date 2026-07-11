@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
-	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,6 +28,11 @@ func (m *mockEventStore) Query(ctx context.Context, filter engine.EventFilter) (
 		return m.queryFn(ctx, filter)
 	}
 	return nil, nil
+}
+
+func (m *mockEventStore) Count(ctx context.Context, filter engine.EventFilter) (int64, error) {
+	events, err := m.Query(ctx, filter)
+	return int64(len(events)), err
 }
 
 func (m *mockEventStore) GetByID(_ context.Context, _ string) (*engine.MemoryEvent, error) {
@@ -68,20 +73,27 @@ func (m *mockRetriever) Reflect(_ context.Context, _ string, _ map[string]any) (
 	return m.reflectResult, m.reflectErr
 }
 
-// mockEngine wraps engine.Engine for testing memory_status.
+// mockEngine is a minimal memoryMaterializer for testing retain's
+// post-write materialization trigger.
 type mockEngine struct {
-	status              *engine.EngineStatus
-	statusErr           error
 	materializationRuns int
-}
-
-func (m *mockEngine) Status(ctx context.Context) (*engine.EngineStatus, error) {
-	return m.status, m.statusErr
 }
 
 func (m *mockEngine) TriggerMaterialization(context.Context) error {
 	m.materializationRuns++
 	return nil
+}
+
+// mockBackendStatus implements BackendStatusProvider for testing
+// memory_status, which now reports the simplified memory.Status rather than
+// the full engine.EngineStatus pipeline diagnostics.
+type mockBackendStatus struct {
+	status    *memory.Status
+	statusErr error
+}
+
+func (m *mockBackendStatus) Status(ctx context.Context) (*memory.Status, error) {
+	return m.status, m.statusErr
 }
 
 // --- retain tests ---
@@ -90,9 +102,8 @@ func TestRetainTool(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := permission.NewPermissionService("/workspace", true, nil)
 	materializer := &mockEngine{}
-	tool := NewRetainTool(eventStore, permissions, "/workspace", materializer)
+	tool := NewRetainTool(eventStore, "/workspace", materializer)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
 	resp, err := runRetainTool(t, tool, ctx, RetainParams{
@@ -124,8 +135,7 @@ func TestRetainToolRequiresSession(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := permission.NewPermissionService("/workspace", true, nil)
-	tool := NewRetainTool(eventStore, permissions, "/workspace")
+	tool := NewRetainTool(eventStore, "/workspace")
 
 	_, err := runRetainTool(t, tool, context.Background(), RetainParams{
 		Scope:   "project",
@@ -138,8 +148,7 @@ func TestRetainToolRequiresSession(t *testing.T) {
 func TestRetainToolNilEventStore(t *testing.T) {
 	t.Parallel()
 
-	permissions := permission.NewPermissionService("/workspace", true, nil)
-	tool := NewRetainTool(nil, permissions, "/workspace")
+	tool := NewRetainTool(nil, "/workspace")
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
 	resp, err := runRetainTool(t, tool, ctx, RetainParams{
@@ -156,8 +165,7 @@ func TestRetainToolDefaultImportance(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := permission.NewPermissionService("/workspace", true, nil)
-	tool := NewRetainTool(eventStore, permissions, "/workspace")
+	tool := NewRetainTool(eventStore, "/workspace")
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
 	_, err := runRetainTool(t, tool, ctx, RetainParams{
@@ -174,9 +182,8 @@ func TestRetainToolSkipsMaterializationForSessionMemory(t *testing.T) {
 	t.Parallel()
 
 	eventStore := &mockEventStore{}
-	permissions := permission.NewPermissionService("/workspace", true, nil)
 	materializer := &mockEngine{}
-	tool := NewRetainTool(eventStore, permissions, "/workspace", materializer)
+	tool := NewRetainTool(eventStore, "/workspace", materializer)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
 
 	_, err := runRetainTool(t, tool, ctx, RetainParams{
@@ -328,74 +335,52 @@ func TestReflectToolEmptyResult(t *testing.T) {
 func TestMemoryStatusTool(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
-	engine := &mockEngine{
-		status: &engine.EngineStatus{
-			EventStoreStatus: "ok",
-			ExtractionStatus: engine.MemoryPipelineStatus{
-				State:     "completed",
-				LastRunAt: &now,
-			},
-			ConsolidationStatus: engine.MemoryPipelineStatus{
-				State:         "completed",
-				LastRunAt:     &now,
-				LastWatermark: 42,
-			},
-			MaterializationViews: []engine.MaterializedViewStatus{
-				{ViewName: "memory_summary", Watermark: 42, SchemaVersion: 1, State: "ok", LastUpdatedAt: &now},
-				{ViewName: "MEMORY", Watermark: 42, SchemaVersion: 1, State: "ok", LastUpdatedAt: &now},
-			},
+	backend := &mockBackendStatus{
+		status: &memory.Status{
+			Backend:           "local",
+			Enabled:           true,
+			EventCount:        42,
+			LastConsolidation: time.Now().Unix(),
 		},
 	}
 	tool := NewMemoryStatusTool(nil)
-	toolWithEngine := NewMemoryStatusTool(engine)
+	toolWithBackend := NewMemoryStatusTool(backend)
 
-	t.Run("nil engine returns error", func(t *testing.T) {
+	t.Run("nil backend returns error", func(t *testing.T) {
 		resp, err := runMemoryStatusTool(t, tool, context.Background(), MemoryStatusParams{})
 		require.NoError(t, err)
 		require.True(t, resp.IsError)
 		require.Contains(t, resp.Content, "not configured")
 	})
 
-	t.Run("full status output", func(t *testing.T) {
-		resp, err := runMemoryStatusTool(t, toolWithEngine, context.Background(), MemoryStatusParams{})
+	t.Run("summary output", func(t *testing.T) {
+		resp, err := runMemoryStatusTool(t, toolWithBackend, context.Background(), MemoryStatusParams{})
 		require.NoError(t, err)
 		require.False(t, resp.IsError)
-		require.Contains(t, resp.Content, "Event Store: ok")
-		require.Contains(t, resp.Content, "Extraction: completed")
-		require.Contains(t, resp.Content, "Consolidation: completed")
-		require.Contains(t, resp.Content, "memory_summary")
-		require.Contains(t, resp.Content, "MEMORY")
-	})
-
-	t.Run("view filter narrows output", func(t *testing.T) {
-		resp, err := runMemoryStatusTool(t, toolWithEngine, context.Background(), MemoryStatusParams{ViewName: "memory_summary"})
-		require.NoError(t, err)
-		require.False(t, resp.IsError)
-		require.Contains(t, resp.Content, "memory_summary")
-		require.NotContains(t, resp.Content, "MEMORY")
+		require.Contains(t, resp.Content, "backend=local")
+		require.Contains(t, resp.Content, "enabled=true")
+		require.Contains(t, resp.Content, "events=42")
 	})
 }
 
 func TestMemoryStatusToolDegradedMode(t *testing.T) {
 	t.Parallel()
 
-	engine := &mockEngine{
-		status: &engine.EngineStatus{
-			EventStoreStatus: "ok",
-			DegradedMode: &engine.DegradedModeInfo{
-				Active: true,
-				Reason: "Background model unavailable",
-			},
+	backend := &mockBackendStatus{
+		status: &memory.Status{
+			Backend:        "hindsight",
+			Enabled:        true,
+			Degraded:       true,
+			DegradedReason: "hindsight backend configured without memory.remote",
 		},
 	}
-	tool := NewMemoryStatusTool(engine)
+	tool := NewMemoryStatusTool(backend)
 
 	resp, err := runMemoryStatusTool(t, tool, context.Background(), MemoryStatusParams{})
 	require.NoError(t, err)
 	require.False(t, resp.IsError)
-	require.Contains(t, resp.Content, "Degraded Mode: YES")
-	require.Contains(t, resp.Content, "Background model unavailable")
+	require.Contains(t, resp.Content, "degraded=true")
+	require.Contains(t, resp.Content, "hindsight backend configured without memory.remote")
 }
 
 // --- helpers ---

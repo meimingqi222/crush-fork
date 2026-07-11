@@ -386,6 +386,13 @@ type MemoryConfig struct {
 	// when using the hindsight backend. Defaults to 3.
 	RetainEveryNTurns int `json:"retain_every_n_turns,omitempty" jsonschema:"description=Retain transcript window every N turns (hindsight backend),default=3"`
 
+	// WorkingMemoryMinDiscardedTokens gates post-compaction session working
+	// memory generation (an LLM call) so it only fires when compaction
+	// actually freed a meaningful amount of context. Only applies to
+	// backends with Capabilities.SessionWorkingMemory (local); hindsight
+	// never generates local working memory regardless of this setting.
+	WorkingMemoryMinDiscardedTokens int `json:"working_memory_min_discarded_tokens,omitempty" jsonschema:"description=Minimum tokens a compaction must discard before triggering session working-memory generation,default=20000"`
+
 	// MentalModels controls the layered Mental Models materializer that
 	// generates stable, low-frequency-updated summary files for user
 	// preferences, project conventions, decisions, and known pitfalls.
@@ -707,6 +714,16 @@ func (m *MemoryConfig) GetRetainEveryNTurns() int {
 		return 3
 	}
 	return m.RetainEveryNTurns
+}
+
+// GetWorkingMemoryMinDiscardedTokens returns the minimum number of tokens a
+// compaction must discard before session working-memory generation is
+// triggered. Defaults to 20000 if not set or invalid.
+func (m *MemoryConfig) GetWorkingMemoryMinDiscardedTokens() int64 {
+	if m == nil || m.WorkingMemoryMinDiscardedTokens <= 0 {
+		return 20000
+	}
+	return int64(m.WorkingMemoryMinDiscardedTokens)
 }
 
 // Completions defines options for the completions UI.
@@ -1362,6 +1379,7 @@ func allToolNames() []string {
 		"tool_search",
 		"todos",
 		"send_message",
+		"sourcegraph",
 		"task_stop",
 		"yield",
 		"subtask_result",
@@ -1383,6 +1401,7 @@ func resolveResearchTools(tools []string) []string {
 		"grep",
 		"lsp",
 		"read",
+		"sourcegraph",
 		"yield",
 		"tool_search",
 	}
@@ -1406,6 +1425,8 @@ var ReadOnlyResearchToolNames = []string{
 	"grep",
 	"lsp",
 	"read",
+	"sourcegraph",
+	"agentic_fetch",
 	"yield",
 	"tool_search",
 }

@@ -85,7 +85,10 @@ func (s *sqliteEventStore) Append(ctx context.Context, event MemoryEvent) error 
 	return nil
 }
 
-func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]MemoryEvent, error) {
+// buildEventFilterWhere renders the shared WHERE clause and argument list for
+// an EventFilter. Used by both Query (which additionally applies LIMIT/ORDER)
+// and Count (which only needs the predicate).
+func buildEventFilterWhere(filter EventFilter) (string, []any) {
 	var conditions []string
 	var args []any
 
@@ -130,6 +133,11 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 	if len(conditions) > 0 {
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
+	return whereClause, args
+}
+
+func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]MemoryEvent, error) {
+	whereClause, args := buildEventFilterWhere(filter)
 
 	limit := filter.Limit
 	if limit <= 0 {
@@ -213,6 +221,18 @@ func (s *sqliteEventStore) Query(ctx context.Context, filter EventFilter) ([]Mem
 	}
 
 	return events, nil
+}
+
+func (s *sqliteEventStore) Count(ctx context.Context, filter EventFilter) (int64, error) {
+	whereClause, args := buildEventFilterWhere(filter)
+
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM memory_events %s`, whereClause)
+
+	var count int64
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting memory events: %w", err)
+	}
+	return count, nil
 }
 
 func (s *sqliteEventStore) GetByID(ctx context.Context, id string) (*MemoryEvent, error) {

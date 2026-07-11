@@ -9,7 +9,6 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/memory/engine"
-	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/google/uuid"
 )
 
@@ -31,7 +30,13 @@ type memoryMaterializer interface {
 	TriggerMaterialization(ctx context.Context) error
 }
 
-func NewRetainTool(eventStore engine.EventStore, permissions permission.Service, workingDir string, materializers ...memoryMaterializer) fantasy.AgentTool {
+// NewRetainTool creates the retain tool. Unlike file-editing tools, retain
+// writes to crush's own data directory (the memory event log), not the
+// user's workspace, so it does not go through a permission prompt -- mirrors
+// oh-my-pi's retain tool, which is registered with approval: "read". The
+// tool description carries the compensating safeguard instead (do not
+// retain secrets/credentials).
+func NewRetainTool(eventStore engine.EventStore, workingDir string, materializers ...memoryMaterializer) fantasy.AgentTool {
 	var materializer memoryMaterializer
 	if len(materializers) > 0 {
 		materializer = materializers[0]
@@ -47,24 +52,6 @@ func NewRetainTool(eventStore engine.EventStore, permissions permission.Service,
 			sessionID := GetSessionFromContext(ctx)
 			if sessionID == "" {
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for retain")
-			}
-
-			permissionResponse, err := RequestPermission(ctx, permissions,
-				permission.CreatePermissionRequest{
-					SessionID:   sessionID,
-					Path:        workingDir,
-					ToolCallID:  call.ID,
-					ToolName:    RetainToolName,
-					Action:      "write",
-					Description: fmt.Sprintf("Retain memory event: %s/%s", params.Scope, params.Kind),
-					Params:      params,
-				},
-			)
-			if err != nil {
-				return fantasy.ToolResponse{}, err
-			}
-			if permissionResponse != nil {
-				return *permissionResponse, nil
 			}
 
 			importance := params.Importance

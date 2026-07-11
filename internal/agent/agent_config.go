@@ -142,7 +142,11 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel M
 		enhanced += "\n\n<mcp-instructions>\n" + s + "\n</mcp-instructions>"
 	}
 
-	if a.memoryEngineEnabled && a.memoryEngineBackend == "hindsight" {
+	// Mental-models snippets are backend-specific (currently hindsight only).
+	// Gating on the MentalModelsProvider interface, rather than a backend
+	// name string, means this stays correct automatically as backends gain
+	// or lose the capability.
+	if a.memoryEngineEnabled {
 		if retriever := a.memoryEngineRetriever; retriever != nil {
 			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
 				if snippet := hr.MentalModelsSnippet(); snippet != "" {
@@ -167,7 +171,7 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel M
 	baseLen := len(basePrompt)
 	mcpLen := instructions.Len()
 	mmLen := 0
-	if a.memoryEngineEnabled && a.memoryEngineBackend == "hindsight" {
+	if a.memoryEngineEnabled {
 		if retriever := a.memoryEngineRetriever; retriever != nil {
 			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
 				mmLen = len(hr.MentalModelsSnippet())

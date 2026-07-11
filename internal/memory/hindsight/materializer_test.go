@@ -32,6 +32,11 @@ func (m *mockEventStore) Query(_ context.Context, filter engine.EventFilter) ([]
 	return result, nil
 }
 
+func (m *mockEventStore) Count(ctx context.Context, filter engine.EventFilter) (int64, error) {
+	events, err := m.Query(ctx, filter)
+	return int64(len(events)), err
+}
+
 func (m *mockEventStore) GetByID(context.Context, string) (*engine.MemoryEvent, error) {
 	return nil, nil
 }

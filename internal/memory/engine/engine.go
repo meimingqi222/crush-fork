@@ -12,9 +12,6 @@ import (
 
 // sessionState tracks per-session lifecycle state for the engine.
 type sessionState struct {
-	firstTurnInjected bool
-	lastWMUpdate      time.Time
-	pendingWrites     int
 }
 
 // Engine is the top-level orchestrator for the memory system pipeline.
@@ -47,8 +44,14 @@ type Engine struct {
 	degradedReason string
 	degradedMu     sync.RWMutex
 
-	// throttle
-	workingMemoryThrottle time.Duration
+	// linkPending queues event IDs awaiting proactive linking. Rather than
+	// spawning a fire-and-forget goroutine per turn (the previous behavior),
+	// AfterTurnIdle and TriggerConsolidation enqueue here and the pending
+	// batch is drained serially, once per pass, inside TriggerMaterialization
+	// -- the same convergence point already used for the periodic/turn-
+	// counter background pass. See docs/refactor-memory.md Phase 5 (P5.3).
+	linkPending []string
+	linkMu      sync.Mutex
 
 	// reranker (optional) applied during Retrieve and compaction recall.
 	reranker Reranker
@@ -88,9 +91,8 @@ const consolidationCheckpointView = "_pipeline_consolidation"
 
 // Config holds configuration for the memory engine.
 type Config struct {
-	Enabled               bool
-	Backend               string
-	WorkingMemoryThrottle time.Duration
+	Enabled bool
+	Backend string
 
 	// BackgroundInterval enables a periodic background materializer when > 0.
 	BackgroundInterval time.Duration
@@ -107,27 +109,22 @@ type Config struct {
 
 // New creates a new memory Engine with the given SQLite database and config.
 func New(db *sql.DB, cfg Config) *Engine {
-	throttle := cfg.WorkingMemoryThrottle
-	if throttle <= 0 {
-		throttle = 30 * time.Second
-	}
 	backend := cfg.Backend
 	if backend == "" {
 		backend = "local"
 	}
 	e := &Engine{
-		store:                 NewSQLiteEventStore(db),
-		db:                    db,
-		enabled:               cfg.Enabled,
-		backend:               backend,
-		sessionStates:         make(map[string]*sessionState),
-		workingMemoryThrottle: throttle,
-		bgInterval:            cfg.BackgroundInterval,
-		bgEveryNTurns:         cfg.BackgroundEveryNTurns,
-		consBgInterval:        cfg.ConsolidationInterval,
-		tripleStore:           NewTripleStore(db),
-		conflictDetector:      NewConflictDetector(db),
-		embeddingStore:        NewEmbeddingStore(db),
+		store:            NewSQLiteEventStore(db),
+		db:               db,
+		enabled:          cfg.Enabled,
+		backend:          backend,
+		sessionStates:    make(map[string]*sessionState),
+		bgInterval:       cfg.BackgroundInterval,
+		bgEveryNTurns:    cfg.BackgroundEveryNTurns,
+		consBgInterval:   cfg.ConsolidationInterval,
+		tripleStore:      NewTripleStore(db),
+		conflictDetector: NewConflictDetector(db),
+		embeddingStore:   NewEmbeddingStore(db),
 	}
 	e.proactiveLinker = NewProactiveLinker(e.store, e.tripleStore, nil)
 	e.embeddingPipeline = NewEmbeddingPipeline(e.store, e.embeddingStore, nil)
@@ -202,11 +199,62 @@ func (e *Engine) Retriever() Retriever {
 	return e.retriever
 }
 
+// enqueuePendingLinks queues event IDs for proactive linking on the next
+// materialization pass instead of linking them immediately.
+func (e *Engine) enqueuePendingLinks(ids ...string) {
+	if e.proactiveLinker == nil {
+		return
+	}
+	e.linkMu.Lock()
+	defer e.linkMu.Unlock()
+	for _, id := range ids {
+		if id != "" {
+			e.linkPending = append(e.linkPending, id)
+		}
+	}
+}
+
+// drainPendingLinks runs proactive linking for every event ID queued since
+// the last drain, serially and within the caller's pass. It is safe to call
+// even when the queue is empty (cheap no-op) or the linker is unset.
+func (e *Engine) drainPendingLinks(ctx context.Context) {
+	if e.proactiveLinker == nil {
+		return
+	}
+	e.linkMu.Lock()
+	ids := e.linkPending
+	e.linkPending = nil
+	e.linkMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+
+	events := make([]MemoryEvent, 0, len(ids))
+	for _, id := range ids {
+		evt, err := e.store.GetByID(ctx, id)
+		if err != nil || evt == nil {
+			continue
+		}
+		events = append(events, *evt)
+	}
+	if len(events) == 0 {
+		return
+	}
+	e.proactiveLinker.LinkEvents(ctx, events)
+}
+
 // TriggerMaterialization iterates over all registered materializers and
 // triggers a materialization pass for each of their views. Only views whose
-// watermark has advanced since the last run are rebuilt.
+// watermark has advanced since the last run are rebuilt. It also drains any
+// proactive-linking work queued since the last pass (see enqueuePendingLinks),
+// so linking runs serially inside this pass rather than as a per-turn
+// fire-and-forget goroutine.
 func (e *Engine) TriggerMaterialization(ctx context.Context) error {
-	if !e.enabled || len(e.materializers) == 0 {
+	if !e.enabled {
+		return nil
+	}
+	e.drainPendingLinks(ctx)
+	if len(e.materializers) == 0 {
 		return nil
 	}
 
@@ -306,8 +354,15 @@ func (e *Engine) TriggerConsolidation(ctx context.Context) error {
 	}
 
 	// Proactively link consolidated memories to related existing memories.
-	if e.proactiveLinker != nil && len(consolidated) > 0 {
-		go e.proactiveLinker.LinkEvents(context.Background(), consolidated)
+	// Queued rather than run in a fire-and-forget goroutine; the next
+	// TriggerMaterialization call (already invoked by every caller of
+	// TriggerConsolidation shortly after) drains and runs it serially.
+	if len(consolidated) > 0 {
+		ids := make([]string, 0, len(consolidated))
+		for _, evt := range consolidated {
+			ids = append(ids, evt.ID)
+		}
+		e.enqueuePendingLinks(ids...)
 	}
 
 	if len(consolidated) > 0 {
@@ -514,9 +569,16 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 		e.embeddingPipeline.Enqueue(ids...)
 	}
 
-	// Proactively link newly extracted memories to related existing memories.
-	if e.proactiveLinker != nil && len(events) > 0 {
-		go e.proactiveLinker.LinkEvents(context.Background(), events)
+	// Proactively link newly extracted memories to related existing
+	// memories. Queued rather than linked in a fire-and-forget goroutine
+	// per turn; drained serially by the next TriggerMaterialization pass
+	// (see drainPendingLinks / docs/refactor-memory.md Phase 5, P5.3).
+	if len(events) > 0 {
+		ids := make([]string, 0, len(events))
+		for _, evt := range events {
+			ids = append(ids, evt.ID)
+		}
+		e.enqueuePendingLinks(ids...)
 	}
 
 	if hasMaterializableEvents(events) {
@@ -524,11 +586,6 @@ func (e *Engine) AfterTurnIdle(ctx context.Context, sessionID string, events []M
 			slog.Warn("Turn-end memory materialization failed", "error", err, "session_id", sessionID)
 		}
 	}
-	e.sessionMu.Lock()
-	if state, ok := e.sessionStates[sessionID]; ok {
-		state.pendingWrites += len(events)
-	}
-	e.sessionMu.Unlock()
 
 	// Turn-counter trigger: opportunistic background materialization even
 	// when this turn produced no directly materializable events. This keeps
@@ -631,22 +688,6 @@ func (e *Engine) OnBeforeCompaction(ctx context.Context, sessionID string) error
 	return nil
 }
 
-// ShouldUpdateWorkingMemory checks the throttle and returns whether a
-// Working Memory update should proceed for the given session.
-func (e *Engine) ShouldUpdateWorkingMemory(sessionID string) bool {
-	e.sessionMu.Lock()
-	defer e.sessionMu.Unlock()
-	state, ok := e.sessionStates[sessionID]
-	if !ok {
-		return false
-	}
-	if time.Since(state.lastWMUpdate) < e.workingMemoryThrottle {
-		return false
-	}
-	state.lastWMUpdate = time.Now()
-	return true
-}
-
 // Status returns the current engine pipeline status.
 func (e *Engine) Status(ctx context.Context) (*EngineStatus, error) {
 	eventStoreStatus := "ok"
@@ -725,6 +766,48 @@ func (e *Engine) RebuildView(ctx context.Context, viewName string) error {
 	}
 
 	return e.TriggerMaterialization(ctx)
+}
+
+// memoryTables lists every table owned by the memory engine. Clear wipes all
+// of them. memory_events_fts is intentionally excluded: it is kept in sync
+// with memory_events via AFTER INSERT/UPDATE/DELETE triggers (see migration
+// 20260516000000_add_memory_fts.sql), so clearing memory_events cascades to
+// it automatically.
+var memoryTables = []string{
+	"memory_events",
+	"memory_sources",
+	"memory_jobs",
+	"memory_materialized_views",
+	"memory_embeddings",
+	"memory_conflicts",
+	"memory_triples",
+	"memory_edges",
+}
+
+// Clear deletes all persisted memory state: events, materialized views,
+// background job records, embeddings, conflicts, and knowledge-graph
+// triples/edges. It is intended for the user-facing "Memory: Clear" command
+// (see internal/ui/dialog) after explicit confirmation. In-memory pipeline
+// state (last run timestamps, watermark cache) is also reset so Status()
+// reflects the cleared state immediately without waiting for a new pass.
+func (e *Engine) Clear(ctx context.Context) error {
+	if e.db == nil {
+		return nil
+	}
+	for _, table := range memoryTables {
+		if _, err := e.db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+
+	e.pipelineMu.Lock()
+	e.lastExtractionRun = nil
+	e.lastConsolidationRun = nil
+	e.lastConsolidatedWatermark = 0
+	e.pipelineMu.Unlock()
+
+	slog.Info("Memory engine state cleared")
+	return nil
 }
 
 func filterConsolidatableEvents(events []MemoryEvent) []MemoryEvent {
