@@ -1,9 +1,14 @@
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This document is archived; it describes a design that has been implemented and may diverge from the current code. The current code is the authoritative source.
+
 # Memory Engine Improvements — Technical Spec
 
 本文档是 `docs/memory-improvements-prd.md` 的技术对应件，给出落地所需的
 代码改动、新增类型、数据迁移、配置开关与测试要点。所有变更扩展现有
 `internal/memory/engine/` 包，不引入新顶层包，不破坏 `docs/memory-engine-design.md`
 的架构边界。
+
+> **实施状态：全部功能已落地，部分实现方式与下文设计有偏离。** 偏离汇总见
+> 文档末尾"实施状态与偏离"小节。
 
 > 命名约定：在不引起歧义时，本文档将 `internal/memory/engine` 包内类型
 > 直接以无前缀的形式书写（例如 `Engine`、`SummaryRetriever`）。
@@ -528,20 +533,39 @@ Hindsight 模式：
 
 ## 8. 实施顺序与里程碑
 
+> 全部 M1–M4 已完成。
+
 按 PRD 第 12 节给出的 S1..S7 顺序提交：每步独立 PR，独立验收。
 
-M1 (S1+S2)：Compaction Recall + Background Materializer。
-M2 (S3)：Mental Models Materializer + 分层注入。
-M3 (S4+S5)：Rollout Summary + Reranker 接口（默认关闭）。
-M4 (S6+S7)：Hindsight tagged replicator + memory_status 可观测性扩展。
+M1 ✅ (S1+S2)：Compaction Recall + Background Materializer。
+M2 ✅ (S3)：Mental Models Materializer + 分层注入。
+M3 ✅ (S4+S5)：Rollout Summary + Embedding Reranker（从 LLM 改为 embedding）。
+M4 ✅ (S6+S7)：Hindsight mental models（原生 API）+ memory_status 可观测性
+（走 Commands 面板）。
 
 ## 9. 未覆盖的开放问题（来自 PRD）
 
 - mental model seed 类目是否需要扩展（pitfalls、workflows）。本 SPEC
-  已包含 `pitfalls`；`workflows` 待 M3 评估。
-- Reranker 模型角色：M3 落地时确认是否复用 `small` 还是单独 role。
-- Compaction rescue 注入位置：M1 与 compaction owner 在 PR review 中
-  对齐，本 SPEC 暂定 system 块紧跟压缩 prompt 头部。
-- 周期物化默认值：默认 5m / 10 turns，M1 后根据真实数据微调。
-- mental model 文件丢失检测：startup 时扫描 + 写缺失 view 标记为 stale，
-  下次 Build 触发重建。Recall 路径不检查文件存在性以避免延迟。
+  已包含 `pitfalls`；实际实现还加了 `procedures`。`workflows` 待评估。
+- Reranker 模型角色：实际用 embedding-based reranker 替代 LLM reranker，
+  复用 `hashing`（默认零下载）或 `provider`（OpenAI 兼容 API）。
+- Compaction rescue 注入位置：实际在 `agent.go:2423` 通过
+  `withCompactionRescue(genCtx, rescuePayload)` 注入。
+- 周期物化默认值：默认 5m / 10 turns，与 SPEC 一致。
+- mental model 文件丢失检测：startup 扫描 + watermark 驱动重建。
+
+## 10. 实施状态与偏离
+
+以下记录实际实现与上述设计的偏离：
+
+| 项 | 设计 | 实际实现 | 文件 |
+|---|---|---|---|
+| F1 seed 定义 | 独立文件 `mental_models_seeds.go`，类型 `MentalModelSeed` | 内联在 `materializer_mental_models.go` 的 `DefaultMentalModels()`，类型 `MentalModelDefinition`；seed 名为 `preferences`/`conventions`/`decisions`/`pitfalls`/`procedures`（非 `user_preferences` 等） | `engine/materializer_mental_models.go` |
+| F3 输出文件名 | `rollouts/<session_id>_summary.md` | `rollouts/<session_id>.md`（去 `_summary` 后缀） | `engine/materializer_rollout.go` |
+| F3 seed 文件 | `mental_models_seeds.go` | 不存在，seed 内联在 materializer | — |
+| F4 签名 | 修改 `OnBeforeCompaction` 返回 `(*CompactionRescue, error)` | 保留旧 `OnBeforeCompaction(ctx, sessionID) error`，新增独立 `PrepareCompactionRescue(ctx, sessionID, opts)` | `engine/compaction_rescue.go` |
+| F4 标签名 | `<compaction-rescue>` | `<memory_rescue>` | `engine/compaction_rescue.go` |
+| F5 Reranker | `LLMReranker`（用 chat 模型对候选打分） | `EmbeddingReranker`（`HashingEmbedder` + `ProviderEmbedder`），`HeuristicReranker` 保留；无 `LLMReranker` | `engine/reranker.go`、`engine/embedding_reranker.go` |
+| F7 Hindsight mental models | `tagged_replicator.go` + `kind:mental_model` tag 复制 | Hindsight 原生 `ListMentalModels` API + 客户端缓存，通过 `MentalModelsProvider` 接口暴露 | `hindsight/retriever.go`、`memory/backend.go` |
+| F8 `memory_status` 工具 | 扩展显示 mental models / background / reranker 三个 section | 保持一行摘要，诊断走 Commands 面板的 Memory: Status 命令 | `agent/tools/memory_status.go` |
+| 额外实现 | — | Embedding pipeline（`embedding_pipeline.go`）、Query expansion + CJK tokenizer + FTS strict-then-loose（`retrieval_terms.go`）、Background consolidator loop | 见 `docs/memory-lightweight-retrieval-plan.md` |

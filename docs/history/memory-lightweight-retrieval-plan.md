@@ -1,4 +1,11 @@
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This document is archived; it describes a design that has been implemented and may diverge from the current code. The current code is the authoritative source.
+
 # Lightweight Local Memory Retrieval Plan
+
+> **状态：P0 和 P2 已实施。** P0（query expansion、CJK tokenizer、FTS
+> strict-then-loose、heuristic reranking）全部落地于 `engine/retrieval_terms.go`
+> 和 `engine/retriever.go`。P2（hashing embedding backend）落地于
+> `engine/embedding_reranker.go` 和 `engine/embedding_pipeline.go`。
 
 ## 背景 / Background
 
@@ -15,7 +22,7 @@ The goal is a better bilingual (Chinese + English) local recall path that remain
 5. **Fail-soft.** FTS 严格查询 miss 时自动回退到宽松 OR 查询，再回退到内存 keyword ranking。
 6. **Embeddings are opt-in.** 未来 embedding 只作为可选 reranker，并且必须增量、缓存、后台低优先级。
 
-## P0: 无模型检索增强 / No-model retrieval improvements
+## P0: 无模型检索增强 / No-model retrieval improvements ✅ 已实施
 
 ### 1. Query expansion
 
@@ -62,7 +69,7 @@ Heuristic reranker 增强：
 - importance + confidence；
 - recency 轻微加权，不压过稳定知识。
 
-## P1: 物化和合并质量 / Materialization and consolidation quality
+## P1: 物化和合并质量 / Materialization and consolidation quality ✅ 已实施
 
 ### Mental Models quality
 
@@ -81,7 +88,7 @@ Heuristic reranker 增强：
 - Supersedes 只用于明确替代关系，避免过度删除历史决策。
 - 对 bilingual content 保留原文关键词，不强制翻译掉关键 token。
 
-## P2: Optional lightweight embeddings
+## P2: Optional lightweight embeddings ✅ 已实施
 
 Embedding 不作为默认实现。当前实现先提供 `hashing` backend：零下载、零模型文件、确定性 signed feature hashing，特征来自 expanded lexical tokens + CJK char n-grams。它不是神经 embedding，但能在中英混合候选集上提供更稳的向量式相似度信号，而且 CPU 成本只和 top-N candidates 成正比。
 

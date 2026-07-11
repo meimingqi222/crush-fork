@@ -1,4 +1,11 @@
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This document is archived; it describes a design that has been implemented and may diverge from the current code. The current code is the authoritative source.
+
 # Memory Engine Improvements — PRD
+
+> **状态：大部分已实施。** F1–F6 已完成（F5 从 LLM reranker 改为 embedding
+> reranker，F7 以 Hindsight 原生 mental models API 替代 tag 复制方案）；
+> F8 的 `memory_status` 工具未扩展（诊断走用户面 Commands 面板）。
+> 技术细节与偏离见 `docs/memory-improvements-spec.md` 末尾的实施状态小节。
 
 ## 1. 背景
 
@@ -38,10 +45,21 @@ Hindsight 远程 backend 中可借鉴的机制（Mental Models、压缩前召回
 | Degraded mode | 已实现 | `engine/engine.go:323-342` |
 | Hindsight TranscriptRetainer + Retriever | 已实现 | `memory/hindsight/*.go` |
 | Hindsight Scope（global / per-project / per-project-tagged） | 已实现 | `memory/hindsight/scope.go` |
+| Mental Models Materializer → `mental_models/*.md` | 已实现 | `engine/materializer_mental_models.go` |
+| Rollout Summary Materializer → `rollouts/<sid>.md` | 已实现 | `engine/materializer_rollout.go` |
+| Compaction Recall（`PrepareCompactionRescue`） | 已实现 | `engine/compaction_rescue.go` |
+| Heuristic + Embedding Reranker | 已实现 | `engine/reranker.go`、`engine/embedding_reranker.go` |
+| Background Materializer（interval + turn counter） | 已实现 | `engine/background.go` |
+| Layered Recall（mental models + summary + working memory） | 已实现 | `engine/retriever.go` |
+| Query expansion / CJK tokenizer / FTS strict-then-loose | 已实现 | `engine/retrieval_terms.go` |
+| Embedding pipeline（hashing + provider backends） | 已实现 | `engine/embedding_pipeline.go` |
+| Mental Models 跨 backend（Hindsight 原生 API） | 已实现 | `hindsight/retriever.go`、`memory/backend.go` |
 
 ## 3. 待解决的问题
 
-### 3.1 本地召回准确率差
+> 以下问题在 PRD 撰写时尚未解决。状态标注当前情况。
+
+### 3.1 本地召回准确率差 ✅ 已解决（F1+F2+F5）
 `SummaryRetriever.Retrieve` 当前路径是 FTS5 MATCH → BM25 排序 → fallback
 到 `strings.Contains` 关键词匹配。这套词法检索对自然语言查询召回精度有
 限，相同语义不同用词（如 "压缩超时" vs "compaction timeout"）就会
@@ -49,32 +67,42 @@ miss。`memory_summary.md` 是一坨混合摘要，无法按知识类型分层�
 用户已明确反对引入向量嵌入服务，因此改进必须在 **不引入外部嵌入依赖**
 的前提下解决。
 
-### 3.2 物化文件不及时
+### 3.2 物化文件不及时 ✅ 已解决（F6）
 当前 `TriggerMaterialization` 仅在 `AfterTurnIdle`（且有可物化事件）和
 `OnSessionClosed` 触发。当一个长会话不结束、且单轮无可物化事件时，本地
 `memory_summary.md` 不会刷新；用户和模型都看不到最新合并结果。
 
-### 3.3 没有 Mental Models 分层
+### 3.3 没有 Mental Models 分层 ✅ 已解决（F1）
 当前所有合并结果混在 `memory_summary.md`。用户偏好和项目约定这类稳定
 知识，会被一次性话题（任务状态、临时讨论）淹没。oh-my-pi 的 Mental
 Models 把这些抽离成独立、低频更新的命名块，注入时作为稳定前缀，比
 全文摘要更鲁棒。
 
-### 3.4 缺少按会话追溯
+### 3.4 缺少按会话追溯 ✅ 已解决（F3）
 当前合并是黑盒：一旦 episodic 事件被合并掉，难以追溯某条 semantic 记忆
 来自哪个会话、原始提取内容长什么样。oh-my-pi 通过 `rollout_summaries`
 表 + `<session_id>_summary.md` 实现追溯，每个会话有独立 stage1 输出。
 
-### 3.5 压缩前没有主动召回
+### 3.5 压缩前没有主动召回 ✅ 已解决（F4）
 `OnBeforeCompaction` 当前只调用 `AfterTurnIdle` 做最后一次提取，并触发
 物化。它**不会**主动召回历史相关记忆注入到压缩 prompt 中。Hindsight
 backend 的 `preCompactionContext` 已经做了这件事，本地 backend 没做。
 
-### 3.6 LLM 重排序未启用
+### 3.6 LLM 重排序未启用 ✅ 已解决（F5，实现方式偏离）
+
+> 原方案提出 LLM reranker（用小模型对候选打分）。实际实现改为 embedding-based
+> reranker：本地 `HashingEmbedder`（零下载、signed feature hashing）+ 可选
+> `ProviderEmbedder`（OpenAI 兼容 API）。HeuristicReranker 作为零成本备选
+> 保留。详见 `docs/memory-lightweight-retrieval-plan.md` P2。
 即使有 FTS5 候选集，当前 Retrieve 也没有任何二次排序，BM25 之外的语义
 相关性完全没有用到 LLM 能力。Reflect 接口存在但只在用户显式调用时使用。
 
-### 3.7 Hindsight backend 与本地 backend 能力不对齐
+### 3.7 Hindsight backend 与本地 backend 能力不对齐 ✅ 已解决（F7，实现方式偏离）
+
+> 原方案提出用 `tagged_replicator.go` + `kind:mental_model` tag 方案。
+> 实际实现改为调用 Hindsight 原生 `ListMentalModels` API + 客户端缓存，
+> 通过 `MentalModelsProvider` 接口暴露给 agent 层。能力对齐目标达成，
+> 实现机制不同。
 Hindsight 模式没有 Mental Models（虽然它有原始 recall），也没有 lease
 + degraded 模式，远程服务抖动时会直接错误。
 
@@ -300,22 +328,26 @@ materializer 不依赖模型，只做模板渲染；reranker 失败时直接走 
 
 ## 12. 实施顺序
 
+> 全部 S1–S7 已完成。
+
 按 ROI 排序，每项独立可上线：
 
-S1. **Compaction Recall** (F4) — 最快收益，改动小。
+S1. ✅ **Compaction Recall** (F4) — 最快收益，改动小。
 
-S2. **周期物化** (F6) — 低复杂度，立刻解决物化滞后。
+S2. ✅ **周期物化** (F6) — 低复杂度，立刻解决物化滞后。
 
-S3. **Mental Models Materializer + 分层注入** (F1 + F2) — 中等复杂度，
+S3. ✅ **Mental Models Materializer + 分层注入** (F1 + F2) — 中等复杂度，
 显著提升注入质量。
 
-S4. **Rollout Summary Materializer** (F3) — 低复杂度，提升可观测性。
+S4. ✅ **Rollout Summary Materializer** (F3) — 低复杂度，提升可观测性。
 
-S5. **LLM Reranker** (F5) — 默认关闭，先打通接口。
+S5. ✅ **Embedding Reranker** (F5) — 从 LLM reranker 改为 embedding-based，
+默认 hashing backend 零下载。
 
-S6. **Mental Models 跨 backend** (F7) — 在 Hindsight 已有路径上加 tag。
+S6. ✅ **Mental Models 跨 backend** (F7) — 用 Hindsight 原生 API 替代 tag 复制。
 
-S7. **可观测性补充** (F8) — 配合上述每步同步落地。
+S7. ✅ **可观测性补充** (F8) — 诊断走 Commands 面板的 Memory: Status 命令，
+`memory_status` LLM 工具保持一行摘要。
 
 ## 13. 开放问题
 

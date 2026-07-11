@@ -1,5 +1,11 @@
 # Subagent Runtime Redesign PRD
 
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This is an early product
+> requirements draft that predates most of the implementation. It proposes a
+> `subagent_finish` tool (actually built as `yield`) and lists
+> `completed_with_warnings`/`blocked` as missing (both were built). The
+> authoritative current-state reference is `docs/subagent-runtime.md`.
+
 ## Status
 
 Draft for implementation planning. The P0 dependency release fix (only

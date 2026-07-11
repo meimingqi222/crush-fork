@@ -1,4 +1,11 @@
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This document is archived; it describes a design that has been implemented and may diverge from the current code. The current code is the authoritative source.
+
 # Memory Engine Design
+
+> **状态：已实施。** 本文档描述的架构已全部落地于 `internal/memory/engine/`
+> 与 `internal/memory/`（Backend 接口、LocalBackend、HindsightBackend、
+> Resolve 工厂）。下文"推荐迁移实施顺序"的 10 步全部完成。后续改进见
+> `docs/memory-improvements-prd.md` 与 `docs/memory-lightweight-retrieval-plan.md`。
 
 ## 背景
 
@@ -500,18 +507,20 @@ Hindsight 远程模式支持三种项目作用域，参考 oh-my-pi 的 scoping 
 
 ## 推荐迁移实施顺序
 
+> 全部 10 步已完成。
+
 无需兼容旧语义时，直接按以下顺序实现：
 
-1. 新增 SQLite EventStore 和 memory job 表。
-2. 引入 Memory Engine lifecycle hooks。
-3. 把 Working Memory 纳入 Engine。
-4. 实现 Stage 1 Extractor，生成 Episodic Memory events。
-5. 实现 Stage 2 Consolidator，生成 Semantic / Procedural events。
-6. 实现 materializers: `memory_summary.md`、`MEMORY.md`、`skills/`。
-7. 用 summary injection 替换当前 query-first auto recall 主路径。
-8. 用 `retain` / `recall` / `reflect` 替换 `long_term_memory`。
-9. 删除 `dream` 和直接长期写入式 `extractMemories`。
-10. 增加互斥的 `hindsight` backend: remote materializer、remote-only retriever
+1. ✅ 新增 SQLite EventStore 和 memory job 表。
+2. ✅ 引入 Memory Engine lifecycle hooks。
+3. ✅ 把 Working Memory 纳入 Engine。
+4. ✅ 实现 Stage 1 Extractor，生成 Episodic Memory events。
+5. ✅ 实现 Stage 2 Consolidator，生成 Semantic / Procedural events。
+6. ✅ 实现 materializers: `memory_summary.md`、`MEMORY.md`、`skills/`。
+7. ✅ 用 summary injection 替换当前 query-first auto recall 主路径。
+8. ✅ 用 `retain` / `recall` / `reflect` 替换 `long_term_memory`。
+9. ✅ 删除 `dream` 和直接长期写入式 `extractMemories`。
+10. ✅ 增加互斥的 `hindsight` backend: remote materializer、remote-only retriever
     和配置降级状态。
 
 ## 最终形态

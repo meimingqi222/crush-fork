@@ -1,3 +1,5 @@
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This document is archived; it describes a design that has been implemented and may diverge from the current code. The current code is the authoritative source.
+
 # Crush Plugin System - Product Requirements Document
 
 ## Overview
@@ -81,6 +83,26 @@ opencode provides a comprehensive plugin system with:
 
 - [ ] Agent definition extension via local files remains future work.
 
+### Additional Implemented Features (not in original plan)
+
+- [x] `Plugin.Close(ctx) error` — plugins can release resources (e.g. persistent
+  processes) on shutdown.
+- [x] `plugin.Runtime` struct with `DefaultRuntime()` / `SetDefaultRuntime()` —
+  instance-scoped runtime replacing the old global singleton pattern.
+- [x] `ChatMessagesTransform` hook — transforms message array before prompt
+  construction.
+- [x] `ChatSystemTransform` hook — transforms system prompt before sending
+  request.
+- [x] `SessionCompacting` hook — customizes summarization before compaction.
+- [x] Command plugins support two execution modes: **transient** (subprocess
+  per event, JSON stdin/stdout) and **persistent** (long-running stdio
+  JSON-lines RPC via `persistentPluginManager`).
+- [x] Command plugin hook wiring is descriptor-driven
+  (`commandPluginHookDescriptor` interface) instead of duplicated
+  implementations.
+- [x] `autopermission.Service` integrates plugin permission hooks into the
+  permission pipeline.
+
 ## Technical Design
 
 ### Phase 1: Hooks System
@@ -127,6 +149,11 @@ type Hooks struct {
     
     // Message lifecycle
     MessageCreated func(ctx context.Context, msg message.Message) error
+    
+    // Chat transforms (added after initial implementation)
+    ChatMessagesTransform func(ctx context.Context, input ChatMessagesTransformInput, output *ChatMessagesTransformOutput) error
+    ChatSystemTransform   func(ctx context.Context, input ChatSystemTransformInput, output *ChatSystemTransformOutput) error
+    SessionCompacting     func(ctx context.Context, input SessionCompactingInput, output *SessionCompactingOutput) error
     
     // Custom tool definitions
     Tools map[string]ToolDefinition
@@ -228,6 +255,9 @@ type Plugin interface {
     
     // Init initializes the plugin and returns hooks.
     Init(ctx context.Context, input PluginInput) (Hooks, error)
+
+    // Close shuts down the plugin, releasing any resources (e.g. persistent processes).
+    Close(ctx context.Context) error
 }
 ```
 

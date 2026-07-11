@@ -1,5 +1,10 @@
 # Subagent System Redesign
 
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This is a redesign proposal for
+> agent-config extensions (Spawns, Blocking, OutputSchema, ThinkingLevel,
+> ModelPriority); only Phase 1-2 were implemented. The authoritative
+> current-state reference is `docs/subagent-runtime.md`.
+
 ## Problem Statement
 
 1. **Explore subagent misuse**: The explore subagent runs on a small/fast model but is sometimes used for final code review, which should use a stronger model.

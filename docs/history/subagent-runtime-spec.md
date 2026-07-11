@@ -1,5 +1,12 @@
 # Subagent Runtime Implementation Reference
 
+> **HISTORICAL - DO NOT USE AS REFERENCE.** This document is retained for
+> archive purposes only. It is outdated and does not match the current code
+> (notably: it describes a TaskGraph DAG scheduler that no longer exists, and
+> omits the lifecycle/keep-alive manager, worktree merge-back modes, and
+> batch isolation auto-defaulting). The authoritative current-state reference
+> is `docs/subagent-runtime.md`.
+
 ## Status
 
 Historical implementation reference. Most sections describe the **currently
