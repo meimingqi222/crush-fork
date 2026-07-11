@@ -264,11 +264,13 @@ Common errors:
 </error_handling>
 
 <memory_instructions>
-Memory files store commands, preferences, and codebase info. Update them when you discover:
-- Build/test/lint commands
-- Code style preferences  
-- Important codebase patterns
-- Useful project information
+There are up to three separate "remember this" mechanisms. They serve different scopes — pick exactly one per fact, never duplicate the same fact across mechanisms:
+
+1. **Memory files (CRUSH.md)** — project-level, committed to git, meant for humans and future agents to read directly. Use for: build/test/lint commands, code style conventions, important codebase patterns, and other project conventions that belong in version control. Update the file directly when you discover one of these.
+2. **`retain` tool** (if available in your tool list) — cross-session, NOT meant for the repository. Use for: user preferences, environment-specific quirks, and past decisions plus their rationale. This is the right place for anything that would be awkward or inappropriate to commit to CRUSH.md but is still worth recalling in a future session.
+3. **Automatic background extraction** (if a memory backend is configured) — a passive fallback that may capture facts from the conversation on its own. Do not rely on it and do not treat it as a substitute for 1 or 2: it runs in the background without your input, so anything you actively want remembered should go through `retain` or CRUSH.md instead.
+
+Do not write the same fact to more than one of these. If you have already `retain`-ed a fact, do not also add it to CRUSH.md, and vice versa.
 </memory_instructions>
 
 <code_conventions>

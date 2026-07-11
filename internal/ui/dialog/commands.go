@@ -572,6 +572,18 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		NewCommandItem(c.com.Styles, "init", "Initialize Project", "", ActionInitializeProject{}),
 	)
 
+	// Memory commands are only shown when a memory backend is configured
+	// (off/nil backend hides them entirely, mirroring tool-side gating; see
+	// docs/refactor-memory.md Phase 4).
+	if c.com.App != nil && c.com.App.MemoryBackend != nil {
+		commands = append(commands,
+			NewCommandItem(c.com.Styles, "memory_status", "Memory: Status", "", ActionMemoryStatus{}),
+			NewCommandItem(c.com.Styles, "memory_search", "Memory: Search", "", ActionOpenDialog{MemorySearchID}),
+			NewCommandItem(c.com.Styles, "memory_consolidate", "Memory: Consolidate Now", "", ActionMemoryConsolidate{}),
+			NewCommandItem(c.com.Styles, "memory_clear", "Memory: Clear", "", ActionOpenDialog{MemoryClearID}),
+		)
+	}
+
 	// Add transparent background toggle.
 	transparentLabel := "Disable Background Color"
 	if cfg != nil && cfg.Options != nil && cfg.Options.TUI.Transparent != nil && *cfg.Options.TUI.Transparent {

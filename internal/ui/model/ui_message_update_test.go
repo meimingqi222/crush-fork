@@ -355,11 +355,13 @@ func TestMaybeOpenProposedPlanDialogRequiresResolveApply(t *testing.T) {
 			Finished: true,
 		},
 	)
+	msg.Parts[1] = message.Finish{Reason: message.FinishReasonToolUse, Time: 1}
 
 	cmd := ui.maybeOpenProposedPlanDialog(msg)
 	require.NotNil(t, cmd)
 	loaded, ok := cmd().(planReviewLoadedMsg)
 	require.True(t, ok)
+	require.Equal(t, "auth-refactor", loaded.Title)
 	m, _ := ui.Update(loaded)
 	ui = m.(*UI)
 	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
@@ -386,7 +388,7 @@ func TestMaybeOpenProposedPlanDialogWithResolve(t *testing.T) {
 		Role:      message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: "The plan is ready for review."},
-			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			message.Finish{Reason: message.FinishReasonToolUse, Time: 1},
 			message.ToolCall{
 				ID:       "tool-1",
 				Name:     agenttools.ResolveToolName,
@@ -400,6 +402,7 @@ func TestMaybeOpenProposedPlanDialogWithResolve(t *testing.T) {
 	require.NotNil(t, cmd)
 	loaded, ok := cmd().(planReviewLoadedMsg)
 	require.True(t, ok)
+	require.Equal(t, "auth-refactor", loaded.Title)
 	m, _ := ui.Update(loaded)
 	ui = m.(*UI)
 	require.True(t, ui.dialog.ContainsDialog(dialog.PlanReviewID))
@@ -422,7 +425,7 @@ func TestMaybeOpenProposedPlanDialogIgnoresNonApplyResolve(t *testing.T) {
 		Role:      message.Assistant,
 		Parts: []message.ContentPart{
 			message.TextContent{Text: "The plan is ready for review."},
-			message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			message.Finish{Reason: message.FinishReasonToolUse, Time: 1},
 			message.ToolCall{
 				ID:       "tool-1",
 				Name:     agenttools.ResolveToolName,

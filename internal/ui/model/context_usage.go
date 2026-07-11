@@ -38,6 +38,48 @@ func (m *UI) frameUsageSnapshotCached() contextUsageSnapshot {
 	return m.currentContextUsageSnapshot()
 }
 
+// refreshSiblingIndex recomputes the cached position (1-based index) and
+// count of the current session among its parent's child sessions, storing
+// the result in m.siblingIndex/m.siblingCount. It is a no-op (zeroing the
+// cache) when not viewing a child session.
+//
+// Unlike a per-frame cache, this is event-driven: it must be called
+// explicitly whenever the set of siblings could have changed for the
+// currently viewed session -- on session switch (loadSessionMsg) and on
+// session pubsub events for the current session or one of its siblings.
+// This avoids a full DB walk (childSessions hits Messages.List,
+// Sessions.ListChildren, and per-tool-call Sessions.Get) on every redraw,
+// which matters because sibling subagent streaming can trigger dozens of
+// redraws per second.
+func (m *UI) refreshSiblingIndex() {
+	m.siblingIndex = 0
+	m.siblingCount = 0
+	if m == nil || m.session == nil || m.session.ParentSessionID == "" {
+		return
+	}
+	parentID := m.session.ParentSessionID
+	currentID := m.session.ID
+	children, err := m.childSessions(parentID)
+	if err != nil || len(children) == 0 {
+		return
+	}
+	m.siblingIndex, m.siblingCount = siblingPosition(children, currentID)
+}
+
+// siblingPosition returns the 1-based index and count of currentID within
+// children. children is expected in creation order (ascending), matching
+// childSessions' contract. If currentID is not found among children (e.g. a
+// stale view), index is 0 but count still reflects len(children).
+func siblingPosition(children []session.Session, currentID string) (index, count int) {
+	count = len(children)
+	for i, child := range children {
+		if child.ID == currentID {
+			return i + 1, count
+		}
+	}
+	return 0, count
+}
+
 func resolveContextUsageSnapshot(sess *session.Session, messages []message.Message, cfg *config.Config, selected *agent.Model) contextUsageSnapshot {
 	if sess == nil {
 		return contextUsageSnapshot{}

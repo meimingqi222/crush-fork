@@ -1,13 +1,11 @@
 package agent
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"math"
@@ -25,7 +23,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/kaptinlin/jsonschema"
 
-	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/mailbox"
 	agentNotify "github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
@@ -37,14 +34,12 @@ import (
 	goalruntime "github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/hooks"
-	"github.com/charmbracelet/crush/internal/httpext"
-	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
-	"github.com/charmbracelet/crush/internal/plan"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -54,20 +49,10 @@ import (
 	"github.com/charmbracelet/crush/internal/userinput"
 	"golang.org/x/sync/errgroup"
 
-	"charm.land/fantasy/providers/anthropic"
-	"charm.land/fantasy/providers/azure"
-	"charm.land/fantasy/providers/bedrock"
-	"charm.land/fantasy/providers/google"
-	"charm.land/fantasy/providers/openai"
-	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/fantasy/providers/openrouter"
-	"charm.land/fantasy/providers/vercel"
-	openaisdk "github.com/charmbracelet/openai-go/option"
-	"github.com/qjebbs/go-jsons"
 )
 
 // Coordinator errors.
-var anthropicEnvMu sync.Mutex
 
 var (
 	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
@@ -178,8 +163,8 @@ type coordinator struct {
 	// escalationBridge handles permission escalation from workers to leader.
 	escalationBridge *permission.EscalationBridge
 
-	// memoryEngine is the event-sourced memory pipeline orchestrator.
-	memoryEngine *engine.Engine
+	// memoryBackend is the memory system abstraction (local or hindsight).
+	memoryBackend memory.Backend
 
 	// agentRegistry tracks all running agents for IRC peer discovery.
 	agentRegistry *AgentRegistry
@@ -224,7 +209,7 @@ func NewCoordinator(
 	toolRuntime toolruntime.Service,
 	timeline timeline.Service,
 	pluginRuntime *plugin.Runtime,
-	memoryEngine *engine.Engine,
+	memoryBackend memory.Backend,
 	goalRuntime *goalruntime.Runtime,
 ) (Coordinator, error) {
 	hookMgr, err := hooks.NewManager(cfg.Config().Hooks)
@@ -262,8 +247,8 @@ func NewCoordinator(
 	if c.pluginRuntime == nil {
 		c.pluginRuntime = plugin.DefaultRuntime()
 	}
-	if memoryEngine != nil {
-		c.SetMemoryEngine(memoryEngine)
+	if memoryBackend != nil {
+		c.SetMemoryBackend(memoryBackend)
 	}
 	c.visionService = NewVisionService(c)
 
@@ -350,22 +335,6 @@ func (c *coordinator) plugins() *plugin.Runtime {
 	return plugin.DefaultRuntime()
 }
 
-func (c *coordinator) ensurePlanFileForSession(ctx context.Context, sess session.Session) (session.Session, error) {
-	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
-	if workspaceRoot == "" {
-		workspaceRoot = c.cfg.WorkingDir()
-	}
-	planPath, err := plan.EnsureSessionPlanPath(workspaceRoot, sess.ID, sess.PlanFilePath)
-	if err != nil {
-		return session.Session{}, err
-	}
-	if planPath == sess.PlanFilePath {
-		return sess, nil
-	}
-	sess.PlanFilePath = planPath
-	return c.sessions.Save(ctx, sess)
-}
-
 // getDiscoveredSkills returns cached skills for the given paths. Caching is
 // handled by the skills package via DiscoverCached so that all callers
 // (coordinator, prompt builder, crush_info tool) share a single cache and
@@ -374,57 +343,106 @@ func (c *coordinator) getDiscoveredSkills(skillsPaths []string) []*skills.Skill 
 	return skills.DiscoverCached(skillsPaths)
 }
 
-// SetMemoryEngine attaches the memory engine to the coordinator.
-// If the engine is enabled, the episodic memory extractor and consolidator
-// are wired automatically for the local backend only. The hindsight backend
-// delegates extraction and consolidation to the remote Hindsight service, so
-// running them locally would be redundant and wasteful.
-func (c *coordinator) SetMemoryEngine(eng *engine.Engine) {
-	c.memoryEngine = eng
-	if eng != nil && eng.Enabled() {
-		if eng.Backend() != "hindsight" {
+// SetMemoryBackend attaches the memory backend to the coordinator. If the
+// backend is a local backend, the episodic memory extractor and consolidator
+// are wired automatically. The hindsight backend delegates extraction and
+// consolidation to the remote Hindsight service, so running them locally
+// would be redundant and wasteful.
+func (c *coordinator) SetMemoryBackend(b memory.Backend) {
+	c.memoryBackend = b
+	if b == nil || !b.Enabled() {
+		return
+	}
+	switch backend := b.(type) {
+	case *memory.LocalBackend:
+		// Wire the local engine's extractor and consolidator only for the
+		// local backend (hindsight delegates to its remote service).
+		if eng := backend.Engine(); eng != nil {
 			c.wireMemoryExtractor(eng)
 			c.wireMemoryConsolidator(eng)
 		}
+	case *memory.HindsightBackend:
+		// The hindsight backend needs the coordinator's message store to
+		// retain transcript windows and to build compaction-rescue recall
+		// queries from recent conversation context. Without this wiring,
+		// AfterTurn/BeforeCompaction transcript retention silently no-ops
+		// (see docs/refactor-memory.md Phase 5 / review finding A1).
+		backend.SetRetainTranscript(c.transcriptAfterTurn)
+		backend.SetRescueQueryBuilder(c.buildHindsightRescueQuery)
 	}
 }
 
-// MemoryEngine returns the attached memory engine, if any.
-func (c *coordinator) MemoryEngine() *engine.Engine {
-	return c.memoryEngine
+// buildHindsightRescueQuery builds the compaction-rescue recall query for the
+// hindsight backend from recent conversation context (there is no "current
+// prompt" at compaction time). The query is truncated according to the
+// backend's Capabilities.TruncateRecallQuery.
+func (c *coordinator) buildHindsightRescueQuery(ctx context.Context, sessionID string) string {
+	recent := buildRecentConversation(ctx, c.messages, sessionID, recallContextTurns)
+	query := composeRecallQuery("", recent)
+	if c.memoryBackend != nil && c.memoryBackend.Capabilities().TruncateRecallQuery {
+		query = truncateRecallQuery(query, "", maxAutoRecallQueryChars)
+	}
+	return strings.TrimSpace(query)
 }
 
-// memoryEngineEventStore returns the engine's EventStore, or nil if the
-// engine is not configured or disabled.
+// MemoryBackend returns the attached memory backend, if any.
+func (c *coordinator) MemoryBackend() memory.Backend {
+	return c.memoryBackend
+}
+
+// memoryEngineEventStore returns the backend's EventStore, or nil if the
+// backend is not configured or disabled.
 func (c *coordinator) memoryEngineEventStore() engine.EventStore {
-	if c.memoryEngine == nil || !c.memoryEngine.Enabled() {
+	if c.memoryBackend == nil || !c.memoryBackend.Enabled() {
 		return nil
 	}
-	return c.memoryEngine.EventStore()
+	return c.memoryBackend.EventStore()
 }
 
-// memoryEngineRetriever returns the engine's Retriever, or nil if the
-// engine is not configured or disabled.
+// memoryEngineRetriever returns the backend's Retriever, or nil if the
+// backend is not configured or disabled.
 func (c *coordinator) memoryEngineRetriever() engine.Retriever {
-	if c.memoryEngine == nil || !c.memoryEngine.Enabled() {
+	if c.memoryBackend == nil || !c.memoryBackend.Enabled() {
 		return nil
 	}
-	return c.memoryEngine.Retriever()
+	return c.memoryBackend.Retriever()
 }
 
-// memoryEngineTripleStore returns the engine's TripleStore, or nil if the
-// engine is not configured or disabled.
+// memoryEngineTripleStore returns the backend's TripleStore, or nil if the
+// backend is not configured or disabled.
 func (c *coordinator) memoryEngineTripleStore() *engine.TripleStore {
-	if c.memoryEngine == nil || !c.memoryEngine.Enabled() {
+	if c.memoryBackend == nil || !c.memoryBackend.Enabled() {
 		return nil
 	}
-	return c.memoryEngine.TripleStore()
+	return c.memoryBackend.TripleStore()
+}
+
+// memoryEngineAccessor is implemented by backends that wrap a concrete
+// *engine.Engine (both LocalBackend and HindsightBackend do). It exists so
+// low-level diagnostic tooling (e.g. the crush info tool) can reach the
+// engine's pipeline state without the coordinator's business logic depending
+// on the concrete engine type.
+type memoryEngineAccessor interface {
+	Engine() *engine.Engine
+}
+
+// memoryEngine returns the underlying *engine.Engine for diagnostic purposes,
+// or nil if the backend is not configured or does not expose one. Business
+// logic should use MemoryBackend()/Capabilities() instead of this accessor.
+func (c *coordinator) memoryEngine() *engine.Engine {
+	if c.memoryBackend == nil {
+		return nil
+	}
+	if ep, ok := c.memoryBackend.(memoryEngineAccessor); ok {
+		return ep.Engine()
+	}
+	return nil
 }
 
 // transcriptAfterTurn handles transcript window retention for the transcript backend.
 // It increments the turn counter and retains the transcript window every N turns.
 func (c *coordinator) transcriptAfterTurn(ctx context.Context, sessionID string) {
-	if c.memoryEngine == nil || c.memoryEngine.TranscriptRetainer() == nil {
+	if c.memoryBackend == nil || c.memoryBackend.TranscriptRetainer() == nil {
 		return
 	}
 	retainInterval := 3
@@ -450,7 +468,7 @@ func (c *coordinator) transcriptAfterTurn(ctx context.Context, sessionID string)
 	if content == "" {
 		return
 	}
-	retainer := c.memoryEngine.TranscriptRetainer()
+	retainer := c.memoryBackend.TranscriptRetainer()
 	if retainer == nil {
 		slog.Warn("Transcript memory backend has no retainer", "session_id", sessionID)
 		return
@@ -466,76 +484,29 @@ func (c *coordinator) clearTranscriptTurnCountForSession(sessionID string) {
 	delete(c.transcriptTurnCounts, sessionID)
 }
 
-// onSessionDeleted cleans up coordinator and memory-engine state for a session.
-// Fires only when a session is explicitly deleted (not on quit/Ctrl+C —
-// those paths use Engine.Flush before Close).
+// onSessionDeleted cleans up coordinator and memory-backend state for a session.
+// Fires only when a session is explicitly deleted (not on quit/Ctrl+C -
+// those paths use Backend.Close before Close).
 func (c *coordinator) onSessionDeleted(ctx context.Context, sessionID string) {
 	c.clearTranscriptTurnCountForSession(sessionID)
 	c.backgroundAgents.RemoveForSession(sessionID)
-	if c.memoryEngine != nil {
-		if err := c.memoryEngine.OnSessionDeleted(ctx, sessionID); err != nil {
-			slog.Warn("Memory engine OnSessionDeleted failed", "error", err, "session_id", sessionID)
+	if c.memoryBackend != nil {
+		if err := c.memoryBackend.OnSessionDeleted(ctx, sessionID); err != nil {
+			slog.Warn("Memory backend OnSessionDeleted failed", "error", err, "session_id", sessionID)
 		}
 	}
 }
 
 // memoryEngineHooks returns lifecycle callbacks for the session agent
-// when the memory engine is enabled. Returns nil when the engine is
+// when the memory backend is enabled. Returns nil when the backend is
 // disabled or not configured.
 func (c *coordinator) memoryEngineHooks() *MemoryEngineHooks {
-	if c.memoryEngine == nil || !c.memoryEngine.Enabled() {
+	if c.memoryBackend == nil || !c.memoryBackend.Enabled() {
 		return nil
 	}
 	return &MemoryEngineHooks{
 		OnBeforeCompaction: func(ctx context.Context, sessionID string) string {
-			if c.memoryEngine.Backend() == "hindsight" {
-				c.transcriptAfterTurn(ctx, sessionID)
-
-				// Hindsight compaction rescue: retrieve dynamic memories before history summary compaction
-				if retriever := c.memoryEngine.Retriever(); retriever != nil {
-					recent := buildRecentConversation(ctx, c.messages, sessionID, 3)
-					if recent != "" {
-						// No current prompt at compaction time: pass empty latest so
-						// composeRecallQuery returns the recent block verbatim and
-						// truncateRecallQuery tail-truncates under the token limit.
-						rescueQuery := truncateRecallQuery(composeRecallQuery("", recent), "", maxAutoRecallQueryChars)
-						events, err := retriever.Retrieve(ctx, rescueQuery, map[string]any{"session_id": sessionID, "limit": 6})
-						if err == nil && len(events) > 0 {
-							var b strings.Builder
-							b.WriteString("<memory_rescue>\n")
-							b.WriteString("The following remote hindsight memories should be preserved through compaction. ")
-							b.WriteString("They are ordered by relevance; copy or paraphrase them into the new summary.\n\n")
-							for i, e := range events {
-								fmt.Fprintf(&b, "%d. %s\n", i+1, e.Content)
-							}
-							b.WriteString("</memory_rescue>")
-							return b.String()
-						}
-					}
-				}
-				return ""
-			}
-			if err := c.memoryEngine.OnBeforeCompaction(ctx, sessionID); err != nil {
-				slog.Warn("Memory engine OnBeforeCompaction failed", "error", err, "session_id", sessionID)
-			}
-			// Build compaction rescue payload to inject into summary prompt.
-			memCfg := c.compactionRecallConfig()
-			if memCfg == nil || !memCfg.IsEnabled() {
-				return ""
-			}
-			rescue, rescueErr := c.memoryEngine.PrepareCompactionRescue(ctx, sessionID, engine.CompactionRescueOptions{
-				TopK:        memCfg.GetTopK(),
-				MaxBytes:    memCfg.GetMaxBytes(),
-				UseReranker: memCfg.GetUseRerank(),
-			})
-			if rescueErr != nil {
-				slog.Warn("Compaction rescue preparation failed", "error", rescueErr, "session_id", sessionID)
-				return ""
-			}
-			if rescue == nil {
-				return ""
-			}
-			return rescue.Rendered
+			return c.memoryBackend.BeforeCompaction(ctx, sessionID)
 		},
 		OnSessionDeleted: func(ctx context.Context, sessionID string) {
 			c.onSessionDeleted(ctx, sessionID)
@@ -554,6 +525,21 @@ func (c *coordinator) compactionRecallConfig() *config.MemoryCompactionRecallCon
 		return nil
 	}
 	return cfg.Options.Memory.CompactionRecall
+}
+
+// workingMemoryMinDiscardedTokens returns the configured minimum discarded-
+// token threshold that gates post-compaction session working-memory
+// generation. Falls back to MemoryConfig's default when the coordinator
+// config or memory options are missing.
+func (c *coordinator) workingMemoryMinDiscardedTokens() int64 {
+	if c == nil || c.cfg == nil {
+		return (&config.MemoryConfig{}).GetWorkingMemoryMinDiscardedTokens()
+	}
+	cfg := c.cfg.Config()
+	if cfg == nil || cfg.Options == nil {
+		return (&config.MemoryConfig{}).GetWorkingMemoryMinDiscardedTokens()
+	}
+	return cfg.Options.Memory.GetWorkingMemoryMinDiscardedTokens()
 }
 
 // collectRecentSuccessfulTools scans the session message history and returns
@@ -803,21 +789,20 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	go func() {
 		var recall string
 		if surfacedBytes < maxSessionRecallBytes {
-			if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-				retriever := c.memoryEngine.Retriever()
+			if c.memoryBackend != nil && c.memoryBackend.Enabled() {
+				retriever := c.memoryBackend.Retriever()
+				caps := c.memoryBackend.Capabilities()
 
-				// Load Hindsight mental models with 500ms sync wait timeout if using Hindsight backend
-				if c.memoryEngine.Backend() == "hindsight" {
+				// Load mental models with a 500ms sync wait timeout for
+				// backends that support them.
+				if caps.MentalModels {
 					tryLoadMentalModels(prefetchCtx, retriever, mentalModelTTL, 500*time.Millisecond)
 				}
 
 				// Expand all user queries with conversation context to preserve semantic continuity in turns.
-				// composeRecallQuery frames the recent turns as "Prior context:" and
-				// truncateRecallQuery (called inside buildAutoRecallBlock for the
-				// hindsight backend) keeps the query under Hindsight's token limit.
 				recent := buildRecentConversation(prefetchCtx, c.messages, sessionID, recallContextTurns)
 
-				recall = buildAutoRecallBlock(prefetchCtx, retriever, strings.TrimSpace(prompt), recent, sessionID, c.memoryEngine.Backend())
+				recall = buildAutoRecallBlock(prefetchCtx, retriever, strings.TrimSpace(prompt), recent, sessionID, caps)
 			}
 		}
 		memoryPrefetch.Settle(recall)
@@ -883,9 +868,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		}
 		return c.currentAgent.Run(ctx, call)
 	}
-	// Call engine OnSessionCreated for first-turn initialization.
-	if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-		c.memoryEngine.OnSessionCreated(ctx, sessionID)
+	// Call backend OnSessionCreated for first-turn initialization.
+	if c.memoryBackend != nil && c.memoryBackend.Enabled() {
+		c.memoryBackend.OnSessionCreated(ctx, sessionID)
 	}
 
 	result, originalErr := run()
@@ -910,22 +895,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 
 	if originalErr == nil && result != nil {
-		if c.memoryEngine != nil && c.memoryEngine.Enabled() {
-			if c.memoryEngine.Backend() == "hindsight" {
-				c.transcriptAfterTurn(ctx, sessionID)
-
-				// Async refresh Hindsight Mental Models (TTL 5 minutes, non-blocking)
-				if retriever := c.memoryEngine.Retriever(); retriever != nil {
-					tryLoadMentalModels(context.Background(), retriever, mentalModelTTL, 0)
-				}
-			} else {
-				slog.Debug("Memory engine enabled, scheduling AfterTurnIdle")
-				go func() {
-					if err := c.memoryEngine.AfterTurnIdle(context.Background(), sessionID, nil); err != nil {
-						slog.Warn("Memory engine AfterTurnIdle failed", "error", err, "session_id", sessionID)
-					}
-				}()
-			}
+		if c.memoryBackend != nil && c.memoryBackend.Enabled() {
+			// AfterTurn is the single post-turn entry point. The backend
+			// implementation decides whether to run extraction (local),
+			// retain transcripts (hindsight), refresh mental models, etc.
+			c.memoryBackend.AfterTurn(ctx, sessionID)
 		}
 
 		if goalResult, budgetExhausted, goalErr := c.goalRuntime.PostTurn(ctx, sessionID, goalruntime.TokenUsageFromFantasy(result.TotalUsage)); goalErr != nil {
@@ -960,425 +934,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	return result, originalErr
 }
 
-func getProviderOptions(model Model, providerCfg config.ProviderConfig, agentCfg ...config.Agent) fantasy.ProviderOptions {
-	options := fantasy.ProviderOptions{}
-
-	cfgOpts := []byte("{}")
-	providerCfgOpts := []byte("{}")
-	catwalkOpts := []byte("{}")
-
-	if model.CatwalkCfg.Options.ProviderOptions != nil {
-		data, err := json.Marshal(model.CatwalkCfg.Options.ProviderOptions)
-		if err == nil {
-			catwalkOpts = data
-		}
-	}
-
-	if providerCfg.ProviderOptions != nil {
-		data, err := json.Marshal(providerCfg.ProviderOptions)
-		if err == nil {
-			providerCfgOpts = data
-		}
-	}
-
-	if model.ModelCfg.ProviderOptions != nil {
-		data, err := json.Marshal(model.ModelCfg.ProviderOptions)
-		if err == nil {
-			cfgOpts = data
-		}
-	}
-
-	readers := []io.Reader{
-		bytes.NewReader(catwalkOpts),
-		bytes.NewReader(providerCfgOpts),
-		bytes.NewReader(cfgOpts),
-	}
-
-	got, err := jsons.Merge(readers)
-	if err != nil {
-		slog.Error("Could not merge call config", "err", err)
-		return options
-	}
-
-	mergedOptions := make(map[string]any)
-
-	err = json.Unmarshal([]byte(got), &mergedOptions)
-	if err != nil {
-		slog.Error("Could not create config for call", "err", err)
-		return options
-	}
-
-	providerType := providerCfg.Type
-	if providerType == "hyper" {
-		if strings.Contains(model.CatwalkCfg.ID, "claude") {
-			providerType = anthropic.Name
-		} else if strings.Contains(model.CatwalkCfg.ID, "gpt") {
-			providerType = openai.Name
-		} else if strings.Contains(model.CatwalkCfg.ID, "gemini") {
-			providerType = google.Name
-		} else {
-			providerType = openaicompat.Name
-		}
-	}
-
-	// Reasoning effort: use agent config if set, then user selection,
-	// then fall back to model's default.
-	reasoningEffort := ""
-	for _, a := range agentCfg {
-		if strings.TrimSpace(a.ReasoningEffort) != "" {
-			reasoningEffort = a.ReasoningEffort
-			break
-		}
-	}
-	if reasoningEffort == "" {
-		reasoningEffort = model.ModelCfg.ReasoningEffort
-	}
-	if reasoningEffort == "" {
-		reasoningEffort = model.CatwalkCfg.DefaultReasoningEffort
-	}
-	shouldSetEffort := reasoningEffort != "" && model.CatwalkCfg.CanReason &&
-		(len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, reasoningEffort))
-
-	switch providerType {
-	case openai.Name, azure.Name:
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			// Explicitly disabled: clear any reasoning params from provider config too.
-			delete(mergedOptions, "reasoning_effort")
-		} else {
-			_, hasReasoningEffort := mergedOptions["reasoning_effort"]
-			if !hasReasoningEffort && model.CatwalkCfg.CanReason {
-				if shouldSetEffort {
-					mergedOptions["reasoning_effort"] = reasoningEffort
-				} else {
-					defaultEffort := "high"
-					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
-						mergedOptions["reasoning_effort"] = defaultEffort
-					}
-				}
-			}
-		}
-		useResponsesAPI := openai.ShouldUseResponsesAPI(
-			model.CatwalkCfg.ID,
-			providerCfg.ModelUseResponsesAPI(model.CatwalkCfg.ID),
-		)
-		if useResponsesAPI {
-			if thinkingDisabled {
-				// Clear Responses API reasoning params from provider config.
-				delete(mergedOptions, "reasoning_summary")
-				delete(mergedOptions, "include")
-			} else if openai.IsResponsesReasoningModel(model.CatwalkCfg.ID) || model.CatwalkCfg.CanReason {
-				_, hasSummary := mergedOptions["reasoning_summary"]
-				if !hasSummary {
-					mergedOptions["reasoning_summary"] = "auto"
-				}
-				_, hasInclude := mergedOptions["include"]
-				if !hasInclude {
-					mergedOptions["include"] = []openai.IncludeType{openai.IncludeReasoningEncryptedContent}
-				}
-			}
-			parsed, err := openai.ParseResponsesOptions(mergedOptions)
-			if err == nil {
-				options[openai.Name] = parsed
-			}
-		} else {
-			parsed, err := openai.ParseOptions(mergedOptions)
-			if err == nil {
-				options[openai.Name] = parsed
-			}
-		}
-	case anthropic.Name, bedrock.Name:
-		// Map reasoning effort to Anthropic parameters.
-		//
-		// Claude 4.6+ (claude-sonnet-4.6, claude-opus-4.6, claude-opus-4-7, etc.)
-		// supports the "effort" parameter which enables adaptive thinking. The
-		// fantasy SDK converts effort → thinking: {type: "adaptive"} automatically.
-		//
-		// Older Claude models use the legacy thinking: {type: "enabled", budget_tokens}.
-		//
-		// Default behavior: if the model supports reasoning (CanReason), enable thinking
-		// by default. Users can override via Think=false to disable.
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			// Explicitly disabled: clear any thinking params from provider config too.
-			delete(mergedOptions, "effort")
-			delete(mergedOptions, "thinking")
-		} else {
-			_, hasEffort := mergedOptions["effort"]
-			_, hasThinking := mergedOptions["thinking"]
-			if !hasEffort && !hasThinking && model.CatwalkCfg.CanReason {
-				isClaude46 := requiresAdaptiveThinking(model.CatwalkCfg.ID)
-				switch {
-				case shouldSetEffort:
-					if isClaude46 {
-						// Claude 4.6+: use effort parameter (adaptive thinking)
-						mergedOptions["effort"] = reasoningEffort
-					} else {
-						// Older Claude: use budget_tokens
-						budgetTokens := effortToBudgetTokens(reasoningEffort)
-						mergedOptions["thinking"] = map[string]any{
-							"type":          "enabled",
-							"budget_tokens": budgetTokens,
-						}
-					}
-				default:
-					// Default: model supports reasoning, enable thinking with high effort.
-					defaultEffort := "high"
-					if isClaude46 {
-						if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
-							mergedOptions["effort"] = defaultEffort
-						}
-					} else {
-						mergedOptions["thinking"] = map[string]any{
-							"type":          "enabled",
-							"budget_tokens": effortToBudgetTokens(defaultEffort),
-						}
-					}
-				}
-			}
-		}
-		parsed, err := anthropic.ParseOptions(mergedOptions)
-		if err == nil {
-			options[anthropic.Name] = parsed
-		}
-
-	case openrouter.Name:
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			delete(mergedOptions, "reasoning")
-		} else {
-			_, hasReasoning := mergedOptions["reasoning"]
-			if !hasReasoning && model.CatwalkCfg.CanReason {
-				if shouldSetEffort {
-					mergedOptions["reasoning"] = map[string]any{
-						"enabled": true,
-						"effort":  reasoningEffort,
-					}
-				} else {
-					defaultEffort := "high"
-					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
-						mergedOptions["reasoning"] = map[string]any{
-							"enabled": true,
-							"effort":  defaultEffort,
-						}
-					}
-				}
-			}
-		}
-		parsed, err := openrouter.ParseOptions(mergedOptions)
-		if err == nil {
-			options[openrouter.Name] = parsed
-		}
-	case vercel.Name:
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			delete(mergedOptions, "reasoning")
-		} else {
-			_, hasReasoning := mergedOptions["reasoning"]
-			if !hasReasoning && model.CatwalkCfg.CanReason {
-				if shouldSetEffort {
-					mergedOptions["reasoning"] = map[string]any{
-						"enabled": true,
-						"effort":  reasoningEffort,
-					}
-				} else {
-					defaultEffort := "high"
-					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
-						mergedOptions["reasoning"] = map[string]any{
-							"enabled": true,
-							"effort":  defaultEffort,
-						}
-					}
-				}
-			}
-		}
-		parsed, err := vercel.ParseOptions(mergedOptions)
-		if err == nil {
-			options[vercel.Name] = parsed
-		}
-	case google.Name:
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			delete(mergedOptions, "thinking_config")
-		} else {
-			_, hasThinkingConfig := mergedOptions["thinking_config"]
-			if !hasThinkingConfig && model.CatwalkCfg.CanReason {
-				if shouldSetEffort {
-					mergedOptions["thinking_config"] = map[string]any{
-						"thinking_level":   reasoningEffort,
-						"include_thoughts": true,
-					}
-				} else {
-					defaultLevel := "high"
-					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultLevel) {
-						mergedOptions["thinking_config"] = map[string]any{
-							"thinking_level":   defaultLevel,
-							"include_thoughts": true,
-						}
-					}
-				}
-			}
-		}
-		parsed, err := google.ParseOptions(mergedOptions)
-		if err == nil {
-			options[google.Name] = parsed
-		}
-	case openaicompat.Name, hyper.Name:
-		extraBody := make(map[string]any)
-
-		thinkingDisabled := model.ModelCfg.Think != nil && !*model.ModelCfg.Think
-		if thinkingDisabled {
-			delete(mergedOptions, "reasoning_effort")
-			switch providerCfg.ID {
-			case string(catwalk.InferenceProviderIoNet):
-				extraBody["reasoning"] = map[string]string{"effort": "none"}
-			case hyper.Name:
-				extraBody["thinking"] = false
-			case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
-				extraBody["thinking"] = map[string]any{
-					"type": "disabled",
-				}
-			}
-		} else {
-			_, hasReasoningEffort := mergedOptions["reasoning_effort"]
-			if !hasReasoningEffort && model.CatwalkCfg.CanReason {
-				if shouldSetEffort {
-					switch providerCfg.ID {
-					case string(catwalk.InferenceProviderIoNet):
-						extraBody["reasoning"] = map[string]string{"effort": reasoningEffort}
-					default:
-						mergedOptions["reasoning_effort"] = reasoningEffort
-					}
-				} else {
-					defaultEffort := "high"
-					if len(model.CatwalkCfg.ReasoningLevels) == 0 || slices.Contains(model.CatwalkCfg.ReasoningLevels, defaultEffort) {
-						switch providerCfg.ID {
-						case string(catwalk.InferenceProviderIoNet):
-							extraBody["reasoning"] = map[string]string{"effort": defaultEffort}
-						default:
-							mergedOptions["reasoning_effort"] = defaultEffort
-						}
-					}
-				}
-			}
-
-			thinkEnabled := model.ModelCfg.Think != nil && *model.ModelCfg.Think
-
-			// "reasoning effort" is a standard OpenAI field, but "thinking" is not.
-			// Setting it in the right way for each provider.
-			// TODO: Abstract this in Fantasy somehow?
-			// TODO: Allow custom providers to specify how to set this?
-			switch providerCfg.ID {
-			case hyper.Name:
-				extraBody["thinking"] = thinkEnabled
-			case string(catwalk.InferenceProviderIoNet):
-				if _, ok := extraBody["reasoning"]; !ok && model.CatwalkCfg.CanReason {
-					if thinkEnabled {
-						extraBody["reasoning"] = map[string]string{"effort": "medium"}
-					} else {
-						extraBody["reasoning"] = map[string]string{"effort": "none"}
-					}
-				}
-			case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
-				if thinkEnabled {
-					extraBody["thinking"] = map[string]any{
-						"type": "enabled",
-					}
-				} else {
-					extraBody["thinking"] = map[string]any{
-						"type": "disabled",
-					}
-				}
-			}
-		}
-		parsed, err := openaicompat.ParseOptions(mergedOptions)
-		if err == nil {
-			if len(extraBody) > 0 {
-				parsed.ExtraBody = extraBody
-			}
-			options[openaicompat.Name] = parsed
-		}
-	}
-
-	return options
-}
-
-func effortToBudgetTokens(effort string) int {
-	// Budget tokens chosen to produce the correct reasoning_effort when translated by Copilot API
-	budgetMap := map[string]int{
-		"low":    2048,  // Will map to "low" in Copilot (1024 <= budget < 8192)
-		"medium": 12288, // Will map to "medium" in Copilot (8192 <= budget < 24576)
-		"high":   28672, // Will map to "high" in Copilot (24576 <= budget < 32768)
-		"max":    49152, // Will map to "xhigh" in Copilot (>= 32768)
-	}
-
-	budget, ok := budgetMap[effort]
-	if !ok {
-		budget = 12288 // default to medium
-	}
-
-	return budget
-}
-
 // requiresAdaptiveThinking returns true for Claude models version 4.6 and above which
 // require the "effort" parameter (adaptive thinking) instead of the legacy
 // thinking: {type: "enabled", budget_tokens: N}.
-func requiresAdaptiveThinking(modelID string) bool {
-	id := strings.ToLower(modelID)
-
-	// For provider-prefixed model IDs (e.g., "anthropic/claude-sonnet-4.6"),
-	// extract the base model ID by finding the last occurrence of "claude-"
-	baseID := id
-	if idx := strings.LastIndex(id, "claude-"); idx != -1 && idx > 0 {
-		baseID = id[idx:]
-	}
-
-	// Match patterns like claude-{variant}-4.N or claude-{variant}-4-N where N >= 6
-	for _, variant := range []string{"sonnet", "opus", "haiku"} {
-		prefix := "claude-" + variant + "-4"
-		// Check for prefix match (e.g., claude-sonnet-4.6)
-		if strings.HasPrefix(baseID, prefix+".") {
-			minor := baseID[len(prefix)+1:]
-			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
-				return true
-			}
-		}
-		// Check for prefix match with dash (e.g., claude-sonnet-4-6)
-		if strings.HasPrefix(baseID, prefix+"-") {
-			minor := baseID[len(prefix)+1:]
-			if n, err := parseLeadingInt(minor); err == nil && n >= 6 {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // parseLeadingInt parses the leading integer from a string (stops at first non-digit).
-func parseLeadingInt(s string) (int, error) {
-	end := 0
-	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
-		end++
-	}
-	if end == 0 {
-		return 0, fmt.Errorf("no digits")
-	}
-	n := 0
-	for i := 0; i < end; i++ {
-		n = n*10 + int(s[i]-'0')
-	}
-	return n, nil
-}
-
-func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
-	modelOptions := getProviderOptions(model, cfg)
-	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
-	topP := cmp.Or(model.ModelCfg.TopP, model.CatwalkCfg.Options.TopP)
-	topK := cmp.Or(model.ModelCfg.TopK, model.CatwalkCfg.Options.TopK)
-	freqPenalty := cmp.Or(model.ModelCfg.FrequencyPenalty, model.CatwalkCfg.Options.FrequencyPenalty)
-	presPenalty := cmp.Or(model.ModelCfg.PresencePenalty, model.CatwalkCfg.Options.PresencePenalty)
-	return modelOptions, temp, topP, topK, freqPenalty, presPenalty
-}
 
 func (c *coordinator) resolveBackgroundModel(ctx context.Context) *backgroundModel {
 	model, providerCfg, err := c.selectedModel(ctx, config.SelectedModelTypeBackground, false)
@@ -1389,17 +949,6 @@ func (c *coordinator) resolveBackgroundModel(ctx context.Context) *backgroundMod
 		model:    model,
 		provider: providerCfg,
 	}
-}
-
-func effectiveMaxOutputTokens(model Model) (int64, bool) {
-	maxTokens := model.CatwalkCfg.DefaultMaxTokens
-	if model.ModelCfg.MaxTokens == 0 {
-		return maxTokens, false
-	}
-	if model.CatwalkCfg.DefaultMaxTokens > 0 && model.ModelCfg.MaxTokens > model.CatwalkCfg.DefaultMaxTokens*2 {
-		return model.CatwalkCfg.DefaultMaxTokens, true
-	}
-	return model.ModelCfg.MaxTokens, false
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
@@ -1442,21 +991,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Filetracker:   c.filetracker,
 		Checkpoint:    c.checkpoint,
 		PluginRuntime: c.pluginRuntime,
-		// Session working memory is only useful for the local backend.
-		// The hindsight backend retrieves memories from the remote service, so
-		// generating local working memory there is pure cost with no benefit.
-		EnableSessionMemory:    c.memoryEngine != nil && c.memoryEngine.Enabled() && c.memoryEngine.Backend() != "hindsight",
-		MemoryEngineEnabled:    c.memoryEngine != nil && c.memoryEngine.Enabled(),
-		MemoryEngineEventStore: c.memoryEngineEventStore(),
-		MemoryEngineHooks:      c.memoryEngineHooks(),
-		MemoryEngineRetriever:  c.memoryEngineRetriever(),
-		MemoryEngineBackend: func() string {
-			if c.memoryEngine != nil {
-				return c.memoryEngine.Backend()
-			}
-			return ""
-		}(),
-		VisionService: c.visionService,
+		// Session working memory generation is gated by the backend's
+		// SessionWorkingMemory capability rather than a backend-name string
+		// comparison (see memory.Capabilities).
+		EnableSessionMemory:             c.memoryBackend != nil && c.memoryBackend.Enabled() && c.memoryBackend.Capabilities().SessionWorkingMemory,
+		MemoryEngineEnabled:             c.memoryBackend != nil && c.memoryBackend.Enabled(),
+		MemoryEngineEventStore:          c.memoryEngineEventStore(),
+		MemoryEngineHooks:               c.memoryEngineHooks(),
+		MemoryEngineRetriever:           c.memoryEngineRetriever(),
+		WorkingMemoryMinDiscardedTokens: c.workingMemoryMinDiscardedTokens(),
+		VisionService:                   c.visionService,
 	})
 
 	// Only use async initialization for the primary agent (not subagents).
@@ -1901,380 +1445,6 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		}, nil
 }
 
-func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, useCopilotClient, isSubAgent bool) (fantasy.Provider, error) {
-	var opts []anthropic.Option
-
-	anthropicEnvMu.Lock()
-	defer anthropicEnvMu.Unlock()
-	oldKey, hasOldKey := os.LookupEnv("ANTHROPIC_API_KEY")
-
-	switch {
-	case strings.HasPrefix(apiKey, "Bearer "):
-		// NOTE: Prevent the SDK from picking up the API key from env.
-		os.Setenv("ANTHROPIC_API_KEY", "")
-		headers["Authorization"] = apiKey
-	case providerID == string(catwalk.InferenceProviderMiniMax) || providerID == string(catwalk.InferenceProviderMiniMaxChina):
-		// NOTE: Prevent the SDK from picking up the API key from env.
-		os.Setenv("ANTHROPIC_API_KEY", "")
-		headers["Authorization"] = "Bearer " + apiKey
-	case apiKey != "":
-		// X-Api-Key header
-		opts = append(opts, anthropic.WithAPIKey(apiKey))
-	}
-
-	if len(headers) > 0 {
-		opts = append(opts, anthropic.WithHeaders(headers))
-	}
-
-	if baseURL != "" {
-		opts = append(opts, anthropic.WithBaseURL(baseURL))
-	}
-
-	// Set HTTP client based on provider and debug mode.
-	var httpClient *http.Client
-	if useCopilotClient {
-		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
-	} else if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	// Always wrap so that requests without an explicit `thinking` field have
-	// `thinking:{type:"disabled"}` injected. This is a no-op for upstream
-	// Anthropic (where omitting thinking already means disabled) but is
-	// required for Anthropic-compatible proxies (DeepSeek's /anthropic
-	// endpoint, etc.) whose default is ON. It also makes the in-flight
-	// "retry without thinking" path actually disable thinking on the wire
-	// when the SDK has nilled the typed Thinking option.
-	wrapped := httpext.WrapAnthropicDisableThinkingHTTPClient(httpClient)
-	opts = append(opts, anthropic.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(wrapped)))
-
-	provider, err := anthropic.New(opts...)
-	if hasOldKey {
-		os.Setenv("ANTHROPIC_API_KEY", oldKey)
-	} else {
-		os.Unsetenv("ANTHROPIC_API_KEY")
-	}
-	return provider, err
-}
-
-func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, modelID string, useResponsesAPI, copilotService, useCopilotClient, isSubAgent, responsesWebSocket bool) (fantasy.Provider, error) {
-	opts := []openai.Option{
-		openai.WithAPIKey(apiKey),
-		openai.WithUseResponsesAPI(),
-	}
-	if useResponsesAPI {
-		opts = append(opts, openai.WithForceResponsesModel(modelID))
-	}
-
-	// Set HTTP client based on provider and debug mode.
-	var httpClient *http.Client
-	if useCopilotClient {
-		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
-	} else if copilotService {
-		// Use billing client for Copilot service.
-		httpClient = copilot.NewBillingClient(copilotService, c.cfg.Config().Options.Debug)
-	} else if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, openai.WithHTTPClient(wrapOpenAIStreamingHTTPClient(httpClient, responsesWebSocket)))
-
-	if len(headers) > 0 {
-		opts = append(opts, openai.WithHeaders(headers))
-	}
-	if baseURL != "" {
-		opts = append(opts, openai.WithBaseURL(baseURL))
-	}
-	return openai.New(opts...)
-}
-
-func wrapOpenAIStreamingHTTPClient(httpClient *http.Client, responsesWebSocket bool) *http.Client {
-	if responsesWebSocket {
-		httpClient = httpext.WrapOpenAIResponsesWebSocketHTTPClient(httpClient)
-	}
-	return httpext.WrapActivityTrackingHTTPClient(httpClient)
-}
-
-func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	opts := []openrouter.Option{
-		openrouter.WithAPIKey(apiKey),
-	}
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, openrouter.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	if len(headers) > 0 {
-		opts = append(opts, openrouter.WithHeaders(headers))
-	}
-	return openrouter.New(opts...)
-}
-
-func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	opts := []vercel.Option{
-		vercel.WithAPIKey(apiKey),
-	}
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, vercel.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	if len(headers) > 0 {
-		opts = append(opts, vercel.WithHeaders(headers))
-	}
-	return vercel.New(opts...)
-}
-
-func (c *coordinator) buildOpenaiCompatProvider(
-	baseURL, apiKey string,
-	headers map[string]string,
-	extraBody map[string]any,
-	providerID string,
-	modelID string,
-	useResponsesAPI bool,
-	useCopilotClient bool,
-	isSubAgent bool,
-	copilotService bool,
-	responsesWebSocket bool,
-) (fantasy.Provider, error) {
-	opts := []openaicompat.Option{
-		openaicompat.WithBaseURL(baseURL),
-		openaicompat.WithAPIKey(apiKey),
-	}
-
-	// Set HTTP client based on provider and debug mode.
-	var httpClient *http.Client
-	if providerID == string(catwalk.InferenceProviderCopilot) || useCopilotClient {
-		// Copilot client already applies reasoning field normalization internally.
-		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
-	} else if copilotService {
-		// Use billing client for Copilot-compatible providers, wrapped with
-		// reasoning field normalization.
-		billingClient := copilot.NewBillingClient(copilotService, c.cfg.Config().Options.Debug)
-		httpClient = &http.Client{
-			Transport: copilot.NewReasoningNormalizingTransport(billingClient.Transport),
-		}
-	} else {
-		// For all other openai-compat providers, apply reasoning field
-		// normalization so that models returning "reasoning" or
-		// "reasoning_text" are transparently mapped to "reasoning_content".
-		var inner http.RoundTripper
-		if c.cfg.Config().Options.Debug {
-			inner = log.NewHTTPClient().Transport
-		}
-		httpClient = &http.Client{
-			Transport: copilot.NewReasoningNormalizingTransport(inner),
-		}
-	}
-	if providerID == string(catwalk.InferenceProviderCopilot) || useResponsesAPI {
-		opts = append(opts, openaicompat.WithUseResponsesAPI())
-	}
-	if useResponsesAPI {
-		opts = append(opts, openaicompat.WithForceResponsesModel(modelID))
-	}
-	opts = append(opts, openaicompat.WithHTTPClient(wrapOpenAIStreamingHTTPClient(httpClient, responsesWebSocket)))
-
-	if len(headers) > 0 {
-		opts = append(opts, openaicompat.WithHeaders(headers))
-	}
-
-	for extraKey, extraValue := range extraBody {
-		opts = append(opts, openaicompat.WithSDKOptions(openaisdk.WithJSONSet(extraKey, extraValue)))
-	}
-
-	return openaicompat.New(opts...)
-}
-
-func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[string]string, modelID string, useResponsesAPI bool, options map[string]string) (fantasy.Provider, error) {
-	opts := []azure.Option{
-		azure.WithBaseURL(baseURL),
-		azure.WithAPIKey(apiKey),
-		azure.WithUseResponsesAPI(),
-	}
-	if useResponsesAPI {
-		opts = append(opts, azure.WithForceResponsesModel(modelID))
-	}
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, azure.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	if options == nil {
-		options = make(map[string]string)
-	}
-	if apiVersion, ok := options["apiVersion"]; ok {
-		opts = append(opts, azure.WithAPIVersion(apiVersion))
-	}
-	if len(headers) > 0 {
-		opts = append(opts, azure.WithHeaders(headers))
-	}
-
-	return azure.New(opts...)
-}
-
-func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	var opts []bedrock.Option
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, bedrock.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	if len(headers) > 0 {
-		opts = append(opts, bedrock.WithHeaders(headers))
-	}
-	switch {
-	case apiKey != "":
-		opts = append(opts, bedrock.WithAPIKey(apiKey))
-	case os.Getenv("AWS_BEARER_TOKEN_BEDROCK") != "":
-		opts = append(opts, bedrock.WithAPIKey(os.Getenv("AWS_BEARER_TOKEN_BEDROCK")))
-	default:
-		// Skip, let the SDK do authentication.
-	}
-	return bedrock.New(opts...)
-}
-
-func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	opts := []google.Option{
-		google.WithBaseURL(baseURL),
-		google.WithGeminiAPIKey(apiKey),
-	}
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, google.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	if len(headers) > 0 {
-		opts = append(opts, google.WithHeaders(headers))
-	}
-	return google.New(opts...)
-}
-
-func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
-	opts := []google.Option{}
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, google.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	if len(headers) > 0 {
-		opts = append(opts, google.WithHeaders(headers))
-	}
-
-	project := options["project"]
-	location := options["location"]
-
-	opts = append(opts, google.WithVertex(project, location))
-
-	return google.New(opts...)
-}
-
-func (c *coordinator) buildHyperProvider(baseURL, apiKey string) (fantasy.Provider, error) {
-	opts := []hyper.Option{
-		hyper.WithAPIKey(apiKey),
-	}
-	if baseURL != "" {
-		opts = append(opts, hyper.WithBaseURL(baseURL))
-	}
-	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
-	}
-	opts = append(opts, hyper.WithHTTPClient(httpext.WrapActivityTrackingHTTPClient(httpClient)))
-	return hyper.New(opts...)
-}
-
-func isAnthropicThinking(model catwalk.Model) bool {
-	// When model.CanReason is true, thinking is enabled by default unless the
-	// user explicitly disables it (Think=false). Callers that need to respect the
-	// explicit-disable case must also check thinkingDisabled separately.
-	if model.CanReason {
-		return true
-	}
-
-	opts, err := anthropic.ParseOptions(model.Options.ProviderOptions)
-	return err == nil && opts.Thinking != nil
-}
-
-func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model catwalk.Model, isSubAgent bool, thinkingDisabled bool) (fantasy.Provider, error) {
-	headers := maps.Clone(providerCfg.ExtraHeaders)
-	if headers == nil {
-		headers = make(map[string]string)
-	}
-
-	// handle special headers for anthropic
-	if providerCfg.Type == anthropic.Name && isAnthropicThinking(model) && !thinkingDisabled {
-		if v, ok := headers["anthropic-beta"]; ok {
-			headers["anthropic-beta"] = v + ",interleaved-thinking-2025-05-14"
-		} else {
-			headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
-		}
-	}
-
-	apiKey, err := c.cfg.Resolve(providerCfg.APIKey)
-	if err != nil {
-		slog.Warn("Failed to resolve API key template", "provider", providerCfg.ID, "error", err)
-	}
-	apiKey = config.DecryptAPIKeyIfNeeded(apiKey)
-	baseURL, err := c.cfg.Resolve(providerCfg.BaseURL)
-	if err != nil {
-		slog.Warn("Failed to resolve Base URL template", "provider", providerCfg.ID, "error", err)
-	}
-
-	useResponsesAPI := providerCfg.ModelUseResponsesAPI(model.ID)
-
-	switch providerCfg.Type {
-	case openai.Name:
-		return c.buildOpenaiProvider(baseURL, apiKey, headers, model.ID, useResponsesAPI, providerCfg.CopilotService, providerCfg.UseCopilotClient, isSubAgent, providerCfg.ResponsesWebSocket)
-	case anthropic.Name:
-		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, providerCfg.UseCopilotClient, isSubAgent)
-	case openrouter.Name:
-		return c.buildOpenrouterProvider(baseURL, apiKey, headers)
-	case vercel.Name:
-		return c.buildVercelProvider(baseURL, apiKey, headers)
-	case azure.Name:
-		return c.buildAzureProvider(baseURL, apiKey, headers, model.ID, useResponsesAPI, providerCfg.ExtraParams)
-	case bedrock.Name:
-		return c.buildBedrockProvider(apiKey, headers)
-	case google.Name:
-		return c.buildGoogleProvider(baseURL, apiKey, headers)
-	case "google-vertex":
-		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
-	case openaicompat.Name:
-		if providerCfg.ID == string(catwalk.InferenceProviderZAI) {
-			if providerCfg.ExtraBody == nil {
-				providerCfg.ExtraBody = map[string]any{}
-			}
-			providerCfg.ExtraBody["tool_stream"] = true
-		}
-		return c.buildOpenaiCompatProvider(
-			baseURL,
-			apiKey,
-			headers,
-			providerCfg.ExtraBody,
-			providerCfg.ID,
-			model.ID,
-			useResponsesAPI,
-			providerCfg.UseCopilotClient,
-			isSubAgent,
-			providerCfg.CopilotService,
-			providerCfg.ResponsesWebSocket,
-		)
-	case hyper.Name:
-		return c.buildHyperProvider(baseURL, apiKey)
-	default:
-		return nil, fmt.Errorf("provider type not supported: %q", providerCfg.Type)
-	}
-}
-
-func isExactoSupported(modelID string) bool {
-	supportedModels := []string{
-		"moonshotai/kimi-k2-0905",
-		"deepseek/deepseek-v3.1-terminus",
-		"z-ai/glm-4.6",
-		"openai/gpt-oss-120b",
-		"qwen/qwen3-coder",
-	}
-	return slices.Contains(supportedModels, modelID)
-}
-
 func (c *coordinator) Cancel(sessionID string) {
 	c.currentAgent.Cancel(sessionID)
 	for _, subAgent := range c.activeSubAgentsForSession(sessionID) {
@@ -2332,30 +1502,6 @@ func (c *coordinator) CancelAll() {
 			subAgent.CancelAll()
 		}
 	}
-}
-
-func (c *coordinator) RemoveQueuedPrompt(sessionID string, index int) bool {
-	return c.currentAgent.RemoveQueuedPrompt(sessionID, index)
-}
-
-func (c *coordinator) ClearQueue(sessionID string) {
-	c.currentAgent.ClearQueue(sessionID)
-}
-
-func (c *coordinator) PauseQueue(sessionID string) {
-	c.currentAgent.PauseQueue(sessionID)
-}
-
-func (c *coordinator) ResumeQueue(sessionID string) {
-	c.currentAgent.ResumeQueue(sessionID)
-}
-
-func (c *coordinator) IsQueuePaused(sessionID string) bool {
-	return c.currentAgent.IsQueuePaused(sessionID)
-}
-
-func (c *coordinator) PrioritizeQueuedPrompt(sessionID string, index int) bool {
-	return c.currentAgent.PrioritizeQueuedPrompt(sessionID, index)
 }
 
 func (c *coordinator) IsBusy() bool {
@@ -2598,14 +1744,6 @@ func (c *coordinator) clearDeferredToolActivationsForSession(sessionID string) {
 	c.deferredMu.Lock()
 	delete(c.activatedDeferredBySession, sessionID)
 	c.deferredMu.Unlock()
-}
-
-func (c *coordinator) QueuedPrompts(sessionID string) int {
-	return c.currentAgent.QueuedPrompts(sessionID)
-}
-
-func (c *coordinator) QueuedPromptsList(sessionID string) []string {
-	return c.currentAgent.QueuedPromptsList(sessionID)
 }
 
 func (c *coordinator) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions) error {
@@ -3772,6 +2910,21 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	}
 
 	eventSink := coordinatorSubagentEventSink{timeline: c.timeline}
+
+	// Publish a "started" event at spawn time so the UI can resolve this
+	// child session immediately via the timeline (the session CreatedEvent
+	// already triggers a ChildSessionStartedEvent via app/timeline.go, but
+	// emitting here makes the spawn-time signal explicit and records the
+	// TaskID association for the UI's task->child session mapping).
+	eventSink.PublishSubagentEvent(ctx, SubagentEvent{
+		Type:            SubagentEventStarted,
+		ParentSessionID: params.SessionID,
+		ChildSessionID:  subSession.ID,
+		TaskID:          strings.TrimSpace(params.ToolCallID),
+		Message:         params.SessionTitle,
+		Status:          string(message.ToolResultSubtaskStatusRunning),
+		Timestamp:       time.Now(),
+	})
 
 	effectiveIsolation := strings.TrimSpace(params.AgentIsolation)
 	subSession, sessionWorkingDir, effectiveIsolation, err := c.prepareSubagentWorkspace(ctx, parentSession, subSession, effectiveIsolation)

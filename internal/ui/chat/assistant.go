@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -9,7 +8,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
-	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -295,8 +293,6 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 		if a.message.IsSummaryMessage {
 			a.summaryBoxStart = summaryStart
 			messageParts = append(messageParts, a.renderSummary(content, width))
-		} else if a.hasResolveApply() {
-			messageParts = append(messageParts, a.renderPlan(content, width))
 		} else {
 			messageParts = append(messageParts, a.renderMarkdown(content, width))
 		}
@@ -465,33 +461,6 @@ func (a *AssistantMessageItem) renderMarkdown(content string, width int) string 
 		return content
 	}
 	return strings.TrimSuffix(result, "\n")
-}
-
-func (a *AssistantMessageItem) renderPlan(plan string, width int) string {
-	header := common.Section(a.sty, "Proposed Plan", width)
-	body := a.renderMarkdown(plan, width)
-	return strings.Join([]string{header, "", body}, "\n")
-}
-
-// hasResolveApply reports whether the message contains a resolve tool call
-// with action "apply".
-func (a *AssistantMessageItem) hasResolveApply() bool {
-	type resolveInput struct {
-		Action string `json:"action"`
-	}
-	for _, tc := range a.message.ToolCalls() {
-		if tc.Name != tools.ResolveToolName {
-			continue
-		}
-		var input resolveInput
-		if err := json.Unmarshal([]byte(tc.Input), &input); err != nil {
-			continue
-		}
-		if input.Action == "apply" {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {

@@ -284,8 +284,7 @@ func isReadOnlyRuntime(agentCfg config.Agent) bool {
 		agenttools.CrushLogsToolName:        {},
 		agenttools.RecallToolName:           {},
 		agenttools.ReflectToolName:          {},
-		agenttools.GraphQueryToolName:       {},
-		agenttools.TripleQueryToolName:      {},
+		agenttools.GraphToolName:            {},
 		agenttools.RequestUserInputToolName: {},
 	}
 	for _, tool := range config.ReadOnlyResearchToolNames {

@@ -274,6 +274,48 @@ func TestResolveContextUsageSnapshotSummaryStreamingStaysWithinContextWindow(t *
 		"context usage must not exceed 100% while a summary message is streaming")
 }
 
+// TestSiblingPositionFindsIndexAndCount covers the pure lookup used by
+// refreshSiblingIndex to compute the subagent footer's "(n of N)" position.
+// The event-driven caching around it (refresh on session switch and on
+// session pubsub events) requires DB/pubsub mocks and is intentionally not
+// covered here.
+func TestSiblingPositionFindsIndexAndCount(t *testing.T) {
+	t.Parallel()
+
+	children := []session.Session{
+		{ID: "child-1"},
+		{ID: "child-2"},
+		{ID: "child-3"},
+	}
+
+	index, count := siblingPosition(children, "child-2")
+	require.Equal(t, 2, index)
+	require.Equal(t, 3, count)
+}
+
+func TestSiblingPositionReturnsZeroIndexWhenCurrentNotFound(t *testing.T) {
+	t.Parallel()
+
+	children := []session.Session{
+		{ID: "child-1"},
+		{ID: "child-2"},
+	}
+
+	// Simulates a stale view where the current session ID no longer
+	// appears among its parent's children.
+	index, count := siblingPosition(children, "missing-child")
+	require.Equal(t, 0, index)
+	require.Equal(t, 2, count)
+}
+
+func TestSiblingPositionEmptyChildren(t *testing.T) {
+	t.Parallel()
+
+	index, count := siblingPosition(nil, "child-1")
+	require.Equal(t, 0, index)
+	require.Equal(t, 0, count)
+}
+
 func TestResolveContextUsageSnapshotAccumulatesProvisionalExchange(t *testing.T) {
 	t.Parallel()
 

@@ -453,10 +453,19 @@ func (m *UI) childSessions(parentID string) ([]session.Session, error) {
 				}
 				continue
 			}
+			// Fallback: the derived ID did not resolve directly, so scan the
+			// parent's children for a "::"-suffixed match. This is needed
+			// for batch task-graph subagents, whose session ID uses the
+			// per-task "toolCallID::taskName" composite form rather than the
+			// bare derived ID, and for older sessions created before this
+			// composite form existed. Both cases are expected to persist
+			// long-term, not just during an in-flight run, so this scan is
+			// not a temporary shim.
 			prefix := childID + "::"
 			for _, s := range parentChildren {
 				if strings.HasPrefix(s.ID, prefix) {
 					if _, exists := seen[s.ID]; !exists {
+						slog.Debug("Child session resolved via legacy prefix scan", "child_session_id", s.ID, "parent", parentID)
 						seen[s.ID] = struct{}{}
 						children = append(children, s)
 					}
@@ -590,6 +599,40 @@ type openChildSessionMsg struct {
 	sessionID string
 }
 
+// openLatestChildSession opens the most recently created running child session
+// of the current session. If no child is running, it opens the most recently
+// created child. It is used as a fallback for the "]" key when no row with a
+// child session is selected.
+func (m *UI) openLatestChildSession() tea.Cmd {
+	if m.session == nil {
+		return nil
+	}
+	parentSessionID := m.session.ID
+
+	// Prefer a running subagent, identified by an active (non-finished)
+	// timeline task. getSubagentTasks sorts active tasks first, newest first.
+	tasks := getSubagentTasks(m.timelineEvents)
+	for _, task := range tasks {
+		if !isActiveTask(task.eventType) {
+			continue
+		}
+		return func() tea.Msg {
+			return openChildSessionMsg{sessionID: task.id}
+		}
+	}
+
+	// No running child: fall back to the most recently created child session.
+	return func() tea.Msg {
+		children, err := m.childSessions(parentSessionID)
+		if err != nil || len(children) == 0 {
+			return nil
+		}
+		// childSessions returns children in creation order (ascending); pick
+		// the last one as the most recently created.
+		return openChildSessionMsg{sessionID: children[len(children)-1].ID}
+	}
+}
+
 // captureViewState saves the current session's selected item ID so it can
 // be restored when navigating back from a child session.
 func (m *UI) captureViewState() {
@@ -645,6 +688,13 @@ func (m *UI) openSelectedChildSession() tea.Cmd {
 			if err == nil && s.ParentSessionID == parentSessionID {
 				return openChildSessionMsg{sessionID: s.ID}
 			}
+			// Fallback: scan child session IDs by the derived
+			// "msgID::toolCallID" prefix. This is needed for batch
+			// task-graph subagents, whose session ID carries a
+			// "toolCallID::taskName" composite suffix instead of the bare
+			// derived ID, and for older sessions predating that composite
+			// form. This scan is a long-lived fallback, not a stopgap for
+			// missing spawn-time metadata.
 			prefix := childID + "::"
 			children, err := m.com.App.Sessions.ListChildren(context.Background(), parentSessionID)
 			if err != nil {
@@ -652,6 +702,7 @@ func (m *UI) openSelectedChildSession() tea.Cmd {
 			}
 			for _, s := range children {
 				if strings.HasPrefix(s.ID, prefix) {
+					slog.Debug("Child session resolved via legacy prefix scan", "child_session_id", s.ID, "parent", parentSessionID)
 					return openChildSessionMsg{sessionID: s.ID}
 				}
 			}
@@ -672,6 +723,13 @@ func (m *UI) openSelectedChildSession() tea.Cmd {
 		if err == nil && child.ParentSessionID == parentSessionID {
 			return openChildSessionMsg{sessionID: child.ID}
 		}
+		// Fallback: scan child session IDs by the derived
+		// "msgID::toolCallID" prefix. This is needed for batch
+		// task-graph subagents, whose session ID carries a
+		// "toolCallID::taskName" composite suffix instead of the bare
+		// derived ID, and for older sessions predating that composite
+		// form. This scan is a long-lived fallback, not a stopgap for
+		// missing spawn-time metadata.
 		prefix := childID + "::"
 		children, err := m.com.App.Sessions.ListChildren(context.Background(), parentSessionID)
 		if err != nil {
@@ -679,6 +737,7 @@ func (m *UI) openSelectedChildSession() tea.Cmd {
 		}
 		for _, s := range children {
 			if strings.HasPrefix(s.ID, prefix) {
+				slog.Debug("Child session resolved via legacy prefix scan", "child_session_id", s.ID, "parent", parentSessionID)
 				return openChildSessionMsg{sessionID: s.ID}
 			}
 		}

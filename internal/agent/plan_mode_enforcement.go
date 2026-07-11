@@ -11,8 +11,6 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 )
 
-type planModeEnforcementDepthKey struct{}
-
 const planModeToolDecisionReminder = `Plan mode turn ended without a required tool call.
 
 You MUST choose exactly one next action now:
@@ -86,17 +84,27 @@ func (c *coordinator) maybeEnforcePlanModeToolDecision(ctx context.Context, sess
 		return nil
 	}
 
-	depth, _ := ctx.Value(planModeEnforcementDepthKey{}).(int)
-	if depth > 0 {
-		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type:      notify.TypeWarning,
-			SessionID: sessionID,
-			Summary:   "Plan 轮次未以 resolve/request_user_input 结束",
-		})
+	if _, err := c.Run(ctx, sessionID, planModeToolDecisionReminder); err != nil {
+		return err
+	}
+
+	// After injecting the reminder, check whether the assistant produced the
+	// required tool call. If not, surface a UI warning so the user is not left
+	// waiting silently.
+	msgs, err = c.messages.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if assistantTurnFailed(msgs) || assistantCalledPlanRequiredTool(msgs) {
 		return nil
 	}
 
-	enforceCtx := context.WithValue(ctx, planModeEnforcementDepthKey{}, depth+1)
-	_, err = c.Run(enforceCtx, sessionID, planModeToolDecisionReminder)
-	return err
+	if c.notify != nil {
+		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			Type:      notify.TypeWarning,
+			SessionID: sessionID,
+			Summary:   "Plan mode turn did not end with resolve or request_user_input",
+		})
+	}
+	return nil
 }

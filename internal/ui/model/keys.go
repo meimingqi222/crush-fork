@@ -313,6 +313,10 @@ func DefaultKeyMap() KeyMap {
 		key.WithKeys("ctrl+up", "alt+up", "alt+p"),
 		key.WithHelp("ctrl+↑", "prev subagent"),
 	)
+	// SessionNav is a display-only binding that advertises the
+	// [ ] / h / l subagent navigation shortcuts in FullHelp. It has no
+	// key.Matches dispatch site; the individual SessionParent/SessionChild
+	// bindings handle the actual key presses.
 	km.Chat.SessionNav = key.NewBinding(
 		key.WithKeys("ctrl+left", "ctrl+right", "alt+left", "alt+right", "ctrl+b", "ctrl+f", "alt+b", "alt+f", "[", "]", "h", "l"),
 		key.WithHelp("[/]/h/l", "subagent"),

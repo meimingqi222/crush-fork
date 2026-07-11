@@ -66,6 +66,11 @@ type AgentToolMessageItem struct {
 	// this item, so the inline task list only renders the summary line.
 	hasTaskNodes bool
 
+	// hasChildSession is true when this agent tool call has spawned at
+	// least one child session, so a "] open subagent" entry hint is
+	// rendered.
+	hasChildSession bool
+
 	// Cached parsed data to avoid repeated json.Unmarshal during spinning renders.
 	cachedParams     *agent.AgentParams
 	cachedParamInput string
@@ -194,6 +199,17 @@ func (a *AgentToolMessageItem) SetHasTaskNodes(v bool) {
 		return
 	}
 	a.hasTaskNodes = v
+	a.invalidateBodyCache()
+	a.clearCache()
+}
+
+// SetHasChildSession marks this item as having spawned a child session, so the
+// "] open subagent" entry hint is rendered.
+func (a *AgentToolMessageItem) SetHasChildSession(v bool) {
+	if a.hasChildSession == v {
+		return
+	}
+	a.hasChildSession = v
 	a.invalidateBodyCache()
 	a.clearCache()
 }
@@ -357,6 +373,15 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	}
 
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	// Entry hint: when this agent tool call has a child session, show a muted
+	// "] open subagent" hint so the subagent-navigation key is discoverable.
+	// The signal comes from either an explicit flag set by the UI (live
+	// running subagent) or the completed result's reducer metadata.
+	if r.agent.hasChildSession || agentResultHasChildSession(opts.Result) {
+		hint := sty.Muted.Render("] open subagent")
+		result = lipgloss.JoinVertical(lipgloss.Left, result, hint)
+	}
 
 	// Add body content when completed.
 	if opts.HasResult() && opts.Result.Content != "" {
@@ -733,6 +758,24 @@ func ParseTaskStatusesFromAgentResult(result *message.ToolResult) map[string]mes
 	return statuses
 }
 
+// agentResultHasChildSession reports whether a completed agent tool result
+// carries reducer metadata referencing at least one child session.
+func agentResultHasChildSession(result *message.ToolResult) bool {
+	if result == nil {
+		return false
+	}
+	reducer, ok := result.Reducer()
+	if !ok {
+		return false
+	}
+	for _, child := range reducer.ChildSessions {
+		if strings.TrimSpace(child.SessionID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func summarizeTaskStatusCounts(tasks []agentTaskRenderEntry, statuses map[string]message.ToolResultSubtaskStatus) (completed, failed, canceled, blocked, inProgress, pending int) {
 	for _, task := range tasks {
 		status := statuses[task.id]
@@ -776,8 +819,9 @@ func taskStatusIcon(sty *styles.Styles, status message.ToolResultSubtaskStatus) 
 	case message.ToolResultSubtaskStatusInProgress, message.ToolResultSubtaskStatusRunning:
 		return sty.Tool.IconWorking.String()
 	case message.ToolResultSubtaskStatusPending:
-		return sty.Tool.IconPending.String()
+		fallthrough
 	default:
+		// Unknown statuses render as pending.
 		return sty.Tool.IconPending.String()
 	}
 }

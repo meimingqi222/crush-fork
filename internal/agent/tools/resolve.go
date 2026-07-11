@@ -108,6 +108,7 @@ func NewResolveTool(sessions session.Service) fantasy.AgentTool {
 			return fantasy.ToolResponse{
 				Content:  content,
 				Metadata: string(metadata),
+				StopTurn: true,
 			}, nil
 		},
 	)

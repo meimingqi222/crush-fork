@@ -169,6 +169,21 @@ type (
 	ActionEnableDockerMCP struct{}
 	// ActionDisableDockerMCP is a message to disable Docker MCP.
 	ActionDisableDockerMCP struct{}
+	// ActionMemoryStatus requests a one-line summary of the memory backend
+	// status (the "Memory: Status" command).
+	ActionMemoryStatus struct{}
+	// ActionMemorySearch runs a read-only memory retrieval query (the
+	// "Memory: Search" command).
+	ActionMemorySearch struct {
+		Query string
+	}
+	// ActionMemoryConsolidate triggers an on-demand consolidation +
+	// materialization pass (the "Memory: Consolidate Now" command).
+	ActionMemoryConsolidate struct{}
+	// ActionMemoryClearConfirmed is sent after the user confirms clearing
+	// all memory state via the MemoryClear dialog (the "Memory: Clear"
+	// command).
+	ActionMemoryClearConfirmed struct{}
 )
 
 // Messages for API key input dialog.

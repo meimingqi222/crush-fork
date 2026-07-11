@@ -23,10 +23,12 @@ import (
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -179,6 +181,59 @@ func TestRunSubAgent(t *testing.T) {
 		yield, ok := message.ParseToolResultYield(resp.Metadata)
 		require.True(t, ok)
 		assert.Equal(t, string(message.ToolResultSubtaskStatusCompleted), yield.Status)
+	})
+
+	t.Run("publishes spawn-time started timeline event", func(t *testing.T) {
+		t.Parallel()
+
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		// Inject a timeline service so the coordinator can publish the
+		// spawn-time SubagentEventStarted -> ChildSessionStartedEvent.
+		tl := timeline.NewService()
+		coord.timeline = tl
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, createErr := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Status: string(message.ToolResultSubtaskStatusCompleted),
+						Data:   "done",
+					}),
+				},
+			})
+			require.NoError(t, createErr)
+			return agentResultWithText("done"), nil
+		})
+
+		_, err = coord.runSubAgentDirect(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "do something",
+			SessionTitle:    "Test Session",
+		})
+		require.NoError(t, err)
+
+		// The spawn-time started event must have been published to the
+		// parent's timeline, recording the child session ID association.
+		events := tl.ListBySession(parentSession.ID)
+		var started *timeline.Event
+		for i := range events {
+			if events[i].Type == timeline.EventChildSessionStarted {
+				started = &events[i]
+				break
+			}
+		}
+		require.NotNil(t, started, "expected a ChildSessionStarted timeline event at spawn time")
+		assert.Equal(t, "msg-1$$call-1", started.ChildSessionID)
+		assert.Equal(t, "Test Session", started.Title)
 	})
 
 	t.Run("auto mode blocks delegation when handoff review cannot run", func(t *testing.T) {
@@ -1846,7 +1901,8 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 		t.Run(tt.backend, func(t *testing.T) {
 			t.Parallel()
 
-			// 每个 sub-test 独立创建 coordinator，避免 SetMemoryEngine 的并发写入竞争。
+			// Each sub-test builds its own coordinator to avoid concurrent
+			// writes racing on SetMemoryBackend.
 			env := testEnv(t)
 			coord := newTestCoordinator(t, env, "test-provider", providerCfg)
 			coord.cfg.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
@@ -1863,16 +1919,24 @@ func TestEnableSessionMemory_BackendAware(t *testing.T) {
 			t.Cleanup(func() { conn.Close() })
 
 			eng := engine.New(conn, engine.Config{Enabled: true, Backend: tt.backend})
-			coord.SetMemoryEngine(eng)
+			var backend memory.Backend
+			if tt.backend == "hindsight" {
+				backend = memory.NewHindsightBackend(eng, nil, nil)
+			} else {
+				backend = memory.NewLocalBackend(eng)
+			}
+			coord.SetMemoryBackend(backend)
 
 			agent, err := coord.buildAgent(t.Context(), nil, config.Agent{}, true)
 			require.NoError(t, err)
 
 			sa, ok := agent.(*sessionAgent)
 			require.True(t, ok)
-			// 检查 buildAgent 中根据 backend 类型正确设置 EnableSessionMemory。
-			// 使用 sessionMemoryEnabled 而非 enableSessionMemory()，
-			// 后者还受 backgroundModel 是否存在的影响，不应在此测试中耦合。
+			// Verify buildAgent sets EnableSessionMemory based on the
+			// backend's SessionWorkingMemory capability. Checking
+			// sessionMemoryEnabled directly (rather than
+			// enableSessionMemory()) avoids coupling this test to whether a
+			// background model is configured.
 			assert.Equal(t, tt.wantEnabled, sa.sessionMemoryEnabled)
 		})
 	}

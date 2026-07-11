@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"image"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -162,6 +163,7 @@ type (
 	planReviewLoadedMsg struct {
 		SessionID string
 		Plan      string
+		Title     string
 		Err       error
 	}
 	planCompactedForExecutionMsg struct {
@@ -403,6 +405,13 @@ type UI struct {
 	// by both drawHeader and modelInfo (sidebar) without recomputing.
 	frameUsageSnapshot      contextUsageSnapshot
 	frameUsageSnapshotValid bool
+
+	// Subagent sibling index/count cache: recomputed only on session-switch
+	// (loadSessionMsg) and on session pubsub events that affect a sibling of
+	// the currently viewed child session, so the footer can render "(n of N)"
+	// without re-walking the parent's message list on every render.
+	siblingIndex int
+	siblingCount int
 
 	// mouse highlighting related state
 	lastClickTime              time.Time
@@ -689,6 +698,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isCanceling = false
 		m.todoIsSpinning = false
 		m.session = msg.session
+		// Recompute the sibling index/count cache for the newly viewed
+		// session. This is a no-op (zeroes the cache) when the session is
+		// not a child session, e.g. after returning to the parent.
+		m.refreshSiblingIndex()
 		m.skippedMessageCount = msg.skippedMessageCount
 		m.totalMessageCount = msg.totalMessageCount
 		m.loadingMoreMessages = false
@@ -795,7 +808,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog.ContainsDialog(dialog.PlanReviewID) {
 			m.dialog.CloseDialog(dialog.PlanReviewID)
 		}
-		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, ""))
+		m.dialog.OpenDialog(dialog.NewPlanReview(m.com, msg.SessionID, plan, msg.Title))
 
 	case planCompactedForExecutionMsg:
 		if msg.Err != nil {
@@ -888,6 +901,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateLayoutAndSize()
 			}
 			m.invalidateSidebarCache()
+		}
+		// Refresh the sibling index/count cache when this event is about the
+		// currently viewed child session itself, or about one of its
+		// siblings (a session sharing the same parent) being created or
+		// updated -- e.g. a new subagent starting, or one finishing, which
+		// changes "(n of N)" in the footer.
+		if m.session != nil && m.session.ParentSessionID != "" &&
+			(msg.Payload.ID == m.session.ID || msg.Payload.ParentSessionID == m.session.ParentSessionID) {
+			m.refreshSiblingIndex()
 		}
 	case pubsub.Event[message.Message]:
 		// Check if this is a child session message for an agent tool.
@@ -1767,6 +1789,7 @@ func (m *UI) restoreTaskNodes(items []chat.MessageItem, toolResultMap map[string
 		// Mark the parent agent item so the inline task list renders summary only.
 		if agentItem, ok := item.(*chat.AgentToolMessageItem); ok {
 			agentItem.SetHasTaskNodes(true)
+			agentItem.SetHasChildSession(true)
 		}
 
 		// Parse task completion statuses from the structured reducer
@@ -1975,13 +1998,17 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 		}
-		if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
-			infoItem := chat.NewAssistantInfoItem(m.com.Styles, &msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
-			m.chat.AppendMessages(infoItem)
-			if cmd := m.maybeOpenProposedPlanDialog(msg); cmd != nil {
-				cmds = append(cmds, cmd)
+		if msg.FinishPart() != nil {
+			if msg.FinishPart().Reason == message.FinishReasonEndTurn {
+				infoItem := chat.NewAssistantInfoItem(m.com.Styles, &msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
+				m.chat.AppendMessages(infoItem)
 			}
-			if m.chat.Follow() {
+			if msg.FinishPart().Reason == message.FinishReasonEndTurn || msg.FinishPart().Reason == message.FinishReasonToolUse {
+				if cmd := m.maybeOpenProposedPlanDialog(msg); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			if msg.FinishPart().Reason == message.FinishReasonEndTurn && m.chat.Follow() {
 				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2103,13 +2130,17 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 
 	m.removeToolItemsForMessage(msg.ID, toolCallIDs)
 
-	if shouldRenderAssistant && msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
-		if infoItem := m.chat.MessageItem(chat.AssistantInfoID(msg.ID)); infoItem == nil {
-			newInfoItem := chat.NewAssistantInfoItem(m.com.Styles, &msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
-			m.chat.AppendMessages(newInfoItem)
+	if msg.FinishPart() != nil {
+		if msg.FinishPart().Reason == message.FinishReasonEndTurn {
+			if infoItem := m.chat.MessageItem(chat.AssistantInfoID(msg.ID)); infoItem == nil {
+				newInfoItem := chat.NewAssistantInfoItem(m.com.Styles, &msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
+				m.chat.AppendMessages(newInfoItem)
+			}
 		}
-		if cmd := m.maybeOpenProposedPlanDialog(msg); cmd != nil {
-			cmds = append(cmds, cmd)
+		if msg.FinishPart().Reason == message.FinishReasonEndTurn || msg.FinishPart().Reason == message.FinishReasonToolUse {
+			if cmd := m.maybeOpenProposedPlanDialog(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 
@@ -2159,11 +2190,11 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 // It also marks the parent AgentToolMessageItem so it only shows the summary.
 func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing chat.MessageItem) []chat.MessageItem {
 	var params agentToolParams
-	if err := json.Unmarshal([]byte(tc.Input), &params); err != nil || len(params.Tasks) <= 1 {
+	if err := json.Unmarshal([]byte(tc.Input), &params); err != nil {
 		return nil
 	}
 
-	// Resolve the agent tool item — either from the existing item or from
+	// Resolve the agent tool item - either from the existing item or from
 	// the chat list (if ensureTaskNodes is called for a newly created item
 	// that hasn't been appended yet, existing is nil, but the item was just
 	// appended in the same batch so check the chat too).
@@ -2173,6 +2204,16 @@ func (m *UI) ensureTaskNodes(messageID string, tc message.ToolCall, existing cha
 			agentItem, _ = item.(*chat.AgentToolMessageItem)
 		}
 	}
+	// An agent tool call always spawns at least one child session, so the
+	// "] open subagent" entry hint applies regardless of task count.
+	if agentItem != nil {
+		agentItem.SetHasChildSession(true)
+	}
+
+	if len(params.Tasks) <= 1 {
+		return nil
+	}
+
 	if agentItem != nil {
 		agentItem.SetHasTaskNodes(true)
 	}
@@ -2848,6 +2889,18 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionDisableDockerMCP:
 		m.dialog.CloseDialog(dialog.CommandsID)
 		cmds = append(cmds, m.disableDockerMCP)
+	case dialog.ActionMemoryStatus:
+		m.dialog.CloseDialog(dialog.CommandsID)
+		cmds = append(cmds, m.memoryStatusCmd())
+	case dialog.ActionMemorySearch:
+		m.dialog.CloseDialog(dialog.MemorySearchID)
+		cmds = append(cmds, m.memorySearchCmd(msg.Query))
+	case dialog.ActionMemoryConsolidate:
+		m.dialog.CloseDialog(dialog.CommandsID)
+		cmds = append(cmds, m.memoryConsolidateCmd())
+	case dialog.ActionMemoryClearConfirmed:
+		m.dialog.CloseDialog(dialog.MemoryClearID)
+		cmds = append(cmds, m.memoryClearCmd())
 	case dialog.ActionInitializeProject:
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before summarizing session..."))
@@ -3146,70 +3199,6 @@ func substituteArgs(content string, args map[string]string) string {
 	return content
 }
 
-func (m *UI) maybeOpenProposedPlanDialog(msg message.Message) tea.Cmd {
-	if m.session == nil || m.session.CollaborationMode != session.CollaborationModePlan {
-		return nil
-	}
-	if msg.FinishPart() == nil || msg.FinishPart().Reason != message.FinishReasonEndTurn {
-		return nil
-	}
-	_, hasPlanTool := hasResolveApply(msg)
-	if !hasPlanTool {
-		return nil
-	}
-	if m.lastPromptedPlanMsg == msg.ID {
-		return nil
-	}
-	m.lastPromptedPlanMsg = msg.ID
-	planFilePath := strings.TrimSpace(m.session.PlanFilePath)
-	if planFilePath == "" {
-		return util.ReportWarn("Plan file path is missing; cannot review the proposed plan.")
-	}
-	return m.loadPlanReview(msg.SessionID, planFilePath)
-}
-
-func (m *UI) loadPlanReview(sessionID, planFilePath string) tea.Cmd {
-	return func() tea.Msg {
-		data, err := os.ReadFile(planFilePath)
-		if err != nil {
-			return planReviewLoadedMsg{SessionID: sessionID, Err: err}
-		}
-		return planReviewLoadedMsg{SessionID: sessionID, Plan: string(data)}
-	}
-}
-
-type resolveToolInput struct {
-	Action string `json:"action"`
-	Extra  struct {
-		Title string `json:"title"`
-	} `json:"extra"`
-}
-
-// findResolveApplyToolCall returns the plan title from a resolve tool call
-// whose action is "apply".
-func findResolveApplyToolCall(msg message.Message) (string, bool) {
-	for _, tc := range msg.ToolCalls() {
-		if tc.Name != agenttools.ResolveToolName {
-			continue
-		}
-		var input resolveToolInput
-		if err := json.Unmarshal([]byte(tc.Input), &input); err != nil {
-			continue
-		}
-		if input.Action != "apply" {
-			continue
-		}
-		return input.Extra.Title, true
-	}
-	return "", false
-}
-
-// hasResolveApply reports whether the message contains a resolve(action="apply")
-// tool call. It returns an optional title when resolve provided one.
-func hasResolveApply(msg message.Message) (string, bool) {
-	return findResolveApplyToolCall(msg)
-}
-
 func (m *UI) openRequestUserInputDialog(request userinput.Request) tea.Cmd {
 	if m.dialog.ContainsDialog(dialog.RequestUserInputID) {
 		m.dialog.CloseDialog(dialog.RequestUserInputID)
@@ -3499,6 +3488,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			if m.state == uiChat && m.hasSession() && m.focus != uiFocusEditor {
 				if cmd := m.openSelectedChildSession(); cmd != nil {
 					cmds = append(cmds, cmd)
+				} else {
+					// No row with a child session selected: fall back to the
+					// latest running (or most recently created) child session.
+					if cmd := m.openLatestChildSession(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 				return true
 			}
@@ -4125,7 +4120,10 @@ func (m *UI) ShortHelp() []key.Binding {
 		switch m.focus {
 		case uiFocusMain:
 			binds = append(binds, k.Chat.UpDown)
-			if m.selectedHasChildSession() {
+			if m.isSubagentSession() {
+				// Inside a child session: advertise sibling navigation.
+				binds = append(binds, k.Chat.SessionParent, k.Chat.SessionPrev, k.Chat.SessionNext)
+			} else if m.selectedHasChildSession() {
 				binds = append(binds, k.Chat.SessionChild)
 			}
 		}
@@ -4969,8 +4967,10 @@ func (m *UI) randomizePlaceholders() {
 	m.readyPlaceholder = readyPlaceholders[rand.Intn(len(readyPlaceholders))]
 }
 
-// renderSubagentBanner renders a read-only banner shown instead of the editor
-// when the user is viewing a subagent session.
+// renderSubagentBanner renders a read-only footer shown instead of the editor
+// when the user is viewing a subagent session. It surfaces the subagent role,
+// its position among siblings, current context usage/cost, and navigation
+// hints.
 func (m *UI) renderSubagentBanner(width int) string {
 	t := m.com.Styles
 	roleLabel := strings.ToUpper(m.sessionRoleLabel(m.session))
@@ -4979,9 +4979,51 @@ func (m *UI) renderSubagentBanner(width int) string {
 		bannerText += " " + roleLabel
 	}
 	tag := t.Tool.SubagentBanner.Render(bannerText)
-	hint := t.Muted.Render("  read-only  [ back")
-	line := lipgloss.JoinHorizontal(lipgloss.Left, tag, hint)
-	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(line)
+
+	// Position among siblings: "(n of N)". Omitted when there is only one
+	// child session (no siblings to navigate). This is a cached value,
+	// refreshed on session switch and on relevant session pubsub events
+	// (see refreshSiblingIndex), not recomputed on every render.
+	index, count := m.siblingIndex, m.siblingCount
+	var meta []string
+	if count > 1 && index > 0 {
+		meta = append(meta, fmt.Sprintf("(%d of %d)", index, count))
+	}
+
+	// Token usage and context percentage.
+	snap := m.frameUsageSnapshotCached()
+	if snap.TotalTokens > 0 {
+		tok := strings.ToLower(common.FormatTokenCount(snap.TotalTokens))
+		if snap.ContextWindow > 0 {
+			// Render as "34.2k tokens (17%)".
+			pct := int(math.Round(float64(snap.TotalTokens) / float64(snap.ContextWindow) * 100))
+			meta = append(meta, fmt.Sprintf("%s tokens (%d%%)", tok, pct))
+		} else {
+			meta = append(meta, tok+" tokens")
+		}
+	}
+
+	// Cost; omitted when zero.
+	if m.session.Cost > 0 {
+		meta = append(meta, fmt.Sprintf("$%.2f", m.session.Cost))
+	}
+
+	line1 := tag
+	if len(meta) > 0 {
+		line1 = lipgloss.JoinHorizontal(lipgloss.Left, tag, t.Muted.Render("  "+strings.Join(meta, " · ")))
+	}
+
+	// Navigation hints line. Omit prev/next when there are no siblings.
+	var hints []string
+	hints = append(hints, "[ parent")
+	if count > 1 {
+		hints = append(hints, "ctrl+↑/↓ prev/next")
+	}
+	hints = append(hints, "read-only")
+	line2 := t.Muted.Render(strings.Join(hints, "   "))
+
+	block := strings.Join([]string{line1, line2}, "\n")
+	return lipgloss.NewStyle().Width(width).PaddingLeft(1).Render(block)
 }
 
 // renderEditorView renders the editor view with attachments if any.
@@ -5049,30 +5091,6 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	}
 
 	return m.runAgentMessage(content, attachments...)
-}
-
-func (m *UI) executeApprovedPlan(sessionID, plan string, mode planmode.ExecutionContextMode) tea.Cmd {
-	if mode == planmode.ExecuteWithCompact {
-		return func() tea.Msg {
-			if err := m.com.App.AgentCoordinator.Summarize(context.Background(), sessionID, nil); err != nil {
-				return planCompactedForExecutionMsg{SessionID: sessionID, Plan: plan, Err: err}
-			}
-			return planCompactedForExecutionMsg{SessionID: sessionID, Plan: plan}
-		}
-	}
-	return tea.Sequence(
-		func() tea.Msg {
-			_, err := m.com.App.Sessions.UpdateCollaborationMode(context.Background(), sessionID, session.CollaborationModeDefault)
-			if err != nil {
-				return util.ReportError(err)()
-			}
-			if m.session != nil && m.session.ID == sessionID {
-				m.session.CollaborationMode = session.CollaborationModeDefault
-			}
-			return planModeChangedMsg{SessionID: sessionID, Status: "Plan approved. Starting implementation.", Mode: session.CollaborationModeDefault}
-		},
-		m.runAgentMessage(planmode.BuildExecutionPrompt(plan, mode)),
-	)
 }
 
 // runGoalOp routes a UI-triggered goal state transition through goal.Runtime
@@ -5549,6 +5567,14 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.MemorySearchID:
+		if cmd := m.openMemorySearchDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.MemoryClearID:
+		if cmd := m.openMemoryClearDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -5614,6 +5640,32 @@ func (m *UI) openQuitDialog() tea.Cmd {
 
 	quitDialog := dialog.NewQuit(m.com)
 	m.dialog.OpenDialog(quitDialog)
+	return nil
+}
+
+// openMemorySearchDialog opens the "Memory: Search" query input dialog.
+func (m *UI) openMemorySearchDialog() tea.Cmd {
+	if m.com.App == nil || m.com.App.MemoryBackend == nil {
+		return util.ReportWarn("Memory backend is not configured.")
+	}
+	if m.dialog.ContainsDialog(dialog.MemorySearchID) {
+		m.dialog.BringToFront(dialog.MemorySearchID)
+		return nil
+	}
+	m.dialog.OpenDialog(dialog.NewMemorySearch(m.com))
+	return nil
+}
+
+// openMemoryClearDialog opens the "Memory: Clear" confirmation dialog.
+func (m *UI) openMemoryClearDialog() tea.Cmd {
+	if m.com.App == nil || m.com.App.MemoryBackend == nil {
+		return util.ReportWarn("Memory backend is not configured.")
+	}
+	if m.dialog.ContainsDialog(dialog.MemoryClearID) {
+		m.dialog.BringToFront(dialog.MemoryClearID)
+		return nil
+	}
+	m.dialog.OpenDialog(dialog.NewMemoryClear(m.com))
 	return nil
 }
 
@@ -5919,6 +5971,8 @@ func (m *UI) newSession() tea.Cmd {
 	}
 
 	m.session = nil
+	m.siblingIndex = 0
+	m.siblingCount = 0
 	m.sessionFiles = nil
 	m.sessionFileReads = nil
 	m.pendingSubagentNotifications = nil
@@ -6252,7 +6306,7 @@ func attachmentFromClipboardPath(rawPath string) (message.Attachment, error) {
 }
 
 func clipboardPathCandidates(text string) []string {
-	text = strings.ReplaceAll(text, "\n", "\n")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	parts := strings.FieldsFunc(text, func(r rune) bool {
 		return r == '\n' || r == 0
 	})

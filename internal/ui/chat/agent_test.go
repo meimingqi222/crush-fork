@@ -462,7 +462,14 @@ func TestBashToolMessageItemFinalResultPrefersResultOverStaleRuntimeSnapshot(t *
 	require.NotContains(t, rendered, "stale partial output")
 }
 
-func TestAssistantMessageOnlyRendersProposedPlanWithResolveToolCall(t *testing.T) {
+// TestAssistantMessageDoesNotRenderProposedPlanHeader verifies that assistant
+// messages never render an inline "Proposed Plan" header, regardless of
+// whether the message also carries a resolve tool call. Proposed-plan review
+// is handled out-of-band by the file-based plan-review dialog (see
+// planReviewLoadedMsg / dialog.NewPlanReview), not by inline message
+// rendering, so both cases below must omit the header while still rendering
+// the message's own text content.
+func TestAssistantMessageDoesNotRenderProposedPlanHeader(t *testing.T) {
 	t.Parallel()
 
 	theme := styles.DefaultStyles()
@@ -495,6 +502,6 @@ func TestAssistantMessageOnlyRendersProposedPlanWithResolveToolCall(t *testing.T
 	}
 	item = NewAssistantMessageItem(&theme, &withResolve)
 	rendered = ansi.Strip(item.Render(120))
-	require.Contains(t, rendered, "Proposed Plan")
+	require.NotContains(t, rendered, "Proposed Plan")
 	require.Contains(t, rendered, content)
 }
