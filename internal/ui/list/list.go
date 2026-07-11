@@ -123,6 +123,62 @@ func (l *List) Height() int {
 	return l.height
 }
 
+// TotalContentHeight returns the total height of all items, including gaps.
+func (l *List) TotalContentHeight() int {
+	total := 0
+	for i := range l.items {
+		item := l.getItem(i)
+		total += item.height
+		if l.gap > 0 && i < len(l.items)-1 {
+			total += l.gap
+		}
+	}
+	return total
+}
+
+// Offset returns the number of lines the viewport is scrolled from the top.
+func (l *List) Offset() int {
+	offset := 0
+	for i := 0; i < l.offsetIdx; i++ {
+		item := l.getItem(i)
+		if item.height > 0 {
+			offset += item.height
+		}
+		if l.gap > 0 {
+			offset += l.gap
+		}
+	}
+	offset += l.offsetLine
+	return offset
+}
+
+// SetOffset scrolls the viewport so the top is offset lines from the start.
+// It is used by scrollbar interactions to jump to a position in the content.
+func (l *List) SetOffset(offset int) {
+	if len(l.items) == 0 {
+		return
+	}
+	maxOffset := max(0, l.TotalContentHeight()-l.height)
+	offset = max(0, min(offset, maxOffset))
+
+	current := 0
+	for i := range l.items {
+		item := l.getItem(i)
+		height := item.height
+		if l.gap > 0 && i < len(l.items)-1 {
+			height += l.gap
+		}
+		if current+height > offset {
+			l.offsetIdx = i
+			l.offsetLine = offset - current
+			return
+		}
+		current += height
+	}
+	// Past the end: clamp to the bottom.
+	l.ScrollToBottom()
+}
+
 // Len returns the number of items in the list.
 func (l *List) Len() int {
 	return len(l.items)

@@ -55,6 +55,7 @@ type KeyMap struct {
 		Copy            key.Binding
 		ClearHighlight  key.Binding
 		Expand          key.Binding
+		OpenThinking    key.Binding
 		SessionParent   key.Binding
 		SessionChild    key.Binding
 		SessionNext     key.Binding
@@ -123,8 +124,8 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("enter", "send"),
 	)
 	km.Editor.OpenEditor = key.NewBinding(
-		key.WithKeys("ctrl+o"),
-		key.WithHelp("ctrl+o", "open editor"),
+		key.WithKeys("ctrl+shift+o"),
+		key.WithHelp("ctrl+shift+o", "open editor"),
 	)
 	km.Editor.Newline = key.NewBinding(
 		// "ctrl+j" (0x0A linefeed) is the fallback for Windows Terminal in
@@ -296,6 +297,10 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.Expand = key.NewBinding(
 		key.WithKeys("space"),
 		key.WithHelp("space", "expand/collapse"),
+	)
+	km.Chat.OpenThinking = key.NewBinding(
+		key.WithKeys("ctrl+o"),
+		key.WithHelp("ctrl+o", "view reasoning"),
 	)
 	km.Chat.SessionParent = key.NewBinding(
 		key.WithKeys("ctrl+left", "alt+left", "ctrl+b", "alt+b", "[", "h"),

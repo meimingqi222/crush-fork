@@ -393,3 +393,130 @@ func TestEnforceMessageToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFull
 	require.NoError(t, readErr)
 	assert.Equal(t, messageOriginal, string(artifactContent))
 }
+
+func toolResultTextMessage(toolCallID, text string) fantasy.Message {
+	return fantasy.Message{
+		Role: fantasy.MessageRoleTool,
+		Content: []fantasy.MessagePart{
+			fantasy.ToolResultPart{
+				ToolCallID: toolCallID,
+				Output:     fantasy.ToolResultOutputContentText{Text: text},
+			},
+		},
+	}
+}
+
+func TestApplyTruncatedToolResults_ReplacesMatchingToolCallID(t *testing.T) {
+	t.Parallel()
+
+	full := strings.Repeat("x", 100_000)
+	truncatedText := full[:20_000] + "[truncated]"
+	messages := []fantasy.Message{
+		fantasy.NewUserMessage("hi"),
+		toolResultTextMessage("call-1", full),
+	}
+
+	out := applyTruncatedToolResults(messages, map[string]string{"call-1": truncatedText})
+
+	require.Len(t, out, 2)
+	toolPart, ok := out[1].Content[0].(fantasy.ToolResultPart)
+	require.True(t, ok)
+	textOutput, ok := toolPart.Output.(fantasy.ToolResultOutputContentText)
+	require.True(t, ok)
+	assert.Equal(t, truncatedText, textOutput.Text)
+
+	// The original slice/messages must not be mutated in place.
+	origToolPart, ok := messages[1].Content[0].(fantasy.ToolResultPart)
+	require.True(t, ok)
+	origText, ok := origToolPart.Output.(fantasy.ToolResultOutputContentText)
+	require.True(t, ok)
+	assert.Equal(t, full, origText.Text, "original fantasy message content must remain untouched")
+}
+
+func TestApplyTruncatedToolResults_UnmatchedMessagesUnchanged(t *testing.T) {
+	t.Parallel()
+
+	messages := []fantasy.Message{
+		fantasy.NewUserMessage("hi"),
+		toolResultTextMessage("call-1", "small content"),
+		toolResultTextMessage("call-2", "other content"),
+	}
+
+	out := applyTruncatedToolResults(messages, map[string]string{"call-3": "unrelated"})
+
+	// Nothing matched, so the exact same slice must come back.
+	require.Len(t, out, 3)
+	toolPart1, ok := out[1].Content[0].(fantasy.ToolResultPart)
+	require.True(t, ok)
+	text1, ok := toolPart1.Output.(fantasy.ToolResultOutputContentText)
+	require.True(t, ok)
+	assert.Equal(t, "small content", text1.Text)
+
+	toolPart2, ok := out[2].Content[0].(fantasy.ToolResultPart)
+	require.True(t, ok)
+	text2, ok := toolPart2.Output.(fantasy.ToolResultOutputContentText)
+	require.True(t, ok)
+	assert.Equal(t, "other content", text2.Text)
+}
+
+func TestApplyTruncatedToolResults_EmptyMapReturnsInputUnchanged(t *testing.T) {
+	t.Parallel()
+
+	messages := []fantasy.Message{toolResultTextMessage("call-1", "content")}
+
+	out := applyTruncatedToolResults(messages, nil)
+
+	// With an empty truncation map the function must return the very same
+	// slice (no allocation), so this also exercises the fast path.
+	require.Equal(t, len(messages), len(out))
+	assert.Equal(t, "content", out[0].Content[0].(fantasy.ToolResultPart).Output.(fantasy.ToolResultOutputContentText).Text)
+}
+
+func TestApplyTruncatedToolResults_SkipsNonTextOutputs(t *testing.T) {
+	t.Parallel()
+
+	messages := []fantasy.Message{
+		{
+			Role: fantasy.MessageRoleTool,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolResultPart{
+					ToolCallID: "call-1",
+					Output:     fantasy.ToolResultOutputContentMedia{Data: "base64data", MediaType: "image/png"},
+				},
+			},
+		},
+	}
+
+	out := applyTruncatedToolResults(messages, map[string]string{"call-1": "should not apply to media"})
+
+	// Media (and error) outputs are never truncated by
+	// enforceStepToolResultBudget/truncateToolResult, so even a spurious
+	// map entry for their ToolCallID must not corrupt the output.
+	toolPart, ok := out[0].Content[0].(fantasy.ToolResultPart)
+	require.True(t, ok)
+	mediaOutput, ok := toolPart.Output.(fantasy.ToolResultOutputContentMedia)
+	require.True(t, ok)
+	assert.Equal(t, "base64data", mediaOutput.Data)
+}
+
+func TestApplyTruncatedToolResults_MultipleMessagesOnlyMatchingReplaced(t *testing.T) {
+	t.Parallel()
+
+	bigA := strings.Repeat("a", 50_000)
+	bigB := strings.Repeat("b", 50_000)
+	truncatedA := bigA[:5_000] + "[truncated A]"
+	messages := []fantasy.Message{
+		fantasy.NewUserMessage("start"),
+		toolResultTextMessage("call-a", bigA),
+		toolResultTextMessage("call-b", bigB),
+		fantasy.NewUserMessage("continue"),
+	}
+
+	out := applyTruncatedToolResults(messages, map[string]string{"call-a": truncatedA})
+
+	require.Len(t, out, 4)
+	textA := out[1].Content[0].(fantasy.ToolResultPart).Output.(fantasy.ToolResultOutputContentText).Text
+	assert.Equal(t, truncatedA, textA)
+	textB := out[2].Content[0].(fantasy.ToolResultPart).Output.(fantasy.ToolResultOutputContentText).Text
+	assert.Equal(t, bigB, textB, "message with no matching ToolCallID must be untouched")
+}

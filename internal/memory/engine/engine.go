@@ -11,8 +11,7 @@ import (
 )
 
 // sessionState tracks per-session lifecycle state for the engine.
-type sessionState struct {
-}
+type sessionState struct{}
 
 // Engine is the top-level orchestrator for the memory system pipeline.
 // It holds the EventStore and provides lifecycle and status methods.

@@ -61,7 +61,12 @@ func (a *sessionAgent) buildRecentFileContext(ctx context.Context, sessionID str
 		}
 
 		result = append(result, fmt.Sprintf("Recently read file `%s`:\n```\n%s\n```", filepath.ToSlash(relPath), text))
-		totalChars += len(runes)
+		// Account for the (possibly truncated) text that was actually
+		// injected, not the full file length. Using len(runes) here would
+		// let a single oversized file exhaust the entire per-run budget
+		// even though only postCompactMaxPerFile characters of it were
+		// injected, starving subsequent files of their share of the budget.
+		totalChars += len([]rune(text))
 	}
 
 	if len(result) > 0 {

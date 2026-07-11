@@ -192,7 +192,9 @@ func TestSetSessionMessagesSuppressesStaleLoadingStateForRestoredSession(t *test
 	assistantItem := ui.chat.MessageItem("assistant-1")
 	require.NotNil(t, assistantItem)
 	assistantRendered := ansi.Strip(assistantItem.Render(80))
-	require.Contains(t, assistantRendered, "still thinking")
+	// Reasoning is collapsed by default; the indicator is shown instead.
+	require.Contains(t, assistantRendered, "Reasoning")
+	require.Contains(t, assistantRendered, "Ctrl+O to view")
 	require.NotContains(t, assistantRendered, "Thinking")
 
 	toolItem := ui.chat.MessageItem("tool-1")
@@ -231,7 +233,8 @@ func TestStopStaleLoadingIndicatorsStopsAgentSpinnerWhenRunAlreadyEnded(t *testi
 
 	after := ansi.Strip(assistantItem.Render(100))
 	require.NotContains(t, after, "Thinking")
-	require.Contains(t, after, "still thinking")
+	require.Contains(t, after, "Reasoning")
+	require.Contains(t, after, "Ctrl+O to view")
 }
 
 func TestHandleChildSessionMessageShowsAndClearsRetryStatus(t *testing.T) {

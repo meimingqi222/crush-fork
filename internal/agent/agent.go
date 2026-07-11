@@ -387,43 +387,43 @@ func NewSessionAgent(
 		retryWaitFunc = waitForRetryDelay
 	}
 	return &sessionAgent{
-		largeModel:             csync.NewValue(opts.LargeModel),
-		smallModel:             csync.NewValue(opts.SmallModel),
-		systemPromptPrefix:     csync.NewValue(opts.SystemPromptPrefix),
-		systemPrompt:           csync.NewValue(opts.SystemPrompt),
-		enhancedSystemPrompt:   csync.NewValue(""),
-		workingDir:             opts.WorkingDir,
-		agentFactory:           agentFactory,
-		refreshCallConfig:      opts.RefreshCallConfig,
-		deferredToolRuntime:    opts.DeferredToolRuntime,
-		isSubAgent:             opts.IsSubAgent,
-		sessions:               opts.Sessions,
-		messages:               opts.Messages,
-		backgroundModel:        opts.BackgroundModel,
-		reviewToolResult:       opts.ReviewToolResult,
-		disableAutoSummarize:   opts.DisableAutoSummarize,
-		tools:                  csync.NewSliceFrom(opts.Tools),
-		isYolo:                 opts.IsYolo,
-		notify:                 opts.Notify,
-		hookManager:            opts.HookManager,
-		pluginRuntime:          opts.PluginRuntime,
-		filetracker:            opts.Filetracker,
-		checkpoint:             opts.Checkpoint,
-		retryDelayFunc:         retryDelayFunc,
-		retryWaitFunc:          retryWaitFunc,
-		messageQueue:           csync.NewMap[string, []SessionAgentCall](),
-		activeRequests:         csync.NewMap[string, context.CancelFunc](),
-		pausedQueues:           csync.NewMap[string, bool](),
-		lastSummarizeTime:      csync.NewMap[string, time.Time](),
-		pendingExtractions:     make(map[string][]pendingExtraction),
-		sessionMemoryEnabled:   opts.EnableSessionMemory,
-		memoryEngineEnabled:    opts.MemoryEngineEnabled,
+		largeModel:                      csync.NewValue(opts.LargeModel),
+		smallModel:                      csync.NewValue(opts.SmallModel),
+		systemPromptPrefix:              csync.NewValue(opts.SystemPromptPrefix),
+		systemPrompt:                    csync.NewValue(opts.SystemPrompt),
+		enhancedSystemPrompt:            csync.NewValue(""),
+		workingDir:                      opts.WorkingDir,
+		agentFactory:                    agentFactory,
+		refreshCallConfig:               opts.RefreshCallConfig,
+		deferredToolRuntime:             opts.DeferredToolRuntime,
+		isSubAgent:                      opts.IsSubAgent,
+		sessions:                        opts.Sessions,
+		messages:                        opts.Messages,
+		backgroundModel:                 opts.BackgroundModel,
+		reviewToolResult:                opts.ReviewToolResult,
+		disableAutoSummarize:            opts.DisableAutoSummarize,
+		tools:                           csync.NewSliceFrom(opts.Tools),
+		isYolo:                          opts.IsYolo,
+		notify:                          opts.Notify,
+		hookManager:                     opts.HookManager,
+		pluginRuntime:                   opts.PluginRuntime,
+		filetracker:                     opts.Filetracker,
+		checkpoint:                      opts.Checkpoint,
+		retryDelayFunc:                  retryDelayFunc,
+		retryWaitFunc:                   retryWaitFunc,
+		messageQueue:                    csync.NewMap[string, []SessionAgentCall](),
+		activeRequests:                  csync.NewMap[string, context.CancelFunc](),
+		pausedQueues:                    csync.NewMap[string, bool](),
+		lastSummarizeTime:               csync.NewMap[string, time.Time](),
+		pendingExtractions:              make(map[string][]pendingExtraction),
+		sessionMemoryEnabled:            opts.EnableSessionMemory,
+		memoryEngineEnabled:             opts.MemoryEngineEnabled,
 		workingMemoryMinDiscardedTokens: opts.WorkingMemoryMinDiscardedTokens,
-		memoryEngineEventStore: opts.MemoryEngineEventStore,
-		memoryEngineHooks:      opts.MemoryEngineHooks,
-		memoryEngineRetriever:  opts.MemoryEngineRetriever,
-		dataDirectory:          opts.DataDirectory,
-		visionService:          opts.VisionService,
+		memoryEngineEventStore:          opts.MemoryEngineEventStore,
+		memoryEngineHooks:               opts.MemoryEngineHooks,
+		memoryEngineRetriever:           opts.MemoryEngineRetriever,
+		dataDirectory:                   opts.DataDirectory,
+		visionService:                   opts.VisionService,
 	}
 }
 
@@ -742,6 +742,24 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	var currentStepToolMessageIDs []string
 	var currentStepToolResultChars int
 	var allRunMessageIDs []string
+	// toolResultBudgetMu guards currentStepToolResultChars and
+	// truncatedToolResults. fantasy executes tool calls in parallel
+	// (parallelSem capacity 5 in fantasy/agent.go) and invokes OnToolResult
+	// concurrently from those goroutines, so the step-budget counter and the
+	// truncation map below both need protection against concurrent access.
+	var toolResultBudgetMu sync.Mutex
+	// truncatedToolResults records, by ToolCallID, the truncated content of
+	// any tool result whose Content was shortened by enforceStepToolResultBudget
+	// or truncateToolResult in OnToolResult below. Those functions only ever
+	// truncate the copy persisted to the message store (via a.messages.Create);
+	// the fantasy-internal response-message history that PrepareStep receives
+	// as options.Messages still carries the original, untruncated content
+	// (see fantasy/agent.go executeSingleTool, which returns the raw result
+	// regardless of what the OnToolResult callback does with it). PrepareStep
+	// uses this map to make the messages actually sent to the model match
+	// what was persisted, instead of resending the full untruncated output on
+	// every subsequent step of the run.
+	truncatedToolResults := make(map[string]string)
 	var estimatedPromptTokens int64
 	var completedStepsThisRun int
 	var runToolUses int
@@ -910,6 +928,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				} else {
 					prepared.Messages = options.Messages
 				}
+				// fantasy's internal response-message history (options.Messages,
+				// and therefore prepared.Messages under either branch above)
+				// still carries the full, untruncated content of any tool
+				// result that OnToolResult truncated before persisting it to
+				// the message store. Rewrite those parts here so the request
+				// we actually send matches what was stored — otherwise every
+				// step of the run resends the full untruncated output for
+				// every prior oversized tool result.
+				toolResultBudgetMu.Lock()
+				prepared.Messages = applyTruncatedToolResults(prepared.Messages, truncatedToolResults)
+				toolResultBudgetMu.Unlock()
 				for i := range prepared.Messages {
 					prepared.Messages[i].ProviderOptions = nil
 				}
@@ -1382,10 +1411,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if runtimeConfig != nil {
 					toolResult = a.applyToolResultReview(genCtx, currentAssistant.SessionID, toolResult, runtimeConfig.PermissionMode)
 				}
+				// currentStepToolResultChars is shared across concurrent tool
+				// executions (fantasy runs up to 5 in parallel) and
+				// truncatedToolResults must stay consistent with it, so both
+				// the budget accounting and the truncation-map bookkeeping
+				// below happen under the same lock.
+				toolResultBudgetMu.Lock()
+				preTruncationContent := toolResult.Content
 				toolResult = a.enforceStepToolResultBudget(currentAssistant.SessionID, toolResult, &currentStepToolResultChars)
 				if truncatedResult, truncated := a.truncateToolResult(currentAssistant.SessionID, toolResult); truncated {
 					toolResult = truncatedResult
 				}
+				if toolResult.ToolCallID != "" && toolResult.Content != preTruncationContent {
+					truncatedToolResults[toolResult.ToolCallID] = toolResult.Content
+				}
+				toolResultBudgetMu.Unlock()
 				toolMsg, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
 					Role:                   message.Tool,
 					Parts:                  []message.ContentPart{toolResult},

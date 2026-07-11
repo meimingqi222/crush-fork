@@ -15,6 +15,8 @@ The module path is `github.com/charmbracelet/crush`.
 
 ```
 main.go                            CLI entry point (cobra via internal/cmd)
+fantasy/                           Local fork of charm.land/fantasy (go.mod replace);
+                                   the LLM framework code is edited HERE, in-repo
 internal/
   app/app.go                       Top-level wiring: DB, config, agents, LSP, MCP, events
   cmd/                             CLI commands (root, run, login, models, stats, sessions)
@@ -26,7 +28,7 @@ internal/
     agent.go                       SessionAgent: runs LLM conversations per session
     coordinator.go                 Coordinator: manages named agents ("coder", "task")
     prompts.go                     Loads Go-template system prompts
-    templates/                     System prompt templates (coder.md.tpl, task.md.tpl, etc.)
+    templates/                     System prompt templates (coder.md.tpl, explore.md.tpl, etc.)
     tools/                         All built-in tools (bash, edit, view, grep, glob, etc.)
       mcp/                         MCP client integration
   session/session.go               Session CRUD backed by SQLite
@@ -35,6 +37,8 @@ internal/
     sql/                           Raw SQL queries (consumed by sqlc)
     migrations/                    Schema migrations
   lsp/                             LSP client manager, auto-discovery, on-demand startup
+  memory/                          Persistent memory engine (recall, retention)
+  plugin/                          Plugin system (chat transform hooks, etc.)
   ui/                              Bubble Tea v2 TUI (see internal/ui/AGENTS.md)
   permission/                      Tool permission checking and allow-lists
   skills/                          Skill file discovery and loading
@@ -47,18 +51,24 @@ internal/
 
 ### Key Dependency Roles
 
-- **`charm.land/fantasy`**: LLM provider abstraction layer. Handles protocol
-  differences between Anthropic, OpenAI, Gemini, etc. Used in `internal/app`
-  and `internal/agent`.
+- **`charm.land/fantasy`**: LLM provider abstraction layer AND the agent step
+  loop (tool execution, message accumulation). Handles protocol differences
+  between Anthropic, OpenAI, Gemini, etc. **Replaced to the local `./fantasy`
+  directory via go.mod `replace`** — changes to the framework are made in this
+  repo. See `docs/pitfalls/fantasy-dual-message-state.md` before touching
+  message flow.
 - **`charm.land/bubbletea/v2`**: TUI framework powering the interactive UI.
 - **`charm.land/lipgloss/v2`**: Terminal styling.
 - **`charm.land/glamour/v2`**: Markdown rendering in the terminal.
-- **`charm.land/catwalk`**: Snapshot/golden-file testing for TUI components.
+- **`charm.land/catwalk`**: Provider/model catalog (embedded data + fetched at
+  runtime); consumed by `internal/config/catwalk.go`.
 - **`sqlc`**: Generates Go code from SQL queries in `internal/db/sql/`.
 
 ### Key Patterns
 
-- **Config is a Service**: accessed via `config.Service`, not global state.
+- **Config is injected, not global**: `config.Init(workingDir, dataDir, debug)`
+  (called in `internal/cmd/root.go`) returns a `*config.ConfigStore` that is
+  passed explicitly to components.
 - **Tools are self-documenting**: each tool has a `.go` implementation and a
   `.md` description file in `internal/agent/tools/`.
 - **System prompts are Go templates**: `internal/agent/templates/*.md.tpl`
@@ -77,12 +87,10 @@ internal/
 
 - **Build**: `go build .` or `go run .`
 - **Test**: `task test` or `go test ./...` (run single test:
-  `go test ./internal/llm/prompt -run TestGetContextFromPaths`)
+  `go test ./internal/agent -run TestApplyTruncatedToolResults`)
 - **Update Golden Files**: `go test ./... -update` (regenerates `.golden`
-  files when test output changes)
-  - Update specific package:
-    `go test ./internal/tui/components/core -update` (in this case,
-    we're updating "core")
+  files when test output changes; e.g.
+  `go test ./internal/ui/diffview -update`)
 - **Lint**: `task lint:fix`
 - **Format**: `task fmt` (`gofumpt -w .`)
 - **Modernize**: `task modernize` (runs `modernize` which makes code
@@ -91,73 +99,28 @@ internal/
 
 ## Code Style Guidelines
 
-- **Imports**: Use `goimports` formatting, group stdlib, external, internal
-  packages.
-- **Formatting**: Use gofumpt (stricter than gofmt), enabled in
-  golangci-lint.
-- **Naming**: Standard Go conventions — PascalCase for exported, camelCase
-  for unexported.
-- **Types**: Prefer explicit types, use type aliases for clarity (e.g.,
-  `type AgentName string`).
-- **Error handling**: Return errors explicitly, use `fmt.Errorf` for
-  wrapping.
-- **Context**: Always pass `context.Context` as first parameter for
-  operations.
-- **Interfaces**: Define interfaces in consuming packages, keep them small
-  and focused.
-- **Structs**: Use struct embedding for composition, group related fields.
-- **Constants**: Use typed constants with iota for enums, group in const
-  blocks.
+Standard Go conventions apply and are not restated here. Project-specific
+rules:
+
+- **Formatting**: ALWAYS format Go code you write. Use gofumpt (stricter than
+  gofmt; `task fmt` runs `gofumpt -w .`); fall back to `goimports`, then
+  `gofmt`, if gofumpt is unavailable.
 - **Testing**: Use testify's `require` package, parallel tests with
-  `t.Parallel()`, `t.SetEnv()` to set environment variables. Always use
-  `t.Tempdir()` when in need of a temporary directory. This directory does
-  not need to be removed.
+  `t.Parallel()`, `t.Setenv()` for environment variables, and `t.TempDir()`
+  for temporary directories (no cleanup needed).
 - **JSON tags**: Use snake_case for JSON field names.
-- **File permissions**: Use octal notation (0o755, 0o644) for file
-  permissions.
-- **Log messages**: Log messages must start with a capital letter (e.g.,
-  "Failed to save session" not "failed to save session").
-  - This is enforced by `task lint:log` which runs as part of `task lint`.
-- **Comments**: End comments in periods unless comments are at the end of the
-  line.
+- **Log messages**: Must start with a capital letter (e.g., "Failed to save
+  session", not "failed to save session"). Enforced by `task lint:log`
+  (part of `task lint`).
+- **Comments**: Own-line comments start with a capital letter and end with a
+  period; wrap at 78 columns. End-of-line comments need no period.
 
 ## Testing with Mock Providers
 
-When writing tests that involve provider configurations, use the mock
-providers to avoid API calls:
-
-```go
-func TestYourFunction(t *testing.T) {
-    // Enable mock providers for testing
-    originalUseMock := config.UseMockProviders
-    config.UseMockProviders = true
-    defer func() {
-        config.UseMockProviders = originalUseMock
-        config.ResetProviders()
-    }()
-
-    // Reset providers to ensure fresh mock data
-    config.ResetProviders()
-
-    // Your test code here - providers will now return mock data
-    providers := config.Providers()
-    // ... test logic
-}
-```
-
-## Formatting
-
-- ALWAYS format any Go code you write.
-  - First, try `gofumpt -w .`.
-  - If `gofumpt` is not available, use `goimports`.
-  - If `goimports` is not available, use `gofmt`.
-  - You can also use `task fmt` to run `gofumpt -w .` on the entire project,
-    as long as `gofumpt` is on the `PATH`.
-
-## Comments
-
-- Comments that live on their own lines should start with capital letters and
-  end with periods. Wrap comments at 78 columns.
+Tests that need provider configurations inject mock clients rather than
+hitting the network — see `mockCatwalkClient` / `mockHyperClient` and
+`TestProviders_Integration_WithMockClients` in
+`internal/config/provider_test.go` for the pattern.
 
 ## Committing
 

@@ -163,6 +163,11 @@ func (a *AssistantMessageItem) ID() string {
 	return a.message.ID
 }
 
+// Message returns the underlying message for this assistant item.
+func (a *AssistantMessageItem) Message() *message.Message {
+	return a.message
+}
+
 // RawRender implements [MessageItem].
 func (a *AssistantMessageItem) RawRender(width int) string {
 	cappedWidth := cappedMessageWidth(width)
@@ -255,7 +260,26 @@ func (a *AssistantMessageItem) SetLoadingStateVisible(visible bool) {
 	a.invalidateCache()
 }
 
-// renderMessageContent renders the message content including thinking, main content, and finish reason.
+// renderThinkingIndicator renders a compact indicator line for reasoning content.
+// It is shown when the thinking block is collapsed to avoid cluttering the chat
+// with long reasoning text.
+func (a *AssistantMessageItem) renderThinkingIndicator(width int) string {
+	duration := a.message.ThinkingDuration()
+	var label string
+	switch {
+	case a.isSpinning():
+		label = "Thinking..."
+	case duration.String() != "0s":
+		label = fmt.Sprintf("Thought for %s", duration.String())
+	default:
+		label = "Reasoning"
+	}
+	hint := a.sty.Chat.Message.ThinkingIndicator.Render(label + " (Ctrl+O to view)")
+	result := a.sty.Chat.Message.ThinkingBox.Width(width).Render(hint)
+	a.thinkingBoxHeight = lipgloss.Height(result)
+	return result
+}
+
 func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	var messageParts []string
 
@@ -276,9 +300,16 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	if display, ok := agent.RetryStatusDisplayText(content); ok {
 		content = display
 	}
-	// if the massage has reasoning content add that first
+	// If there is reasoning content, show either a compact indicator (when
+	// collapsed) or the full thinking block (when expanded). The full block is
+	// no longer rendered by default to keep long conversations readable and
+	// fast; press Ctrl+O or click the indicator to view the reasoning.
 	if thinking != "" {
-		messageParts = append(messageParts, a.renderThinking(thinking, width))
+		if a.thinkingExpanded {
+			messageParts = append(messageParts, a.renderThinking(thinking, width))
+		} else {
+			messageParts = append(messageParts, a.renderThinkingIndicator(width))
+		}
 	}
 
 	// then add the main content

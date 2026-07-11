@@ -397,6 +397,68 @@ func (a *sessionAgent) truncateOversizedToolResults(ctx context.Context, session
 	return nil
 }
 
+// applyTruncatedToolResults replaces the Output of tool-result message parts
+// whose ToolCallID has a recorded truncated version in truncated, so that the
+// messages actually sent to the model match what enforceStepToolResultBudget
+// / truncateToolResult persisted to the session store in OnToolResult.
+//
+// Background: fantasy accumulates its own internal response-message history
+// across steps of a single run (see fantasy/agent.go's Stream loop), and that
+// history always carries the full, untruncated tool output — the truncation
+// that happens in OnToolResult only affects the copy written to the message
+// store, not fantasy's internal copy. Without this replacement, every
+// subsequent step of a run would resend the full untruncated tool output to
+// the model even though the store (and any post-restart history rebuild)
+// only ever contains the truncated version.
+//
+// messages is not mutated in place: when a replacement is needed, the
+// function returns a new slice with shallow copies of the affected messages
+// (and their Content slices); messages that need no changes are left as-is.
+// If truncated is empty or nothing matches, the original slice is returned
+// unchanged.
+func applyTruncatedToolResults(messages []fantasy.Message, truncated map[string]string) []fantasy.Message {
+	if len(truncated) == 0 || len(messages) == 0 {
+		return messages
+	}
+
+	var out []fantasy.Message
+	for i, msg := range messages {
+		if msg.Role != fantasy.MessageRoleTool {
+			continue
+		}
+		for j, part := range msg.Content {
+			trPart, ok := part.(fantasy.ToolResultPart)
+			if !ok {
+				continue
+			}
+			replacement, ok := truncated[trPart.ToolCallID]
+			if !ok {
+				continue
+			}
+			// enforceStepToolResultBudget/truncateToolResult never touch
+			// error, media, or provider-executed results (they bail out
+			// early for those), so only text outputs should ever land in
+			// the map. Guard defensively in case that invariant changes.
+			textOutput, isText := trPart.Output.(fantasy.ToolResultOutputContentText)
+			if !isText || textOutput.Text == replacement {
+				continue
+			}
+
+			if out == nil {
+				out = append(out, messages...)
+			}
+			newContent := append([]fantasy.MessagePart(nil), out[i].Content...)
+			trPart.Output = fantasy.ToolResultOutputContentText{Text: replacement}
+			newContent[j] = trPart
+			out[i].Content = newContent
+		}
+	}
+	if out == nil {
+		return messages
+	}
+	return out
+}
+
 // enforceMessageToolResultBudgets scans all tool messages in the session and
 // applies the aggregate message-level budget to groups of tool results that
 // belong to the same API-level message (consecutive tool messages).

@@ -277,6 +277,17 @@ type UI struct {
 	height int
 	layout uiLayout
 
+	// scrollToBottomRect is the screen area of the "scroll to bottom" button.
+	// It is set in Draw and checked in mouse handling.
+	scrollToBottomRect image.Rectangle
+
+	// scrollbarDrag tracks an active scrollbar drag. dragOffset is the distance
+	// from the top of the scrollbar thumb to the cursor at the start of the drag.
+	scrollbarDrag struct {
+		active     bool
+		dragOffset int
+	}
+
 	isTransparent bool
 
 	focus uiFocusState
@@ -1125,6 +1136,19 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 		case uiChat:
+			// Handle the "scroll to bottom" button click before passing to the chat.
+			if !m.scrollToBottomRect.Empty() && image.Pt(msg.X, msg.Y).In(m.scrollToBottomRect) {
+				m.chat.ScrollToBottom()
+				return m, tea.Sequence(cmds...)
+			}
+
+			// Handle scrollbar press/drag start.
+			if !m.chat.ScrollbarRect().Empty() && image.Pt(msg.X, msg.Y).In(m.chat.ScrollbarRect()) {
+				if m.handleScrollbarClick(msg.Y) {
+					return m, tea.Sequence(cmds...)
+				}
+			}
+
 			x, y := msg.X, msg.Y
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
@@ -1175,6 +1199,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+			// If a scrollbar drag is active, update the scroll position from
+			// the cursor and skip the normal chat drag handling.
+			if m.scrollbarDrag.active {
+				m.handleScrollbarDrag(msg.Y)
+				return m, tea.Sequence(cmds...)
+			}
+
 			x, y := msg.X, msg.Y
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
@@ -1191,6 +1222,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 		case uiChat:
+			// End an active scrollbar drag before handling mouse up in the chat.
+			if m.scrollbarDrag.active {
+				m.scrollbarDrag.active = false
+				return m, tea.Sequence(cmds...)
+			}
+
 			x, y := msg.X, msg.Y
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
@@ -3814,6 +3851,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.moveQueueSelection(1)
 			case key.Matches(msg, m.keyMap.Chat.Expand):
 				m.chat.ToggleExpandedSelectedItem()
+			case key.Matches(msg, m.keyMap.Chat.OpenThinking):
+				if cmd := m.openThinkingDialog(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			case key.Matches(msg, m.keyMap.Chat.Up):
 				if cmd := m.chat.ScrollByAndAnimate(-1); cmd != nil {
 					cmds = append(cmds, cmd)
@@ -3906,6 +3947,102 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 	)
 }
 
+// drawScrollToBottomButton draws a small "scroll to bottom" button in the
+// bottom-right corner of the chat area when the view is not already at the
+// bottom.
+func (m *UI) drawScrollToBottomButton(scr uv.Screen, area uv.Rectangle) {
+	m.scrollToBottomRect = image.Rectangle{}
+
+	if m.chat.AtBottom() || m.chat.Len() == 0 {
+		return
+	}
+
+	const buttonText = "↓"
+	button := m.com.Styles.ButtonBlur.Padding(0, 1).Render(buttonText)
+	buttonWidth := lipgloss.Width(button)
+	buttonHeight := lipgloss.Height(button)
+
+	x := area.Max.X - buttonWidth
+	y := area.Max.Y - buttonHeight
+	if x < area.Min.X || y < area.Min.Y {
+		return
+	}
+
+	buttonArea := image.Rectangle{
+		Min: image.Pt(x, y),
+		Max: image.Pt(x+buttonWidth, y+buttonHeight),
+	}
+	m.scrollToBottomRect = buttonArea
+	uv.NewStyledString(button).Draw(scr, buttonArea)
+}
+
+// handleScrollbarClick starts a scrollbar drag on press and jumps to the
+// clicked position when the click is on the track rather than the thumb.
+func (m *UI) handleScrollbarClick(y int) bool {
+	rect := m.chat.ScrollbarRect()
+	if rect.Empty() {
+		return false
+	}
+
+	relY := y - rect.Min.Y
+	viewportHeight := m.chat.ViewportHeight()
+	contentHeight := m.chat.ContentHeight()
+	if relY < 0 || relY >= viewportHeight || contentHeight <= viewportHeight {
+		return false
+	}
+
+	maxOffset := max(0, contentHeight-viewportHeight)
+	thumbSize := max(1, viewportHeight*viewportHeight/contentHeight)
+	trackSpace := max(1, viewportHeight-thumbSize)
+
+	currentOffset := m.chat.Offset()
+	thumbPos := 0
+	if maxOffset > 0 {
+		thumbPos = min(trackSpace, currentOffset*trackSpace/maxOffset)
+	}
+
+	onThumb := relY >= thumbPos && relY < thumbPos+thumbSize
+	if onThumb {
+		m.scrollbarDrag.active = true
+		m.scrollbarDrag.dragOffset = relY - thumbPos
+		return true
+	}
+
+	// Click on the track: jump to that position and start a drag.
+	targetOffset := relY * maxOffset / max(1, trackSpace)
+	targetOffset = max(0, min(targetOffset, maxOffset))
+	m.chat.SetScrollOffset(targetOffset)
+
+	m.scrollbarDrag.active = true
+	m.scrollbarDrag.dragOffset = 0
+	return true
+}
+
+// handleScrollbarDrag updates the chat scroll offset while the scrollbar is
+// being dragged. The scroll position follows the cursor while preserving the
+// initial offset within the thumb.
+func (m *UI) handleScrollbarDrag(y int) {
+	rect := m.chat.ScrollbarRect()
+	if rect.Empty() {
+		return
+	}
+
+	relY := y - rect.Min.Y
+	viewportHeight := m.chat.ViewportHeight()
+	contentHeight := m.chat.ContentHeight()
+	if viewportHeight <= 0 || contentHeight <= viewportHeight {
+		return
+	}
+
+	maxOffset := max(0, contentHeight-viewportHeight)
+	thumbSize := max(1, viewportHeight*viewportHeight/contentHeight)
+	trackSpace := max(1, viewportHeight-thumbSize)
+
+	targetOffset := (relY - m.scrollbarDrag.dragOffset) * maxOffset / max(1, trackSpace)
+	targetOffset = max(0, min(targetOffset, maxOffset))
+	m.chat.SetScrollOffset(targetOffset)
+}
+
 // Draw implements [uv.Drawable] and draws the UI model.
 func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	layout := m.generateLayout(area.Dx(), area.Dy())
@@ -3954,6 +4091,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		}
 
 		m.chat.Draw(scr, layout.main)
+		m.drawScrollToBottomButton(scr, layout.main)
 		if layout.pills.Dy() > 0 && m.pillsView != "" {
 			uv.NewStyledString(m.pillsView).Draw(scr, layout.pills)
 		}
@@ -4428,8 +4566,8 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	// The help height
 	helpHeight := 1
 	// The editor height includes the dynamic textarea, optional attachments row,
-	// and bottom spacing.
-	editorHeight := m.textarea.Height() + editorBottomMargin + m.editorTopMarginRows()
+	// optional thinking status line, and bottom spacing.
+	editorHeight := m.textarea.Height() + editorBottomMargin + m.editorTopMarginRows() + m.editorStatusLineRows()
 	// The sidebar width
 	sidebarWidth := 30
 	// The header height
@@ -4909,6 +5047,49 @@ func (m *UI) editorTopMarginRows() int {
 	return 0
 }
 
+// editorStatusLineRows returns the number of rows reserved for the agent
+// thinking status line displayed above the editor.
+func (m *UI) editorStatusLineRows() int {
+	if !m.isAgentBusy() {
+		return 0
+	}
+	msg := m.latestAssistantMessageWithReasoning()
+	if msg != nil && msg.IsThinking() {
+		return 1
+	}
+	return 0
+}
+
+// renderThinkingStatusLine renders the "Thinking • input / output / reasoning"
+// status line shown above the editor while the agent is streaming reasoning.
+func (m *UI) renderThinkingStatusLine(width int) string {
+	msg := m.latestAssistantMessageWithReasoning()
+	if msg == nil {
+		return ""
+	}
+	usage := msg.Usage
+	s := m.com.Styles
+	spinner := s.Dialog.PrimaryText.Render("Thinking")
+	line := fmt.Sprintf("%s  in %s  out %s  reasoning %s",
+		spinner,
+		formatTokenCount(usage.InputTokens),
+		formatTokenCount(usage.OutputTokens),
+		formatTokenCount(usage.ReasoningTokens),
+	)
+	return s.Muted.Width(width).Render(line)
+}
+
+// formatTokenCount formats a token count for display, abbreviating thousands.
+func formatTokenCount(n int64) string {
+	if n < 1000 {
+		return strconv.FormatInt(n, 10)
+	}
+	if n < 1_000_000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+}
+
 // hasSession returns true if there is an active session with a valid ID.
 func (m *UI) hasSession() bool {
 	return m.session != nil && m.session.ID != ""
@@ -5032,7 +5213,10 @@ func (m *UI) renderSubagentBanner(width int) string {
 
 // renderEditorView renders the editor view with attachments if any.
 func (m *UI) renderEditorView(width int) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
+	if m.editorStatusLineRows() > 0 {
+		parts = append(parts, m.renderThinkingStatusLine(width))
+	}
 	if m.attachments != nil && len(m.attachments.List()) > 0 {
 		parts = append(parts, m.attachments.Render(width))
 	}
@@ -5798,6 +5982,45 @@ func (m *UI) openReasoningDialog() tea.Cmd {
 	}
 
 	m.dialog.OpenDialog(reasoningDialog)
+	return nil
+}
+
+// openThinkingDialog opens the reasoning/thinking content for the currently
+// selected assistant message, or the most recent assistant message if no
+// assistant message is selected.
+func (m *UI) openThinkingDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.ThinkingID) {
+		m.dialog.BringToFront(dialog.ThinkingID)
+		return nil
+	}
+
+	msg := m.chat.SelectedAssistantMessage()
+	if msg == nil {
+		msg = m.latestAssistantMessageWithReasoning()
+	}
+	if msg == nil {
+		return util.ReportWarn("No reasoning content available.")
+	}
+	if msg.ReasoningContent().Thinking == "" {
+		return util.ReportWarn("No reasoning content available.")
+	}
+
+	m.dialog.OpenDialog(dialog.NewThinking(m.com, msg))
+	return nil
+}
+
+// latestAssistantMessageWithReasoning returns the most recent assistant
+// message in the current session that has reasoning content.
+func (m *UI) latestAssistantMessageWithReasoning() *message.Message {
+	if m.session == nil {
+		return nil
+	}
+	for i := len(m.sessionMessages) - 1; i >= 0; i-- {
+		msg := &m.sessionMessages[i]
+		if msg.Role == message.Assistant && msg.ReasoningContent().Thinking != "" {
+			return msg
+		}
+	}
 	return nil
 }
 

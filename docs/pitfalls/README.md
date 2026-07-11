@@ -18,3 +18,4 @@ When reviewing code or implementing new features, scan these documents for:
 ## Contents
 
 - [double-base64-encoding.md](double-base64-encoding.md) — Pre-encoding data before calling APIs that expect raw bytes
+- [fantasy-dual-message-state.md](fantasy-dual-message-state.md) — Mutating messages in callbacks/DB doesn't affect what fantasy sends in the current run

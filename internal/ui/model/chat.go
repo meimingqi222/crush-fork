@@ -1,11 +1,13 @@
 package model
 
 import (
+	"image"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -72,6 +74,10 @@ type Chat struct {
 	// follow is a flag to indicate whether the view should auto-scroll to
 	// bottom on new messages.
 	follow bool
+
+	// scrollbarRect is the screen area of the scrollbar, set by Draw and used
+	// for mouse interaction.
+	scrollbarRect image.Rectangle
 }
 
 // NewChat creates a new instance of [Chat] that handles chat interactions and
@@ -101,7 +107,50 @@ func (m *Chat) Height() int {
 
 // Draw renders the chat UI component to the screen and the given area.
 func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
+	m.scrollbarRect = image.Rectangle{}
 	uv.NewStyledString(m.list.Render()).Draw(scr, area)
+
+	// Draw a scrollbar on the right edge when the content overflows.
+	contentHeight := m.list.TotalContentHeight()
+	viewportHeight := m.list.Height()
+	if contentHeight > viewportHeight {
+		scrollbar := common.Scrollbar(m.com.Styles, viewportHeight, contentHeight, viewportHeight, m.list.Offset())
+		if scrollbar != "" {
+			scrollbarArea := image.Rectangle{
+				Min: image.Pt(area.Max.X-1, area.Min.Y),
+				Max: area.Max,
+			}
+			m.scrollbarRect = scrollbarArea
+			uv.NewStyledString(scrollbar).Draw(scr, scrollbarArea)
+		}
+	}
+}
+
+// ScrollbarRect returns the screen area of the scrollbar. It is valid after
+// Draw has been called and empty when no scrollbar is shown.
+func (m *Chat) ScrollbarRect() image.Rectangle {
+	return m.scrollbarRect
+}
+
+// ContentHeight returns the total height of the chat content in lines.
+func (m *Chat) ContentHeight() int {
+	return m.list.TotalContentHeight()
+}
+
+// ViewportHeight returns the height of the chat viewport in lines.
+func (m *Chat) ViewportHeight() int {
+	return m.list.Height()
+}
+
+// Offset returns the current scroll offset in lines from the top.
+func (m *Chat) Offset() int {
+	return m.list.Offset()
+}
+
+// SetScrollOffset scrolls the chat view to the given line offset.
+func (m *Chat) SetScrollOffset(offset int) {
+	m.list.SetOffset(offset)
+	m.follow = m.AtBottom()
 }
 
 // SetSize sets the size of the chat view port.
@@ -508,6 +557,23 @@ func (m *Chat) ScrollToSelectedAndAnimate() tea.Cmd {
 // SelectedItemInView returns whether the selected item is currently in view.
 func (m *Chat) SelectedItemInView() bool {
 	return m.list.SelectedItemInView()
+}
+
+// SelectedAssistantMessage returns the message of the currently selected
+// assistant item, or nil if the selected item is not an assistant message.
+func (m *Chat) SelectedAssistantMessage() *message.Message {
+	item := m.list.SelectedItem()
+	if item == nil {
+		return nil
+	}
+	assistant, ok := item.(chat.MessageItem)
+	if !ok {
+		return nil
+	}
+	if ai, ok := assistant.(*chat.AssistantMessageItem); ok {
+		return ai.Message()
+	}
+	return nil
 }
 
 func (m *Chat) isSelectable(index int) bool {

@@ -245,6 +245,7 @@ type Styles struct {
 			ThinkingTruncationHint lipgloss.Style // "… (N lines hidden)" hint
 			ThinkingFooterTitle    lipgloss.Style // "Thought for" text
 			ThinkingFooterDuration lipgloss.Style // Duration value
+			ThinkingIndicator      lipgloss.Style // Compact "Thought for... (Ctrl+O)" line
 
 			// Summary section styles
 			SummaryBox            lipgloss.Style // Body box for summary content
@@ -1303,6 +1304,7 @@ func DefaultStyles() Styles {
 	s.Chat.Message.ThinkingTruncationHint = s.Muted
 	s.Chat.Message.ThinkingFooterTitle = s.Muted
 	s.Chat.Message.ThinkingFooterDuration = s.Subtle
+	s.Chat.Message.ThinkingIndicator = s.Muted
 
 	// Summary section styles
 	s.Chat.Message.SummaryBox = lipgloss.NewStyle().
