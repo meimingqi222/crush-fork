@@ -234,8 +234,10 @@ type (
 	idleRecapTickMsg struct{ seq uint64 }
 	// idleRecapResultMsg carries the recap text back to the Update loop.
 	idleRecapResultMsg struct {
-		recap string
-		err   error
+		seq       uint64
+		sessionID string
+		recap     string
+		err       error
 	}
 )
 
@@ -1094,7 +1096,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Drop stale results: if the agent is already running again the user
 		// is active and does not need a recap painted over their session.
-		if msg.recap != "" && !m.agentRunInProgress {
+		// Also guard against session switches so a recap from a previous
+		// session is not shown in the current one.
+		if msg.seq == m.idleRecapSeq && m.hasSession() && m.session.ID == msg.sessionID && !m.agentRunInProgress && msg.recap != "" {
 			cmds = append(cmds, func() tea.Msg {
 				return util.InfoMsg{
 					Type: util.InfoTypeInfo,
@@ -5367,11 +5371,12 @@ func (m *UI) runIdleRecapCmd() tea.Cmd {
 	}
 	sessionID := m.session.ID
 	coordinator := m.com.App.AgentCoordinator
+	seq := m.idleRecapSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		recap, err := coordinator.RecapSession(ctx, sessionID)
-		return idleRecapResultMsg{recap: recap, err: err}
+		return idleRecapResultMsg{seq: seq, sessionID: sessionID, recap: recap, err: err}
 	}
 }
 
