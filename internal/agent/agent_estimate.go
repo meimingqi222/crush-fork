@@ -71,6 +71,10 @@ func promptTokensForUsage(usage fantasy.Usage, providerID string) int64 {
 	}
 	// fantasy/providers/openai normalizes InputTokens by subtracting
 	// CacheReadTokens for both Chat Completions and Responses usage.
+	// It does NOT populate CacheCreationTokens for OpenAI/Response providers,
+	// so adding CacheCreationTokens here is a no-op today. If it ever starts
+	// filling CacheCreationTokens, this formula must be updated to avoid
+	// double-counting cache creation.
 	if isOpenAIUsageProvider(providerID) {
 		return usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	}
@@ -323,7 +327,35 @@ func estimatePromptTokens(messages []fantasy.Message, tools []fantasy.AgentTool)
 	return totalTokens
 }
 
-func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimatedPromptTokens int64, estimated bool) {
+// usageRecordPurpose classifies why an LLM call happened so
+// updateSessionUsage can decide which session fields it is allowed to
+// touch. This is the single write point for conversation and maintenance
+// calls; Summarize is responsible for recomputing the post-compaction
+// baseline (PromptTokens / LastPromptTokens / LastCompletionTokens)
+// after its usage is recorded.
+type usageRecordPurpose int
+
+const (
+	// usagePurposeConversation marks a real conversation step (the main
+	// agent loop). Its reported prompt tokens are the authoritative "current
+	// context length" and update Cost, CompletionTokens, LastPromptTokens,
+	// and LastCompletionTokens.
+	usagePurposeConversation usageRecordPurpose = iota
+	// usagePurposeSummarize marks a compaction/summarize call. The cost and
+	// completion tokens it incurred are real and must be recorded, but its
+	// own prompt tokens describe the *pre-compaction* history, not the
+	// current context, so they must never overwrite LastPromptTokens /
+	// LastCompletionTokens. The caller (Summarize) recomputes those fields
+	// from the retained post-compaction messages once the summary is
+	// committed.
+	usagePurposeSummarize
+	// usagePurposeMaintenance marks auxiliary calls (title generation,
+	// memory extraction, ...). Only Cost and CompletionTokens are recorded;
+	// none of the context-length fields are touched.
+	usagePurposeMaintenance
+)
+
+func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimatedPromptTokens int64, estimated bool, purpose usageRecordPurpose) {
 	modelConfig := model.CatwalkCfg
 	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
 		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
@@ -342,10 +374,30 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 		session.Cost += cost
 	}
 
-	normalizedUsage := normalizedMessageUsage(usage, usageProvider(model), estimatedPromptTokens)
-	promptTokens := normalizedUsage.PromptTokens()
-
+	// Cost and cumulative CompletionTokens are real for every purpose: the
+	// call happened and consumed output tokens regardless of why it was
+	// made.
 	session.CompletionTokens += usage.OutputTokens
+
+	if purpose == usagePurposeMaintenance {
+		// Maintenance calls (title generation, memory extraction, ...) are
+		// billable but must never influence "current context length"
+		// bookkeeping used for display and auto-summarize thresholds.
+		return
+	}
+
+	normalizedUsage := normalizedMessageUsage(usage, usageProvider(model), estimatedPromptTokens)
+
+	if purpose == usagePurposeSummarize {
+		// The summarize call's own prompt tokens reflect the
+		// pre-compaction history, not the post-compaction context. Do not
+		// touch PromptTokens/LastPromptTokens/LastCompletionTokens here;
+		// the caller (Summarize) recomputes them from the retained
+		// messages once the summary is committed.
+		return
+	}
+
+	promptTokens := normalizedUsage.PromptTokens()
 	// PromptTokens tracks the current context length (the full input sent in
 	// the latest exchange), not a sum across exchanges. Provider usage reports
 	// the total input for each request, which already includes all history, so

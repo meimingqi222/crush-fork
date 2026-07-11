@@ -174,7 +174,7 @@ func TestUpdateSessionUsageIncludesEstimatedCost(t *testing.T) {
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 	usage := fantasy.Usage{InputTokens: 1000, OutputTokens: 2000}
 
-	agent.updateSessionUsage(model, currentSession, usage, nil, 0, true)
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, true, usagePurposeConversation)
 
 	require.Equal(t, 1.30, currentSession.Cost)
 	require.Equal(t, int64(1000), currentSession.PromptTokens)
@@ -194,7 +194,7 @@ func TestUpdateSessionUsageKeepsCountersForZeroUsage(t *testing.T) {
 	}
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 
-	agent.updateSessionUsage(model, currentSession, fantasy.Usage{}, nil, 0, false)
+	agent.updateSessionUsage(model, currentSession, fantasy.Usage{}, nil, 0, false, usagePurposeConversation)
 
 	require.Equal(t, 1.25, currentSession.Cost)
 	require.Equal(t, int64(123), currentSession.PromptTokens)
@@ -213,7 +213,7 @@ func TestUpdateSessionUsagePreservesOmittedCountersForPartialUsage(t *testing.T)
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 	usage := fantasy.Usage{InputTokens: 789}
 
-	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false)
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeConversation)
 
 	// PromptTokens reflects the current step's input tokens, not a cumulative
 	// sum, so it is set to the reported input count rather than added to the
@@ -234,7 +234,7 @@ func TestUpdateSessionUsagePreservesCountersForTotalOnlyUsage(t *testing.T) {
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 	usage := fantasy.Usage{TotalTokens: 100}
 
-	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false)
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeConversation)
 
 	require.Equal(t, int64(123), currentSession.PromptTokens)
 	require.Equal(t, int64(456), currentSession.CompletionTokens)
@@ -252,7 +252,7 @@ func TestUpdateSessionUsagePreservesPromptForOutputOnlyUsage(t *testing.T) {
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 	usage := fantasy.Usage{OutputTokens: 50}
 
-	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false)
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeConversation)
 
 	require.Equal(t, int64(123), currentSession.PromptTokens)
 	require.Equal(t, int64(506), currentSession.CompletionTokens)
@@ -270,7 +270,7 @@ func TestUpdateSessionUsageKeepsCountersForEstimatedZeroUsage(t *testing.T) {
 	}
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 
-	agent.updateSessionUsage(model, currentSession, fantasy.Usage{}, nil, 0, true)
+	agent.updateSessionUsage(model, currentSession, fantasy.Usage{}, nil, 0, true, usagePurposeConversation)
 
 	require.Equal(t, 1.25, currentSession.Cost)
 	require.Equal(t, int64(123), currentSession.PromptTokens)
@@ -300,10 +300,74 @@ func TestUpdateSessionUsageAddsProviderCost(t *testing.T) {
 	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
 	usage := fantasy.Usage{InputTokens: 1000, OutputTokens: 2000}
 
-	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false)
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeConversation)
 
 	require.Equal(t, 1.3, currentSession.Cost)
 	require.Equal(t, int64(1000), currentSession.PromptTokens)
 	require.Equal(t, int64(2000), currentSession.CompletionTokens)
 	require.False(t, currentSession.EstimatedUsage)
+}
+
+// TestUpdateSessionUsage_SummarizePurposeDoesNotOverwriteLastPromptTokens is
+// a Phase D invariant test for docs/refactor-context-usage-accounting.md: a
+// Summarize-purpose usage record must never let its own (potentially huge,
+// pre-compaction) prompt token count leak into LastPromptTokens /
+// LastCompletionTokens. Only Cost and cumulative CompletionTokens are real
+// side effects of the call.
+func TestUpdateSessionUsage_SummarizePurposeDoesNotOverwriteLastPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	agent := &sessionAgent{}
+	currentSession := &session.Session{
+		ID:                   "session-id",
+		PromptTokens:         500,
+		LastPromptTokens:     500,
+		LastCompletionTokens: 20,
+		CompletionTokens:     100,
+		Cost:                 1.0,
+	}
+	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
+
+	// A huge input token count, as a real summarize/compaction call would
+	// report: it sends the entire pre-compaction history as its prompt.
+	usage := fantasy.Usage{InputTokens: 1_000_000, OutputTokens: 300}
+
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeSummarize)
+
+	require.Equal(t, int64(500), currentSession.PromptTokens,
+		"PromptTokens must not be overwritten by the summarize call's own huge prompt")
+	require.Equal(t, int64(500), currentSession.LastPromptTokens,
+		"LastPromptTokens must not be overwritten by the summarize call's own huge prompt")
+	require.Equal(t, int64(20), currentSession.LastCompletionTokens,
+		"LastCompletionTokens must not be touched by updateSessionUsage for Summarize purpose")
+	// Cost and cumulative CompletionTokens are real and must still be recorded.
+	require.Greater(t, currentSession.Cost, 1.0)
+	require.Equal(t, int64(400), currentSession.CompletionTokens)
+}
+
+// TestUpdateSessionUsage_MaintenancePurposeOnlyRecordsCost is a Phase D
+// invariant test: a Maintenance-purpose usage record (title generation,
+// memory extraction, ...) must leave every context-length field untouched.
+func TestUpdateSessionUsage_MaintenancePurposeOnlyRecordsCost(t *testing.T) {
+	t.Parallel()
+
+	agent := &sessionAgent{}
+	currentSession := &session.Session{
+		ID:                   "session-id",
+		PromptTokens:         500,
+		LastPromptTokens:     500,
+		LastCompletionTokens: 20,
+		CompletionTokens:     100,
+		Cost:                 1.0,
+	}
+	model := Model{CatwalkCfg: catwalk.Model{CostPer1MIn: 10, CostPer1MOut: 20}}
+	usage := fantasy.Usage{InputTokens: 50_000, OutputTokens: 300}
+
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeMaintenance)
+
+	require.Equal(t, int64(500), currentSession.PromptTokens)
+	require.Equal(t, int64(500), currentSession.LastPromptTokens)
+	require.Equal(t, int64(20), currentSession.LastCompletionTokens)
+	require.Greater(t, currentSession.Cost, 1.0)
+	require.Equal(t, int64(400), currentSession.CompletionTokens)
 }

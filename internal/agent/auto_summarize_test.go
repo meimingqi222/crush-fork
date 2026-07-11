@@ -421,7 +421,16 @@ func TestRunFallbackEstimateIncludesSystemPromptAndUserPrompt(t *testing.T) {
 	require.Equal(t, expected, savedSession.LastPromptTokens)
 }
 
-func TestSummarizeFallbackEstimateIncludesFullSummaryRequest(t *testing.T) {
+// TestSummarizeDoesNotLeakFullSummaryRequestIntoLastPromptTokens replaces the
+// former TestSummarizeFallbackEstimateIncludesFullSummaryRequest, which
+// asserted the old buggy behavior: LastPromptTokens ending up equal to the
+// *full* summarize request estimate (system prompt + prefix + entire
+// pre-compaction history). That is exactly the root cause described in
+// docs/refactor-context-usage-accounting.md -- it made the post-compaction
+// context display jump above 100%. After the Phase A purpose-tagging fix,
+// LastPromptTokens must instead reflect only the retained post-compaction
+// messages (here, just the summary message).
+func TestSummarizeDoesNotLeakFullSummaryRequestIntoLastPromptTokens(t *testing.T) {
 	plugin.Reset()
 	t.Cleanup(plugin.Reset)
 
@@ -446,7 +455,9 @@ func TestSummarizeFallbackEstimateIncludesFullSummaryRequest(t *testing.T) {
 	require.NoError(t, err)
 	aiMsgs, _ := concrete.preparePrompt(msgs)
 
-	expected := concrete.estimateSessionPromptTokens(
+	// This is the pre-compaction request size the old (buggy) code used to
+	// write into LastPromptTokens.
+	fullSummaryRequestEstimate := concrete.estimateSessionPromptTokens(
 		aiMsgs,
 		buildSessionCompactingPrompt(nil, nil, ""),
 		nil,
@@ -461,7 +472,71 @@ func TestSummarizeFallbackEstimateIncludesFullSummaryRequest(t *testing.T) {
 
 	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
 	require.NoError(t, err)
-	require.Equal(t, expected, savedSession.LastPromptTokens)
+
+	require.NotEqual(t, fullSummaryRequestEstimate, savedSession.LastPromptTokens,
+		"LastPromptTokens must not equal the pre-compaction summarize request size")
+	require.Less(t, savedSession.LastPromptTokens, fullSummaryRequestEstimate,
+		"LastPromptTokens must be smaller than the pre-compaction summarize request size after compaction")
+
+	retainedMsgs, err := concrete.getSessionMessages(t.Context(), savedSession)
+	require.NoError(t, err)
+	expectedBaseline := concrete.estimatePromptForMessages(retainedMsgs)
+	require.Equal(t, expectedBaseline, savedSession.LastPromptTokens,
+		"LastPromptTokens must be recomputed from the retained post-compaction messages")
+	require.Zero(t, savedSession.LastCompletionTokens,
+		"LastCompletionTokens must be reset to 0 after compaction")
+}
+
+// TestSummarizeShrinksLastTotalTokensBelowPreCompactionValue is a Phase D
+// invariant test for docs/refactor-context-usage-accounting.md: after a
+// successful compaction, session.LastTotalTokens() (the value the UI uses
+// for the context-usage percentage) must be strictly smaller than the
+// pre-compaction value that triggered summarization, and must match the
+// local estimate of the retained post-compaction messages (summary + any
+// tail) within a reasonable margin.
+func TestSummarizeShrinksLastTotalTokensBelowPreCompactionValue(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "shrink after compaction")
+	require.NoError(t, err)
+
+	// Build a long history so the pre-compaction context is large, mirroring
+	// what actually triggers auto-summarization in production.
+	for i := 0; i < 20; i++ {
+		_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+			Role:  message.User,
+			Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("long conversation history ", 500)}},
+		})
+		require.NoError(t, err)
+	}
+
+	const preCompactionLastPromptTokens = 180_000
+	testSession.LastPromptTokens = preCompactionLastPromptTokens
+	testSession.LastCompletionTokens = 500
+	testSession, err = env.sessions.Save(t.Context(), testSession)
+	require.NoError(t, err)
+	preCompactionTotal := testSession.LastTotalTokens()
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 200_000)
+	concrete := agentUnderTest.(*sessionAgent)
+
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+
+	require.Less(t, savedSession.LastTotalTokens(), preCompactionTotal,
+		"LastTotalTokens must shrink after compaction, not stay at (or exceed) the pre-compaction size")
+
+	retainedMsgs, err := concrete.getSessionMessages(t.Context(), savedSession)
+	require.NoError(t, err)
+	expectedBaseline := concrete.estimatePromptForMessages(retainedMsgs)
+	require.InDelta(t, float64(expectedBaseline), float64(savedSession.LastTotalTokens()), float64(expectedBaseline)*0.1+10,
+		"LastTotalTokens must closely track the local estimate of the retained (summary + tail) messages")
 }
 
 func TestSummarizePublishesProvisionalSummaryUsage(t *testing.T) {

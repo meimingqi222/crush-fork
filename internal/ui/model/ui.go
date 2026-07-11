@@ -1441,6 +1441,17 @@ func (m *UI) appendCurrentSessionMessage(msg message.Message) {
 	m.sessionMessages = append(m.sessionMessages, msg)
 }
 
+func (m *UI) sessionMessageIndex(messageID string) int {
+	if m.sessionMsgIndex == nil {
+		return -1
+	}
+	i, ok := m.sessionMsgIndex[messageID]
+	if !ok {
+		return -1
+	}
+	return i
+}
+
 func (m *UI) updateCurrentSessionMessage(msg message.Message) {
 	if m.sessionMsgIndex == nil {
 		m.sessionMsgIndex = make(map[string]int, len(m.sessionMessages))
@@ -2052,13 +2063,24 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 			assistantItem.SetMessage(&msg)
 		}
 	} else if shouldRenderAssistant {
+		var toInsert []chat.MessageItem
+		if msg.IsFinished() {
+			if idx := m.sessionMessageIndex(msg.ID); idx >= 0 {
+				if prev, ok := chat.AssistantUsageBefore(m.sessionMessages, idx); ok {
+					if n, hit := agent.DetectCacheInvalidation(prev, msg.Usage); hit {
+						toInsert = append(toInsert, chat.NewCacheMissDividerItem(m.com.Styles, msg.ID, n))
+					}
+				}
+			}
+		}
 		assistantItem := chat.NewAssistantMessageItem(m.com.Styles, &msg)
+		toInsert = append(toInsert, assistantItem)
 		inserted := false
 		if toolCalls := msg.ToolCalls(); len(toolCalls) > 0 {
-			inserted = m.chat.InsertMessagesBefore(toolCalls[0].ID, assistantItem)
+			inserted = m.chat.InsertMessagesBefore(toolCalls[0].ID, toInsert...)
 		}
 		if !inserted {
-			m.chat.AppendMessages(assistantItem)
+			m.chat.AppendMessages(toInsert...)
 		}
 		if cmd := m.startAnimations([]chat.MessageItem{assistantItem}); cmd != nil {
 			cmds = append(cmds, cmd)

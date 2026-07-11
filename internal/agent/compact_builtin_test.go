@@ -190,3 +190,22 @@ func TestBuiltinPruneToolResults_PreservesErrorToolResults(t *testing.T) {
 		}
 	}
 }
+
+func TestBuiltinPruneSkipsCacheProtectedMessages(t *testing.T) {
+	t.Parallel()
+
+	longContent := strings.Repeat("x", 50000)
+	msgs := []message.Message{
+		makeUserMsg(),
+		makeAssistantMsg(),
+		makeUserMsg(),
+		makeAssistantMsg(),
+		makeUserMsg(),
+		makeAssistantMsg(),
+		makeToolMsg(longContent),
+	}
+	protected := map[int]struct{}{6: {}}
+	result := builtinPruneToolResultsWithProtection(msgs, nil, protected)
+	tr := result[6].Parts[0].(message.ToolResult)
+	require.Equal(t, longContent, tr.Content)
+}

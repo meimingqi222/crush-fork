@@ -144,22 +144,13 @@ func TestCacheControlPeriodicBreakpoints(t *testing.T) {
 		}
 	}
 
-	// Main system prompt + periodic breakpoints every cacheBreakpointInterval
-	// messages + last 2 messages.
+	// Main system prompt + last 2 messages + at most 1 periodic boundary.
+	// Total must not exceed maxCacheBreakpoints (4).
 	require.NotEmpty(t, cacheIndices)
 	require.Equal(t, 0, cacheIndices[0], "main system prompt should be cached")
 	require.Contains(t, cacheIndices, len(prepared)-1, "last message should be cached")
 	require.Contains(t, cacheIndices, len(prepared)-2, "second-to-last message should be cached")
-
-	for i := 1; i < len(cacheIndices); i++ {
-		if cacheIndices[i] == len(prepared)-1 || cacheIndices[i] == len(prepared)-2 {
-			continue
-		}
-		// Periodic breakpoints are spaced by cacheBreakpointInterval after the
-		// main system prompt.
-		diff := cacheIndices[i] - cacheIndices[i-1]
-		require.Equal(t, cacheBreakpointInterval, diff, "periodic breakpoints should be spaced by cacheBreakpointInterval")
-	}
+	require.LessOrEqual(t, len(cacheIndices), maxCacheBreakpoints, "breakpoint count must not exceed Anthropic's limit")
 }
 
 func TestAutoModeReminderAsPromptSuffix(t *testing.T) {

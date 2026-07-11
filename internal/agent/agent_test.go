@@ -481,7 +481,7 @@ func TestUpdateSessionUsage_AccumulatesTotals(t *testing.T) {
 		OutputTokens:        45,
 	}
 
-	agent.updateSessionUsage(model, &sess, usage, nil, 0, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, 0, false, usagePurposeConversation)
 
 	// PromptTokens tracks the current step's input tokens (current context
 	// length), not a cumulative sum, to avoid double-counting history.
@@ -510,7 +510,7 @@ func TestUpdateSessionUsage_AccumulatesTotals_AnthropicSDKProviderName(t *testin
 		OutputTokens:        45,
 	}
 
-	agent.updateSessionUsage(model, &sess, usage, nil, 0, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, 0, false, usagePurposeConversation)
 
 	// Model.Provider() = "@ai-sdk/anthropic" should be treated as Anthropic-style usage.
 	require.Equal(t, int64(1320), sess.PromptTokens)
@@ -535,7 +535,7 @@ func TestUpdateSessionUsage_AccumulatesTotals_OpenAI(t *testing.T) {
 		OutputTokens:        45,
 	}
 
-	agent.updateSessionUsage(model, &sess, usage, nil, 0, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, 0, false, usagePurposeConversation)
 
 	// PromptTokens tracks the current step's input tokens, not a cumulative sum.
 	require.Equal(t, int64(1320), sess.PromptTokens)
@@ -562,11 +562,11 @@ func TestUpdateSessionUsage_LastPromptTokensIsSetNotAccumulated(t *testing.T) {
 		OutputTokens: 180,
 	}
 
-	agent.updateSessionUsage(model, &sess, firstUsage, nil, 0, false)
+	agent.updateSessionUsage(model, &sess, firstUsage, nil, 0, false, usagePurposeConversation)
 	require.Equal(t, int64(15000), sess.LastPromptTokens)
 	require.Equal(t, int64(15000), sess.PromptTokens)
 
-	agent.updateSessionUsage(model, &sess, secondUsage, nil, 0, false)
+	agent.updateSessionUsage(model, &sess, secondUsage, nil, 0, false, usagePurposeConversation)
 	// PromptTokens reflects the current step's input tokens (current context
 	// length), not a cumulative sum.
 	require.Equal(t, int64(15300), sess.PromptTokens)
@@ -590,7 +590,7 @@ func TestUpdateSessionUsage_FallbackToEstimatedTokens(t *testing.T) {
 	}
 
 	estimatedTokens := int64(4200)
-	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false, usagePurposeConversation)
 
 	// When API reports 0 input tokens, the estimated value should be used.
 	require.Equal(t, estimatedTokens, sess.LastPromptTokens)
@@ -615,7 +615,7 @@ func TestUpdateSessionUsage_PreferAPIOverEstimate(t *testing.T) {
 	}
 
 	estimatedTokens := int64(3500) // estimate is less accurate
-	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false, usagePurposeConversation)
 
 	// API value (68+4185=4253) should be preferred over the estimate (3500)
 	// because the API value exceeds the estimate.
@@ -638,7 +638,7 @@ func TestUpdateSessionUsage_FallbackWhenAPIUnderReports(t *testing.T) {
 	}
 
 	estimatedTokens := int64(18500) // includes system prompt + tools
-	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false, usagePurposeConversation)
 
 	// API reports 95 which is < estimatedTokens (18500), so the
 	// estimate should be used instead.
@@ -661,7 +661,7 @@ func TestUpdateSessionUsage_FallbackWhenAPIReportsStaleValue(t *testing.T) {
 	}
 
 	estimatedTokens := int64(8000) // estimate grew with messages
-	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false)
+	agent.updateSessionUsage(model, &sess, usage, nil, estimatedTokens, false, usagePurposeConversation)
 
 	// API reports 5000 which is less than the estimate (8000). The
 	// estimate should be used to keep the context display growing.

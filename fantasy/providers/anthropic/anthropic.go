@@ -41,7 +41,23 @@ func betaRequestOptions(flags []string) []option.RequestOption {
 // buildRequestOptions constructs the common request options shared
 // by Generate and Stream: user-agent, raw tool injection, and any
 // beta API flags.
-func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlags []string) []option.RequestOption {
+const contextManagementBetaFlag = "context-management-2025-06-27"
+
+// thinkingContextManagementReqOpt preserves replayed thinking blocks across turns
+// when extended thinking is enabled. Without this directive, Anthropic may strip
+// thinking blocks from history and invalidate the KV cache prefix each turn.
+func thinkingContextManagementReqOpt() option.RequestOption {
+	return option.WithJSONSet("context_management", map[string]any{
+		"edits": []map[string]any{
+			{
+				"type": "clear_thinking_20251015",
+				"keep": map[string]string{"type": "all"},
+			},
+		},
+	})
+}
+
+func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlags []string, extraReqOpts ...option.RequestOption) []option.RequestOption {
 	reqOpts := callUARequestOptions(call)
 	if len(rawTools) > 0 {
 		// Tools are injected as raw JSON rather than via params.Tools
@@ -53,6 +69,7 @@ func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlag
 	if len(betaFlags) > 0 {
 		reqOpts = append(reqOpts, betaRequestOptions(betaFlags)...)
 	}
+	reqOpts = append(reqOpts, extraReqOpts...)
 	return reqOpts
 }
 
@@ -272,6 +289,7 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 	rawTools []json.RawMessage,
 	warnings []fantasy.CallWarning,
 	betaFlags []string,
+	extraReqOpts []option.RequestOption,
 	err error,
 ) {
 	params = &anthropic.MessageNewParams{}
@@ -279,7 +297,7 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 	if v, ok := call.ProviderOptions[Name]; ok {
 		providerOptions, ok = v.(*ProviderOptions)
 		if !ok {
-			return nil, nil, nil, nil, &fantasy.Error{Title: "invalid argument", Message: "anthropic provider options should be *anthropic.ProviderOptions"}
+			return nil, nil, nil, nil, nil, &fantasy.Error{Title: "invalid argument", Message: "anthropic provider options should be *anthropic.ProviderOptions"}
 		}
 	}
 	sendReasoning := true
@@ -333,7 +351,7 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		params.Thinking.OfAdaptive = &adaptive
 	case providerOptions.Thinking != nil:
 		if providerOptions.Thinking.BudgetTokens == 0 {
-			return nil, nil, nil, nil, &fantasy.Error{Title: "no budget", Message: "thinking requires budget"}
+			return nil, nil, nil, nil, nil, &fantasy.Error{Title: "no budget", Message: "thinking requires budget"}
 		}
 		enabled := anthropic.ThinkingConfigEnabledParam{
 			BudgetTokens: providerOptions.Thinking.BudgetTokens,
@@ -382,7 +400,12 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		warnings = append(warnings, toolWarnings...)
 	}
 
-	return params, rawTools, warnings, betaFlags, nil
+	if providerOptions.Thinking != nil || providerOptions.Effort != nil {
+		betaFlags = append(betaFlags, contextManagementBetaFlag)
+		extraReqOpts = append(extraReqOpts, thinkingContextManagementReqOpt())
+	}
+
+	return params, rawTools, warnings, betaFlags, extraReqOpts, nil
 }
 
 func (a *provider) Name() string {
@@ -1170,11 +1193,11 @@ func mapFinishReason(finishReason string) fantasy.FinishReason {
 
 // Generate implements fantasy.LanguageModel.
 func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
-	params, rawTools, warnings, betaFlags, err := a.prepareParams(call)
+	params, rawTools, warnings, betaFlags, extraReqOpts, err := a.prepareParams(call)
 	if err != nil {
 		return nil, err
 	}
-	reqOpts := buildRequestOptions(call, rawTools, betaFlags)
+	reqOpts := buildRequestOptions(call, rawTools, betaFlags, extraReqOpts...)
 
 	response, err := a.client.Messages.New(ctx, *params, reqOpts...)
 	if err != nil {
@@ -1302,12 +1325,12 @@ func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 
 // Stream implements fantasy.LanguageModel.
 func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	params, rawTools, warnings, betaFlags, err := a.prepareParams(call)
+	params, rawTools, warnings, betaFlags, extraReqOpts, err := a.prepareParams(call)
 	if err != nil {
 		return nil, err
 	}
 
-	reqOpts := buildRequestOptions(call, rawTools, betaFlags)
+	reqOpts := buildRequestOptions(call, rawTools, betaFlags, extraReqOpts...)
 
 	stream := a.client.Messages.NewStreaming(ctx, *params, reqOpts...)
 	acc := anthropic.Message{}

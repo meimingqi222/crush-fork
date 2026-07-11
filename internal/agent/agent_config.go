@@ -99,6 +99,7 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
 			"new_hash", hex.EncodeToString(newHash[:8]),
 		)
 		a.enhancedSystemPrompt.Set("")
+		a.enhancedPromptContextSig = ""
 	}
 }
 
@@ -106,9 +107,9 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
 // (MCP instructions, mental models, vision note) to the base system prompt
 // and caches the result. Subsequent calls return the cached value, keeping
 // the prompt prefix identical across turns for prompt caching.
-func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel Model) string {
+func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel Model, contextSig string) string {
 	if a.enhancedSystemPrompt != nil {
-		if cached := a.enhancedSystemPrompt.Get(); cached != "" {
+		if cached := a.enhancedSystemPrompt.Get(); cached != "" && a.enhancedPromptContextSig == contextSig {
 			return cached
 		}
 	}
@@ -157,6 +158,7 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel M
 
 	if a.enhancedSystemPrompt != nil {
 		a.enhancedSystemPrompt.Set(enhanced)
+		a.enhancedPromptContextSig = contextSig
 	}
 
 	// Diagnostic: log hash and section sizes to identify what changes

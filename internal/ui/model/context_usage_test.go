@@ -186,6 +186,94 @@ func TestDisplayContextWindowFallsBackToMaxPromptTokens(t *testing.T) {
 	require.Equal(t, int64(150_000), window)
 }
 
+// TestLatestAssistantUsageSnapshotIgnoresSummaryPromptTokens is a Phase B/D
+// invariant test for docs/refactor-context-usage-accounting.md: a streaming
+// summary (compaction) message reports its OWN prompt tokens, which reflect
+// the pre-compaction history, not the current context. Before the fix these
+// were added to OutputTokens, making the context-usage display jump above
+// 100% while/after compacting. Only the summary's output length is
+// meaningful here.
+func TestLatestAssistantUsageSnapshotIgnoresSummaryPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	selected := &agent.Model{
+		CatwalkCfg: catwalk.Model{ContextWindow: 200_000},
+		ModelCfg:   config.SelectedModel{Provider: "anthropic", Model: "claude-sonnet-4-5"},
+	}
+
+	snapshot, ok := latestAssistantUsageSnapshot([]message.Message{
+		{
+			ID:               "summary",
+			Role:             message.Assistant,
+			Provider:         "anthropic",
+			Model:            "claude-sonnet-4-5",
+			IsSummaryMessage: true,
+			// A huge pre-compaction prompt, as a real summarize call sends.
+			Usage: message.Usage{
+				InputTokens:  190_000,
+				OutputTokens: 500,
+			},
+			// No Finish part: the summary is still streaming.
+		},
+	}, nil, selected)
+
+	require.True(t, ok)
+	require.Equal(t, int64(500), snapshot.TotalTokens,
+		"summary snapshot TotalTokens must be the output length only, not prompt+output")
+	require.Equal(t, int64(500), snapshot.OutputTokens)
+	require.True(t, snapshot.Provisional)
+	require.True(t, snapshot.Summary)
+}
+
+// TestResolveContextUsageSnapshotSummaryStreamingStaysWithinContextWindow is
+// a Phase D UI snapshot test: while a summary message streams, the resolved
+// context-usage snapshot must not report TotalTokens/ContextWindow above
+// 1.0, even though the summary's own (pre-compaction) prompt tokens are
+// close to the context window and its growing output alone would not be.
+// This reproduces the "jumps above 100% after compacting" bug scenario from
+// docs/refactor-context-usage-accounting.md.
+func TestResolveContextUsageSnapshotSummaryStreamingStaysWithinContextWindow(t *testing.T) {
+	t.Parallel()
+
+	const contextWindow = 200_000
+	selected := &agent.Model{
+		CatwalkCfg: catwalk.Model{ContextWindow: contextWindow},
+		ModelCfg:   config.SelectedModel{Provider: "anthropic", Model: "claude-sonnet-4-5"},
+	}
+
+	// The session's last known (pre-compaction) exchange was near the
+	// auto-summarize threshold.
+	sess := &session.Session{
+		PromptTokens:         190_000,
+		CompletionTokens:     1_000,
+		LastPromptTokens:     190_000,
+		LastCompletionTokens: 1_000,
+	}
+
+	snapshot := resolveContextUsageSnapshot(sess, []message.Message{
+		{
+			ID:               "summary",
+			Role:             message.Assistant,
+			Provider:         "anthropic",
+			Model:            "claude-sonnet-4-5",
+			IsSummaryMessage: true,
+			Usage: message.Usage{
+				// The summarize call's own prompt tokens: pre-compaction
+				// history, close to the context window.
+				InputTokens: 190_000,
+				// A large, still-growing summary.
+				OutputTokens: 15_000,
+			},
+			// Not finished: the summary is still streaming.
+		},
+	}, nil, selected)
+
+	require.True(t, snapshot.Provisional)
+	require.True(t, snapshot.Summary)
+	require.LessOrEqual(t, float64(snapshot.TotalTokens)/float64(snapshot.ContextWindow), 1.0,
+		"context usage must not exceed 100% while a summary message is streaming")
+}
+
 func TestResolveContextUsageSnapshotAccumulatesProvisionalExchange(t *testing.T) {
 	t.Parallel()
 

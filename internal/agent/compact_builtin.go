@@ -48,10 +48,10 @@ var builtinPruneProtectedToolNames = map[string]struct{}{
 //  5. Only apply the prune if the total prunable content exceeds
 //     builtinPruneMinTokens.
 func builtinPruneToolResults(msgs []message.Message) []message.Message {
-	return builtinPruneToolResultsWithProtection(msgs, nil)
+	return builtinPruneToolResultsWithProtection(msgs, nil, nil)
 }
 
-func builtinPruneToolResultsWithProtection(msgs []message.Message, protect func(message.ToolResult) bool) []message.Message {
+func builtinPruneToolResultsWithProtection(msgs []message.Message, protect func(message.ToolResult) bool, cacheProtectedIndices map[int]struct{}) []message.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
@@ -88,6 +88,11 @@ loop:
 		}
 		if msgs[i].Role != message.Tool {
 			continue
+		}
+		if cacheProtectedIndices != nil {
+			if _, skip := cacheProtectedIndices[i]; skip {
+				continue
+			}
 		}
 		for j, part := range msgs[i].Parts {
 			tr, ok := part.(message.ToolResult)

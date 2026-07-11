@@ -97,6 +97,16 @@ func latestAssistantUsageSnapshot(messages []message.Message, cfg *config.Config
 		// (and Anthropic output_tokens includes thinking tokens), so we must
 		// NOT add ReasoningTokens again to avoid double-counting.
 		total := msg.Usage.PromptTokens() + msg.Usage.OutputTokens
+		if msg.IsSummaryMessage {
+			// A summary message's own PromptTokens reflects the
+			// *pre-compaction* history sent to the summarizer, not the
+			// current context -- adding it here would make the display
+			// jump above 100% while/after compacting. Only the summary's
+			// output length is meaningful; resolveContextUsageSnapshot
+			// falls back to sess.LastTotalTokens() (the post-compaction
+			// baseline written by Summarize) to size the actual context.
+			total = msg.Usage.OutputTokens
+		}
 		if total <= 0 {
 			continue
 		}
