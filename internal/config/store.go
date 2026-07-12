@@ -319,6 +319,15 @@ func (s *ConfigStore) RemoveMCP(name string) {
 	s.config.MCP = newMCP
 }
 
+// AddMCP adds an ephemeral MCP transport configuration without persisting it.
+// Visibility and authorization are owned by the caller. If a server with the
+// same name already exists, it is replaced.
+func (s *ConfigStore) AddMCP(name string, cfg MCPConfig) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	s.config.MCP = copyMCPsWith(s.config.MCP, name, cfg)
+}
+
 // copyMCPsWith returns a copy of mcp with the entry at name replaced by cfg.
 // The original map is not mutated, so concurrent readers of the old map are
 // safe.

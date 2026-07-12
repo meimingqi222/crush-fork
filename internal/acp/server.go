@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,9 @@ const (
 	// writeAsyncBufSize is the buffer size for low-priority async writes
 	// (notifications). Large enough to absorb bursts of streaming deltas.
 	writeAsyncBufSize = 4096
+	// maxMessageSize is the largest single JSON-RPC message the server will
+	// accept. Oversized messages are discarded and the server continues.
+	maxMessageSize = 4 * 1024 * 1024
 )
 
 // writeRequest is a single serialized write to stdout.
@@ -138,28 +142,74 @@ func (s *Server) writeLineAsync(data []byte) bool {
 func (s *Server) Serve(ctx context.Context) error {
 	go s.runWriter(ctx)
 
-	scanner := bufio.NewScanner(s.in)
-	// ACP messages can be large; increase the buffer.
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 4*1024*1024)
+	// Use a sized buffer that matches the per-message cap so an oversized
+	// line can be detected by bufio.ErrBufferFull without allocating the
+	// whole payload. See drainLine.
+	reader := bufio.NewReaderSize(s.in, maxMessageSize)
 
-	for scanner.Scan() {
-		// scanner.Bytes() returns a slice backed by the scanner's internal buffer.
-		// We must copy it before passing to a goroutine, because the next Scan()
-		// call will overwrite the underlying memory.
-		src := scanner.Bytes()
-		if len(src) == 0 {
+	for {
+		if err := ctx.Err(); err != nil {
+			// Context cancellation (e.g. SIGINT via NotifyContext) is a
+			// clean shutdown, not an error the CLI should surface.
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+
+		line, err := reader.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			// Message exceeded the buffer. Discard the rest of the line and
+			// keep serving; the id is unknown so we cannot respond.
+			if drainErr := s.drainLine(reader); drainErr != nil {
+				return fmt.Errorf("acp: drain error: %w", drainErr)
+			}
+			slog.Warn("ACP: oversized message discarded", "max_size", maxMessageSize)
 			continue
 		}
-		raw := make(json.RawMessage, len(src))
-		copy(raw, src)
+		if err == io.EOF {
+			if len(line) == 0 {
+				return nil
+			}
+			// EOF without a trailing newline; process the final line.
+			err = nil
+		} else if err != nil {
+			return fmt.Errorf("acp: read error: %w", err)
+		}
+
+		if len(line) == 0 {
+			continue
+		}
+		// Strip the line terminator and any CR for CRLF inputs.
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+		}
+
+		// ReadSlice returns memory backed by the reader's internal buffer, so
+		// copy before passing to a goroutine.
+		raw := make(json.RawMessage, len(line))
+		copy(raw, line)
 		go s.dispatch(ctx, raw)
 	}
+}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("acp: scanner error: %w", err)
+// drainLine discards bytes from reader until the next newline or EOF.
+func (s *Server) drainLine(reader *bufio.Reader) error {
+	for {
+		b, err := reader.ReadByte()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if b == '\n' {
+			return nil
+		}
 	}
-	return nil
 }
 
 // dispatch determines the message kind and handles it.
@@ -213,7 +263,11 @@ func (s *Server) dispatch(ctx context.Context, raw json.RawMessage) {
 			}
 		}
 		if ch, ok := s.pending.Load(pendingID); ok {
-			ch.(chan *Response) <- &resp
+			select {
+			case ch.(chan *Response) <- &resp:
+			default:
+				slog.Warn("ACP: duplicate response dropped for pending call", "id", pendingID)
+			}
 		}
 		return
 	}

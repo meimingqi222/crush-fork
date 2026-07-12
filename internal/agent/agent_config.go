@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
@@ -89,7 +90,7 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
 	// entirely — the enhanced prompt would be rebuilt from scratch each
 	// time, causing the instructions hash to change and breaking prompt
 	// caching on the provider side.
-	if a.enhancedSystemPrompt != nil && old != systemPrompt {
+	if old != systemPrompt {
 		oldHash := sha256.Sum256([]byte(old))
 		newHash := sha256.Sum256([]byte(systemPrompt))
 		slog.Info("[CACHE-DIAG] SetSystemPrompt changed, invalidating enhanced cache",
@@ -98,20 +99,26 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
 			"old_hash", hex.EncodeToString(oldHash[:8]),
 			"new_hash", hex.EncodeToString(newHash[:8]),
 		)
-		a.enhancedSystemPrompt.Set("")
-		a.enhancedPromptContextSig = ""
+		a.invalidateEnhancedSystemPrompt()
 	}
+}
+
+func (a *sessionAgent) invalidateEnhancedSystemPrompt() {
+	a.enhancedPromptMu.Lock()
+	a.enhancedSystemPrompt = ""
+	a.enhancedPromptContextSig = ""
+	a.enhancedPromptMu.Unlock()
 }
 
 // buildEnhancedSystemPrompt appends dynamic-but-stable-per-session parts
 // (MCP instructions, mental models, vision note) to the base system prompt
 // and caches the result. Subsequent calls return the cached value, keeping
 // the prompt prefix identical across turns for prompt caching.
-func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel Model, contextSig string) string {
-	if a.enhancedSystemPrompt != nil {
-		if cached := a.enhancedSystemPrompt.Get(); cached != "" && a.enhancedPromptContextSig == contextSig {
-			return cached
-		}
+func (a *sessionAgent) buildEnhancedSystemPrompt(ctx context.Context, basePrompt string, largeModel Model, contextSig string) string {
+	a.enhancedPromptMu.Lock()
+	defer a.enhancedPromptMu.Unlock()
+	if a.enhancedSystemPrompt != "" && a.enhancedPromptContextSig == contextSig {
+		return a.enhancedSystemPrompt
 	}
 
 	enhanced := basePrompt
@@ -123,6 +130,9 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel M
 	mcpStates := mcp.GetStates()
 	mcpNames := make([]string, 0, len(mcpStates))
 	for name := range mcpStates {
+		if !tools.MCPServerAllowed(ctx, name) {
+			continue
+		}
 		mcpNames = append(mcpNames, name)
 	}
 	slices.Sort(mcpNames)
@@ -160,10 +170,8 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel M
 		enhanced += "\n\n" + describeImageToolSystemPromptNote()
 	}
 
-	if a.enhancedSystemPrompt != nil {
-		a.enhancedSystemPrompt.Set(enhanced)
-		a.enhancedPromptContextSig = contextSig
-	}
+	a.enhancedSystemPrompt = enhanced
+	a.enhancedPromptContextSig = contextSig
 
 	// Diagnostic: log hash and section sizes to identify what changes
 	// between rebuilds. This helps pinpoint which dynamic section is
@@ -193,13 +201,22 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(basePrompt string, largeModel M
 
 // mcpStateSnapshot captures the MCP server states at a point in time.
 // Used to detect changes during a run so we can notify the agent.
-type mcpStateSnapshot map[string]mcp.State
+type mcpStateSnapshot struct {
+	states   map[string]mcp.State
+	revision uint64
+}
 
 // snapshotMcpStates records the current MCP server states.
-func snapshotMcpStates() mcpStateSnapshot {
-	snapshot := make(mcpStateSnapshot)
+func snapshotMcpStates(ctx context.Context) mcpStateSnapshot {
+	snapshot := mcpStateSnapshot{
+		states:   make(map[string]mcp.State),
+		revision: tools.MCPServerAccessRevision(ctx),
+	}
 	for name, info := range mcp.GetStates() {
-		snapshot[name] = info.State
+		if !tools.MCPServerAllowed(ctx, name) {
+			continue
+		}
+		snapshot.states[name] = info.State
 	}
 	return snapshot
 }
@@ -213,13 +230,16 @@ type mcpStateChange struct {
 
 // diffMcpStates compares the current MCP states against a snapshot and
 // returns the changes (new servers, disconnected servers, state transitions).
-func diffMcpStates(snapshot mcpStateSnapshot) []mcpStateChange {
+func diffMcpStates(ctx context.Context, snapshot mcpStateSnapshot) ([]mcpStateChange, bool) {
 	current := mcp.GetStates()
 	var changes []mcpStateChange
 
 	// Check for new servers or state transitions.
 	for name, info := range current {
-		prevState, existed := snapshot[name]
+		if !tools.MCPServerAllowed(ctx, name) {
+			continue
+		}
+		prevState, existed := snapshot.states[name]
 		if !existed {
 			changes = append(changes, mcpStateChange{Name: name, From: mcp.StateDisabled, To: info.State})
 		} else if prevState != info.State {
@@ -227,13 +247,13 @@ func diffMcpStates(snapshot mcpStateSnapshot) []mcpStateChange {
 		}
 	}
 	// Check for servers that disappeared (disconnected/removed).
-	for name, prevState := range snapshot {
+	for name, prevState := range snapshot.states {
 		if _, exists := current[name]; !exists {
 			changes = append(changes, mcpStateChange{Name: name, From: prevState, To: mcp.StateDisabled})
 		}
 	}
 
-	return changes
+	return changes, snapshot.revision != tools.MCPServerAccessRevision(ctx)
 }
 
 // formatMcpChangeNotification creates a System Message informing the agent
@@ -242,7 +262,11 @@ func diffMcpStates(snapshot mcpStateSnapshot) []mcpStateChange {
 func formatMcpChangeNotification(changes []mcpStateChange) string {
 	var b strings.Builder
 	b.WriteString("<system-reminder>\n")
-	b.WriteString("The following MCP server connections have changed since the conversation started:\n")
+	if len(changes) == 0 {
+		b.WriteString("The MCP configuration available to this session has changed. Refresh your tool selection before continuing.\n")
+	} else {
+		b.WriteString("The following MCP server connections have changed since the conversation started:\n")
+	}
 	for _, c := range changes {
 		if c.To == mcp.StateConnected {
 			b.WriteString(fmt.Sprintf("- MCP server \"%s\" is now connected (was: %s). Its tools and instructions are now available.\n", c.Name, c.From))

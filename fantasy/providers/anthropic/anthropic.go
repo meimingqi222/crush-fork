@@ -214,9 +214,6 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 	for key, value := range resolved {
 		clientOptions = append(clientOptions, option.WithHeader(key, value))
 	}
-	if a.options.client != nil {
-		clientOptions = append(clientOptions, option.WithHTTPClient(a.options.client))
-	}
 	if a.options.vertexProject != "" && a.options.vertexLocation != "" {
 		var credentials *google.Credentials
 		if a.options.skipAuth {
@@ -238,6 +235,13 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 				credentials,
 			),
 		)
+	}
+	// Apply an explicitly supplied client after platform authentication
+	// options. Vertex may install its own authenticated HTTP client, but callers
+	// using WithHTTPClient (including offline VCR tests) expect their transport
+	// to remain authoritative.
+	if a.options.client != nil {
+		clientOptions = append(clientOptions, option.WithHTTPClient(a.options.client))
 	}
 	if a.options.useBedrock {
 		modelID = bedrockPrefixModelWithRegion(modelID)

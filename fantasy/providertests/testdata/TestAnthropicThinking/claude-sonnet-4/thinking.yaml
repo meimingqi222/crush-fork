@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 548
+        content_length: 638
         host: ""
-        body: '{"max_tokens":4096,"messages":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
+        body: '{"context_management":{"edits":[{"keep":{"type":"all"},"type":"clear_thinking_20251015"}]},"max_tokens":4096,"messages":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
         headers:
             Accept:
                 - application/json
@@ -15,7 +15,7 @@ interactions:
                 - application/json
             User-Agent:
                 - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
-        url: https://api.anthropic.com/v1/messages
+        url: https://api.anthropic.com/v1/messages?beta=true
         method: POST
       response:
         proto: HTTP/2.0
@@ -34,9 +34,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 1804
+        content_length: 1894
         host: ""
-        body: '{"max_tokens":4096,"messages":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"},{"content":[{"signature":"Es8DCkYICxgCKkBROcM3239oIjVRtMTZin6UAjoE9xO0SXVQMr4UmHPaf8ABCrDZU7HQV0rZBBQjHz/LYBodQYqfhI6JW2CdZe5cEgy8y5mudpoPkWnTaV8aDJVR52Mx2nO7+eGpPyIwDFer1KYmKviIXPO6bpzvoC3AZzj7EyHpgeZMZZkKG2IZEC3tS0X46Gz0qAjQe3GjKrYCxSKWUv+dBGxXLgI8JtU/knWJR5GCTlLny+dvOLqdMjQIS/eJI2chHhrsND7SIcQG4EC2b21XBH07VbzYPWEDFmZULyXNXS66nkeqbqj+Y9lmhAn1ONYt47Txlaf0Zf5AAATe53hdDWd8VkJwcgHV7y142xtwVGK4EefJ06FIRfjpvhdKKjVHvgH4fqdTjtuchawXvek10MMqjl1BfOVNa3RoV+Y3ACpFxBXUVFOK7yqJExZYAjtCLTme6LGNhl/stnCq+I4mV3zHiy6PD3svzUyEO1bwvBpTXXXEyl2sRhm764/Rs/BxiVr+Z35zimii76pz+S+VT8Tch9ymIkZ8WySqFp3M2c2m/fpxZl8Iy4A2Y/cmqVHXyiX2RbM4/ViWJtj3V2UTVNwrKh4Uivqv4vvcwomAtRgB","thinking":"The user is asking about the weather in Florence, Italy. I have a weather function available that takes a location parameter. The user has provided the location as \"Florence, Italy\" which is specific enough for the weather function. I have all the required parameters to make the function call.","type":"thinking"},{"id":"toolu_014azqsWLU8Djh6RhmBGRC2u","input":{"location":"Florence, Italy"},"name":"weather","type":"tool_use"}],"role":"assistant"},{"content":[{"content":[{"text":"40 C","type":"text"}],"tool_use_id":"toolu_014azqsWLU8Djh6RhmBGRC2u","type":"tool_result"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
+        body: '{"context_management":{"edits":[{"keep":{"type":"all"},"type":"clear_thinking_20251015"}]},"max_tokens":4096,"messages":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"},{"content":[{"signature":"Es8DCkYICxgCKkBROcM3239oIjVRtMTZin6UAjoE9xO0SXVQMr4UmHPaf8ABCrDZU7HQV0rZBBQjHz/LYBodQYqfhI6JW2CdZe5cEgy8y5mudpoPkWnTaV8aDJVR52Mx2nO7+eGpPyIwDFer1KYmKviIXPO6bpzvoC3AZzj7EyHpgeZMZZkKG2IZEC3tS0X46Gz0qAjQe3GjKrYCxSKWUv+dBGxXLgI8JtU/knWJR5GCTlLny+dvOLqdMjQIS/eJI2chHhrsND7SIcQG4EC2b21XBH07VbzYPWEDFmZULyXNXS66nkeqbqj+Y9lmhAn1ONYt47Txlaf0Zf5AAATe53hdDWd8VkJwcgHV7y142xtwVGK4EefJ06FIRfjpvhdKKjVHvgH4fqdTjtuchawXvek10MMqjl1BfOVNa3RoV+Y3ACpFxBXUVFOK7yqJExZYAjtCLTme6LGNhl/stnCq+I4mV3zHiy6PD3svzUyEO1bwvBpTXXXEyl2sRhm764/Rs/BxiVr+Z35zimii76pz+S+VT8Tch9ymIkZ8WySqFp3M2c2m/fpxZl8Iy4A2Y/cmqVHXyiX2RbM4/ViWJtj3V2UTVNwrKh4Uivqv4vvcwomAtRgB","thinking":"The user is asking about the weather in Florence, Italy. I have a weather function available that takes a location parameter. The user has provided the location as \"Florence, Italy\" which is specific enough for the weather function. I have all the required parameters to make the function call.","type":"thinking"},{"id":"toolu_014azqsWLU8Djh6RhmBGRC2u","input":{"location":"Florence, Italy"},"name":"weather","type":"tool_use"}],"role":"assistant"},{"content":[{"content":[{"text":"40 C","type":"text"}],"tool_use_id":"toolu_014azqsWLU8Djh6RhmBGRC2u","type":"tool_result"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
         headers:
             Accept:
                 - application/json
@@ -44,7 +44,7 @@ interactions:
                 - application/json
             User-Agent:
                 - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
-        url: https://api.anthropic.com/v1/messages
+        url: https://api.anthropic.com/v1/messages?beta=true
         method: POST
       response:
         proto: HTTP/2.0

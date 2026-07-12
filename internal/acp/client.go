@@ -37,23 +37,25 @@ func RunPermissionBridge(ctx context.Context, perms permission.Service, server *
 }
 
 // GetToolKind maps a generic tool name to the standardized ACP ToolKind.
+// Only names emitted by crush's built-in tools are recognized; unknown tool
+// names (including MCP tools) fall through to ToolKindOther.
 func GetToolKind(toolName string) ToolKind {
 	switch toolName {
-	case "read", "view", "fs/read_text_file", "view_file":
+	case "read", "view":
 		return ToolKindRead
-	case "write", "edit", "patch", "fs/write_text_file", "replace_file_content", "multi_replace_file_content", "write_to_file":
+	case "write", "edit", "patch", "hashline_edit":
 		return ToolKindEdit
-	case "delete", "fs/delete_file":
+	case "delete":
 		return ToolKindDelete
 	case "move", "rename":
 		return ToolKindMove
-	case "search", "grep", "grep_search", "glob", "locate", "search_context", "codebase_search", "github_codebase_search", "warp_grep", "tool_search":
+	case "search", "grep", "glob", "tool_search":
 		return ToolKindSearch
-	case "execute", "bash", "run_command", "shell", "execute_command", "run_terminal_command", "bash_exec", "terminal":
+	case "execute", "bash", "shell":
 		return ToolKindExecute
 	case "think", "agent":
 		return ToolKindThink
-	case "fetch", "web_fetch", "search_web", "download":
+	case "fetch", "web_search", "web_fetch", "agentic_fetch", "download":
 		return ToolKindFetch
 	default:
 		return ToolKindOther
@@ -99,8 +101,8 @@ func extractParam(params any, keys ...string) string {
 // GetBeautifulTitle creates a human-readable title for tool calls to prevent raw JSON displays in IDEs.
 func GetBeautifulTitle(toolName, action string, params any) string {
 	switch toolName {
-	case "read", "view", "fs/read_text_file", "view_file":
-		filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
+	case "read", "view":
+		filePath := extractParam(params, "file_path", "path")
 		if filePath != "" {
 			base := filepath.Base(filePath)
 			if base == "." || base == "/" || base == "\\" || filePath == "" {
@@ -113,14 +115,14 @@ func GetBeautifulTitle(toolName, action string, params any) string {
 			return fmt.Sprintf("Read directory: %s", base)
 		}
 		return "Read file"
-	case "write", "edit", "patch", "fs/write_text_file", "replace_file_content", "multi_replace_file_content", "write_to_file":
-		filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
+	case "write", "edit", "patch", "hashline_edit":
+		filePath := extractParam(params, "file_path", "path")
 		if filePath != "" {
 			return fmt.Sprintf("Edit file: %s", filepath.Base(filePath))
 		}
 		return "Edit file"
-	case "delete", "fs/delete_file":
-		filePath := extractParam(params, "file_path", "filePath", "filepath", "path", "TargetFile", "target_file")
+	case "delete":
+		filePath := extractParam(params, "file_path", "path")
 		if filePath != "" {
 			return fmt.Sprintf("Delete file: %s", filepath.Base(filePath))
 		}
@@ -132,9 +134,9 @@ func GetBeautifulTitle(toolName, action string, params any) string {
 			return fmt.Sprintf("Move file: %s -> %s", filepath.Base(src), filepath.Base(dest))
 		}
 		return "Move file"
-	case "search", "grep", "grep_search", "glob", "locate", "search_context", "codebase_search", "github_codebase_search", "warp_grep", "tool_search":
-		query := extractParam(params, "query", "Query", "pattern", "Pattern", "q")
-		path := extractParam(params, "path", "Path", "SearchPath", "search_path", "project_root_path", "projectRootPath")
+	case "search", "grep", "glob", "tool_search":
+		query := extractParam(params, "query", "pattern", "q")
+		path := extractParam(params, "path", "search_path")
 
 		if query != "" && path != "" {
 			if len(query) > 20 {
@@ -152,8 +154,8 @@ func GetBeautifulTitle(toolName, action string, params any) string {
 			return fmt.Sprintf("List project: %s", filepath.Base(path))
 		}
 		return "List project"
-	case "execute", "bash", "run_command", "shell", "execute_command", "run_terminal_command", "bash_exec", "terminal":
-		command := extractParam(params, "command", "CommandLine", "command_line", "cmd", "script", "args", "arguments", "code")
+	case "execute", "bash", "shell":
+		command := extractParam(params, "command", "cmd", "script", "args", "code")
 		if command != "" {
 			if len(command) > 40 {
 				command = command[:37] + "..."
@@ -161,8 +163,8 @@ func GetBeautifulTitle(toolName, action string, params any) string {
 			return fmt.Sprintf("Run command: '%s'", command)
 		}
 		return "Run terminal command"
-	case "fetch", "web_fetch", "search_web", "download":
-		url := extractParam(params, "url", "Url", "URL", "query", "Query")
+	case "fetch", "web_search", "web_fetch", "agentic_fetch", "download":
+		url := extractParam(params, "url", "query")
 		if url != "" {
 			if len(url) > 45 {
 				url = url[:42] + "..."

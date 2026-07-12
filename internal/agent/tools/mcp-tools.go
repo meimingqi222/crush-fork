@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -26,6 +27,62 @@ var whitelistDockerTools = []string{
 
 const mcpAdditionalMediaMetadataKey = "mcp_additional_media"
 
+type mcpServerAccessContextKey struct{}
+
+var scopedMCPServers sync.Map
+
+// MCPServerAccess controls which process-global MCP connections are visible
+// to the current execution. A missing access value preserves the normal Crush
+// behavior where all configured MCP servers are available.
+type MCPServerAccess interface {
+	AllowsMCPServer(name string) bool
+	MCPServerScope() string
+	MCPServerRevision() uint64
+}
+
+// WithMCPServerAccess scopes MCP discovery and invocation to access.
+func WithMCPServerAccess(ctx context.Context, access MCPServerAccess) context.Context {
+	return context.WithValue(ctx, mcpServerAccessContextKey{}, access)
+}
+
+// MarkMCPServerScoped records that name is execution-scoped rather than a
+// process-global static MCP server. The marker is intentionally permanent for
+// the process lifetime so a removed dynamic server can never be mistaken for
+// a newly discovered static server by an old cached tool object.
+func MarkMCPServerScoped(name string) {
+	if name != "" {
+		scopedMCPServers.Store(name, struct{}{})
+	}
+}
+
+// MCPServerAllowed reports whether name is available in the current scope.
+func MCPServerAllowed(ctx context.Context, name string) bool {
+	access, ok := ctx.Value(mcpServerAccessContextKey{}).(MCPServerAccess)
+	if ok && access != nil {
+		return access.AllowsMCPServer(name)
+	}
+	_, scoped := scopedMCPServers.Load(name)
+	return !scoped
+}
+
+// MCPServerAccessRevision returns the current scope revision for cache keys.
+func MCPServerAccessRevision(ctx context.Context) uint64 {
+	access, ok := ctx.Value(mcpServerAccessContextKey{}).(MCPServerAccess)
+	if !ok || access == nil {
+		return 0
+	}
+	return access.MCPServerRevision()
+}
+
+// MCPServerAccessScope identifies the current access set for cache keys.
+func MCPServerAccessScope(ctx context.Context) string {
+	access, ok := ctx.Value(mcpServerAccessContextKey{}).(MCPServerAccess)
+	if !ok || access == nil {
+		return ""
+	}
+	return access.MCPServerScope()
+}
+
 type mcpAdditionalMediaMetadataItem struct {
 	Type      string `json:"type"`
 	Data      string `json:"data"`
@@ -33,9 +90,12 @@ type mcpAdditionalMediaMetadataItem struct {
 }
 
 // GetMCPTools gets all the currently available MCP tools.
-func GetMCPTools(permissions permission.Service, cfg *config.ConfigStore, wd string) []*Tool {
+func GetMCPTools(ctx context.Context, permissions permission.Service, cfg *config.ConfigStore, wd string) []*Tool {
 	var result []*Tool
 	for mcpName, tools := range mcp.Tools() {
+		if !MCPServerAllowed(ctx, mcpName) {
+			continue
+		}
 		for _, tool := range tools {
 			result = append(result, &Tool{
 				mcpName:     mcpName,
@@ -137,6 +197,9 @@ func normalizeMCPMediaPayload(resultType string, data []byte, mimeType string, t
 }
 
 func (m *Tool) Run(ctx context.Context, params fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	if !MCPServerAllowed(ctx, m.mcpName) {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("MCP server %q is not available in this session", m.mcpName)), nil
+	}
 	sessionID := GetSessionFromContext(ctx)
 	if sessionID == "" {
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for creating a new file")

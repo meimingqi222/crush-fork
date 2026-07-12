@@ -4,17 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -23,6 +28,7 @@ import (
 	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/charmbracelet/crush/internal/version"
+	"github.com/google/uuid"
 )
 
 // cancelEntry wraps a cancel function for safe concurrent prompt handling.
@@ -41,6 +47,22 @@ type Handler struct {
 	cancels          map[string]*cancelEntry
 	sessionCWD       map[string]string
 	activeToolParams map[string]any
+	clientCaps       ClientCapabilities
+
+	mcpLifecycleMu  sync.Mutex
+	sessionMCP      map[string][]string
+	dynamicMCP      map[string]string
+	knownDynamicMCP map[string]struct{}
+	mcpRevision     map[string]uint64
+	mcpGeneration   uint64
+	mcpInstanceID   string
+}
+
+// MCPManager is the subset of the MCP manager the ACP handler needs to
+// connect and disconnect session-scoped MCP servers supplied by clients.
+type MCPManager interface {
+	Reconnect(ctx context.Context, cfg *config.ConfigStore, name string) error
+	DisableSingle(cfg *config.ConfigStore, name string) error
 }
 
 // App is the subset of app.App the ACP handler needs.
@@ -52,6 +74,7 @@ type App interface {
 	GetPermissions() permission.Service
 	GetToolRuntime() toolruntime.Service
 	GetTimeline() timeline.Service
+	GetMCPManager() MCPManager
 }
 
 // NewHandler constructs a Handler backed by the given App.
@@ -61,6 +84,11 @@ func NewHandler(app App) *Handler {
 		cancels:          make(map[string]*cancelEntry),
 		sessionCWD:       make(map[string]string),
 		activeToolParams: make(map[string]any),
+		sessionMCP:       make(map[string][]string),
+		dynamicMCP:       make(map[string]string),
+		knownDynamicMCP:  make(map[string]struct{}),
+		mcpRevision:      make(map[string]uint64),
+		mcpInstanceID:    uuid.NewString(),
 	}
 }
 
@@ -96,6 +124,197 @@ func (h *Handler) SetServer(s *Server) {
 	h.server = s
 }
 
+// ClientCapabilities returns the capabilities advertised by the connected
+// client during initialize. Returns the zero value before initialize is
+// called. Smaller features (e.g. image-block fallbacks) can consult these to
+// decide whether to route through the client FS.
+func (h *Handler) ClientCapabilities() ClientCapabilities {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.clientCaps
+}
+
+func (h *Handler) setClientCapabilities(caps ClientCapabilities) {
+	h.mu.Lock()
+	h.clientCaps = caps
+	h.mu.Unlock()
+}
+
+// connectSessionMCP replaces the session's ephemeral MCP connections. Global
+// transport state is retained by the MCP manager, while visibility is
+// enforced by the access scope installed on each ACP prompt.
+func (h *Handler) connectSessionMCP(ctx context.Context, sessionID string, servers []MCPServerConfig) {
+	h.mcpLifecycleMu.Lock()
+	defer h.mcpLifecycleMu.Unlock()
+
+	mgr := h.app.GetMCPManager()
+	cfg := h.app.GetConfig()
+	if mgr == nil || cfg == nil {
+		return
+	}
+	h.disconnectSessionMCPLocked(ctx, sessionID)
+	if len(servers) == 0 {
+		return
+	}
+
+	names := make([]string, 0, len(servers))
+	seen := make(map[string]struct{}, len(servers))
+	for _, s := range servers {
+		name := strings.TrimSpace(s.Name)
+		if name == "" {
+			slog.Warn("ACP: skipping session MCP server with empty name")
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			slog.Warn("ACP: skipping duplicate session MCP server", "name", s.Name)
+			continue
+		}
+		seen[name] = struct{}{}
+		// The manager and ConfigStore are process-global. Namespace client
+		// registrations to avoid configured-server and cross-session collisions.
+		clientName := name
+		for {
+			h.mcpGeneration++
+			name = sessionMCPName(h.mcpInstanceID, sessionID, clientName, h.mcpGeneration)
+			if _, exists := cfg.Config().MCP[name]; !exists {
+				break
+			}
+		}
+		h.mu.Lock()
+		h.knownDynamicMCP[name] = struct{}{}
+		h.mu.Unlock()
+		agenttools.MarkMCPServerScoped(name)
+		mcpCfg := acpMCPConfigToConfig(s)
+		cfg.AddMCP(name, mcpCfg)
+		if err := mgr.Reconnect(ctx, cfg, name); err != nil {
+			slog.Warn("ACP: failed to connect session MCP server", "name", name, "err", err)
+			cfg.RemoveMCP(name)
+			continue
+		}
+		names = append(names, name)
+		h.mu.Lock()
+		h.dynamicMCP[name] = sessionID
+		h.mu.Unlock()
+	}
+
+	h.mu.Lock()
+	if len(names) == 0 {
+		delete(h.sessionMCP, sessionID)
+	} else {
+		h.sessionMCP[sessionID] = names
+	}
+	h.mcpRevision[sessionID]++
+	h.mu.Unlock()
+}
+
+func sessionMCPName(instanceID, sessionID, name string, generation uint64) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return fmt.Sprintf("acp-%s-%x-%d-%s", instanceID, sum[:6], generation, name)
+}
+
+// disconnectSessionMCP disconnects and removes all MCP servers registered for
+// the given session. Safe to call when no servers are registered.
+func (h *Handler) disconnectSessionMCP(ctx context.Context, sessionID string) {
+	h.mcpLifecycleMu.Lock()
+	defer h.mcpLifecycleMu.Unlock()
+	h.disconnectSessionMCPLocked(ctx, sessionID)
+}
+
+func (h *Handler) disconnectSessionMCPLocked(ctx context.Context, sessionID string) {
+	mgr := h.app.GetMCPManager()
+	cfg := h.app.GetConfig()
+
+	h.mu.Lock()
+	names := h.sessionMCP[sessionID]
+	delete(h.sessionMCP, sessionID)
+	for _, name := range names {
+		delete(h.dynamicMCP, name)
+	}
+	h.mcpRevision[sessionID]++
+	h.mu.Unlock()
+
+	if len(names) == 0 {
+		return
+	}
+	for _, name := range names {
+		if mgr != nil {
+			if err := mgr.DisableSingle(cfg, name); err != nil {
+				slog.Warn("ACP: failed to disconnect session MCP server", "name", name, "err", err)
+			}
+		}
+		if cfg != nil {
+			cfg.RemoveMCP(name)
+		}
+	}
+}
+
+type sessionMCPAccess struct {
+	handler   *Handler
+	sessionID string
+}
+
+func (a sessionMCPAccess) AllowsMCPServer(name string) bool {
+	a.handler.mu.RLock()
+	defer a.handler.mu.RUnlock()
+	if _, dynamic := a.handler.knownDynamicMCP[name]; !dynamic {
+		return true
+	}
+	return a.handler.dynamicMCP[name] == a.sessionID
+}
+
+func (a sessionMCPAccess) MCPServerRevision() uint64 {
+	a.handler.mu.RLock()
+	defer a.handler.mu.RUnlock()
+	return a.handler.mcpRevision[a.sessionID]
+}
+
+func (a sessionMCPAccess) MCPServerScope() string {
+	return a.sessionID
+}
+
+// acpMCPConfigToConfig converts an ACP MCPServerConfig to a config.MCPConfig.
+func acpMCPConfigToConfig(s MCPServerConfig) config.MCPConfig {
+	typ := config.MCPType(strings.ToLower(strings.TrimSpace(s.Type)))
+	if typ == "" {
+		typ = config.MCPStdio
+	}
+	env := make(map[string]string, len(s.Env))
+	for _, e := range s.Env {
+		env[e.Name] = e.Value
+	}
+	headers := make(map[string]string, len(s.Headers))
+	for _, header := range s.Headers {
+		headers[header.Name] = header.Value
+	}
+	return config.MCPConfig{
+		Command: s.Command,
+		Args:    s.Args,
+		Env:     env,
+		Type:    typ,
+		URL:     s.URL,
+		Headers: headers,
+	}
+}
+
+// Close disconnects all MCP servers registered by ACP sessions.
+func (h *Handler) Close(ctx context.Context) {
+	h.mcpLifecycleMu.Lock()
+	defer h.mcpLifecycleMu.Unlock()
+
+	h.mu.Lock()
+	for _, entry := range h.cancels {
+		entry.cancel()
+	}
+	sessionIDs := make([]string, 0, len(h.sessionMCP))
+	for sessionID := range h.sessionMCP {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	h.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		h.disconnectSessionMCPLocked(ctx, sessionID)
+	}
+}
+
 // Handle dispatches an incoming request.
 func (h *Handler) Handle(ctx context.Context, req *Request) (any, *RPCError) {
 	switch req.Method {
@@ -128,6 +347,11 @@ func (h *Handler) handleInitialize(_ context.Context, req *Request) (any, *RPCEr
 	}
 
 	slog.Info("ACP: client connected", "client", params.ClientInfo.Name, "version", params.ClientInfo.Version)
+
+	// Store the client's capabilities so other features (e.g. client-FS
+	// indirection for unsaved buffers) can consult them later without a
+	// deep refactor now.
+	h.setClientCapabilities(params.ClientCapabilities)
 
 	return InitializeResult{
 		ProtocolVersion: ProtocolVersion,
@@ -174,6 +398,9 @@ func (h *Handler) handleSessionNew(ctx context.Context, req *Request) (any, *RPC
 		return nil, &RPCError{Code: CodeInternalError, Message: fmt.Sprintf("failed to persist session cwd: %v", err)}
 	}
 
+	// Connect any client-supplied session-scoped MCP servers.
+	h.connectSessionMCP(ctx, sess.ID, params.MCPServers)
+
 	// Use the internal session ID as the ACP session ID for simplicity.
 	slog.Info("ACP: created session", "session_id", sess.ID)
 	return SessionNewResult{
@@ -206,6 +433,9 @@ func (h *Handler) handleSessionLoad(ctx context.Context, req *Request) (any, *RP
 		return nil, &RPCError{Code: CodeInternalError, Message: fmt.Sprintf("failed to persist session cwd: %v", err)}
 	}
 
+	// Connect any client-supplied session-scoped MCP servers.
+	h.connectSessionMCP(ctx, sess.ID, params.MCPServers)
+
 	h.replayHistory(ctx, sess.ID)
 
 	slog.Info("ACP: loaded session", "session_id", sess.ID)
@@ -225,34 +455,50 @@ func (h *Handler) replayHistory(ctx context.Context, sessionID string) {
 	for _, msg := range msgs {
 		switch msg.Role {
 		case message.User:
-			content := msg.Content().Text
-			if content != "" {
+			if content := msg.Content().Text; content != "" {
 				h.sendUpdateSyncWithContext(ctx, sessionID, SessionUpdate{
 					SessionUpdate: SessionUpdateUserMessageChunk,
 					Content:       TextBlock(content),
 				})
 			}
+			for _, bc := range msg.BinaryContent() {
+				h.sendUpdateSyncWithContext(ctx, sessionID, SessionUpdate{
+					SessionUpdate: SessionUpdateUserMessageChunk,
+					Content:       BinaryContent(bc.MIMEType, base64.StdEncoding.EncodeToString(bc.Data)),
+				})
+			}
+			for _, iuc := range msg.ImageURLContent() {
+				h.sendUpdateSyncWithContext(ctx, sessionID, SessionUpdate{
+					SessionUpdate: SessionUpdateUserMessageChunk,
+					Content:       ResourceContent(iuc.URL, mimeTypeForResourceURL(iuc.URL), iuc.Detail),
+				})
+			}
 		case message.Tool:
 			for _, tr := range msg.ToolResults() {
-				h.sendUpdateSyncWithContext(ctx, sessionID, h.sessionUpdateFromToolResult(tr, sessionID, sessionID))
+				h.sendUpdateSyncWithContext(ctx, sessionID, h.sessionUpdateFromToolResult(tr, sessionID, sessionID, nil))
 			}
 		case message.Assistant:
-			content := msg.Content().Text
-			if content != "" {
+			if content := msg.Content().Text; content != "" {
 				h.sendUpdateSyncWithContext(ctx, sessionID, SessionUpdate{
 					SessionUpdate: SessionUpdateAgentMessageChunk,
 					Content:       TextBlock(content),
 				})
 			}
-			for _, tc := range msg.ToolCalls() {
+			for _, bc := range msg.BinaryContent() {
 				h.sendUpdateSyncWithContext(ctx, sessionID, SessionUpdate{
-					SessionUpdate: SessionUpdateToolCall,
-					ToolCallID:    tc.ID,
-					Title:         tc.Name,
-					Kind:          "tool",
-					Status:        ToolCallStatusCompleted,
-					RawInput:      tc.Input,
+					SessionUpdate: SessionUpdateAgentMessageChunk,
+					Content:       BinaryContent(bc.MIMEType, base64.StdEncoding.EncodeToString(bc.Data)),
 				})
+			}
+			for _, iuc := range msg.ImageURLContent() {
+				h.sendUpdateSyncWithContext(ctx, sessionID, SessionUpdate{
+					SessionUpdate: SessionUpdateAgentMessageChunk,
+					Content:       ResourceContent(iuc.URL, mimeTypeForResourceURL(iuc.URL), iuc.Detail),
+				})
+			}
+			for _, tc := range msg.ToolCalls() {
+				update, _ := h.buildToolCallUpdate(tc, sessionID, sessionID, nil)
+				h.sendUpdateSyncWithContext(ctx, sessionID, update)
 			}
 		}
 	}
@@ -269,9 +515,12 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 		return nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId is required"}
 	}
 
-	// Build prompt text from content blocks.
-	promptText := extractText(params.Prompt)
-	if promptText == "" {
+	// Build prompt text and attachments from content blocks.
+	promptText, attachments, err := extractPromptContent(params.Prompt)
+	if err != nil {
+		return nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()}
+	}
+	if promptText == "" && len(attachments) == 0 {
 		return nil, &RPCError{Code: CodeInvalidParams, Message: "prompt is empty"}
 	}
 
@@ -287,6 +536,7 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 
 	// Wrap context with cancellation so session/cancel can stop the run.
 	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = agenttools.WithMCPServerAccess(runCtx, sessionMCPAccess{handler: h, sessionID: params.SessionID})
 	entry := &cancelEntry{cancel: cancel}
 	h.mu.Lock()
 	// Cancel any previous prompt for this session before overwriting.
@@ -311,6 +561,19 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 	readBytes := make(map[string]int)
 	runtimeSnapshotHashes := make(map[string][32]byte)
 	trackedSessionIDs := map[string]struct{}{params.SessionID: {}}
+	rejectedSessionIDs := make(map[string]struct{})
+	prefixCache := make(map[string]string)
+	defer func() {
+		// Sweep any tool-call parameters observed this turn so cancelled
+		// or errored runs do not leak activeToolParams entries.
+		for key := range readBytes {
+			if !strings.Contains(key, ":tc:") || strings.HasSuffix(key, ":done") {
+				continue
+			}
+			tcID := key[strings.LastIndex(key, ":tc:")+4:]
+			h.deleteToolParams(tcID)
+		}
+	}()
 
 	// Run the agent in a goroutine and stream message events.
 	type runResult struct {
@@ -320,7 +583,7 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 	done := make(chan runResult, 1)
 
 	go func() {
-		result, err := h.app.GetCoordinator().Run(runCtx, params.SessionID, promptText)
+		result, err := h.app.GetCoordinator().Run(runCtx, params.SessionID, promptText, attachments...)
 		done <- runResult{result, err}
 	}()
 
@@ -336,6 +599,8 @@ loop:
 				} else {
 					return nil, &RPCError{Code: CodeInternalError, Message: r.err.Error()}
 				}
+			} else if r.result != nil {
+				stopReason = stopReasonFromAgentResult(r.result)
 			}
 			// Drain any remaining subscription events before returning so that
 			// trailing stream chunks are not lost.
@@ -344,8 +609,8 @@ loop:
 				select {
 				case event := <-msgSub:
 					drained = true
-					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleMessageEvent(event.Payload, params.SessionID, readBytes, func(update SessionUpdate) {
+					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs, rejectedSessionIDs) {
+						h.handleMessageEvent(event.Payload, params.SessionID, readBytes, prefixCache, func(update SessionUpdate) {
 							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 						})
 					}
@@ -370,8 +635,8 @@ loop:
 				select {
 				case event := <-runtimeSub:
 					drained = true
-					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
-						h.handleToolRuntimeEvent(event, params.SessionID, runtimeSnapshotHashes, func(update SessionUpdate) {
+					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs, rejectedSessionIDs) {
+						h.handleToolRuntimeEvent(event, params.SessionID, runtimeSnapshotHashes, prefixCache, func(update SessionUpdate) {
 							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 						})
 					}
@@ -381,7 +646,7 @@ loop:
 				select {
 				case event := <-timelineSub:
 					drained = true
-					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
+					if h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs, rejectedSessionIDs) {
 						h.handleTimelineEvent(event, func(update SessionUpdate) {
 							h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 						})
@@ -396,10 +661,10 @@ loop:
 
 		case event := <-msgSub:
 			msg := event.Payload
-			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, msg.SessionID, trackedSessionIDs) {
+			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, msg.SessionID, trackedSessionIDs, rejectedSessionIDs) {
 				continue
 			}
-			h.handleMessageEvent(msg, params.SessionID, readBytes, func(update SessionUpdate) {
+			h.handleMessageEvent(msg, params.SessionID, readBytes, prefixCache, func(update SessionUpdate) {
 				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 			})
 
@@ -415,15 +680,15 @@ loop:
 			}
 
 		case event := <-runtimeSub:
-			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
+			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs, rejectedSessionIDs) {
 				continue
 			}
-			h.handleToolRuntimeEvent(event, params.SessionID, runtimeSnapshotHashes, func(update SessionUpdate) {
+			h.handleToolRuntimeEvent(event, params.SessionID, runtimeSnapshotHashes, prefixCache, func(update SessionUpdate) {
 				h.sendUpdateSyncWithContext(subCtx, params.SessionID, update)
 			})
 
 		case event := <-timelineSub:
-			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs) {
+			if !h.shouldForwardSessionEvent(subCtx, params.SessionID, event.Payload.SessionID, trackedSessionIDs, rejectedSessionIDs) {
 				continue
 			}
 			h.handleTimelineEvent(event, func(update SessionUpdate) {
@@ -439,7 +704,7 @@ loop:
 }
 
 // handleMessageEvent converts a message update into session/update notifications.
-func (h *Handler) handleMessageEvent(msg message.Message, parentSessionID string, readBytes map[string]int, send func(SessionUpdate)) {
+func (h *Handler) handleMessageEvent(msg message.Message, parentSessionID string, readBytes map[string]int, prefixCache map[string]string, send func(SessionUpdate)) {
 	switch msg.Role {
 	case message.Assistant:
 		if msg.SessionID == parentSessionID {
@@ -466,53 +731,45 @@ func (h *Handler) handleMessageEvent(msg message.Message, parentSessionID string
 					Content:       TextBlock(chunk),
 				})
 			}
+
+			// Emit binary (image/audio) and resource (URL reference) content.
+			for i, bc := range msg.BinaryContent() {
+				key := msg.ID + ":binary:" + strconv.Itoa(i)
+				if seen := readBytes[key]; seen == 0 {
+					readBytes[key] = max(len(bc.Data), 1)
+					send(SessionUpdate{
+						SessionUpdate: SessionUpdateAgentMessageChunk,
+						Content:       BinaryContent(bc.MIMEType, base64.StdEncoding.EncodeToString(bc.Data)),
+					})
+				}
+			}
+			for i, iuc := range msg.ImageURLContent() {
+				key := msg.ID + ":resource:" + strconv.Itoa(i)
+				if seen := readBytes[key]; seen == 0 {
+					readBytes[key] = 1
+					send(SessionUpdate{
+						SessionUpdate: SessionUpdateAgentMessageChunk,
+						Content:       ResourceContent(iuc.URL, mimeTypeForResourceURL(iuc.URL), iuc.Detail),
+					})
+				}
+			}
 		}
 
 		// Emit tool call events.
 		for _, tc := range msg.ToolCalls() {
 			key := msg.ID + ":tc:" + tc.ID
-			var inputParams any
-			if tc.Input != "" {
-				_ = json.Unmarshal([]byte(tc.Input), &inputParams)
-			}
-			prefix := h.getSubagentPrefix(context.Background(), msg.SessionID, parentSessionID)
-			beautifulTitle := prefix + GetBeautifulTitle(tc.Name, "", inputParams)
-			toolKind := GetToolKind(tc.Name)
+			update, inputParams := h.buildToolCallUpdate(tc, msg.SessionID, parentSessionID, prefixCache)
 			h.setToolParams(tc.ID, inputParams)
-
-			parentTCID := ""
-			if msg.SessionID != parentSessionID {
-				parentTCID = cleanParentToolCallID(msg.SessionID)
-			}
 
 			if _, seen := readBytes[key]; !seen {
 				readBytes[key] = 1
-				status := ToolCallStatusInProgress
-				if tc.Finished {
-					status = ToolCallStatusCompleted
-				}
-				send(SessionUpdate{
-					SessionUpdate:    SessionUpdateToolCall,
-					ToolCallID:       tc.ID,
-					Title:            beautifulTitle,
-					Kind:             toolKind,
-					Status:           status,
-					RawInput:         tc.Input,
-					ParentToolCallID: parentTCID,
-				})
+				send(update)
 			} else if tc.Finished {
 				finishedKey := msg.ID + ":tc:" + tc.ID + ":done"
 				if _, done := readBytes[finishedKey]; !done {
 					readBytes[finishedKey] = 1
-					send(SessionUpdate{
-						SessionUpdate:    SessionUpdateToolCallUpdate,
-						ToolCallID:       tc.ID,
-						Title:            beautifulTitle,
-						Kind:             toolKind,
-						Status:           ToolCallStatusCompleted,
-						RawInput:         tc.Input,
-						ParentToolCallID: parentTCID,
-					})
+					update.SessionUpdate = SessionUpdateToolCallUpdate
+					send(update)
 				}
 			}
 		}
@@ -521,13 +778,75 @@ func (h *Handler) handleMessageEvent(msg message.Message, parentSessionID string
 			key := msg.ID + ":tr:" + tr.ToolCallID
 			if _, seen := readBytes[key]; !seen {
 				readBytes[key] = 1
-				send(h.sessionUpdateFromToolResult(tr, msg.SessionID, parentSessionID))
+				send(h.sessionUpdateFromToolResult(tr, msg.SessionID, parentSessionID, prefixCache))
+			}
+			// Bridge todos tool results to ACP plan updates so IDEs that
+			// render agent plans stay in sync with crush's todo state.
+			// Best-effort: failures to parse must not disturb the normal
+			// tool-call updates.
+			if tr.Name == agenttools.TodosToolName {
+				if update, ok := planUpdateFromTodosResult(tr); ok {
+					send(update)
+				}
 			}
 		}
 	}
 }
 
-func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], parentSessionID string, snapshotHashes map[string][32]byte, send func(SessionUpdate)) {
+// planUpdateFromTodosResult translates a todos tool result's metadata into an
+// ACP SessionUpdatePlan notification. Returns ok=false when the metadata is
+// absent or has no todo entries.
+func planUpdateFromTodosResult(tr message.ToolResult) (SessionUpdate, bool) {
+	if strings.TrimSpace(tr.Metadata) == "" {
+		return SessionUpdate{}, false
+	}
+	var meta agenttools.TodosResponseMetadata
+	if err := json.Unmarshal([]byte(tr.Metadata), &meta); err != nil {
+		return SessionUpdate{}, false
+	}
+	entries := make([]PlanEntry, 0, len(meta.Todos))
+	for _, todo := range meta.Todos {
+		entries = append(entries, PlanEntry{
+			Content:  todo.Content,
+			Priority: "medium",
+			Status:   string(todo.Status),
+		})
+	}
+	return SessionUpdate{
+		SessionUpdate: SessionUpdatePlan,
+		Entries:       &entries,
+	}, true
+}
+
+func (h *Handler) buildToolCallUpdate(tc message.ToolCall, sessionID, parentSessionID string, prefixCache map[string]string) (SessionUpdate, any) {
+	var inputParams any
+	if tc.Input != "" {
+		_ = json.Unmarshal([]byte(tc.Input), &inputParams)
+	}
+	if inputParams == nil {
+		inputParams = tc.Input
+	}
+	prefix := h.getSubagentPrefix(context.Background(), sessionID, parentSessionID, prefixCache)
+	parentTCID := ""
+	if sessionID != parentSessionID {
+		parentTCID = cleanParentToolCallID(sessionID)
+	}
+	status := ToolCallStatusInProgress
+	if tc.Finished {
+		status = ToolCallStatusCompleted
+	}
+	return SessionUpdate{
+		SessionUpdate:    SessionUpdateToolCall,
+		ToolCallID:       tc.ID,
+		Title:            prefix + GetBeautifulTitle(tc.Name, "", inputParams),
+		Kind:             GetToolKind(tc.Name),
+		Status:           status,
+		RawInput:         inputParams,
+		ParentToolCallID: parentTCID,
+	}, inputParams
+}
+
+func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], parentSessionID string, snapshotHashes map[string][32]byte, prefixCache map[string]string, send func(SessionUpdate)) {
 	if event.Type == pubsub.DeletedEvent {
 		return
 	}
@@ -550,7 +869,7 @@ func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], 
 		snapshotHashes[state.ToolCallID] = hash
 
 		inputParams := h.getToolParams(state.ToolCallID)
-		prefix := h.getSubagentPrefix(context.Background(), state.SessionID, parentSessionID)
+		prefix := h.getSubagentPrefix(context.Background(), state.SessionID, parentSessionID, prefixCache)
 		parentTCID := ""
 		if state.SessionID != parentSessionID {
 			parentTCID = cleanParentToolCallID(state.SessionID)
@@ -562,7 +881,7 @@ func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], 
 			Title:            prefix + GetBeautifulTitle(state.ToolName, "", inputParams),
 			Kind:             GetToolKind(state.ToolName),
 			Status:           ToolCallStatusInProgress,
-			Content:          TextBlock(snapshot),
+			Content:          []any{ContentItem(TextBlock(snapshot))},
 			ClientMetadata:   state.ClientMetadata,
 			DurationMs:       state.DurationMs,
 			ParentToolCallID: parentTCID,
@@ -587,7 +906,7 @@ func (h *Handler) handleToolRuntimeEvent(event pubsub.Event[toolruntime.State], 
 	}
 
 	inputParams := h.getToolParams(state.ToolCallID)
-	prefix := h.getSubagentPrefix(context.Background(), state.SessionID, parentSessionID)
+	prefix := h.getSubagentPrefix(context.Background(), state.SessionID, parentSessionID, prefixCache)
 	parentTCID := ""
 	if state.SessionID != parentSessionID {
 		parentTCID = cleanParentToolCallID(state.SessionID)
@@ -626,7 +945,7 @@ func (h *Handler) handleTimelineEvent(event pubsub.Event[timeline.Event], send f
 	})
 }
 
-func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult, sessionID, parentSessionID string) SessionUpdate {
+func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult, sessionID, parentSessionID string, prefixCache map[string]string) SessionUpdate {
 	status := ToolCallStatusCompleted
 	subtaskResult, hasSubtaskResult := tr.SubtaskResult()
 	if hasSubtaskResult {
@@ -641,19 +960,24 @@ func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult, sessionID, 
 	}
 
 	inputParams := h.getToolParams(tr.ToolCallID)
-	prefix := h.getSubagentPrefix(context.Background(), sessionID, parentSessionID)
+	prefix := h.getSubagentPrefix(context.Background(), sessionID, parentSessionID, prefixCache)
 	parentTCID := ""
 	if sessionID != parentSessionID {
 		parentTCID = cleanParentToolCallID(sessionID)
 	}
 
 	toolKind := GetToolKind(tr.Name)
-	var content any = TextBlock(tr.Content)
+	// Per the ACP spec, tool_call_update content is a ToolCallContent[] array.
+	// Edit/write tools produce a text entry plus an optional diff entry;
+	// everything else is wrapped as a single "content" item.
+	var content any
 	if toolKind == ToolKindEdit {
-		diffContent := h.getToolDiffContent(tr.Name, inputParams, tr.Content)
-		if diffContent != nil {
+		if diffContent := h.getToolDiffContent(tr.Name, inputParams, tr.Content); diffContent != nil {
 			content = diffContent
 		}
+	}
+	if content == nil {
+		content = []any{ContentItem(TextBlock(tr.Content))}
 	}
 
 	update := SessionUpdate{
@@ -732,7 +1056,7 @@ func (h *Handler) sendUpdateSyncWithContext(ctx context.Context, sessionID strin
 	}
 }
 
-func (h *Handler) shouldForwardSessionEvent(ctx context.Context, parentSessionID string, candidateSessionID string, trackedSessionIDs map[string]struct{}) bool {
+func (h *Handler) shouldForwardSessionEvent(ctx context.Context, parentSessionID string, candidateSessionID string, trackedSessionIDs, rejectedSessionIDs map[string]struct{}) bool {
 	if candidateSessionID == parentSessionID {
 		trackedSessionIDs[candidateSessionID] = struct{}{}
 		return true
@@ -743,29 +1067,135 @@ func (h *Handler) shouldForwardSessionEvent(ctx context.Context, parentSessionID
 	if candidateSessionID == "" {
 		return false
 	}
+	if rejectedSessionIDs != nil {
+		if _, ok := rejectedSessionIDs[candidateSessionID]; ok {
+			return false
+		}
+	}
 	candidate, err := h.app.GetSessions().Get(ctx, candidateSessionID)
 	if err != nil {
+		if rejectedSessionIDs != nil {
+			rejectedSessionIDs[candidateSessionID] = struct{}{}
+		}
 		return false
 	}
 	if candidate.ParentSessionID != parentSessionID {
+		if rejectedSessionIDs != nil {
+			rejectedSessionIDs[candidateSessionID] = struct{}{}
+		}
 		return false
 	}
 	trackedSessionIDs[candidateSessionID] = struct{}{}
 	return true
 }
 
-// extractText joins all text-type ContentBlocks into a single string.
-func extractText(blocks []ContentBlock) string {
+// extractPromptContent joins text blocks and inlines resource blocks into a
+// prompt string, and extracts image/audio blocks into crush attachments.
+func extractPromptContent(blocks []ContentBlock) (string, []message.Attachment, error) {
 	var sb strings.Builder
+	var attachments []message.Attachment
 	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				if sb.Len() > 0 {
+					sb.WriteByte('\n')
+				}
+				sb.WriteString(b.Text)
+			}
+		case "resource":
+			if b.Resource == nil {
+				return "", nil, errors.New("resource block is missing resource")
+			}
+			if b.Resource.URI == "" {
+				return "", nil, errors.New("resource block is missing uri")
+			}
+			if b.Resource.Text == "" && b.Resource.Blob == "" {
+				return "", nil, errors.New("resource block is missing text or blob")
+			}
+			if b.Resource.Text != "" && b.Resource.Blob != "" {
+				return "", nil, errors.New("resource block cannot contain both text and blob")
+			}
+			if b.Resource.Blob != "" {
+				data, err := base64.StdEncoding.DecodeString(b.Resource.Blob)
+				if err != nil {
+					return "", nil, fmt.Errorf("invalid resource blob: %w", err)
+				}
+				mimeType := b.Resource.MIMEType
+				if mimeType == "" {
+					mimeType = "application/octet-stream"
+				}
+				attachments = append(attachments, message.Attachment{
+					FileName: b.Resource.URI,
+					MimeType: mimeType,
+					Content:  data,
+				})
+				continue
+			}
 			if sb.Len() > 0 {
 				sb.WriteByte('\n')
 			}
-			sb.WriteString(b.Text)
+			sb.WriteString("```resource\n")
+			sb.WriteString(b.Resource.URI)
+			if b.Resource.Text != "" {
+				sb.WriteByte('\n')
+				sb.WriteString(b.Resource.Text)
+			}
+			sb.WriteString("\n```")
+		case "image", "audio":
+			if b.Data == "" {
+				return "", nil, fmt.Errorf("%s block is missing data", b.Type)
+			}
+			if b.MIMEType == "" {
+				return "", nil, fmt.Errorf("%s block is missing mimeType", b.Type)
+			}
+			data, err := base64.StdEncoding.DecodeString(b.Data)
+			if err != nil {
+				return "", nil, fmt.Errorf("invalid %s block: %w", b.Type, err)
+			}
+			attachments = append(attachments, message.Attachment{
+				FileName: b.Type + "-" + strconv.Itoa(len(attachments)),
+				MimeType: b.MIMEType,
+				Content:  data,
+			})
+		default:
+			return "", nil, fmt.Errorf("unsupported content block type: %s", b.Type)
 		}
 	}
-	return sb.String()
+	return sb.String(), attachments, nil
+}
+
+// mimeTypeForResourceURL infers the MIME type of an external resource from
+// its URL, returning "" when it cannot be determined.
+func mimeTypeForResourceURL(uri string) string {
+	if mimeType := mime.TypeByExtension(filepath.Ext(uri)); mimeType != "" {
+		return mimeType
+	}
+	u, err := url.Parse(uri)
+	if err == nil && u != nil {
+		if mimeType := mime.TypeByExtension(filepath.Ext(u.Path)); mimeType != "" {
+			return mimeType
+		}
+	}
+	return ""
+}
+
+// stopReasonFromAgentResult maps the final run finish reason to an ACP
+// StopReason.
+func stopReasonFromAgentResult(result *fantasy.AgentResult) StopReason {
+	if result == nil {
+		return StopReasonEndTurn
+	}
+	switch result.Response.FinishReason {
+	case fantasy.FinishReasonLength:
+		return StopReasonMaxTokens
+	case fantasy.FinishReasonContentFilter:
+		return StopReasonRefusal
+	case fantasy.FinishReasonMaxTurnRequests:
+		return StopReasonMaxTurnRequests
+	default:
+		return StopReasonEndTurn
+	}
 }
 
 // isContextError returns true if the error is a context cancellation, deadline,
@@ -864,7 +1294,34 @@ func (h *Handler) buildModes(sessionID string) *SessionModeState {
 	}
 }
 
-func (h *Handler) handleSetMode(_ context.Context, req *Request) (any, *RPCError) {
+// applyPermissionMode performs the shared mode-transition logic used by both
+// session/set_mode and session/set_config_option{configId: "mode"}. It
+// validates the mode, clears persistent permissions when entering auto,
+// persists the new permission mode, and emits an auto-mode exit prompt message
+// when applicable. Callers are responsible for sending the
+// current_mode_update / config_option_update notifications and for shaping
+// their own response, since the two handlers differ in those respects.
+func (h *Handler) applyPermissionMode(ctx context.Context, sessionID, modeID string) (*session.ModeTransition, *RPCError) {
+	if modeID == "auto" {
+		h.app.GetPermissions().ClearPersistentPermissions(sessionID)
+	}
+	current, err := h.app.GetSessions().Get(ctx, sessionID)
+	if err != nil {
+		return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
+	}
+	transition := session.NewPermissionModeTransition(current, session.NormalizePermissionMode(modeID))
+	if _, err := h.app.GetSessions().UpdatePermissionMode(ctx, sessionID, transition.Current.PermissionMode); err != nil {
+		return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
+	}
+	if transition.ExitedAutoMode() {
+		if _, err := h.app.GetMessages().Create(ctx, sessionID, message.NewAutoModePromptMessage(message.AutoModePromptTypeExit)); err != nil {
+			return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
+		}
+	}
+	return &transition, nil
+}
+
+func (h *Handler) handleSetMode(ctx context.Context, req *Request) (any, *RPCError) {
 	var params SetModeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()}
@@ -872,21 +1329,9 @@ func (h *Handler) handleSetMode(_ context.Context, req *Request) (any, *RPCError
 	if params.ModeID != "default" && params.ModeID != "auto" && params.ModeID != "yolo" {
 		return nil, &RPCError{Code: CodeInvalidParams, Message: fmt.Sprintf("invalid modeId: %s", params.ModeID)}
 	}
-	if params.ModeID == "auto" {
-		h.app.GetPermissions().ClearPersistentPermissions(params.SessionID)
-	}
-	current, err := h.app.GetSessions().Get(context.Background(), params.SessionID)
-	if err != nil {
-		return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
-	}
-	transition := session.NewPermissionModeTransition(current, session.NormalizePermissionMode(params.ModeID))
-	if _, err := h.app.GetSessions().UpdatePermissionMode(context.Background(), params.SessionID, transition.Current.PermissionMode); err != nil {
-		return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
-	}
-	if transition.ExitedAutoMode() {
-		if _, err := h.app.GetMessages().Create(context.Background(), params.SessionID, message.NewAutoModePromptMessage(message.AutoModePromptTypeExit)); err != nil {
-			return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
-		}
+	transition, rpcErr := h.applyPermissionMode(ctx, params.SessionID, params.ModeID)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
 	h.sendUpdate(params.SessionID, SessionUpdate{
 		SessionUpdate: SessionUpdateCurrentModeUpdate,
@@ -1034,21 +1479,9 @@ func (h *Handler) handleSetConfigOption(ctx context.Context, req *Request) (any,
 		if params.Value != "default" && params.Value != "auto" && params.Value != "yolo" {
 			return nil, &RPCError{Code: CodeInvalidParams, Message: fmt.Sprintf("invalid mode option value: %s", params.Value)}
 		}
-		if params.Value == "auto" {
-			h.app.GetPermissions().ClearPersistentPermissions(params.SessionID)
-		}
-		current, err := h.app.GetSessions().Get(ctx, params.SessionID)
-		if err != nil {
-			return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
-		}
-		transition := session.NewPermissionModeTransition(current, session.NormalizePermissionMode(params.Value))
-		if _, err := h.app.GetSessions().UpdatePermissionMode(ctx, params.SessionID, transition.Current.PermissionMode); err != nil {
-			return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
-		}
-		if transition.ExitedAutoMode() {
-			if _, err := h.app.GetMessages().Create(ctx, params.SessionID, message.NewAutoModePromptMessage(message.AutoModePromptTypeExit)); err != nil {
-				return nil, &RPCError{Code: CodeInternalError, Message: err.Error()}
-			}
+		transition, rpcErr := h.applyPermissionMode(ctx, params.SessionID, params.Value)
+		if rpcErr != nil {
+			return nil, rpcErr
 		}
 
 		updated := h.buildConfigOptions(params.SessionID)
@@ -1153,27 +1586,39 @@ func (h *Handler) handleSetConfigOption(ctx context.Context, req *Request) (any,
 // in the message subscription loop.
 var _ pubsub.Event[message.Message]
 
-func (h *Handler) getSubagentPrefix(ctx context.Context, sessionID, parentSessionID string) string {
+func (h *Handler) getSubagentPrefix(ctx context.Context, sessionID, parentSessionID string, cache map[string]string) string {
 	if sessionID == "" || sessionID == parentSessionID {
 		return ""
+	}
+	if cache != nil {
+		if prefix, ok := cache[sessionID]; ok {
+			return prefix
+		}
 	}
 	sess, err := h.app.GetSessions().Get(ctx, sessionID)
 	if err != nil {
 		return ""
 	}
+	var prefix string
 	// Extract subagent name from title like "Explore task (@explore subagent)"
 	if idx := strings.Index(sess.Title, "(@"); idx != -1 {
 		sub := sess.Title[idx+2:]
 		if endIdx := strings.Index(sub, " "); endIdx != -1 {
-			return "[" + sub[:endIdx] + "] "
+			prefix = "[" + sub[:endIdx] + "] "
 		}
 	}
-	// Fallback to title
-	title := sess.Title
-	if len(title) > 15 {
-		title = title[:12] + "..."
+	if prefix == "" {
+		// Fallback to title.
+		title := sess.Title
+		if len(title) > 15 {
+			title = title[:12] + "..."
+		}
+		prefix = "[" + title + "] "
 	}
-	return "[" + title + "] "
+	if cache != nil {
+		cache[sessionID] = prefix
+	}
+	return prefix
 }
 
 func (h *Handler) getToolLocations(toolName string, params any) []Location {
@@ -1187,22 +1632,24 @@ func (h *Handler) getToolLocations(toolName string, params any) []Location {
 	return nil
 }
 
+// getToolDiffContent builds a ToolCallContent[] array for edit/write tool
+// results. The first entry is always the text output wrapped as a "content"
+// item; when the tool produced a diff, a "diff" entry is appended.
 func (h *Handler) getToolDiffContent(toolName string, params any, toolOutput string) []any {
 	if params == nil {
 		return nil
 	}
 
-	path := extractParam(params, "TargetFile", "file_path", "filePath", "filepath", "path")
+	path := extractParam(params, "file_path", "path")
 	if path == "" {
 		return nil
 	}
 
-	blocks := []any{TextBlock(toolOutput)}
+	blocks := []any{ContentItem(TextBlock(toolOutput))}
 
-	// replace_file_content
-	if toolName == "replace_file_content" {
-		oldText := extractParam(params, "TargetContent")
-		newText := extractParam(params, "ReplacementContent")
+	if toolName == "edit" {
+		oldText := extractParam(params, "old_string")
+		newText := extractParam(params, "new_string")
 		if oldText != "" || newText != "" {
 			blocks = append(blocks, DiffBlock{
 				Type:    "diff",
@@ -1214,34 +1661,8 @@ func (h *Handler) getToolDiffContent(toolName string, params any, toolOutput str
 		}
 	}
 
-	// multi_replace_file_content
-	if toolName == "multi_replace_file_content" {
-		type localChunk struct {
-			TargetContent      string `json:"TargetContent"`
-			ReplacementContent string `json:"ReplacementContent"`
-		}
-		type localMultiParams struct {
-			ReplacementChunks []localChunk `json:"ReplacementChunks"`
-		}
-		var mp localMultiParams
-		if data, err := json.Marshal(params); err == nil {
-			if err := json.Unmarshal(data, &mp); err == nil {
-				for _, ch := range mp.ReplacementChunks {
-					blocks = append(blocks, DiffBlock{
-						Type:    "diff",
-						Path:    path,
-						OldText: ch.TargetContent,
-						NewText: ch.ReplacementContent,
-					})
-				}
-				return blocks
-			}
-		}
-	}
-
-	// write_to_file, write, fs/write_text_file
-	if toolName == "write_to_file" || toolName == "write" || toolName == "fs/write_text_file" {
-		newText := extractParam(params, "CodeContent", "content", "data", "text")
+	if toolName == "write" {
+		newText := extractParam(params, "content")
 		if newText != "" {
 			blocks = append(blocks, DiffBlock{
 				Type:    "diff",

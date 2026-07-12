@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 565
+        content_length: 549
         host: ""
-        body: '{"include":["reasoning.encrypted_content"],"input":[{"content":"You are a helpful assistant","role":"developer"},{"content":[{"text":"What''s the weather in Florence, Italy?","type":"input_text"}],"role":"user"}],"model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
+        body: '{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"input_text"}],"role":"user"}],"instructions":"You are a helpful assistant","model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
         headers:
             Accept:
                 - application/json
@@ -370,9 +370,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 788
+        content_length: 772
         host: ""
-        body: '{"include":["reasoning.encrypted_content"],"input":[{"content":"You are a helpful assistant","role":"developer"},{"content":[{"text":"What''s the weather in Florence, Italy?","type":"input_text"}],"role":"user"},{"arguments":"{\"location\":\"Florence, Italy\"}","call_id":"call_vTqMwYdzvdmoeNyNdQOqI1uY","name":"weather","type":"function_call"},{"call_id":"call_vTqMwYdzvdmoeNyNdQOqI1uY","output":"40 C","type":"function_call_output"}],"model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
+        body: '{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"input_text"}],"role":"user"},{"arguments":"{\"location\":\"Florence, Italy\"}","call_id":"call_vTqMwYdzvdmoeNyNdQOqI1uY","name":"weather","type":"function_call"},{"call_id":"call_vTqMwYdzvdmoeNyNdQOqI1uY","output":"40 C","type":"function_call_output"}],"instructions":"You are a helpful assistant","model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
         headers:
             Accept:
                 - application/json

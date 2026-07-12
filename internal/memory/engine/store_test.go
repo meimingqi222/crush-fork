@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,12 +170,12 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-var eventCounter int
+var eventCounter atomic.Int64
 
 func testEvent(scope MemoryScope, kind MemoryKind, content string) MemoryEvent {
-	eventCounter++
-	id := fmt.Sprintf("evt-%d-%s-%s", eventCounter, string(scope), string(kind))
-	msgID := fmt.Sprintf("msg-%d", eventCounter)
+	n := eventCounter.Add(1)
+	id := fmt.Sprintf("evt-%d-%s-%s", n, string(scope), string(kind))
+	msgID := fmt.Sprintf("msg-%d", n)
 	return MemoryEvent{
 		ID:      id,
 		Scope:   scope,
@@ -182,7 +183,7 @@ func testEvent(scope MemoryScope, kind MemoryKind, content string) MemoryEvent {
 		Content: content,
 		Summary: "summary: " + truncate(content, 30),
 		Source: MemorySourceRef{
-			SessionID:  fmt.Sprintf("sess-%d", eventCounter),
+			SessionID:  fmt.Sprintf("sess-%d", n),
 			MessageIDs: []string{msgID},
 			CWD:        "/test",
 		},

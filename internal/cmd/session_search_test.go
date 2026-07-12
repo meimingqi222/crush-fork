@@ -23,9 +23,11 @@ func newSessionSearchCommand(t *testing.T, dataDir string) *cobra.Command {
 	return cmd
 }
 
-func TestRunSessionSearch(t *testing.T) {
-	t.Parallel()
+// These three tests share the package-level sessionSearchSession /
+// sessionSearchLimit cobra flag vars (see session.go), so they can't run
+// with t.Parallel() against each other without racing on that shared state.
 
+func TestRunSessionSearch(t *testing.T) {
 	dataDir := t.TempDir()
 	conn, err := db.Connect(t.Context(), dataDir)
 	require.NoError(t, err)
@@ -72,8 +74,6 @@ func TestRunSessionSearch(t *testing.T) {
 }
 
 func TestRunSessionSearchRequiresQuery(t *testing.T) {
-	t.Parallel()
-
 	dataDir := t.TempDir()
 	cmd := newSessionSearchCommand(t, dataDir)
 	sessionSearchSession = ""
@@ -84,8 +84,6 @@ func TestRunSessionSearchRequiresQuery(t *testing.T) {
 }
 
 func TestSessionSearchCommandWiring(t *testing.T) {
-	t.Parallel()
-
 	sessionSearchSession = ""
 	sessionSearchLimit = 20
 	defer func() {

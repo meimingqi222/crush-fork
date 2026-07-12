@@ -6,12 +6,21 @@ package acp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Protocol version supported.
 const ProtocolVersion = 1
 
 // ---- Shared types ----
+
+// ResourceBlock is the ACP embedded-context resource payload.
+type ResourceBlock struct {
+	URI      string `json:"uri,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
+}
 
 // ContentBlock is a union type for prompt content.
 type ContentBlock struct {
@@ -22,11 +31,30 @@ type ContentBlock struct {
 	Data     string `json:"data,omitempty"`
 	MIMEType string `json:"mimeType,omitempty"`
 	URI      string `json:"uri,omitempty"`
+	// Embedded context resource reference.
+	Resource *ResourceBlock `json:"resource,omitempty"`
 }
 
 // TextBlock returns a text ContentBlock.
 func TextBlock(text string) *ContentBlock {
 	return &ContentBlock{Type: "text", Text: text}
+}
+
+// BinaryContent returns an image/audio ContentBlock from a base64 data payload.
+func BinaryContent(mimeType, data string) *ContentBlock {
+	typ := "image"
+	if strings.HasPrefix(mimeType, "audio/") {
+		typ = "audio"
+	}
+	return &ContentBlock{Type: typ, MIMEType: mimeType, Data: data}
+}
+
+// ResourceContent returns a resource ContentBlock referencing a URI.
+func ResourceContent(uri, mimeType, text string) *ContentBlock {
+	return &ContentBlock{
+		Type:     "resource",
+		Resource: &ResourceBlock{URI: uri, MIMEType: mimeType, Text: text},
+	}
 }
 
 // StopReason is the reason a prompt turn stopped.
@@ -113,15 +141,22 @@ type InitializeResult struct {
 
 // ---- Session setup ----
 
-// MCPServerConfig describes an MCP server to connect to.
+// NameValue is an ACP environment variable or HTTP header.
+type NameValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// MCPServerConfig describes an MCP server to connect to. Stdio is the
+// untagged default variant; HTTP and SSE use the type discriminator.
 type MCPServerConfig struct {
-	Name    string            `json:"name"`
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     []string          `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Type    string            `json:"type,omitempty"` // "stdio", "http", "sse"
-	Headers map[string]string `json:"headers,omitempty"`
+	Name    string      `json:"name"`
+	Command string      `json:"command,omitempty"`
+	Args    []string    `json:"args,omitempty"`
+	Env     []NameValue `json:"env,omitempty"`
+	URL     string      `json:"url,omitempty"`
+	Type    string      `json:"type,omitempty"` // "http" or "sse"; empty means stdio
+	Headers []NameValue `json:"headers,omitempty"`
 }
 
 // SessionNewParams is the request to create a new session.
@@ -328,7 +363,7 @@ type SessionUpdate struct {
 	SubtaskResult    *SubtaskResult `json:"subtaskResult,omitempty"`
 	Reducer          *Reducer       `json:"reducer,omitempty"`
 	// Plan entries.
-	Entries []PlanEntry `json:"entries,omitempty"`
+	Entries *[]PlanEntry `json:"entries,omitempty"`
 	// Session info update fields (ISO 8601 timestamp).
 	UpdatedAt string `json:"updatedAt,omitempty"`
 	// Config option update fields.
@@ -341,10 +376,9 @@ type SessionUpdate struct {
 
 // PlanEntry is a single entry in an agent execution plan.
 type PlanEntry struct {
-	ID      string `json:"id"`
-	Title   string `json:"title"`
-	Status  string `json:"status"`
-	Content string `json:"content,omitempty"`
+	Content  string `json:"content"`
+	Priority string `json:"priority"`
+	Status   string `json:"status"`
 }
 
 // SessionUpdateNotification is the full notification envelope.
@@ -538,4 +572,16 @@ type DiffBlock struct {
 	Path    string `json:"path"`
 	OldText string `json:"oldText"`
 	NewText string `json:"newText"`
+}
+
+// ToolCallContentItem wraps a ContentBlock as a ToolCallContent array entry
+// per the ACP spec: `{"type": "content", "content": {...}}`.
+type ToolCallContentItem struct {
+	Type    string        `json:"type"` // "content"
+	Content *ContentBlock `json:"content"`
+}
+
+// ContentItem wraps a ContentBlock as a ToolCallContent "content" entry.
+func ContentItem(block *ContentBlock) *ToolCallContentItem {
+	return &ToolCallContentItem{Type: "content", Content: block}
 }

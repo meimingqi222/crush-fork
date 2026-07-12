@@ -34,7 +34,7 @@ func TestOpenAIWebSearch(t *testing.T) {
 	webSearchTool := openai.WebSearchTool(nil)
 
 	t.Run("generate", func(t *testing.T) {
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		lm, err := openAIWebSearchBuilder(model)(t, r)
 		require.NoError(t, err)
@@ -82,7 +82,7 @@ func TestOpenAIWebSearch(t *testing.T) {
 	})
 
 	t.Run("stream", func(t *testing.T) {
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		lm, err := openAIWebSearchBuilder(model)(t, r)
 		require.NoError(t, err)

@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 503
+        content_length: 490
         host: ""
-        body: '{"input":[{"content":"You are a helpful assistant","role":"system"},{"content":[{"text":"What''s the weather in Florence,Italy?","type":"input_text"}],"role":"user"}],"max_output_tokens":4000,"model":"gpt-4o-mini","store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
+        body: '{"input":[{"content":[{"text":"What''s the weather in Florence,Italy?","type":"input_text"}],"role":"user"}],"instructions":"You are a helpful assistant","max_output_tokens":4000,"model":"gpt-4o-mini","store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
         headers:
             Accept:
                 - application/json
@@ -76,9 +76,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 726
+        content_length: 713
         host: ""
-        body: '{"input":[{"content":"You are a helpful assistant","role":"system"},{"content":[{"text":"What''s the weather in Florence,Italy?","type":"input_text"}],"role":"user"},{"arguments":"{\"location\":\"Florence, Italy\"}","call_id":"call_yLQoefRSgy3mxdgHFwx1248W","name":"weather","type":"function_call"},{"call_id":"call_yLQoefRSgy3mxdgHFwx1248W","output":"40 C","type":"function_call_output"}],"max_output_tokens":4000,"model":"gpt-4o-mini","store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
+        body: '{"input":[{"content":[{"text":"What''s the weather in Florence,Italy?","type":"input_text"}],"role":"user"},{"arguments":"{\"location\":\"Florence, Italy\"}","call_id":"call_yLQoefRSgy3mxdgHFwx1248W","name":"weather","type":"function_call"},{"call_id":"call_yLQoefRSgy3mxdgHFwx1248W","output":"40 C","type":"function_call_output"}],"instructions":"You are a helpful assistant","max_output_tokens":4000,"model":"gpt-4o-mini","store":false,"stream":true,"tool_choice":"auto","tools":[{"description":"Get weather information for a location","name":"weather","parameters":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"strict":false,"type":"function"}]}'
         headers:
             Accept:
                 - application/json

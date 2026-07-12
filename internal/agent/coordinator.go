@@ -31,10 +31,10 @@ import (
 	"github.com/charmbracelet/crush/internal/checkpoint"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filetracker"
-	"github.com/charmbracelet/crush/internal/httpext"
 	goalruntime "github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/hooks"
+	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
@@ -270,6 +270,15 @@ func NewCoordinator(
 		return nil, err
 	}
 
+	// agentRegistry, mainAgentID, and lifecycle must be set before buildAgent
+	// is called: for the primary agent, buildAgent kicks off an async runtime
+	// config refresh (c.readyWg.Go) that reads c.agentRegistry while building
+	// tools (see registerAgentTools), racing with these assignments if they
+	// happened afterward.
+	c.agentRegistry = GlobalAgentRegistry()
+	c.mainAgentID = "0-Main"
+	c.lifecycle = newSubagentLifecycleManager(c.agentRegistry, &c.childSessionAgents)
+
 	agent, err := c.buildAgent(ctx, prompt, agentCfg, false)
 	if err != nil {
 		return nil, err
@@ -277,9 +286,6 @@ func NewCoordinator(
 	c.currentAgent = agent
 	c.agents[config.AgentCoder] = agent
 
-	c.agentRegistry = GlobalAgentRegistry()
-	c.mainAgentID = "0-Main"
-	c.lifecycle = newSubagentLifecycleManager(c.agentRegistry, &c.childSessionAgents)
 	c.agentRegistry.Register(AgentRef{
 		ID:          c.mainAgentID,
 		DisplayName: "Main",
@@ -1125,11 +1131,6 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(inferenceModel, providerCfg)
 	systemPromptPrefix := providerCfg.SystemPromptPrefix
 
-	allowedToolNames := make([]string, len(toolSet))
-	for i, tool := range toolSet {
-		allowedToolNames[i] = tool.Info().Name
-	}
-
 	return sessionAgentRuntimeConfig{
 		ProviderOptions:    mergedOptions,
 		MaxOutputTokens:    maxTokens,
@@ -1142,7 +1143,6 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 		SystemPromptPrefix: &systemPromptPrefix,
 		CollaborationMode:  mode,
 		PermissionMode:     permissionMode,
-		AllowedToolNames:   allowedToolNames,
 		Tools:              append([]fantasy.AgentTool(nil), toolSet...),
 		// The soft/hard request-step budget is only enforced on subagents.
 		// The main agent runs unbounded so interactive sessions are never
@@ -2976,19 +2976,19 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		resolvedAgentCfg = config.Agent{ID: params.SubagentTypeOrDefault(), Description: params.SessionTitle, AllowedTools: nil}
 	}
 
-	// Clear any inherited runtime config from the parent agent before
-	// deriving parent permissions and running the subagent. Each subagent
+	parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, session.CollaborationModeDefault, params.SessionID)
+	if parentPermissionsErr != nil {
+		return fantasy.ToolResponse{}, parentPermissionsErr
+	}
+
+	// Clear inherited runtime config after capturing the parent's effective
+	// tools. Each subagent
 	// must refresh its own models, tools, and system prompt; otherwise
 	// concurrent child runs can observe the parent's runtime config and skip
 	// their own initialization. This also prevents subagent permissions from
 	// inheriting parent's temporary allowed tool restrictions in Plan/Review
 	// modes.
 	ctx = context.WithValue(ctx, sessionAgentRuntimeConfigContextKey{}, (*sessionAgentRuntimeConfig)(nil))
-
-	parentPermissions, parentPermissionsErr := c.parentPermissionContext(ctx, session.CollaborationModeDefault, params.SessionID)
-	if parentPermissionsErr != nil {
-		return fantasy.ToolResponse{}, parentPermissionsErr
-	}
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, subSession.ID)
 	ctx = context.WithValue(ctx, tools.ToolCallIDContextKey, params.ToolCallID)
 	ctx = context.WithValue(ctx, tools.WorkingDirContextKey, sessionWorkingDir)

@@ -234,13 +234,10 @@ type sessionAgent struct {
 	smallModel         *csync.Value[Model]
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
-	// enhancedSystemPrompt caches the system prompt after appending dynamic
-	// but stable-per-session parts (MCP instructions, mental models, vision
-	// note). This keeps the prompt prefix identical across turns, which is
-	// critical for prompt caching. Invalidated by SetSystemPrompt.
-	enhancedSystemPrompt *csync.Value[string]
-	// enhancedPromptContextSig is the tool/MCP/date fingerprint used when
-	// enhancedSystemPrompt was last built.
+	// enhancedPromptMu protects the enhanced prompt and its context signature
+	// as one logical cache entry shared by concurrent sessions.
+	enhancedPromptMu         sync.Mutex
+	enhancedSystemPrompt     string
 	enhancedPromptContextSig string
 	workingDir               string
 	tools                    *csync.Slice[fantasy.AgentTool]
@@ -350,7 +347,6 @@ type sessionAgentRuntimeConfig struct {
 	SystemPromptPrefix *string
 	CollaborationMode  session.CollaborationMode
 	PermissionMode     session.PermissionMode
-	AllowedToolNames   []string
 	Tools              []fantasy.AgentTool
 
 	// RequestStepBudget, when > 0, enables the soft/hard step budget for
@@ -391,7 +387,6 @@ func NewSessionAgent(
 		smallModel:                      csync.NewValue(opts.SmallModel),
 		systemPromptPrefix:              csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:                    csync.NewValue(opts.SystemPrompt),
-		enhancedSystemPrompt:            csync.NewValue(""),
 		workingDir:                      opts.WorkingDir,
 		agentFactory:                    agentFactory,
 		refreshCallConfig:               opts.RefreshCallConfig,
@@ -541,19 +536,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if runtimeConfig.SystemPromptPrefix != nil {
 			promptPrefix = *runtimeConfig.SystemPromptPrefix
 		}
-		if len(runtimeConfig.Tools) > 0 {
-			agentTools = append([]fantasy.AgentTool(nil), runtimeConfig.Tools...)
-		}
-		if len(runtimeConfig.AllowedToolNames) > 0 {
-			agentTools = filterToolsByNames(agentTools, runtimeConfig.AllowedToolNames)
-		}
+		agentTools = append([]fantasy.AgentTool(nil), runtimeConfig.Tools...)
 	}
 	// Build the enhanced system prompt (base + MCP instructions + mental
 	// models + vision note). Cache it so subsequent turns reuse the exact
 	// same prefix, which is critical for prompt caching. The cache is
 	// invalidated by SetSystemPrompt (called when models/config change).
-	enhancedContextSig := computeToolSignature(agentTools) + "|" + promptDateUTC()
-	systemPrompt = a.buildEnhancedSystemPrompt(systemPrompt, largeModel, enhancedContextSig)
+	enhancedContextSig := fmt.Sprintf("%s|%s|mcp:%s:%d", computeToolSignature(agentTools), promptDateUTC(), tools.MCPServerAccessScope(genCtx), tools.MCPServerAccessRevision(genCtx))
+	systemPrompt = a.buildEnhancedSystemPrompt(genCtx, systemPrompt, largeModel, enhancedContextSig)
 
 	// Check if memory prefetch is ready (non-blocking) for logging purposes.
 	// Memory is always injected via PrepareStep as a trailing System Message,
@@ -804,7 +794,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// connect/disconnect during the run, we inject a System Message
 		// notification (preserving cache prefix) and invalidate the
 		// enhancedSystemPrompt cache so the next Run() rebuilds it.
-		mcpSnapshot := snapshotMcpStates()
+		mcpSnapshot := snapshotMcpStates(genCtx)
 		mcpChangeNotified := false
 		currentAssistant = nil
 		currentStepToolMessageIDs = nil
@@ -930,11 +920,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 
 				prepared.Tools = a.tools.Copy()
-				if stepRuntimeConfig != nil && len(stepRuntimeConfig.Tools) > 0 {
+				if stepRuntimeConfig != nil {
 					prepared.Tools = append([]fantasy.AgentTool(nil), stepRuntimeConfig.Tools...)
-				}
-				if stepRuntimeConfig != nil && len(stepRuntimeConfig.AllowedToolNames) > 0 {
-					prepared.Tools = filterToolsByNames(prepared.Tools, stepRuntimeConfig.AllowedToolNames)
 				}
 				// Add Anthropic caching to the last tool.
 				if len(prepared.Tools) > 0 {
@@ -996,16 +983,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// prefix stable (for caching) while still informing the agent
 				// about newly connected/disconnected MCP servers.
 				if !mcpChangeNotified {
-					if changes := diffMcpStates(mcpSnapshot); len(changes) > 0 {
+					changes, configurationChanged := diffMcpStates(callContext, mcpSnapshot)
+					if len(changes) > 0 || configurationChanged {
 						notification := formatMcpChangeNotification(changes)
 						prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(notification))
 						mcpChangeNotified = true
 						// Invalidate the enhanced system prompt cache so the
 						// next Run() picks up the new MCP instructions.
-						if a.enhancedSystemPrompt != nil {
-							a.enhancedSystemPrompt.Set("")
-							a.enhancedPromptContextSig = ""
-						}
+						a.invalidateEnhancedSystemPrompt()
 						slog.Info("MCP state changed during run, injected notification", "changes", changes, "session_id", call.SessionID)
 					}
 				}
@@ -1711,6 +1696,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
 					slog.Warn("Failed to persist budget-exceeded finish reason", "session_id", call.SessionID, "error", updateErr)
 				}
+			}
+			if hardBudgetExceeded && result != nil {
+				// Surface the budget abort in the run result so callers (e.g.
+				// ACP) can report the correct stop reason. The last step's
+				// model finish reason alone does not capture a StopWhen abort.
+				result.Response.FinishReason = fantasy.FinishReasonMaxTurnRequests
 			}
 			hydrateAgentResultFromAssistantMessage(result, currentAssistant)
 			// When the run was force-aborted by the hard request-step

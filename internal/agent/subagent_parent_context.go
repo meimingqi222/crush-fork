@@ -4,23 +4,32 @@ import (
 	"context"
 	"strings"
 
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
-func allowedToolNamesFromRuntimeContext(ctx context.Context) []string {
+func allowedToolNamesFromRuntimeContext(ctx context.Context) ([]string, bool) {
 	if runtimeConfig, ok := ctx.Value(sessionAgentRuntimeConfigContextKey{}).(*sessionAgentRuntimeConfig); ok && runtimeConfig != nil {
-		return normalizeToolNames(runtimeConfig.AllowedToolNames)
+		return runtimeToolNames(runtimeConfig.Tools), true
 	}
 	if runtimeConfig, ok := ctx.Value(sessionAgentRuntimeConfigContextKey{}).(sessionAgentRuntimeConfig); ok {
-		return normalizeToolNames(runtimeConfig.AllowedToolNames)
+		return runtimeToolNames(runtimeConfig.Tools), true
 	}
-	return nil
+	return nil, false
+}
+
+func runtimeToolNames(tools []fantasy.AgentTool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Info().Name)
+	}
+	return normalizeToolNames(names)
 }
 
 func (c *coordinator) parentPermissionContext(ctx context.Context, mode session.CollaborationMode, sessionID string) (ParentPermissionContext, error) {
-	allowedTools := allowedToolNamesFromRuntimeContext(ctx)
-	if len(allowedTools) == 0 {
+	allowedTools, hasRuntimeConfig := allowedToolNamesFromRuntimeContext(ctx)
+	if !hasRuntimeConfig {
 		agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
 		if ok {
 			toolBuild, err := c.buildToolsWithContext(ctx, agentCfg, mode)

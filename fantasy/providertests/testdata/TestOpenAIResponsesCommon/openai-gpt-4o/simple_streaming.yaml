@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 219
+        content_length: 206
         host: ""
-        body: '{"input":[{"content":"You are a helpful assistant","role":"system"},{"content":[{"text":"Say hi in Portuguese","type":"input_text"}],"role":"user"}],"max_output_tokens":4000,"model":"gpt-4o","store":false,"stream":true}'
+        body: '{"input":[{"content":[{"text":"Say hi in Portuguese","type":"input_text"}],"role":"user"}],"instructions":"You are a helpful assistant","max_output_tokens":4000,"model":"gpt-4o","store":false,"stream":true}'
         headers:
             Accept:
                 - application/json

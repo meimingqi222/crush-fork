@@ -117,6 +117,23 @@ func Connect(ctx context.Context, dataDir string) (*sql.DB, error) {
 				return nil, fmt.Errorf("failed to copy test database template: %w", err)
 			}
 		}
+
+		db, err := openDB(dbPath)
+		if err != nil {
+			return nil, err
+		}
+
+		if err = db.PingContext(ctx); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to connect to database: %w", err)
+		}
+
+		// The template copied above was already migrated inside
+		// testTemplateOnce, so there's no need to run goose again here.
+		// goose.SetBaseFS/SetDialect/Up mutate package-level state in the
+		// goose library that isn't safe to touch concurrently, which was
+		// causing data races when tests open connections in parallel.
+		return db, nil
 	}
 
 	db, err := openDB(dbPath)

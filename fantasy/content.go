@@ -120,6 +120,9 @@ const (
 	FinishReasonOther FinishReason = "other" // model stopped for other reasons
 	// FinishReasonUnknown indicates the model has not transmitted a finish reason.
 	FinishReasonUnknown FinishReason = "unknown" // the model has not transmitted a finish reason
+	// FinishReasonMaxTurnRequests indicates the run was aborted by the max
+	// turn/step request budget rather than ending naturally.
+	FinishReasonMaxTurnRequests FinishReason = "max_turn_requests" // run hit max turn budget
 )
 
 // Prompt represents a list of messages for the language model.

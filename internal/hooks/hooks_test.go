@@ -16,39 +16,96 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func helperBinary(t *testing.T, name, src string) string {
+// helperSrc is a single dispatcher binary shared by every test in this file.
+// It picks its behavior from os.Args[1] so tests only need to differ in the
+// hook Args they configure, instead of each compiling their own throwaway
+// binary (compiling one Go binary per test made this package's tests
+// dominated by `go build` process overhead).
+const helperSrc = `package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		os.Exit(1)
+	}
+	switch os.Args[1] {
+	case "wrap":
+		if len(os.Args) < 3 {
+			os.Exit(1)
+		}
+		fmt.Print("wrapped:" + os.Args[2])
+	case "fail":
+		os.Exit(1)
+	case "deny":
+		fmt.Fprint(os.Stdout, ` + "`{\"decision\":\"deny\",\"reason\":\"not allowed\"}`" + `)
+	case "sleep":
+		time.Sleep(10 * time.Second)
+	case "chain":
+		suffix := ""
+		if len(os.Args) > 2 {
+			suffix = os.Args[2]
+		}
+		var in struct {
+			ToolInput map[string]any ` + "`json:\"tool_input\"`" + `
+		}
+		_ = json.NewDecoder(os.Stdin).Decode(&in)
+		cmd, _ := in.ToolInput["command"].(string)
+		fmt.Fprintf(os.Stdout, "{\"decision\":\"modify\",\"modified_input\":{\"command\":%q}}", cmd+suffix)
+	default:
+		os.Exit(1)
+	}
+}
+`
+
+var helperBin string
+
+// TestMain compiles the shared helper binary once for the whole test binary
+// run, instead of once per test.
+func TestMain(m *testing.M) {
+	if _, err := exec.LookPath("go"); err == nil {
+		dir, err := os.MkdirTemp("", "crush-hooks-helper")
+		if err != nil {
+			panic(err)
+		}
+		defer os.RemoveAll(dir)
+
+		srcFile := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(srcFile, []byte(helperSrc), 0o644); err != nil {
+			panic(err)
+		}
+
+		binName := "helper"
+		if runtime.GOOS == "windows" {
+			binName += ".exe"
+		}
+		bin := filepath.Join(dir, binName)
+		if out, err := exec.Command("go", "build", "-o", bin, srcFile).CombinedOutput(); err != nil {
+			panic("build helper binary: " + err.Error() + ": " + string(out))
+		}
+		helperBin = bin
+	}
+
+	os.Exit(m.Run())
+}
+
+func requireHelperBin(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("go"); err != nil {
+	if helperBin == "" {
 		t.Skip("go toolchain not found, skipping")
 	}
-
-	dir := t.TempDir()
-	srcFile := filepath.Join(dir, "main.go")
-	require.NoError(t, os.WriteFile(srcFile, []byte(src), 0o644))
-
-	binName := name
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(dir, binName)
-	out, err := exec.CommandContext(t.Context(), "go", "build", "-o", binPath, srcFile).CombinedOutput()
-	require.NoError(t, err, "build helper binary: %s", out)
-	return binPath
+	return helperBin
 }
 
 func TestCommandHandler_Passthrough_Supported(t *testing.T) {
 	t.Parallel()
 
-	src := `package main
-import (
-	"fmt"
-	"os"
-)
-func main() {
-	if len(os.Args) < 2 { os.Exit(1) }
-	fmt.Print("wrapped:" + os.Args[1])
-}`
-	bin := helperBinary(t, "helper", src)
+	bin := requireHelperBin(t)
 
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
@@ -60,6 +117,7 @@ func main() {
 			TimeoutMs: 15000,
 			Command: &hooks.CommandConfig{
 				Command:     bin,
+				Args:        []string{"wrap"},
 				Passthrough: true,
 			},
 		},
@@ -77,10 +135,7 @@ func main() {
 func TestCommandHandler_Passthrough_Unsupported(t *testing.T) {
 	t.Parallel()
 
-	src := `package main
-import "os"
-func main() { os.Exit(1) }`
-	bin := helperBinary(t, "helper-fail", src)
+	bin := requireHelperBin(t)
 
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
@@ -92,6 +147,7 @@ func main() { os.Exit(1) }`
 			TimeoutMs: 15000,
 			Command: &hooks.CommandConfig{
 				Command:     bin,
+				Args:        []string{"fail"},
 				Passthrough: true,
 			},
 		},
@@ -108,15 +164,7 @@ func main() { os.Exit(1) }`
 func TestCommandHandler_JSON_Deny(t *testing.T) {
 	t.Parallel()
 
-	src := `package main
-import (
-	"fmt"
-	"os"
-)
-func main() {
-	fmt.Fprint(os.Stdout, "{\"decision\":\"deny\",\"reason\":\"not allowed\"}")
-}`
-	bin := helperBinary(t, "deny-hook", src)
+	bin := requireHelperBin(t)
 
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
@@ -128,6 +176,7 @@ func main() {
 			TimeoutMs: 15000,
 			Command: &hooks.CommandConfig{
 				Command: bin,
+				Args:    []string{"deny"},
 			},
 		},
 	})
@@ -144,10 +193,7 @@ func main() {
 func TestManager_Timeout(t *testing.T) {
 	t.Parallel()
 
-	src := `package main
-import "time"
-func main() { time.Sleep(10 * time.Second) }`
-	bin := helperBinary(t, "sleep-hook", src)
+	bin := requireHelperBin(t)
 
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
@@ -159,6 +205,7 @@ func main() { time.Sleep(10 * time.Second) }`
 			TimeoutMs: 200,
 			Command: &hooks.CommandConfig{
 				Command:     bin,
+				Args:        []string{"sleep"},
 				Passthrough: true,
 			},
 		},
@@ -179,25 +226,7 @@ func main() { time.Sleep(10 * time.Second) }`
 func TestManager_ChainedHooks(t *testing.T) {
 	t.Parallel()
 
-	makeSrc := func(suffix string) string {
-		return `package main
-import (
-	"encoding/json"
-	"fmt"
-	"os"
-)
-func main() {
-	var in struct {
-		ToolInput map[string]any ` + "`json:\"tool_input\"`" + `
-	}
-	_ = json.NewDecoder(os.Stdin).Decode(&in)
-	cmd, _ := in.ToolInput["command"].(string)
-	fmt.Fprintf(os.Stdout, "{\"decision\":\"modify\",\"modified_input\":{\"command\":%q}}", cmd + "` + suffix + `")
-}`
-	}
-
-	bin1 := helperBinary(t, "hook1", makeSrc("-A"))
-	bin2 := helperBinary(t, "hook2", makeSrc("-B"))
+	bin := requireHelperBin(t)
 
 	enabled := true
 	mgr, err := hooks.NewManager([]hooks.HookConfig{
@@ -207,7 +236,7 @@ func main() {
 			Events:    []hooks.Event{hooks.EventPreToolUse},
 			Type:      hooks.HandlerTypeCommand,
 			TimeoutMs: 15000,
-			Command:   &hooks.CommandConfig{Command: bin1},
+			Command:   &hooks.CommandConfig{Command: bin, Args: []string{"chain", "-A"}},
 		},
 		{
 			Name:      "hook2",
@@ -215,7 +244,7 @@ func main() {
 			Events:    []hooks.Event{hooks.EventPreToolUse},
 			Type:      hooks.HandlerTypeCommand,
 			TimeoutMs: 15000,
-			Command:   &hooks.CommandConfig{Command: bin2},
+			Command:   &hooks.CommandConfig{Command: bin, Args: []string{"chain", "-B"}},
 		},
 	})
 	require.NoError(t, err)

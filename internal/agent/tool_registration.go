@@ -182,7 +182,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		register(customAgentTool, "plugin", metadataFromPluginToolDefinition(customTool))
 	}
 
-	for _, mcpTool := range agenttools.GetMCPTools(c.permissions, c.cfg, c.cfg.WorkingDir()) {
+	for _, mcpTool := range agenttools.GetMCPTools(ctx, c.permissions, c.cfg, c.cfg.WorkingDir()) {
 		if !allowMCPToolForAgent(agent, mcpTool) {
 			continue
 		}

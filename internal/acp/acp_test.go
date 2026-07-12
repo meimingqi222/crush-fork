@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/acp"
 	"github.com/charmbracelet/crush/internal/agent"
+	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
@@ -128,6 +131,22 @@ func (f *fakeSessionService) UpdatePlanFilePath(_ context.Context, id, planFileP
 	return s, nil
 }
 
+func (f *fakeSessionService) Fork(_ context.Context, sessionID, messageID string) (session.Session, error) {
+	source, ok := f.sessions[sessionID]
+	if !ok {
+		return session.Session{}, sql.ErrNoRows
+	}
+	title := source.Title
+	if title == "" {
+		title = "Forked Session"
+	} else {
+		title = "Fork of " + title
+	}
+	s := session.Session{ID: "fork-" + sessionID + "-" + messageID, Title: title}
+	f.sessions[s.ID] = s
+	return s, nil
+}
+
 func (f *fakeSessionService) SetDefaultPermissionMode(session.PermissionMode) {}
 
 func (f *fakeSessionService) UpdateTitleAndUsage(_ context.Context, id, title string, p, c int64, cost float64) error {
@@ -204,8 +223,13 @@ func (f *fakeMessageService) ListPage(_ context.Context, _ string, _, _ int) ([]
 }
 
 type fakeCoordinator struct {
+	mu          sync.Mutex
 	runResult   *fantasy.AgentResult
 	runErr      error
+	lastPrompt  string
+	attachments []message.Attachment
+	mcpProbes   []string
+	mcpAllowed  map[string]bool
 	sessionSvc  *fakeSessionService
 	messageSvc  *fakeMessageService
 	runtimeSvc  toolruntime.Service
@@ -213,7 +237,15 @@ type fakeCoordinator struct {
 	sessions    map[string]session.Session
 }
 
-func (f *fakeCoordinator) Run(_ context.Context, sessionID, prompt string, _ ...message.Attachment) (*fantasy.AgentResult, error) {
+func (f *fakeCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+	f.mu.Lock()
+	f.lastPrompt = prompt
+	f.attachments = append([]message.Attachment(nil), attachments...)
+	f.mcpAllowed = make(map[string]bool, len(f.mcpProbes))
+	for _, name := range f.mcpProbes {
+		f.mcpAllowed[name] = agenttools.MCPServerAllowed(ctx, name)
+	}
+	f.mu.Unlock()
 	if strings.Contains(prompt, "spawn-agent-subsession") {
 		subSessionID := "sub-session-1"
 		if subSession, ok := f.sessions[subSessionID]; ok {
@@ -320,6 +352,7 @@ type fakeApp struct {
 	cfg         *config.ConfigStore
 	runtime     toolruntime.Service
 	timeline    timeline.Service
+	mcpMgr      acp.MCPManager
 }
 
 type recordingPermissionService struct {
@@ -389,6 +422,13 @@ func (a *fakeApp) GetTimeline() timeline.Service {
 		a.timeline = timeline.NewService()
 	}
 	return a.timeline
+}
+
+func (a *fakeApp) GetMCPManager() acp.MCPManager {
+	if a.mcpMgr != nil {
+		return a.mcpMgr
+	}
+	return acp.MCPManagerFuncs{}
 }
 
 func newFakeApp() *fakeApp {
@@ -551,6 +591,322 @@ func TestSessionNew(t *testing.T) {
 	var result acp.SessionNewResult
 	require.NoError(t, json.Unmarshal(resp.Result, &result))
 	require.NotEmpty(t, result.SessionID)
+}
+
+// recordingMCPManager is an MCPManager that records calls for testing.
+type recordingMCPManager struct {
+	mu           sync.Mutex
+	reconnected  []string
+	disabled     []string
+	reconnectErr error
+}
+
+func (m *recordingMCPManager) Reconnect(_ context.Context, _ *config.ConfigStore, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconnected = append(m.reconnected, name)
+	return m.reconnectErr
+}
+
+func (m *recordingMCPManager) DisableSingle(_ *config.ConfigStore, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.disabled = append(m.disabled, name)
+	return nil
+}
+
+func (m *recordingMCPManager) Reconnected() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.reconnected...)
+}
+
+func (m *recordingMCPManager) Disabled() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.disabled...)
+}
+
+func TestSessionNewConnectsMCPServers(t *testing.T) {
+	// Not parallel: config.Init mutates a shared global (defaultContextPaths)
+	// in setDefaults, which races with other config.Init callers under -race.
+
+	baseDir := t.TempDir()
+	workingDir := filepath.Join(baseDir, "work")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "crush.json"),
+		[]byte(`{"options":{"disable_provider_auto_update":true},"tools":{}}`),
+		0o644,
+	))
+	store, err := config.Init(workingDir, filepath.Join(baseDir, "state"), false)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, log.ResetForTesting())
+	})
+
+	mgr := &recordingMCPManager{}
+	app := newFakeAppWithConfig(store)
+	app.mcpMgr = mgr
+
+	reqLine := buildRequest(t, 1, "session/new", acp.SessionNewParams{
+		CWD: "/tmp",
+		MCPServers: []acp.MCPServerConfig{
+			{Name: "server-a", Type: "stdio", Command: "echo"},
+			{Name: "server-b", Type: "http", URL: "http://localhost:1234"},
+		},
+	})
+
+	resp := runSingleRequest(t, app, reqLine)
+	require.Nil(t, resp.Error)
+
+	reconnected := mgr.Reconnected()
+	require.Len(t, reconnected, 2)
+	require.Contains(t, reconnected[0]+reconnected[1], "server-a")
+	require.Contains(t, reconnected[0]+reconnected[1], "server-b")
+	for _, name := range reconnected {
+		require.True(t, strings.HasPrefix(name, "acp-"))
+	}
+}
+
+func TestSessionLoadConnectsMCPServers(t *testing.T) {
+	// Not parallel: config.Init mutates a shared global (defaultContextPaths)
+	// in setDefaults, which races with other config.Init callers under -race.
+
+	baseDir := t.TempDir()
+	workingDir := filepath.Join(baseDir, "work")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDir, "crush.json"),
+		[]byte(`{"options":{"disable_provider_auto_update":true},"tools":{}}`),
+		0o644,
+	))
+	store, err := config.Init(workingDir, filepath.Join(baseDir, "state"), false)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, log.ResetForTesting())
+	})
+
+	mgr := &recordingMCPManager{}
+	app := newFakeAppWithConfig(store)
+	app.mcpMgr = mgr
+
+	sessionID := "sess-mcp-load"
+	app.sessions.sessions[sessionID] = session.Session{ID: sessionID, Title: "test"}
+
+	reqLine := buildRequest(t, 1, "session/load", acp.SessionLoadParams{
+		SessionID: sessionID,
+		MCPServers: []acp.MCPServerConfig{
+			{Name: "server-c", Type: "sse", URL: "http://localhost:5678/sse"},
+		},
+	})
+
+	resp := runSingleRequest(t, app, reqLine)
+	require.Nil(t, resp.Error)
+
+	reconnected := mgr.Reconnected()
+	require.Len(t, reconnected, 1)
+	require.True(t, strings.HasPrefix(reconnected[0], "acp-"))
+	require.Contains(t, reconnected[0], "server-c")
+}
+
+func TestSessionMCPAccessIsIsolated(t *testing.T) {
+	// Not parallel: config.Init mutates shared process state.
+	baseDir := t.TempDir()
+	workingDir := filepath.Join(baseDir, "work")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "crush.json"), []byte(`{"options":{"disable_provider_auto_update":true},"tools":{}}`), 0o644))
+	store, err := config.Init(workingDir, filepath.Join(baseDir, "state"), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, log.ResetForTesting()) })
+
+	mgr := &recordingMCPManager{}
+	app := newFakeAppWithConfig(store)
+	app.mcpMgr = mgr
+	handler := acp.NewHandler(app)
+	handle := func(method string, params any) *acp.RPCError {
+		data, marshalErr := json.Marshal(params)
+		require.NoError(t, marshalErr)
+		_, rpcErr := handler.Handle(t.Context(), &acp.Request{JSONRPC: "2.0", Method: method, Params: data})
+		return rpcErr
+	}
+	for _, id := range []string{"session-a", "session-b"} {
+		app.sessions.sessions[id] = session.Session{ID: id, Title: id}
+		rpcErr := handle("session/load", acp.SessionLoadParams{
+			SessionID:  id,
+			MCPServers: []acp.MCPServerConfig{{Name: "private", Command: "server"}},
+		})
+		require.Nil(t, rpcErr)
+	}
+
+	names := mgr.Reconnected()
+	require.Len(t, names, 2)
+	app.coordinator.mu.Lock()
+	app.coordinator.mcpProbes = append([]string{"static-server"}, names...)
+	app.coordinator.mu.Unlock()
+
+	for i, sessionID := range []string{"session-a", "session-b"} {
+		rpcErr := handle("session/prompt", acp.PromptParams{
+			SessionID: sessionID,
+			Prompt:    []acp.ContentBlock{{Type: "text", Text: "test isolation"}},
+		})
+		require.Nil(t, rpcErr)
+
+		app.coordinator.mu.Lock()
+		allowed := maps.Clone(app.coordinator.mcpAllowed)
+		app.coordinator.mu.Unlock()
+		require.True(t, allowed["static-server"])
+		require.True(t, allowed[names[i]])
+		require.False(t, allowed[names[1-i]])
+	}
+
+	rpcErr := handle("session/load", acp.SessionLoadParams{
+		SessionID:  "session-a",
+		MCPServers: []acp.MCPServerConfig{{Name: "private", Command: "replacement-server"}},
+	})
+	require.Nil(t, rpcErr)
+	reconnected := mgr.Reconnected()
+	require.Len(t, reconnected, 3)
+	replacement := reconnected[2]
+	require.NotEqual(t, names[0], replacement)
+	app.coordinator.mu.Lock()
+	app.coordinator.mcpProbes = []string{"static-server", names[0], names[1], replacement}
+	app.coordinator.mu.Unlock()
+	rpcErr = handle("session/prompt", acp.PromptParams{
+		SessionID: "session-a",
+		Prompt:    []acp.ContentBlock{{Type: "text", Text: "test replacement"}},
+	})
+	require.Nil(t, rpcErr)
+	app.coordinator.mu.Lock()
+	allowed := maps.Clone(app.coordinator.mcpAllowed)
+	app.coordinator.mu.Unlock()
+	require.True(t, allowed["static-server"])
+	require.False(t, allowed[names[0]])
+	require.False(t, allowed[names[1]])
+	require.True(t, allowed[replacement])
+
+	handler.Close(t.Context())
+	require.ElementsMatch(t, []string{names[0], names[1], replacement}, mgr.Disabled())
+	for _, name := range []string{names[0], names[1], replacement} {
+		_, exists := store.Config().MCP[name]
+		require.False(t, exists)
+	}
+	rpcErr = handle("session/prompt", acp.PromptParams{
+		SessionID: "session-a",
+		Prompt:    []acp.ContentBlock{{Type: "text", Text: "test shutdown"}},
+	})
+	require.Nil(t, rpcErr)
+	app.coordinator.mu.Lock()
+	allowed = maps.Clone(app.coordinator.mcpAllowed)
+	app.coordinator.mu.Unlock()
+	require.True(t, allowed["static-server"])
+	require.False(t, allowed[replacement])
+}
+
+func TestSessionMCPGenerationIsUniqueAcrossHandlerRestarts(t *testing.T) {
+	// Not parallel: config.Init mutates shared process state.
+	baseDir := t.TempDir()
+	workingDir := filepath.Join(baseDir, "work")
+	require.NoError(t, os.MkdirAll(workingDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "crush.json"), []byte(`{"options":{"disable_provider_auto_update":true},"tools":{}}`), 0o644))
+	store, err := config.Init(workingDir, filepath.Join(baseDir, "state"), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, log.ResetForTesting()) })
+
+	const sessionID = "session-restart"
+	load := func(handler *acp.Handler, app *fakeApp) string {
+		app.sessions.sessions[sessionID] = session.Session{ID: sessionID, Title: sessionID}
+		params, marshalErr := json.Marshal(acp.SessionLoadParams{
+			SessionID:  sessionID,
+			MCPServers: []acp.MCPServerConfig{{Name: "private", Command: "server"}},
+		})
+		require.NoError(t, marshalErr)
+		_, rpcErr := handler.Handle(t.Context(), &acp.Request{JSONRPC: "2.0", Method: "session/load", Params: params})
+		require.Nil(t, rpcErr)
+		names := app.mcpMgr.(*recordingMCPManager).Reconnected()
+		require.Len(t, names, 1)
+		return names[0]
+	}
+
+	firstApp := newFakeAppWithConfig(store)
+	firstApp.mcpMgr = &recordingMCPManager{}
+	firstHandler := acp.NewHandler(firstApp)
+	firstName := load(firstHandler, firstApp)
+	firstHandler.Close(t.Context())
+
+	secondApp := newFakeAppWithConfig(store)
+	secondApp.mcpMgr = &recordingMCPManager{}
+	secondHandler := acp.NewHandler(secondApp)
+	secondName := load(secondHandler, secondApp)
+	secondHandler.Close(t.Context())
+
+	require.NotEqual(t, firstName, secondName)
+}
+
+func TestSessionNewDecodesStandardMCPFields(t *testing.T) {
+	var params acp.SessionNewParams
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"cwd":"/tmp",
+		"mcpServers":[
+			{"name":"stdio","command":"server","args":["--stdio"],"env":[{"name":"TOKEN","value":"secret"}]},
+			{"type":"http","name":"remote","url":"https://example.com/mcp","headers":[{"name":"Authorization","value":"Bearer token"}]}
+		]
+	}`), &params))
+	require.Equal(t, []acp.NameValue{{Name: "TOKEN", Value: "secret"}}, params.MCPServers[0].Env)
+	require.Equal(t, []acp.NameValue{{Name: "Authorization", Value: "Bearer token"}}, params.MCPServers[1].Headers)
+}
+
+func TestPlanEntryMatchesACPWireShape(t *testing.T) {
+	b, err := json.Marshal(acp.PlanEntry{Content: "Run tests", Priority: "medium", Status: "in_progress"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"content":"Run tests","priority":"medium","status":"in_progress"}`, string(b))
+
+	empty := []acp.PlanEntry{}
+	b, err = json.Marshal(acp.SessionUpdate{SessionUpdate: acp.SessionUpdatePlan, Entries: &empty})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"sessionUpdate":"plan","entries":[]}`, string(b))
+}
+
+func TestSessionPromptAcceptsImageAndBlobResource(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	sessionID := "prompt-attachments"
+	app.sessions.sessions[sessionID] = session.Session{ID: sessionID, Title: "test"}
+	reqLine := buildRequest(t, 1, "session/prompt", acp.PromptParams{
+		SessionID: sessionID,
+		Prompt: []acp.ContentBlock{
+			{Type: "text", Text: "describe these"},
+			{Type: "image", MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte("image"))},
+			{Type: "resource", Resource: &acp.ResourceBlock{URI: "file:///context.bin", MIMEType: "application/octet-stream", Blob: base64.StdEncoding.EncodeToString([]byte("context"))}},
+		},
+	})
+
+	resp := runSingleRequest(t, app, reqLine)
+	require.Nil(t, resp.Error)
+	coordinator := app.coordinator
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	require.Equal(t, "describe these", coordinator.lastPrompt)
+	require.Len(t, coordinator.attachments, 2)
+	require.Equal(t, []byte("image"), coordinator.attachments[0].Content)
+	require.Equal(t, []byte("context"), coordinator.attachments[1].Content)
+}
+
+func TestSessionPromptRejectsMalformedSupportedContent(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	sessionID := "prompt-invalid-content"
+	app.sessions.sessions[sessionID] = session.Session{ID: sessionID, Title: "test"}
+	reqLine := buildRequest(t, 1, "session/prompt", acp.PromptParams{
+		SessionID: sessionID,
+		Prompt:    []acp.ContentBlock{{Type: "image", MIMEType: "image/png", Data: "not-base64"}},
+	})
+
+	resp := runSingleRequest(t, app, reqLine)
+	require.NotNil(t, resp.Error)
+	require.Equal(t, acp.CodeInvalidParams, resp.Error.Code)
 }
 
 func TestSessionPrompt(t *testing.T) {

@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 622
+        content_length: 712
         host: ""
-        body: '{"max_tokens":4096,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"cache_control":{"type":"ephemeral"},"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
+        body: '{"context_management":{"edits":[{"keep":{"type":"all"},"type":"clear_thinking_20251015"}]},"max_tokens":4096,"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"cache_control":{"type":"ephemeral"},"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
         headers:
             Accept:
                 - application/json
@@ -15,7 +15,7 @@ interactions:
                 - application/json
             User-Agent:
                 - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
-        url: https://api.anthropic.com/v1/messages
+        url: https://api.anthropic.com/v1/messages?beta=true
         method: POST
       response:
         proto: HTTP/2.0
@@ -34,9 +34,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 1830
+        content_length: 1920
         host: ""
-        body: '{"max_tokens":4096,"messages":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"},{"content":[{"signature":"EqoDCkYICxgCKkBbUa2TxSz9pQkxOwba97/2WFKQH64dFiW/RaX1YnwR4s07oEqouxOS9NZOQcdnFfAFkBBEYMzb5Xp+qQVDn9GyEgx4adxqDhij5J3e7UoaDBGn7f7OrRnK/4vzCiIwjQqY7nvv0XdkOhUBjSx1Dp1MH7Sp3mSTdXIjW6gRSnQ7HWLGFUs8E7E+aTaOOzJoKpECLa3BfMiu+gjqTQhuCXOBRVWEw4J/eIwoDQaYB144DQfeXuXx0gcNVrht/N14uqKoRsXL9jvYWzIR4rJRL+MuQabUVtgl/VR3HVy4D5ae8ZAYdp+HjAjd3bM/2EEBcbwgKO+YFYWklPB96wQhhjW0YVOQDYAlzcvuwEE1lkNXjPsqP19kaFmjh5P+J6JEff0gmtxfrk8uvxclz2Y28/8tTM+xniKlskCt+RA4EgYAWOMNSFCZ3pgEQwGkAyjzLUzju5pVsud9NpFkKKhGSWs1fk0LPKzVHgXy4xjQYdRsoDeLRJP3ZUwk9hGsGmVr64DZhvwawIXe5oatWkyZgqWt076HScmjWdKeGuQSL7pbz4JHGAE=","thinking":"The user is asking for weather information for Florence, Italy. I have a weather function available that takes a location parameter. The user has provided a specific location: \"Florence, Italy\". I have all the required parameters to make this function call.","type":"thinking"},{"cache_control":{"type":"ephemeral"},"id":"toolu_01NNKFSpy3EbeMEUzD6yHGCV","input":{"location":"Florence, Italy"},"name":"weather","type":"tool_use"}],"role":"assistant"},{"content":[{"cache_control":{"type":"ephemeral"},"content":[{"text":"40 C","type":"text"}],"tool_use_id":"toolu_01NNKFSpy3EbeMEUzD6yHGCV","type":"tool_result"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"cache_control":{"type":"ephemeral"},"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
+        body: '{"context_management":{"edits":[{"keep":{"type":"all"},"type":"clear_thinking_20251015"}]},"max_tokens":4096,"messages":[{"content":[{"text":"What''s the weather in Florence, Italy?","type":"text"}],"role":"user"},{"content":[{"signature":"EqoDCkYICxgCKkBbUa2TxSz9pQkxOwba97/2WFKQH64dFiW/RaX1YnwR4s07oEqouxOS9NZOQcdnFfAFkBBEYMzb5Xp+qQVDn9GyEgx4adxqDhij5J3e7UoaDBGn7f7OrRnK/4vzCiIwjQqY7nvv0XdkOhUBjSx1Dp1MH7Sp3mSTdXIjW6gRSnQ7HWLGFUs8E7E+aTaOOzJoKpECLa3BfMiu+gjqTQhuCXOBRVWEw4J/eIwoDQaYB144DQfeXuXx0gcNVrht/N14uqKoRsXL9jvYWzIR4rJRL+MuQabUVtgl/VR3HVy4D5ae8ZAYdp+HjAjd3bM/2EEBcbwgKO+YFYWklPB96wQhhjW0YVOQDYAlzcvuwEE1lkNXjPsqP19kaFmjh5P+J6JEff0gmtxfrk8uvxclz2Y28/8tTM+xniKlskCt+RA4EgYAWOMNSFCZ3pgEQwGkAyjzLUzju5pVsud9NpFkKKhGSWs1fk0LPKzVHgXy4xjQYdRsoDeLRJP3ZUwk9hGsGmVr64DZhvwawIXe5oatWkyZgqWt076HScmjWdKeGuQSL7pbz4JHGAE=","thinking":"The user is asking for weather information for Florence, Italy. I have a weather function available that takes a location parameter. The user has provided a specific location: \"Florence, Italy\". I have all the required parameters to make this function call.","type":"thinking"},{"cache_control":{"type":"ephemeral"},"id":"toolu_01NNKFSpy3EbeMEUzD6yHGCV","input":{"location":"Florence, Italy"},"name":"weather","type":"tool_use"}],"role":"assistant"},{"content":[{"cache_control":{"type":"ephemeral"},"content":[{"text":"40 C","type":"text"}],"tool_use_id":"toolu_01NNKFSpy3EbeMEUzD6yHGCV","type":"tool_result"}],"role":"user"}],"model":"claude-sonnet-4-20250514","system":[{"cache_control":{"type":"ephemeral"},"text":"You are a helpful assistant","type":"text"}],"thinking":{"budget_tokens":4000,"type":"enabled"},"tool_choice":{"disable_parallel_tool_use":false,"type":"auto"},"tools":[{"description":"Get weather information for a location","input_schema":{"properties":{"location":{"description":"the city","type":"string"}},"required":["location"],"type":"object"},"name":"weather"}]}'
         headers:
             Accept:
                 - application/json
@@ -44,7 +44,7 @@ interactions:
                 - application/json
             User-Agent:
                 - Charm-Fantasy/0.12.2 (https://charm.land/fantasy)
-        url: https://api.anthropic.com/v1/messages
+        url: https://api.anthropic.com/v1/messages?beta=true
         method: POST
       response:
         proto: HTTP/2.0

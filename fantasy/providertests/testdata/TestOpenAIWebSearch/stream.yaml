@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 311
+        content_length: 298
         host: ""
-        body: '{"input":[{"content":"You are a helpful assistant","role":"system"},{"content":[{"text":"What is the current population of Tokyo? Cite your source.","type":"input_text"}],"role":"user"}],"max_output_tokens":4000,"model":"gpt-4.1","store":false,"stream":true,"tool_choice":"auto","tools":[{"type":"web_search"}]}'
+        body: '{"input":[{"content":[{"text":"What is the current population of Tokyo? Cite your source.","type":"input_text"}],"role":"user"}],"instructions":"You are a helpful assistant","max_output_tokens":4000,"model":"gpt-4.1","store":false,"stream":true,"tool_choice":"auto","tools":[{"type":"web_search"}]}'
         headers:
             Accept:
                 - application/json

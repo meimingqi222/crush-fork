@@ -5,9 +5,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 836
+        content_length: 820
         host: ""
-        body: '{"input":[{"content":"You are a helpful assistant. CRITICAL: Always use both add and multiply at the same time ALWAYS.","role":"developer"},{"content":[{"text":"Add and multiply the number 2 and 3","type":"input_text"}],"role":"user"}],"max_output_tokens":4000,"model":"gpt-5","store":false,"tool_choice":"auto","tools":[{"description":"Add two numbers","name":"add","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"},{"description":"Multiply two numbers","name":"multiply","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"}]}'
+        body: '{"input":[{"content":[{"text":"Add and multiply the number 2 and 3","type":"input_text"}],"role":"user"}],"instructions":"You are a helpful assistant. CRITICAL: Always use both add and multiply at the same time ALWAYS.","max_output_tokens":4000,"model":"gpt-5","store":false,"tool_choice":"auto","tools":[{"description":"Add two numbers","name":"add","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"},{"description":"Multiply two numbers","name":"multiply","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"}]}'
         headers:
             Accept:
                 - application/json
@@ -159,9 +159,9 @@ interactions:
         proto: HTTP/1.1
         proto_major: 1
         proto_minor: 1
-        content_length: 1239
+        content_length: 1223
         host: ""
-        body: '{"input":[{"content":"You are a helpful assistant. CRITICAL: Always use both add and multiply at the same time ALWAYS.","role":"developer"},{"content":[{"text":"Add and multiply the number 2 and 3","type":"input_text"}],"role":"user"},{"arguments":"{\"a\":2,\"b\":3}","call_id":"call_SXMdSYIWhKweiIjoBRxUmzZw","name":"add","type":"function_call"},{"arguments":"{\"a\":2,\"b\":3}","call_id":"call_wBPb8fIvZKT8tHxONHfs6iqq","name":"multiply","type":"function_call"},{"call_id":"call_SXMdSYIWhKweiIjoBRxUmzZw","output":"5","type":"function_call_output"},{"call_id":"call_wBPb8fIvZKT8tHxONHfs6iqq","output":"6","type":"function_call_output"}],"max_output_tokens":4000,"model":"gpt-5","store":false,"tool_choice":"auto","tools":[{"description":"Add two numbers","name":"add","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"},{"description":"Multiply two numbers","name":"multiply","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"}]}'
+        body: '{"input":[{"content":[{"text":"Add and multiply the number 2 and 3","type":"input_text"}],"role":"user"},{"arguments":"{\"a\":2,\"b\":3}","call_id":"call_SXMdSYIWhKweiIjoBRxUmzZw","name":"add","type":"function_call"},{"arguments":"{\"a\":2,\"b\":3}","call_id":"call_wBPb8fIvZKT8tHxONHfs6iqq","name":"multiply","type":"function_call"},{"call_id":"call_SXMdSYIWhKweiIjoBRxUmzZw","output":"5","type":"function_call_output"},{"call_id":"call_wBPb8fIvZKT8tHxONHfs6iqq","output":"6","type":"function_call_output"}],"instructions":"You are a helpful assistant. CRITICAL: Always use both add and multiply at the same time ALWAYS.","max_output_tokens":4000,"model":"gpt-5","store":false,"tool_choice":"auto","tools":[{"description":"Add two numbers","name":"add","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"},{"description":"Multiply two numbers","name":"multiply","parameters":{"properties":{"a":{"description":"first number","type":"integer"},"b":{"description":"second number","type":"integer"}},"required":["a","b"],"type":"object"},"strict":false,"type":"function"}]}'
         headers:
             Accept:
                 - application/json

@@ -130,6 +130,10 @@ func (m *mockSessionService) Save(context.Context, session.Session) (session.Ses
 	return session.Session{}, nil
 }
 
+func (m *mockSessionService) Fork(context.Context, string, string) (session.Session, error) {
+	return session.Session{}, nil
+}
+
 func (m *mockSessionService) UpdateCollaborationMode(context.Context, string, session.CollaborationMode) (session.Session, error) {
 	return session.Session{}, nil
 }

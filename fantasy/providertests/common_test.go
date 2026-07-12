@@ -11,6 +11,7 @@ import (
 	"charm.land/x/vcr"
 	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
 )
 
 func init() {
@@ -36,6 +37,15 @@ type builderPair struct {
 	prepareStep     fantasy.PrepareStepFunction
 }
 
+func newVCRRecorder(t *testing.T) *vcr.Recorder {
+	t.Helper()
+	mode := recorder.ModeReplayOnly
+	if os.Getenv("FANTASY_VCR_RECORD") == "1" {
+		mode = recorder.ModeRecordOnly
+	}
+	return vcr.NewRecorder(t, vcr.WithMode(mode))
+}
+
 func testCommon(t *testing.T, pairs []builderPair) {
 	for _, pair := range pairs {
 		t.Run(pair.name, func(t *testing.T) {
@@ -58,7 +68,7 @@ func testSimple(t *testing.T, pair builderPair) {
 			t.Skip("Avian only support streaming")
 		}
 
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -78,7 +88,7 @@ func testSimple(t *testing.T, pair builderPair) {
 	})
 
 	t.Run("simple streaming", func(t *testing.T) {
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -136,7 +146,7 @@ func testTool(t *testing.T, pair builderPair) {
 			t.Skip("Avian only support streaming")
 		}
 
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -157,7 +167,7 @@ func testTool(t *testing.T, pair builderPair) {
 	})
 
 	t.Run("tool streaming", func(t *testing.T) {
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -241,7 +251,7 @@ func testMultiTool(t *testing.T, pair builderPair) {
 			t.Skip("Avian only support streaming")
 		}
 
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -263,7 +273,7 @@ func testMultiTool(t *testing.T, pair builderPair) {
 	})
 
 	t.Run("multi tool streaming", func(t *testing.T) {
-		r := vcr.NewRecorder(t)
+		r := newVCRRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -293,7 +303,7 @@ func testThinking(t *testing.T, pairs []builderPair, thinkChecks func(*testing.T
 					t.Skip("Avian only support streaming")
 				}
 
-				r := vcr.NewRecorder(t)
+				r := newVCRRecorder(t)
 
 				languageModel, err := pair.builder(t, r)
 				require.NoError(t, err, "failed to build language model")
@@ -331,7 +341,7 @@ func testThinking(t *testing.T, pairs []builderPair, thinkChecks func(*testing.T
 			})
 
 			t.Run("thinking-streaming", func(t *testing.T) {
-				r := vcr.NewRecorder(t)
+				r := newVCRRecorder(t)
 
 				languageModel, err := pair.builder(t, r)
 				require.NoError(t, err, "failed to build language model")

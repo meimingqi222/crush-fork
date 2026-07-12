@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -81,6 +82,19 @@ func TestCommandBlocking(t *testing.T) {
 		},
 	}
 
+	// Strip PATH so that "allowed" commands (npm, brew, curl, ...) resolve
+	// to "command not found" instead of a real host binary. Without this,
+	// "allow npm local install" would actually invoke the system npm and
+	// download a package over the network.
+	sandboxPath := t.TempDir()
+	env := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(e), "PATH=") {
+			env = append(env, e)
+		}
+	}
+	env = append(env, "PATH="+sandboxPath)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a temporary directory for each test
@@ -88,6 +102,7 @@ func TestCommandBlocking(t *testing.T) {
 
 			shell := NewShell(&Options{
 				WorkingDir: tmpDir,
+				Env:        env,
 				BlockFuncs: tt.blockFuncs,
 			})
 

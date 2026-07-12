@@ -44,18 +44,6 @@ crush acp --cwd /path/to/project
 		}
 		defer appInstance.Shutdown()
 
-		// Do not block ACP handshake on MCP startup; editors may time out.
-		// Refresh models once MCP initialization finishes so MCP tools are picked up.
-		go func() {
-			if err := mcp.WaitForInit(ctx); err != nil {
-				slog.Warn("ACP: MCP initialization failed", "err", err)
-				return
-			}
-			if err := appInstance.AgentCoordinator.UpdateModels(ctx); err != nil {
-				slog.Warn("ACP: failed to refresh models after MCP initialization", "err", err)
-			}
-		}()
-
 		adapter := acp.NewAppAdapter(
 			appInstance.Sessions,
 			appInstance.Messages,
@@ -64,9 +52,14 @@ crush acp --cwd /path/to/project
 			appInstance.ToolRuntime,
 			appInstance.Timeline,
 			appInstance.Store(),
+			acp.MCPManagerFuncs{
+				ReconnectFn:     mcp.Reconnect,
+				DisableSingleFn: mcp.DisableSingle,
+			},
 		)
 
 		handler := acp.NewHandler(adapter)
+		defer handler.Close(context.Background())
 		server := acp.NewServer(handler)
 		handler.SetServer(server)
 
