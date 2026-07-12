@@ -3898,32 +3898,6 @@ func TestUserAgent(t *testing.T) {
 	})
 }
 
-func TestForceResponsesModelUsesResponsesAPI(t *testing.T) {
-	t.Parallel()
-
-	server := newMockServer()
-	defer server.close()
-	server.response = mockResponsesWebSearchResponse()
-
-	provider, err := New(
-		WithAPIKey("test-api-key"),
-		WithBaseURL(server.server.URL),
-		WithUseResponsesAPI(),
-		WithForceResponsesModel("grok-composer-2.5-fast"),
-	)
-	require.NoError(t, err)
-
-	model, err := provider.LanguageModel(context.Background(), "grok-composer-2.5-fast")
-	require.NoError(t, err)
-
-	_, err = model.Generate(context.Background(), fantasy.Call{
-		Prompt: testPrompt,
-	})
-	require.NoError(t, err)
-	require.Len(t, server.calls, 1)
-	require.Equal(t, "/responses", server.calls[0].path)
-}
-
 // --- OpenAI Responses API Web Search Tests ---
 
 // mockResponsesWebSearchResponse returns a Responses API response

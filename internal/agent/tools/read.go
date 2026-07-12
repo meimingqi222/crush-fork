@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	_ "embed"
@@ -130,6 +131,13 @@ func NewReadTool(
 					return fantasy.NewTextErrorResponse(err.Error()), nil
 				}
 				params.Path = resolvedPath
+
+				// Builtin skills use a virtual crush:// path and are embedded
+				// in the binary, not on disk. Read them directly.
+				if strings.HasPrefix(params.Path, "crush://") {
+					return handleEmbeddedSkillRead(ctx, params, sel, call, skillList, filetracker)
+				}
+
 				// Re-parse selectors for the resolved path, preserving any
 				// line selectors that were already parsed from the original
 				// skill:// URL (e.g. skill://pdf:10-50 → sel has line range).
@@ -273,6 +281,116 @@ func handleURLRead(
 		IsURL: true,
 	}
 	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(content), meta), nil
+}
+
+func handleEmbeddedSkillRead(
+	ctx context.Context,
+	params ReadParams,
+	sel pathSelector,
+	call fantasy.ToolCall,
+	skillList []*skills.Skill,
+	filetracker filetracker.Service,
+) (fantasy.ToolResponse, error) {
+	content, err := skills.ReadSkillFile(params.Path)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("error reading skill file: %v", err)), nil
+	}
+
+	// Split embedded content into lines.
+	var allLines []string
+	scanner := NewLineScanner(bytes.NewReader(content))
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("error reading skill file: %v", err)), nil
+	}
+
+	readOffset := sel.offset
+	readLimit := sel.limit
+	if readLimit <= 0 {
+		readLimit = len(allLines)
+	}
+	readResult, err := extractReadResultFromLines(allLines, readOffset, readLimit)
+	if err != nil {
+		if errors.Is(err, errReadOffsetBeyondEOF) {
+			msg := fmt.Sprintf("Line %d is beyond end of file (%d lines total).", readOffset+1, readResult.Total)
+			return fantasy.WithResponseMetadata(
+				fantasy.NewTextErrorResponse(msg),
+				ReadResponseMetadata{Path: params.Path, TotalLines: readResult.Total},
+			), nil
+		}
+		return fantasy.ToolResponse{}, fmt.Errorf("error reading skill file: %w", err)
+	}
+
+	lines := readResult.Lines
+	displayContent := joinDisplayLines(lines)
+	if !utf8.ValidString(displayContent) {
+		return fantasy.NewTextErrorResponse("Skill file content is not valid UTF-8"), nil
+	}
+
+	useHashline := sel.hasLineSel && !sel.raw
+	var output string
+	if sel.raw {
+		output = displayContent
+	} else {
+		output = "<file>\n"
+		if useHashline {
+			output += addHashlineLineNumbers(lines, readOffset+1)
+		} else {
+			output += addLineNumbers(lines, readOffset+1)
+		}
+	}
+
+	nextLine := readOffset + len(lines) + 1
+	if !sel.raw && len(lines) > 0 {
+		startLine := readOffset + 1
+		endLine := readOffset + len(lines)
+		if readResult.HasMore {
+			slashPath := filepath.ToSlash(params.Path)
+			output += fmt.Sprintf("\n\n(Showing lines %d-%d. Use path=%q to continue.)",
+				startLine, endLine, fmt.Sprintf("%s:%d", slashPath, nextLine))
+		} else if readResult.TotalKnown {
+			output += fmt.Sprintf("\n\n(Showing lines %d-%d. End of file - total %d lines.)",
+				startLine, endLine, readResult.Total)
+		}
+	} else if !sel.raw && readResult.TotalKnown {
+		output += fmt.Sprintf("\n\n(End of file - total %d lines.)", readResult.Total)
+	}
+	if !sel.raw {
+		output += "\n</file>\n"
+	} else {
+		output += "\n"
+	}
+
+	sessionID := GetSessionFromContext(ctx)
+	filetracker.RecordRead(ctx, sessionID, params.Path)
+
+	meta := ReadResponseMetadata{
+		Path:      params.Path,
+		Content:   displayContent,
+		Hashline:  useHashline,
+		StartLine: readOffset + 1,
+	}
+	if readResult.TotalKnown {
+		meta.TotalLines = readResult.Total
+	}
+	if s := findSkillByFilePath(params.Path, skillList); s != nil {
+		meta.ResourceType = ReadResourceSkill
+		meta.ResourceName = s.Name
+		meta.ResourceDescription = s.Description
+	}
+
+	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(output), meta), nil
+}
+
+func findSkillByFilePath(path string, skillList []*skills.Skill) *skills.Skill {
+	for _, s := range skillList {
+		if s.SkillFilePath == path {
+			return s
+		}
+	}
+	return nil
 }
 
 func handleFileRead(

@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -413,6 +414,82 @@ func TestPrioritizeQueuedPromptInvalidIndexReturnsFalse(t *testing.T) {
 
 	require.False(t, a.PrioritizeQueuedPrompt(sess.ID, -1))
 	require.False(t, a.PrioritizeQueuedPrompt(sess.ID, 5))
+}
+
+// TestSummarizeRejectsBusySessionWithoutInternalCompactionContext is a
+// regression test for the external Summarize entry point's busy guard: an
+// externally-triggered compaction request must still be rejected while the
+// session has an active request, so it doesn't race with in-flight work.
+func TestSummarizeRejectsBusySessionWithoutInternalCompactionContext(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	testSession, err := env.sessions.Create(t.Context(), "summarize busy without internal flag")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "hello"}},
+	})
+	require.NoError(t, err)
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
+	concrete := agentUnderTest.(*sessionAgent)
+
+	// Simulate a session that already has an active request in flight, as
+	// would be the case right before the end-of-turn compaction path in Run
+	// invokes Summarize.
+	concrete.activeRequests.Set(testSession.ID, func() {})
+
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.ErrorIs(t, err, ErrSessionBusy)
+	require.Equal(t, 0, fakeAgent.summaryCalls)
+}
+
+// TestSummarizeAllowsBusySessionWithInternalCompactionContext is a
+// regression test for the end-of-turn compaction TOCTOU race fixed in Run:
+// previously Run deleted the activeRequests entry before calling Summarize
+// so Summarize's own busy check would pass, leaving a window where a queued
+// prompt or a fresh Run for the same session could start concurrently. Now
+// Run instead tags the context with internalCompactionKey (like the
+// preflight-compaction path already did) and keeps the activeRequests entry
+// held throughout. Summarize must honor that flag: skip the busy check, and
+// leave the pre-existing activeRequests entry alone (Run is responsible for
+// releasing it exactly once, after Summarize returns).
+func TestSummarizeAllowsBusySessionWithInternalCompactionContext(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	testSession, err := env.sessions.Create(t.Context(), "summarize busy with internal flag")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "hello"}},
+	})
+	require.NoError(t, err)
+
+	fakeAgent := &autoSummarizeTestAgent{t: t}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
+	concrete := agentUnderTest.(*sessionAgent)
+
+	concrete.activeRequests.Set(testSession.ID, func() {})
+
+	ctx := context.WithValue(t.Context(), internalCompactionKey{}, true)
+	err = agentUnderTest.Summarize(ctx, testSession.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeAgent.summaryCalls)
+
+	// Summarize must not have deleted the caller's activeRequests entry: it
+	// skips its own Set/Del bookkeeping entirely when isInternalCompaction is
+	// true, leaving release of the entry to the caller (Run).
+	_, stillHeld := concrete.activeRequests.Get(testSession.ID)
+	require.True(t, stillHeld, "activeRequests entry set before an internal-compaction Summarize call must still be held afterward")
 }
 
 func TestBusyRunRemovesPrecreatedUserMessageBeforeQueueing(t *testing.T) {

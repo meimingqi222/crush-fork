@@ -438,6 +438,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 
 	// Only show compact command if there's an active session
 	if c.hasSession {
+		commands = append(commands, NewCommandItem(c.com.Styles, "fork_session", "Fork Session", "", ActionOpenDialog{ForkID}))
 		commands = append(commands, NewCommandItem(c.com.Styles, "summarize", "Summarize Session", "", ActionSummarize{SessionID: c.sessionID}))
 		commands = append(commands, NewCommandItem(c.com.Styles, "handoff", "Handoff", "", ActionOpenDialog{HandoffID}))
 		switch c.mode {

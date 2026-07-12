@@ -190,7 +190,10 @@ func globForPath(ctx context.Context, pathInput, workingDir string, limit int, h
 	pathInput = strings.ReplaceAll(pathInput, "\\", "/")
 	basePath, globPattern, hasGlob := parseFindPattern(pathInput)
 
-	searchPath := filepath.Join(workingDir, filepath.FromSlash(basePath))
+	searchPath := filepath.FromSlash(basePath)
+	if !filepath.IsAbs(searchPath) {
+		searchPath = filepath.Join(workingDir, searchPath)
+	}
 	searchPath = filepath.Clean(searchPath)
 
 	info, err := os.Stat(searchPath)

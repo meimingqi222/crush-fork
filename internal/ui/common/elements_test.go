@@ -15,18 +15,20 @@ func TestFormatContextUsage(t *testing.T) {
 		name          string
 		tokens        int64
 		contextWindow int64
+		estimated     bool
 		want          string
 	}{
 		{name: "formats usage without context window", tokens: 1500, contextWindow: 0, want: "1.5k"},
 		{name: "allows usage above context window", tokens: 120, contextWindow: 100, want: "120 120%"},
 		{name: "clamps negative usage to zero", tokens: -1, contextWindow: 100, want: "0 0%"},
 		{name: "keeps usage below context window", tokens: 55, contextWindow: 100, want: "55 55%"},
+		{name: "estimated prefix", tokens: 100, contextWindow: 200, estimated: true, want: "~100 50%"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, FormatContextUsage(tt.tokens, tt.contextWindow))
+			require.Equal(t, tt.want, FormatContextUsage(tt.tokens, tt.contextWindow, tt.estimated))
 		})
 	}
 }

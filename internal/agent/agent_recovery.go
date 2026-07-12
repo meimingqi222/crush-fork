@@ -231,42 +231,49 @@ func (a *sessionAgent) recoverTextualToolCallProtocol(ctx context.Context, genCt
 	var toolMessageIDs []string
 	var lastTool string
 	for _, toolCall := range toolCalls {
-		tool := toolMap[toolCall.Name]
+		name := toolCall.Name
+		tool := toolMap[name]
+		if tool == nil {
+			name = strings.ToLower(name)
+			tool = toolMap[name]
+		}
 		var response fantasy.ToolResponse
 		var runErr error
 		if tool == nil {
-			if a.deferredToolRuntime != nil && a.deferredToolRuntime.isDeferredTool(toolCall.Name) {
+			if a.deferredToolRuntime != nil && a.deferredToolRuntime.isDeferredTool(name) {
 				payload, err := json.Marshal(map[string]any{
 					"recovered_by":         "deferred_tool_not_activated",
-					"recovery_action":      "Run tool_search with query \"select:" + toolCall.Name + "\" before using this tool.",
+					"recovery_action":      "Run tool_search with query \"select:" + name + "\" before using this tool.",
 					"fallback_tool":        "tool_search",
-					"fallback_tool_query":  "select:" + toolCall.Name,
+					"fallback_tool_query":  "select:" + name,
 					"recovered_parameters": []string{"query"},
-					"tool":                 toolCall.Name,
+					"tool":                 name,
 				})
 				if err != nil {
-					runErr = fmt.Errorf("tool not found: %s", toolCall.Name)
+					runErr = fmt.Errorf("tool not found: %s", name)
 				} else {
 					response = fantasy.NewTextErrorResponse(string(payload))
 					response.Metadata = string(payload)
 				}
 			} else {
-				runErr = fmt.Errorf("tool not found: %s", toolCall.Name)
+				runErr = fmt.Errorf("tool not found: %s", name)
 			}
 		} else {
 			response, runErr = tool.Run(toolCtx, fantasy.ToolCall{
 				ID:    toolCall.ID,
-				Name:  toolCall.Name,
+				Name:  name,
 				Input: toolCall.Input,
 			})
 		}
-		result := toolResponseToToolResultContent(toolCall, response, runErr)
+		normalizedCall := toolCall
+		normalizedCall.Name = name
+		result := toolResponseToToolResultContent(normalizedCall, response, runErr)
 		toolMessageID, persistErr := a.persistRecoveredToolResult(ctx, genCtx, assistant, result, runtimeConfig, currentStepToolResultChars)
 		if persistErr != nil {
 			return nil, 0, "", false, persistErr
 		}
 		toolMessageIDs = append(toolMessageIDs, toolMessageID)
-		lastTool = toolCall.Name
+		lastTool = name
 	}
 	return toolMessageIDs, len(toolCalls), lastTool, true, nil
 }

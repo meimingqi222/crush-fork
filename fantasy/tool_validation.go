@@ -15,7 +15,78 @@ import (
 	"github.com/kaptinlin/jsonschema"
 )
 
-const maxCoercionPasses = 5
+const (
+	maxCoercionPasses       = 5
+	maxArgEchoFieldLength   = 256
+	rawInputExcerptMax      = 256
+)
+
+// parseToolCallInput parses a tool call's JSON input into a map. On strict
+// parse failure it retries with jsonrepair to tolerate weak-model output
+// (single quotes, trailing commas, Python literals, truncated JSON, bareword
+// keys). When repair changes the input, the returned string carries the
+// repaired JSON so the caller can update the tool call. If both strict and
+// repaired parsing fail, the error includes a truncated raw-input excerpt
+// (oh-my-pi's __parseError pattern) so the model can self-correct.
+func parseToolCallInput(input string) (map[string]any, string, error) {
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(input), &parsed); err == nil {
+		return parsed, input, nil
+	} else {
+		// Strict parse failed; retry with jsonrepair before rejecting.
+		repaired, repairErr := jsonrepair.RepairJSON(input)
+		if repairErr != nil {
+			return nil, input, fmt.Errorf("invalid JSON input: %w%s", err, rawInputExcerpt(input))
+		}
+		if parseErr := json.Unmarshal([]byte(repaired), &parsed); parseErr != nil {
+			return nil, input, fmt.Errorf("invalid JSON input: %w%s", parseErr, rawInputExcerpt(input))
+		}
+		return parsed, repaired, nil
+	}
+}
+
+func rawInputExcerpt(input string) string {
+	if len(input) <= rawInputExcerptMax {
+		return fmt.Sprintf(" (raw: %q)", input)
+	}
+	return fmt.Sprintf(" (raw: %q…)", input[:rawInputExcerptMax])
+}
+
+// truncateArgsForError recursively truncates string values in args to
+// maxArgEchoFieldLength runes so a failed write/edit call with a large
+// content field does not round-trip hundreds of KB back through the model
+// as a tool result. Mirrors oh-my-pi's truncateArgsForError.
+func truncateArgsForError(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = truncateValueForError(v)
+	}
+	return out
+}
+
+func truncateValueForError(v any) any {
+	switch val := v.(type) {
+	case string:
+		runes := []rune(val)
+		if len(runes) <= maxArgEchoFieldLength {
+			return val
+		}
+		return string(runes[:maxArgEchoFieldLength]) + "…"
+	case map[string]any:
+		return truncateArgsForError(val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = truncateValueForError(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
 
 var (
 	additionalPropertyPattern = regexp.MustCompile(`Additional property '([^']+)'`)
@@ -130,11 +201,14 @@ func formatToolValidationError(toolName string, originalArgs, normalizedArgs map
 		messages = append(messages, "  - root: unknown validation error")
 	}
 
-	receivedArgs := any(originalArgs)
+	// Truncate string fields before marshaling so a failed write/edit with a
+	// large content field does not round-trip hundreds of KB back through the
+	// model as a tool result (and fight the step tool-result budget).
+	receivedArgs := any(truncateArgsForError(originalArgs))
 	if !mapsEqual(originalArgs, normalizedArgs) {
 		receivedArgs = map[string]any{
-			"original":   originalArgs,
-			"normalized": normalizedArgs,
+			"original":   truncateArgsForError(originalArgs),
+			"normalized": truncateArgsForError(normalizedArgs),
 		}
 	}
 	receivedJSON, _ := json.MarshalIndent(receivedArgs, "", "  ")
@@ -839,7 +913,9 @@ func replacePointerParent(root map[string]any, parentSegments []string, value an
 }
 
 // repairToolArguments applies the built-in validation/repair pipeline to a tool
-// call that already failed initial validation.
+// call that already failed initial validation. Top-level JSON repair
+// (jsonrepair) is applied first so malformed JSON from weak models reaches
+// the schema-driven coercion stage instead of being bounced immediately.
 func repairToolArguments(options ToolCallRepairOptions) (*ToolCallContent, error) {
 	var toolInfo *ToolInfo
 	for _, t := range options.AvailableTools {
@@ -853,26 +929,35 @@ func repairToolArguments(options ToolCallRepairOptions) (*ToolCallContent, error
 		return nil, nil
 	}
 
-	var originalArgs map[string]any
-	if err := json.Unmarshal([]byte(options.OriginalToolCall.Input), &originalArgs); err != nil {
-		return nil, err
-	}
-
-	normalized, err := validateAndNormalizeToolArguments(*toolInfo, originalArgs)
+	originalArgs, repairedInput, err := parseToolCallInput(options.OriginalToolCall.Input)
 	if err != nil {
 		return nil, nil
 	}
+	inputRepaired := repairedInput != options.OriginalToolCall.Input
 
-	if mapsEqual(originalArgs, normalized) {
+	normalized, err := validateAndNormalizeToolArguments(*toolInfo, originalArgs)
+	if err != nil {
+		// Schema validation failed. If top-level JSON repair changed the
+		// input, still return the repaired version so the model gets
+		// well-formed JSON to self-correct from on the next turn.
+		if inputRepaired {
+			repaired := options.OriginalToolCall
+			repaired.Input = repairedInput
+			return &repaired, nil
+		}
 		return nil, nil
 	}
 
-	repairedInput, err := json.Marshal(normalized)
+	if !inputRepaired && mapsEqual(originalArgs, normalized) {
+		return nil, nil
+	}
+
+	finalInput, err := json.Marshal(normalized)
 	if err != nil {
 		return nil, err
 	}
 
 	repaired := options.OriginalToolCall
-	repaired.Input = string(repairedInput)
+	repaired.Input = string(finalInput)
 	return &repaired, nil
 }

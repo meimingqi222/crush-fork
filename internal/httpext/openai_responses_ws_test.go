@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -15,10 +17,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func wsUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+}
+
+func wsOpts(enabled bool) ResponsesWebSocketOptions {
+	return ResponsesWebSocketOptions{
+		Enabled:  enabled,
+		Fallback: ResponsesWebSocketFallbackSession,
+	}
+}
+
 func TestWrapOpenAIResponsesWebSocketHTTPClientStreamsResponseEvents(t *testing.T) {
 	t.Parallel()
 
-	upgrader := websocket.Upgrader{}
+	upgrader := wsUpgrader()
 	var requestPayload map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +78,7 @@ func TestWrapOpenAIResponsesWebSocketHTTPClientStreamsResponseEvents(t *testing.
 	}))
 	defer srv.Close()
 
-	wrapped := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client())
+	wrapped := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client(), NewResponsesWebSocketPool(), wsOpts(true), nil)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5","stream":true,"input":[]}`))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
@@ -85,8 +98,7 @@ func TestWrapOpenAIResponsesWebSocketHTTPClientStreamsResponseEvents(t *testing.
 	require.NoError(t, stream.Err())
 
 	require.Equal(t, "response.create", requestPayload["type"])
-	_, hasStream := requestPayload["stream"]
-	require.False(t, hasStream)
+	require.Equal(t, true, requestPayload["stream"])
 	require.Equal(t, "gpt-5", requestPayload["model"])
 }
 
@@ -102,7 +114,7 @@ func TestWrapOpenAIResponsesWebSocketHTTPClientPassesThroughNonStreamingRequests
 	}))
 	defer srv.Close()
 
-	wrapped := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client())
+	wrapped := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client(), NewResponsesWebSocketPool(), wsOpts(true), nil)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5","stream":false,"input":[]}`))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
@@ -115,4 +127,75 @@ func TestWrapOpenAIResponsesWebSocketHTTPClientPassesThroughNonStreamingRequests
 	require.NoError(t, err)
 	require.Equal(t, `{"ok":true}`, string(body))
 	require.True(t, sawRequest)
+}
+
+func TestApplyResponsesWebSocketBetaHeaderV2(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{}
+	applyResponsesWebSocketBetaHeader(url.URL{Host: "api.openai.com"}, headers, ResponsesWebSocketOptions{V2: true})
+	require.Equal(t, OpenAIBetaResponsesWSV2, headers.Get("OpenAI-Beta"))
+
+	headers = http.Header{}
+	applyResponsesWebSocketBetaHeader(url.URL{Host: "api.openai.com"}, headers, ResponsesWebSocketOptions{V2: false})
+	require.Equal(t, OpenAIBetaResponsesAPIV1, headers.Get("OpenAI-Beta"))
+}
+
+func TestResponsesWebSocketPoolProviderSessionKeyStable(t *testing.T) {
+	t.Parallel()
+
+	u, err := url.Parse("wss://example.com/v1/responses")
+	require.NoError(t, err)
+	h := http.Header{"Authorization": []string{"Bearer a"}}
+	k1 := providerSessionKey(*u, h, "")
+	k2 := providerSessionKey(*u, h, "")
+	require.Equal(t, k1, k2)
+	h.Set("Authorization", "Bearer b")
+	require.NotEqual(t, k1, providerSessionKey(*u, h, ""))
+	k3 := providerSessionKey(*u, h, "turn-a")
+	k4 := providerSessionKey(*u, h, "turn-a")
+	require.Equal(t, k3, k4)
+	require.NotEqual(t, k1, k3)
+}
+
+func TestOpenAIResponsesWebSocketFallbackAfterDialFailure(t *testing.T) {
+	t.Parallel()
+
+	httpHits := atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "websocket" {
+			http.Error(w, "websocket unavailable", http.StatusBadRequest)
+			return
+		}
+		httpHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	opts := ResponsesWebSocketOptions{
+		Enabled:  true,
+		Fallback: ResponsesWebSocketFallbackSession,
+	}
+	client := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client(), NewResponsesWebSocketPool(), opts, nil)
+
+	for range 2 {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5","stream":true,"input":[]}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
+	require.Equal(t, int32(2), httpHits.Load())
+}
+
+func TestResponsesWebSocketPoolTurnState(t *testing.T) {
+	t.Parallel()
+
+	entry := &pooledWebSocketConn{}
+	entry.setTurnState("turn-abc")
+	require.Equal(t, "turn-abc", entry.turnStateHeader())
+	require.Equal(t, "turn-xyz", parseTurnStateFromEvent([]byte(`{"type":"response.completed","turn_state":"turn-xyz"}`)))
 }

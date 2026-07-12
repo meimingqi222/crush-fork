@@ -300,7 +300,7 @@ func DefaultKeyMap() KeyMap {
 	)
 	km.Chat.OpenThinking = key.NewBinding(
 		key.WithKeys("ctrl+o"),
-		key.WithHelp("ctrl+o", "view reasoning"),
+		key.WithHelp("ctrl+o", "show/hide reasoning"),
 	)
 	km.Chat.SessionParent = key.NewBinding(
 		key.WithKeys("ctrl+left", "alt+left", "ctrl+b", "alt+b", "[", "h"),

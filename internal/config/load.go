@@ -271,7 +271,10 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			ExtraHeaders:       headers,
 			ExtraBody:          config.ExtraBody,
 			ExtraParams:        make(map[string]string),
-			ResponsesWebSocket: config.ResponsesWebSocket,
+			ResponsesWebSocket:         config.ResponsesWebSocket,
+			ResponsesWebSocketV2:       config.ResponsesWebSocketV2,
+			ResponsesWebSocketFallback:   config.ResponsesWebSocketFallback,
+			ResponsesWebSocketPrewarm:    config.ResponsesWebSocketPrewarm,
 			Models:             providerModels,
 		}
 

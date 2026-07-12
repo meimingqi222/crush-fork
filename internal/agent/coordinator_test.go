@@ -23,6 +23,7 @@ import (
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
@@ -1670,7 +1671,6 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 
 	t.Run("openai: no reasoning_effort when Think is false", func(t *testing.T) {
 		t.Parallel()
-		// Use a non-responses model ID so mergeCallOptions returns *ProviderOptions.
 		model := Model{
 			CatwalkCfg: catwalk.Model{
 				ID:        "custom-reasoning-model",
@@ -1679,14 +1679,13 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 			ModelCfg: config.SelectedModel{Think: &think},
 		}
 		options, _, _, _, _, _ := mergeCallOptions(model, config.ProviderConfig{Type: openai.Name})
-		opts, ok := options[openai.Name].(*openai.ProviderOptions)
+		opts, ok := options[openai.Name].(*openai.ResponsesProviderOptions)
 		require.True(t, ok)
 		require.Nil(t, opts.ReasoningEffort)
 	})
 
 	t.Run("openai: reasoning_effort set by default when Think is nil", func(t *testing.T) {
 		t.Parallel()
-		// Use a non-responses model ID so mergeCallOptions returns *ProviderOptions.
 		model := Model{
 			CatwalkCfg: catwalk.Model{
 				ID:        "custom-reasoning-model",
@@ -1694,33 +1693,10 @@ func TestMergeCallOptions_ThinkDisabledAllProviders(t *testing.T) {
 			},
 		}
 		options, _, _, _, _, _ := mergeCallOptions(model, config.ProviderConfig{Type: openai.Name})
-		opts, ok := options[openai.Name].(*openai.ProviderOptions)
+		opts, ok := options[openai.Name].(*openai.ResponsesProviderOptions)
 		require.True(t, ok)
 		require.NotNil(t, opts.ReasoningEffort)
 		require.Equal(t, openai.ReasoningEffortHigh, *opts.ReasoningEffort)
-	})
-
-	t.Run("openai: use_responses_api forces Responses provider options", func(t *testing.T) {
-		t.Parallel()
-
-		model := Model{
-			CatwalkCfg: catwalk.Model{
-				ID:        "grok-composer-2.5-fast",
-				CanReason: true,
-			},
-		}
-		providerCfg := config.ProviderConfig{
-			Type: openai.Name,
-			Models: []config.ProviderModel{{
-				Model: catwalk.Model{
-					ID: "grok-composer-2.5-fast",
-				},
-				UseResponsesAPI: true,
-			}},
-		}
-		options, _, _, _, _, _ := mergeCallOptions(model, providerCfg)
-		_, ok := options[openai.Name].(*openai.ResponsesProviderOptions)
-		require.True(t, ok)
 	})
 
 	t.Run("openai-compat: no reasoning_effort when Think is false", func(t *testing.T) {
@@ -1781,7 +1757,7 @@ func TestMergeCallOptions_ThinkDisabledClearsProviderOptions(t *testing.T) {
 		}
 
 		options, _, _, _, _, _ := mergeCallOptions(model, cfg)
-		opts, ok := options[openai.Name].(*openai.ProviderOptions)
+		opts, ok := options[openai.Name].(*openai.ResponsesProviderOptions)
 		require.True(t, ok)
 		require.Nil(t, opts.ReasoningEffort)
 	})
@@ -1813,7 +1789,8 @@ func TestWrapOpenAIStreamingHTTPClient(t *testing.T) {
 	t.Run("uses websocket wrapper when enabled", func(t *testing.T) {
 		t.Parallel()
 
-		wrapped := wrapOpenAIStreamingHTTPClient(nil, true)
+		wsCfg := config.ProviderConfig{ResponsesWebSocket: true}
+		wrapped := (&coordinator{responsesWSPool: httpext.NewResponsesWebSocketPool()}).wrapOpenAIStreamingHTTPClient(nil, wsCfg)
 		require.NotNil(t, wrapped)
 
 		transportType := reflect.TypeOf(wrapped.Transport).String()
@@ -1829,7 +1806,7 @@ func TestWrapOpenAIStreamingHTTPClient(t *testing.T) {
 	t.Run("uses activity wrapper only when disabled", func(t *testing.T) {
 		t.Parallel()
 
-		wrapped := wrapOpenAIStreamingHTTPClient(nil, false)
+		wrapped := (&coordinator{}).wrapOpenAIStreamingHTTPClient(nil, config.ProviderConfig{})
 		require.NotNil(t, wrapped)
 
 		transportType := reflect.TypeOf(wrapped.Transport).String()

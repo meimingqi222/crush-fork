@@ -105,12 +105,15 @@ func FormatTokenCount(tokens int64) string {
 }
 
 // FormatContextUsage formats token usage as used tokens plus context usage
-// percentage.
-func FormatContextUsage(tokens, contextWindow int64) string {
+// percentage. When estimated is true, the token count is prefixed with "~".
+func FormatContextUsage(tokens, contextWindow int64, estimated bool) string {
 	if tokens < 0 {
 		tokens = 0
 	}
 	used := strings.ToLower(FormatTokenCount(tokens))
+	if estimated {
+		used = "~" + used
+	}
 	if contextWindow <= 0 {
 		return used
 	}
@@ -128,7 +131,7 @@ func formatTokensAndCost(t *styles.Styles, totalTokens, outputTokens, contextWin
 	}
 	formattedCost := t.Muted.Render(fmt.Sprintf("$%.2f", cost))
 	formattedOutput := t.Muted.Render(fmt.Sprintf("%s out", strings.ToLower(FormatTokenCount(outputTokens))))
-	formattedTotal := t.Subtle.Render(FormatContextUsage(totalTokens, contextWindow))
+	formattedTotal := t.Subtle.Render(FormatContextUsage(totalTokens, contextWindow, false))
 	return fmt.Sprintf("%s %s %s", formattedTotal, formattedOutput, formattedCost)
 }
 

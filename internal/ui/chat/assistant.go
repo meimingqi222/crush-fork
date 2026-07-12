@@ -34,6 +34,14 @@ const maxCollapsedSummaryHeight = 8
 // streaming delta while keeping the spinner animation smooth at 20 FPS.
 const thinkingStreamThrottle = 200 * time.Millisecond
 
+// contentStreamThrottle limits cache invalidation during pure content streaming.
+const contentStreamThrottle = 200 * time.Millisecond
+
+type clickRegion struct {
+	name          string
+	start, height int
+}
+
 // AssistantMessageItem represents an assistant message in the chat UI.
 //
 // This item includes thinking, and the content but does not include the tool calls.
@@ -47,10 +55,11 @@ type AssistantMessageItem struct {
 	anim              *anim.Anim
 	showLoadingState  bool
 	thinkingExpanded  bool
-	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
+	thinkingBoxHeight int // Legacy Y bookkeeping; prefer clickRegions.
 	summaryExpanded   bool
-	summaryBoxHeight  int // Tracks the rendered summary box height for click detection.
-	summaryBoxStart   int // Y offset where the summary box begins.
+	summaryBoxHeight  int
+	summaryBoxStart   int
+	clickRegions      []clickRegion
 
 	// currentAnimLabel tracks the current animation label to avoid redundant
 	// SetLabel calls on every animation frame.
@@ -64,9 +73,12 @@ type AssistantMessageItem struct {
 	thinkingRenderWidth int    // Width at which thinkingFullRender was rendered.
 	plainThinkingMode   bool   // True when cache holds raw text (streaming+expanded skip).
 
-	// Streaming invalidation throttle state. During pure thinking streaming,
-	// cache invalidation is throttled to avoid expensive re-renders on every
-	// delta while keeping the spinner smooth at 20 FPS.
+	// Streaming invalidation throttle state. During thinking and content
+	// streaming, cache invalidation is throttled to avoid expensive
+	// re-renders on every delta while keeping the spinner smooth at 20 FPS.
+	// lastInvalidation.IsZero() doubles as the "first delta of this run"
+	// signal so pure-content models (which never set wasThinking) also get
+	// an immediate first render before throttling kicks in.
 	lastInvalidation time.Time
 	wasThinking      bool
 
@@ -304,7 +316,8 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	// collapsed) or the full thinking block (when expanded). The full block is
 	// no longer rendered by default to keep long conversations readable and
 	// fast; press Ctrl+O or click the indicator to view the reasoning.
-	if thinking != "" {
+	showThinking := thinking != "" && !a.message.IsSummaryMessage
+	if showThinking {
 		if a.thinkingExpanded {
 			messageParts = append(messageParts, a.renderThinking(thinking, width))
 		} else {
@@ -316,7 +329,7 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	if content != "" {
 		// Compute the Y offset at which the content block starts.
 		summaryStart := 0
-		if thinking != "" {
+		if showThinking {
 			// Spacer line between thinking and content adds 1.
 			summaryStart = a.thinkingBoxHeight + 1
 			messageParts = append(messageParts, "")
@@ -339,7 +352,33 @@ func (a *AssistantMessageItem) renderMessageContent(width int) string {
 		}
 	}
 
-	return strings.Join(messageParts, "\n")
+	out := strings.Join(messageParts, "\n")
+	a.clickRegions = a.buildClickRegions(out)
+	return out
+}
+
+func (a *AssistantMessageItem) buildClickRegions(content string) []clickRegion {
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	var regions []clickRegion
+	y := 0
+	if a.thinkingBoxHeight > 0 && !a.message.IsSummaryMessage {
+		regions = append(regions, clickRegion{name: "thinking", start: 0, height: a.thinkingBoxHeight})
+		y = a.thinkingBoxHeight
+		if y < len(lines) && lines[y] == "" {
+			y++
+		}
+	}
+	if a.summaryBoxHeight > 0 && a.message.IsSummaryMessage {
+		start := a.summaryBoxStart
+		if start < 0 {
+			start = y
+		}
+		regions = append(regions, clickRegion{name: "summary", start: start, height: a.summaryBoxHeight})
+	}
+	return regions
 }
 
 // renderThinking renders the thinking/reasoning content with footer.
@@ -399,7 +438,6 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 
 	thinkingStyle := a.sty.Chat.Message.ThinkingBox.Width(width)
 	result := thinkingStyle.Render(strings.Join(lines, "\n"))
-	a.thinkingBoxHeight = lipgloss.Height(result)
 
 	var footer string
 	// If thinking is done add the thought for footer.
@@ -414,6 +452,7 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 	if footer != "" {
 		result += "\n\n" + footer
 	}
+	a.thinkingBoxHeight = lipgloss.Height(result)
 
 	return result
 }
@@ -513,7 +552,9 @@ func (a *AssistantMessageItem) renderSpinning() string {
 // invalidateCache clears all render caches: base content, prefixed render,
 // thinking glamour cache, viewport cache, and summary cache. Call this when
 // the message content or visual state changes in a way that affects the
-// thinking glamour output.
+// thinking glamour output. Legacy height/offset fields are reset too so a
+// block that disappears on the next render does not leave stale geometry
+// behind for click hit-testing (see buildClickRegions).
 func (a *AssistantMessageItem) invalidateCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
@@ -521,6 +562,9 @@ func (a *AssistantMessageItem) invalidateCache() {
 	a.invalidateViewportCache()
 	a.invalidateSummaryCache()
 	a.invalidateStrippedCache()
+	a.thinkingBoxHeight = 0
+	a.summaryBoxHeight = 0
+	a.summaryBoxStart = 0
 }
 
 // invalidateContentCache clears the base content cache, prefixed render
@@ -701,13 +745,17 @@ func hasNonWhitespace(s string) bool {
 	return false
 }
 
-// SetMessage is used to update the underlying message. During pure thinking
-// streaming, cache invalidation is throttled to thinkingStreamThrottle to
-// prevent expensive re-renders on every delta while keeping the spinner
-// animation smooth at 20 FPS.
+// SetMessage is used to update the underlying message. During thinking and
+// content streaming, cache invalidation is throttled to prevent expensive
+// re-renders on every delta while keeping the spinner animation smooth at
+// 20 FPS. The first delta of a streaming run (detected via
+// lastInvalidation.IsZero()) is always shown immediately so pure-content
+// models — which never set wasThinking — do not bypass the throttle.
 func (a *AssistantMessageItem) SetMessage(msg *message.Message) tea.Cmd {
 	wasSpinning := a.isSpinning()
 	wasThinking := a.wasThinking
+	wasFinished := a.message.IsFinished()
+	wasFinishReason := a.message.FinishReason()
 
 	thinkingNow := msg.ReasoningContent().Thinking != ""
 	contentNow := msg.Content().Text != "" || len(msg.ToolCalls()) > 0
@@ -716,12 +764,23 @@ func (a *AssistantMessageItem) SetMessage(msg *message.Message) tea.Cmd {
 	a.message = msg
 
 	shouldInvalidate := false
-	if contentNow {
-		// Content appeared or is streaming — always invalidate immediately.
-		// This covers the critical thinking→content transition.
+	if msg.IsFinished() && (!wasFinished || msg.FinishReason() != wasFinishReason) {
+		// Step boundaries must bypass streaming throttle so final text and
+		// finish/cancel/error footers render immediately.
 		shouldInvalidate = true
-	} else if thinkingNow {
-		if !wasThinking {
+	}
+	firstDelta := a.lastInvalidation.IsZero()
+	if !shouldInvalidate && contentNow {
+		if firstDelta {
+			// First delta of this run — show immediately. Covers pure-content
+			// models where wasThinking never becomes true; the previous
+			// !wasThinking check failed to throttle those.
+			shouldInvalidate = true
+		} else if time.Since(a.lastInvalidation) >= contentStreamThrottle {
+			shouldInvalidate = true
+		}
+	} else if !shouldInvalidate && thinkingNow {
+		if firstDelta || !wasThinking {
 			// First thinking delta — always show.
 			shouldInvalidate = true
 		} else if time.Since(a.lastInvalidation) >= thinkingStreamThrottle {
@@ -750,25 +809,36 @@ func (a *AssistantMessageItem) ToggleExpanded() bool {
 	return a.thinkingExpanded
 }
 
+// SetThinkingExpanded sets the expanded state of the thinking box. Used by
+// the global ctrl+o reasoning-visibility toggle.
+func (a *AssistantMessageItem) SetThinkingExpanded(expanded bool) {
+	if a.thinkingExpanded == expanded {
+		return
+	}
+	a.thinkingExpanded = expanded
+	// Preserve the thinking glamour cache — only truncation/boxing changes.
+	a.invalidateContentCache()
+}
+
 // HandleMouseClick implements MouseClickable.
 func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) (bool, tea.Cmd) {
 	if btn != ansi.MouseLeft {
 		return false, nil
 	}
-	// Check if the click is within the thinking box.
-	if a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight {
-		a.thinkingExpanded = !a.thinkingExpanded
-		// Preserve the thinking glamour cache — only truncation/boxing changes.
-		a.invalidateContentCache()
-		return true, nil
-	}
-	// Check if the click is within the summary box.
-	summaryEnd := a.summaryBoxStart + a.summaryBoxHeight
-	if a.summaryBoxHeight > 0 && y >= a.summaryBoxStart && y < summaryEnd {
-		a.summaryExpanded = !a.summaryExpanded
-		a.invalidateSummaryCache()
-		a.invalidateContentCache()
-		return true, nil
+	for _, region := range a.clickRegions {
+		if y >= region.start && y < region.start+region.height {
+			switch region.name {
+			case "thinking":
+				a.thinkingExpanded = !a.thinkingExpanded
+				a.invalidateContentCache()
+				return true, nil
+			case "summary":
+				a.summaryExpanded = !a.summaryExpanded
+				a.invalidateSummaryCache()
+				a.invalidateContentCache()
+				return true, nil
+			}
+		}
 	}
 	return false, nil
 }

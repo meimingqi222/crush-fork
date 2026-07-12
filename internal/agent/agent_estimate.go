@@ -365,10 +365,11 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
 		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
 
-	if !estimated {
-		a.eventTokensUsed(session.ID, model, usage, cost)
-	} else {
+	if estimated {
 		session.EstimatedUsage = true
+	} else {
+		session.EstimatedUsage = false
+		a.eventTokensUsed(session.ID, model, usage, cost)
 	}
 
 	if overrideCost != nil {

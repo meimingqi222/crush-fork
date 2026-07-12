@@ -18,6 +18,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
+	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -218,6 +219,15 @@ type ProviderConfig struct {
 	// When false, streaming uses HTTP SSE for compatibility.
 	ResponsesWebSocket bool `json:"responses_websocket,omitempty" jsonschema:"description=Use WebSocket transport for OpenAI Responses streaming when supported,default=false"`
 
+	// ResponsesWebSocketV2 uses the responses_websockets=2026-02-06 OpenAI-Beta value on api.openai.com.
+	ResponsesWebSocketV2 bool `json:"responses_websocket_v2,omitempty" jsonschema:"description=Use OpenAI Responses WebSocket v2 beta header when supported,default=false"`
+
+	// ResponsesWebSocketFallback selects HTTP fallback after WebSocket errors: session, request, or off.
+	ResponsesWebSocketFallback string `json:"responses_websocket_fallback,omitempty" jsonschema:"description=HTTP fallback mode after WebSocket failures: session, request, or off,default=session"`
+
+	// ResponsesWebSocketPrewarm enables turn-level prewarm (generate=false) before the first stream.
+	ResponsesWebSocketPrewarm bool `json:"responses_websocket_prewarm,omitempty" jsonschema:"description=Prewarm Responses WebSocket connections at turn start,default=false"`
+
 	// CopilotService indicates if this provider follows GitHub Copilot billing rules.
 	// When true, X-Initiator header is set based on request type:
 	// - "user" for direct user prompts (billable)
@@ -234,9 +244,6 @@ type ProviderConfig struct {
 // ProviderModel extends catwalk.Model with Crush-specific provider options.
 type ProviderModel struct {
 	catwalk.Model
-	// UseResponsesAPI forces this model to use the OpenAI Responses API
-	// (/v1/responses) instead of Chat Completions.
-	UseResponsesAPI bool `json:"use_responses_api,omitempty" jsonschema:"description=Force this model to use the OpenAI Responses API instead of Chat Completions,default=false"`
 }
 
 // ProviderModelID creates a provider model with only an ID set.
@@ -256,14 +263,15 @@ func ProviderModelsFromCatwalk(models []catwalk.Model) []ProviderModel {
 	return out
 }
 
-// ModelUseResponsesAPI reports whether a configured model should use the Responses API.
-func (pc *ProviderConfig) ModelUseResponsesAPI(modelID string) bool {
-	for _, model := range pc.Models {
-		if model.ID == modelID {
-			return model.UseResponsesAPI
-		}
+// ResponsesWebSocketOptions returns httpext transport options for this provider.
+func (pc *ProviderConfig) ResponsesWebSocketOptions() httpext.ResponsesWebSocketOptions {
+	return httpext.ResponsesWebSocketOptions{
+		Enabled:  pc.ResponsesWebSocket,
+		V2:       pc.ResponsesWebSocketV2,
+		Fallback: httpext.NormalizeResponsesWebSocketFallback(pc.ResponsesWebSocketFallback),
+		Prewarm:  pc.ResponsesWebSocketPrewarm,
+		Chain:    pc.ResponsesWebSocket && pc.ResponsesWebSocketV2,
 	}
-	return false
 }
 
 // ToProvider converts the [ProviderConfig] to a [catwalk.Provider].

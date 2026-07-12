@@ -107,16 +107,21 @@ func textFromFantasyMessage(msg fantasy.Message) string {
 }
 
 type autoSummarizeTestAgent struct {
-	t                       *testing.T
-	runCalls                int
-	summaryCalls            int
-	stepUsage               fantasy.Usage
-	stepUsages              []fantasy.Usage
-	afterPrepare            func()
-	afterStep               func()
-	runErr                  error
-	runErrs                 []error
-	summaryErrs             []error
+	t            *testing.T
+	runCalls     int
+	summaryCalls int
+	stepUsage    fantasy.Usage
+	stepUsages   []fantasy.Usage
+	afterPrepare func()
+	afterStep    func()
+	runErr       error
+	runErrs      []error
+	summaryErrs  []error
+	// summaryTexts, when non-empty, supplies the text emitted via
+	// OnTextDelta for successive summary calls (one entry dequeued per
+	// call). If exhausted or unset, the summary branch emits the default
+	// "summary" text.
+	summaryTexts            []string
 	onSummary               func(fantasy.AgentStreamCall)
 	lastCall                fantasy.AgentStreamCall
 	errAfterStep            bool
@@ -153,7 +158,12 @@ func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentS
 			}
 		}
 		if call.OnTextDelta != nil {
-			require.NoError(a.t, call.OnTextDelta("summary", "summary"))
+			text := "summary"
+			if len(a.summaryTexts) > 0 {
+				text = a.summaryTexts[0]
+				a.summaryTexts = a.summaryTexts[1:]
+			}
+			require.NoError(a.t, call.OnTextDelta("summary", text))
 		}
 		return &fantasy.AgentResult{}, nil
 	}
@@ -1188,6 +1198,103 @@ func TestSummarizeSkipsAutoCompactForTinyHistory(t *testing.T) {
 	require.Equal(t, 1, fakeAgent.summaryCalls)
 	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposeAutoCompact)
 	require.NotContains(t, purposeTracker.messagePurposes, plugin.ChatTransformPurposePostCompact)
+}
+
+// TestSummarizeRetriesAfterToolCallMarkupThenSucceeds covers the fix for a
+// weak summarization model (e.g. DeepSeek V4 Flash) that ignores
+// ToolChoiceNone and streams its native tool-call protocol (DSML/antml-style
+// tags) as plain text instead of a summary. Summarize must detect that,
+// retry with a strengthened prompt, and persist the good summary from the
+// second attempt rather than the garbage from the first.
+func TestSummarizeRetriesAfterToolCallMarkupThenSucceeds(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summarize tool-call markup retry success")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("x", 4000)}},
+	})
+	require.NoError(t, err)
+
+	garbage := buildLeakedToolCallText("internal/agent/agent.go")
+	const goodSummary = "A concise, well-formed summary of the session."
+	fakeAgent := &autoSummarizeTestAgent{
+		t:            t,
+		summaryTexts: []string{garbage, goodSummary},
+	}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
+
+	err = sessionAgent.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, fakeAgent.summaryCalls)
+
+	msgs, err := env.messages.List(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	var summaryMsg *message.Message
+	for i := range msgs {
+		if msgs[i].IsSummaryMessage {
+			summaryMsg = &msgs[i]
+		}
+	}
+	require.NotNil(t, summaryMsg)
+	require.Equal(t, message.FinishReasonEndTurn, summaryMsg.FinishReason())
+	require.Equal(t, goodSummary, summaryMsg.Content().Text)
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.Equal(t, summaryMsg.ID, savedSession.SummaryMessageID)
+}
+
+// TestSummarizeExhaustsToolCallMarkupRetriesAndFails covers the case where
+// the summarization model keeps leaking tool-call markup across every retry
+// attempt: Summarize must give up (rather than persist garbage as the
+// session summary) and mark the summary message as failed.
+func TestSummarizeExhaustsToolCallMarkupRetriesAndFails(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summarize tool-call markup retry exhausted")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("x", 4000)}},
+	})
+	require.NoError(t, err)
+
+	garbage := buildLeakedToolCallText("internal/agent/agent.go")
+	fakeAgent := &autoSummarizeTestAgent{
+		t:            t,
+		summaryTexts: []string{garbage, garbage, garbage},
+	}
+	sessionAgent := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 10000)
+
+	err = sessionAgent.Summarize(t.Context(), testSession.ID, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tool-call markup")
+	require.Equal(t, maxSummaryContentRetries+1, fakeAgent.summaryCalls)
+
+	msgs, listErr := env.messages.List(t.Context(), testSession.ID)
+	require.NoError(t, listErr)
+	var summaryMsg *message.Message
+	for i := range msgs {
+		if msgs[i].IsSummaryMessage {
+			summaryMsg = &msgs[i]
+		}
+	}
+	require.NotNil(t, summaryMsg)
+	require.Equal(t, message.FinishReasonError, summaryMsg.FinishReason())
+	require.Equal(t, "Summarization failed", summaryMsg.FinishPart().Message)
+	require.Empty(t, summaryMsg.Content().Text, "garbage content must be cleared before the failure is persisted")
+
+	savedSession, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.Empty(t, savedSession.SummaryMessageID)
 }
 
 func TestSummarizeRetryableErrorRetriesAndSucceeds(t *testing.T) {

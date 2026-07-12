@@ -140,7 +140,7 @@ func (k *KeyboardShortcuts) getShortcutCategories() []ShortcutCategory {
 			Shortcuts: []Shortcut{
 				{"enter", "发送消息"},
 				{"ctrl+j / shift+enter", "换行"},
-				{"ctrl+o", "查看 reasoning"},
+				{"ctrl+o", "显示/隐藏完整思考内容"},
 				{"ctrl+shift+o", "打开外部编辑器"},
 				{"alt+o", "切换 standard/plan/orchestrate"},
 				{"@", "提及文件"},

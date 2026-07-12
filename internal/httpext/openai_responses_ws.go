@@ -7,26 +7,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
 
-func WrapOpenAIResponsesWebSocketHTTPClient(client *http.Client) *http.Client {
+// WrapOpenAIResponsesWebSocketHTTPClient wraps streaming POST /responses as WebSocket SSE.
+func WrapOpenAIResponsesWebSocketHTTPClient(
+	client *http.Client,
+	pool *ResponsesWebSocketPool,
+	opts ResponsesWebSocketOptions,
+	session *ResponsesWebSocketTransportSession,
+) *http.Client {
 	if client == nil {
-		return &http.Client{Transport: openAIResponsesWebSocketTransport{base: http.DefaultTransport}}
+		client = &http.Client{Transport: http.DefaultTransport}
 	}
-
+	var preferHTTP *atomic.Bool
+	if session != nil {
+		preferHTTP = session.PreferHTTP()
+	}
 	clone := *client
-	clone.Transport = openAIResponsesWebSocketTransport{base: client.Transport}
+	clone.Transport = openAIResponsesWebSocketTransport{
+		base:       client.Transport,
+		pool:       pool,
+		opts:       opts,
+		preferHTTP: preferHTTP,
+	}
 	return &clone
 }
 
 type openAIResponsesWebSocketTransport struct {
-	base http.RoundTripper
+	base       http.RoundTripper
+	pool       *ResponsesWebSocketPool
+	opts       ResponsesWebSocketOptions
+	preferHTTP *atomic.Bool
 }
 
 func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -48,29 +67,57 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 		return base.RoundTrip(req)
 	}
 
+	if !t.opts.Enabled {
+		restoreRequestBody(req, body)
+		return base.RoundTrip(req)
+	}
+
+	if t.preferHTTP != nil && t.preferHTTP.Load() {
+		restoreRequestBody(req, body)
+		return base.RoundTrip(req)
+	}
+
 	wsURL := toWebSocketURL(*req.URL)
 	headers := req.Header.Clone()
-	if shouldSetOpenAIBetaHeader(wsURL, headers) {
-		headers.Set("OpenAI-Beta", "responses-api=v1")
+	applyResponsesWebSocketBetaHeader(wsURL, headers, t.opts)
+	if turnState := pooledTurnState(t.pool, wsURL, headers, responsesWebSocketSessionID(req.Context())); turnState != "" {
+		headers.Set(HeaderCodexTurnState, turnState)
 	}
 
-	requestPayload := map[string]any{"type": "response.create"}
-	for k, v := range payload {
-		if k == "stream" {
-			continue
-		}
-		requestPayload[k] = v
-	}
-
+	requestPayload := buildWebSocketResponseCreate(payload)
+	inputLen := responsesInputLen(requestPayload["input"])
 	message, err := json.Marshal(requestPayload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal websocket request: %w", err)
 	}
 
-	dialer := websocket.Dialer{Proxy: http.ProxyFromEnvironment}
-	conn, resp, err := dialer.DialContext(req.Context(), wsURL.String(), headers)
+	entry, reused, err := t.pool.acquireConn(req.Context(), wsURL, headers, t.opts, t.preferHTTP)
 	if err != nil {
-		return nil, formatWebSocketDialError(err, resp)
+		if errors.Is(err, errWebSocketDisabled) || t.shouldFallbackToHTTP() {
+			if !errors.Is(err, errWebSocketDisabled) {
+				t.markPreferHTTP()
+			}
+			restoreRequestBody(req, body)
+			return base.RoundTrip(req)
+		}
+		t.markPreferHTTP()
+		if t.shouldFallbackToHTTP() {
+			restoreRequestBody(req, body)
+			return base.RoundTrip(req)
+		}
+		return nil, err
+	}
+
+	applyResponsesWebSocketChain(requestPayload, entry, t.opts)
+	message, err = json.Marshal(requestPayload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal websocket request: %w", err)
+	}
+
+	sessionID := responsesWebSocketSessionID(req.Context())
+
+	if reused {
+		slog.Debug("Responses websocket connection reused", "url", wsURL.Redacted())
 	}
 
 	reader, writer := io.Pipe()
@@ -79,22 +126,30 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 
 	go func() {
 		defer close(done)
-		defer func() { _ = conn.Close() }()
 		defer func() { _ = writer.Close() }()
 
-		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+		entry.streamMu.Lock()
+		defer entry.streamMu.Unlock()
+
+		if err := entry.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			t.invalidateConn(wsURL, headers, sessionID)
 			_ = writer.CloseWithError(fmt.Errorf("send websocket request: %w", err))
 			return
 		}
 
 		for {
-			_, data, err := conn.ReadMessage()
+			_, data, err := entry.conn.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) || errors.Is(err, io.EOF) {
 					return
 				}
-				_ = writer.CloseWithError(fmt.Errorf("read websocket event: %w", err))
+				t.invalidateConn(wsURL, headers, sessionID)
+				_ = writer.CloseWithError(formatWebSocketReadError(err))
 				return
+			}
+
+			if turnState := parseTurnStateFromEvent(data); turnState != "" {
+				entry.setTurnState(turnState)
 			}
 
 			eventType := websocketEventType(data)
@@ -110,6 +165,10 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 			if _, err := writer.Write([]byte("\n\n")); err != nil {
 				return
 			}
+			if eventType == "response.completed" || eventType == "response.failed" || eventType == "response.incomplete" {
+				recordResponsesWebSocketChainState(entry, data, inputLen)
+				return
+			}
 		}
 	}()
 
@@ -117,7 +176,6 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 		ReadCloser: reader,
 		closeFn: func() error {
 			cancel()
-			_ = conn.Close()
 			<-done
 			return reader.Close()
 		},
@@ -137,6 +195,114 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 		Body:    bodyCloser,
 		Request: req,
 	}, nil
+}
+
+func (t openAIResponsesWebSocketTransport) shouldFallbackToHTTP() bool {
+	return t.opts.fallbackEnabled()
+}
+
+func (t openAIResponsesWebSocketTransport) markPreferHTTP() {
+	if t.preferHTTP != nil && t.opts.fallbackSessionScoped() {
+		t.preferHTTP.Store(true)
+	}
+}
+
+func (t openAIResponsesWebSocketTransport) invalidateConn(wsURL url.URL, headers http.Header, sessionID string) {
+	if t.pool != nil {
+		t.pool.invalidate(wsURL, headers, sessionID)
+	}
+	t.markPreferHTTP()
+}
+
+func pooledTurnState(pool *ResponsesWebSocketPool, wsURL url.URL, headers http.Header, sessionID string) string {
+	if pool == nil {
+		return ""
+	}
+	key := providerSessionKey(wsURL, headers, sessionID)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	entry, ok := pool.conns[key]
+	if !ok || entry == nil {
+		return ""
+	}
+	return entry.turnStateHeader()
+}
+
+func buildWebSocketResponseCreate(payload map[string]any) map[string]any {
+	requestPayload := map[string]any{"type": "response.create"}
+	for k, v := range payload {
+		requestPayload[k] = v
+	}
+	return requestPayload
+}
+
+func applyResponsesWebSocketBetaHeader(wsURL url.URL, headers http.Header, opts ResponsesWebSocketOptions) {
+	if headers.Get("OpenAI-Beta") != "" {
+		return
+	}
+	host := strings.ToLower(wsURL.Hostname())
+	if host != "api.openai.com" && !strings.HasSuffix(host, ".api.openai.com") {
+		return
+	}
+	if opts.V2 {
+		headers.Set("OpenAI-Beta", OpenAIBetaResponsesWSV2)
+		return
+	}
+	headers.Set("OpenAI-Beta", OpenAIBetaResponsesAPIV1)
+}
+
+func dialResponsesWebSocket(
+	ctx context.Context,
+	wsURL url.URL,
+	headers http.Header,
+	opts ResponsesWebSocketOptions,
+	turnState string,
+) (*websocket.Conn, bool, error) {
+	h := headers.Clone()
+	applyResponsesWebSocketBetaHeader(wsURL, h, opts)
+	if turnState != "" {
+		h.Set(HeaderCodexTurnState, turnState)
+	}
+	dialer := websocket.Dialer{Proxy: http.ProxyFromEnvironment}
+	conn, resp, err := dialer.DialContext(ctx, wsURL.String(), h)
+	if err != nil {
+		return nil, false, formatWebSocketDialError(err, resp)
+	}
+	return conn, false, nil
+}
+
+func parseTurnStateFromEvent(data []byte) string {
+	var envelope struct {
+		Response struct {
+			Metadata map[string]string `json:"metadata"`
+		} `json:"response"`
+		TurnState string `json:"turn_state"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return ""
+	}
+	if envelope.TurnState != "" {
+		return envelope.TurnState
+	}
+	if envelope.Response.Metadata != nil {
+		if v := envelope.Response.Metadata[HeaderCodexTurnState]; v != "" {
+			return v
+		}
+		if v := envelope.Response.Metadata["turn_state"]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func formatWebSocketReadError(err error) error {
+	if closeErr, ok := err.(*websocket.CloseError); ok {
+		reason := strings.ToLower(closeErr.Text)
+		if strings.Contains(reason, WebSocketConnectionLimitReached) {
+			return fmt.Errorf("read websocket event: %w: create a new websocket connection to continue", err)
+		}
+	}
+	return fmt.Errorf("read websocket event: %w", err)
 }
 
 type webSocketStreamBody struct {
@@ -205,14 +371,6 @@ func mapToWebSocketScheme(scheme string) string {
 	default:
 		return scheme
 	}
-}
-
-func shouldSetOpenAIBetaHeader(wsURL url.URL, headers http.Header) bool {
-	if headers.Get("OpenAI-Beta") != "" {
-		return false
-	}
-	host := strings.ToLower(wsURL.Hostname())
-	return host == "api.openai.com" || strings.HasSuffix(host, ".api.openai.com")
 }
 
 func websocketEventType(data []byte) string {

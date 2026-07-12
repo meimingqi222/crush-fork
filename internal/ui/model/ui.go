@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -738,9 +739,6 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.updateTextareaWithPrevHeight(nil, prevHeight); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-			if m.attachments != nil {
-				m.attachments.Clear()
-			}
 		}
 		if msg.selectedMessageID != "" && m.chat.SelectMessage(msg.selectedMessageID) {
 			if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
@@ -760,6 +758,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadPromptHistory())
 		m.updateLayoutAndSize()
 		m.invalidateSidebarCache()
+
+	case forkSessionResultMsg:
+		if msg.err != nil {
+			cmds = append(cmds, util.ReportError(msg.err))
+		} else {
+			cmds = append(cmds, util.ReportInfo("Session forked."))
+			cmds = append(cmds, m.loadSession(msg.sessionID))
+		}
 
 	case loadMoreMessagesMsg:
 		m.loadingMoreMessages = false
@@ -1140,6 +1146,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.scrollToBottomRect.Empty() && image.Pt(msg.X, msg.Y).In(m.scrollToBottomRect) {
 				m.chat.ScrollToBottom()
 				return m, tea.Sequence(cmds...)
+			}
+
+			// Handle anchor strip click before the scrollbar/chat so users can
+			// jump directly to a user message.
+			if !m.chat.AnchorStripRect().Empty() && image.Pt(msg.X, msg.Y).In(m.chat.AnchorStripRect()) {
+				if userIdx := m.chat.UserMessageIndexAtY(msg.Y); userIdx >= 0 {
+					m.chat.ScrollToUserMessage(userIdx)
+					return m, tea.Sequence(cmds...)
+				}
 			}
 
 			// Handle scrollbar press/drag start.
@@ -2097,6 +2112,37 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 	return cmd
 }
 
+func (m *UI) maybeInsertCacheMissDivider(msg message.Message) {
+	if msg.Role != message.Assistant || !msg.IsFinished() {
+		return
+	}
+	dividerID := "cache-miss-" + msg.ID
+	if m.chat.MessageItem(dividerID) != nil {
+		return
+	}
+	idx := m.sessionMessageIndex(msg.ID)
+	if idx < 0 {
+		return
+	}
+	prev, ok := chat.AssistantUsageBefore(m.sessionMessages, idx)
+	if !ok {
+		return
+	}
+	n, hit := agent.DetectCacheInvalidation(prev, msg.Usage)
+	if !hit {
+		return
+	}
+	divider := chat.NewCacheMissDividerItem(m.com.Styles, msg.ID, n)
+	if toolCalls := msg.ToolCalls(); len(toolCalls) > 0 {
+		if m.chat.InsertMessagesBefore(toolCalls[0].ID, divider) {
+			return
+		}
+	}
+	if !m.chat.InsertMessagesBefore(msg.ID, divider) {
+		m.chat.AppendMessages(divider)
+	}
+}
+
 // updateSessionMessage updates an existing message in the current session in the chat
 // when an assistant message is updated it may include updated tool calls as well
 // that is why we need to handle creating/updating each tool call message too
@@ -2129,6 +2175,9 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	if existingItem != nil {
 		if assistantItem, ok := existingItem.(*chat.AssistantMessageItem); ok {
 			assistantItem.SetMessage(&msg)
+			if msg.IsFinished() {
+				m.maybeInsertCacheMissDivider(msg)
+			}
 		}
 	} else if shouldRenderAssistant {
 		var toInsert []chat.MessageItem
@@ -2566,6 +2615,17 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		if cmd := m.openDialog(msg.DialogID); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+
+	case dialog.ActionForkSession:
+		m.dialog.CloseFrontDialog()
+		cmds = append(cmds, func() tea.Msg {
+			ctx := context.Background()
+			newSession, err := m.com.App.Sessions.Fork(ctx, msg.SessionID, msg.MessageID)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			return forkSessionResultMsg{sessionID: newSession.ID}
+		})
 
 	// Command dialog messages.
 	case dialog.ActionTogglePlanMode:
@@ -3715,6 +3775,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if cmd := m.cycleCollaborationMode(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
+			case key.Matches(msg, m.keyMap.Chat.OpenThinking):
+				if cmd := m.toggleThinkingVisibility(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			case key.Matches(msg, m.keyMap.Editor.PromptEnhance):
 				if m.isEnhancingPrompt {
 					break
@@ -3852,7 +3916,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			case key.Matches(msg, m.keyMap.Chat.Expand):
 				m.chat.ToggleExpandedSelectedItem()
 			case key.Matches(msg, m.keyMap.Chat.OpenThinking):
-				if cmd := m.openThinkingDialog(); cmd != nil {
+				if cmd := m.toggleThinkingVisibility(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Chat.Up):
@@ -4226,6 +4290,15 @@ func (m *UI) View() tea.View {
 
 // ShortHelp implements [help.KeyMap].
 func (m *UI) ShortHelp() []key.Binding {
+	if m.state == uiChat && m.isSubagentSession() {
+		// The subagent view has less horizontal room (the read-only banner
+		// replaces the editor) and most of the normal chat shortcuts (tab,
+		// commands, new session, ...) don't apply there anyway, so show a
+		// deliberately small set instead of letting the help bar truncate
+		// whichever bindings happen not to fit.
+		return m.shortHelpSubagent()
+	}
+
 	var binds []key.Binding
 	k := &m.keyMap
 	tab := k.Tab
@@ -4262,10 +4335,7 @@ func (m *UI) ShortHelp() []key.Binding {
 		switch m.focus {
 		case uiFocusMain:
 			binds = append(binds, k.Chat.UpDown)
-			if m.isSubagentSession() {
-				// Inside a child session: advertise sibling navigation.
-				binds = append(binds, k.Chat.SessionParent, k.Chat.SessionPrev, k.Chat.SessionNext)
-			} else if m.selectedHasChildSession() {
+			if m.selectedHasChildSession() {
 				binds = append(binds, k.Chat.SessionChild)
 			}
 		}
@@ -4282,6 +4352,36 @@ func (m *UI) ShortHelp() []key.Binding {
 		k.Quit,
 		help,
 	)
+
+	return binds
+}
+
+// shortHelpSubagent returns the trimmed short-help bindings shown while
+// viewing a subagent (child) session. Only the shortcuts needed to get
+// around the subagent tree and out of it are surfaced here; everything else
+// remains available via the full help (ctrl+g).
+func (m *UI) shortHelpSubagent() []key.Binding {
+	k := &m.keyMap
+	var binds []key.Binding
+
+	if m.isAgentBusy() {
+		cancelBinding := k.Chat.Cancel
+		if m.isCanceling {
+			cancelBinding.SetHelp("esc", "press again to cancel")
+		} else if m.com.App.AgentCoordinator.QueuedPrompts(m.session.ID) > 0 && !m.queuePaused {
+			cancelBinding.SetHelp("esc", "pause queue")
+		}
+		binds = append(binds, cancelBinding)
+	}
+
+	binds = append(binds, k.Chat.UpDown, k.Chat.SessionParent)
+	if m.siblingCount > 1 {
+		binds = append(binds, k.Chat.SessionPrev, k.Chat.SessionNext)
+	}
+
+	help := k.Help
+	help.SetHelp("ctrl+g", "more shortcuts")
+	binds = append(binds, k.Quit, help)
 
 	return binds
 }
@@ -5062,21 +5162,53 @@ func (m *UI) editorStatusLineRows() int {
 
 // renderThinkingStatusLine renders the "Thinking • input / output / reasoning"
 // status line shown above the editor while the agent is streaming reasoning.
+//
+// Provider usage numbers only arrive when a step finishes, so during
+// streaming the reasoning/output counts are floored at a local estimate of
+// the streamed text. This keeps the numbers ticking up live (like Claude
+// Code) instead of sitting frozen until the step completes.
 func (m *UI) renderThinkingStatusLine(width int) string {
 	msg := m.latestAssistantMessageWithReasoning()
 	if msg == nil {
 		return ""
 	}
 	usage := msg.Usage
+	reasoningTokens := usage.ReasoningTokens
+	outputTokens := usage.OutputTokens
+	if !msg.IsFinished() {
+		reasoningEstimate := estimateStreamedTokens(msg.ReasoningContent().Thinking)
+		reasoningTokens = max(reasoningTokens, reasoningEstimate)
+		// Output tokens include reasoning tokens (matching provider usage
+		// accounting), so the estimate covers both streams.
+		outputTokens = max(outputTokens, reasoningEstimate+estimateStreamedTokens(msg.Content().Text))
+	}
 	s := m.com.Styles
 	spinner := s.Dialog.PrimaryText.Render("Thinking")
 	line := fmt.Sprintf("%s  in %s  out %s  reasoning %s",
 		spinner,
 		formatTokenCount(usage.InputTokens),
-		formatTokenCount(usage.OutputTokens),
-		formatTokenCount(usage.ReasoningTokens),
+		formatTokenCount(outputTokens),
+		formatTokenCount(reasoningTokens),
 	)
 	return s.Muted.Width(width).Render(line)
+}
+
+// estimateStreamedTokens estimates the token count of streamed text: ~4
+// ASCII bytes per token, one token per non-ASCII rune. Mirrors the
+// heuristic used by internal/agent's prompt estimation.
+func estimateStreamedTokens(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	var asciiBytes, nonASCIIRunes int64
+	for _, r := range s {
+		if r < utf8.RuneSelf {
+			asciiBytes++
+			continue
+		}
+		nonASCIIRunes++
+	}
+	return asciiBytes/4 + nonASCIIRunes
 }
 
 // formatTokenCount formats a token count for display, abbreviating thousands.
@@ -5764,11 +5896,34 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openMemoryClearDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.ForkID:
+		if cmd := m.openForkDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m *UI) openForkDialog() tea.Cmd {
+	if m.session == nil {
+		return util.ReportWarn("Open a session before forking.")
+	}
+	if m.dialog.ContainsDialog(dialog.ForkID) {
+		m.dialog.BringToFront(dialog.ForkID)
+		return nil
+	}
+	userMessages, err := m.com.App.Messages.ListUserMessages(context.Background(), m.session.ID)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	if len(userMessages) == 0 {
+		return util.ReportWarn("No user messages to fork from.")
+	}
+	m.dialog.OpenDialog(dialog.NewFork(m.com, m.session.ID, userMessages))
+	return nil
 }
 
 func (m *UI) openGoalDialog() tea.Cmd {
@@ -5985,28 +6140,17 @@ func (m *UI) openReasoningDialog() tea.Cmd {
 	return nil
 }
 
-// openThinkingDialog opens the reasoning/thinking content for the currently
-// selected assistant message, or the most recent assistant message if no
-// assistant message is selected.
-func (m *UI) openThinkingDialog() tea.Cmd {
-	if m.dialog.ContainsDialog(dialog.ThinkingID) {
-		m.dialog.BringToFront(dialog.ThinkingID)
-		return nil
+// toggleThinkingVisibility toggles inline display of the full reasoning
+// content for all assistant messages (Claude Code-style ctrl+o). It works
+// from anywhere — no message selection or separate dialog required — and is
+// sticky for messages streamed in later.
+func (m *UI) toggleThinkingVisibility() tea.Cmd {
+	show := !m.chat.ShowAllThinking()
+	m.chat.SetShowAllThinking(show)
+	if show {
+		return util.ReportInfo("Showing full reasoning (ctrl+o to hide)")
 	}
-
-	msg := m.chat.SelectedAssistantMessage()
-	if msg == nil {
-		msg = m.latestAssistantMessageWithReasoning()
-	}
-	if msg == nil {
-		return util.ReportWarn("No reasoning content available.")
-	}
-	if msg.ReasoningContent().Thinking == "" {
-		return util.ReportWarn("No reasoning content available.")
-	}
-
-	m.dialog.OpenDialog(dialog.NewThinking(m.com, msg))
-	return nil
+	return util.ReportInfo("Reasoning collapsed")
 }
 
 // latestAssistantMessageWithReasoning returns the most recent assistant

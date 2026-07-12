@@ -12,6 +12,7 @@ type contextUsageSnapshot struct {
 	OutputTokens  int64
 	ContextWindow int64
 	Provisional   bool
+	Estimated     bool
 	Summary       bool
 }
 
@@ -98,6 +99,7 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 			// at the last known exchange total so the display never drops
 			// below the confirmed context length.
 			usage.TotalTokens = max(usage.TotalTokens, sess.LastTotalTokens())
+			usage.Estimated = sess.EstimatedUsage
 		} else {
 			usage.OutputTokens = sess.CompletionTokens
 			// For finished messages the latest assistant message's usage is

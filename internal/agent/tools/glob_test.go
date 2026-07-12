@@ -101,6 +101,19 @@ func TestGlobFilesLimit(t *testing.T) {
 	require.Len(t, matches, 5)
 }
 
+func TestGlobForPathAbsolutePath(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "file.txt"), []byte("x"), 0o644))
+
+	files, truncated, err := globForPath(t.Context(), tempDir, tempDir, 10, true, true)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, files, 1)
+	require.Equal(t, "file.txt", files[0])
+}
+
 func TestParseFindPattern(t *testing.T) {
 	t.Parallel()
 

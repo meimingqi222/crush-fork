@@ -57,6 +57,8 @@ func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools
 		"<available_deferred_tools>",
 		"Some tools are deferred (not loaded yet) to reduce context size. These are primarily MCP and external integration tools.",
 		"",
+		"Important: ALL MCP tools are deferred and are NOT in your default tool set. You MUST use tool_search to activate an MCP tool before calling it. Do NOT call MCP tools directly, and do NOT use display titles like \"Server → Tool\"; use the exact registered name (e.g. \"mcp_<server>_<tool>\").",
+		"",
 		"When to use tool_search:",
 		"- When the task involves external systems, APIs, databases, deployments, or other non-local integrations",
 		"- When you need an MCP tool that isn't in your default tool set",

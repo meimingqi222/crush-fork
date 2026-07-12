@@ -1817,6 +1817,81 @@ func TestToolCallRepair(t *testing.T) {
 		require.True(t, toolCalls[0].Invalid) // Should be invalid
 		require.Contains(t, toolCalls[0].ValidationError.Error(), "invalid JSON input")
 	})
+
+	// Regression test: a repair function registered at the agent-settings
+	// level (via WithRepairToolCall, with no per-call RepairToolCall set on
+	// AgentStreamCall) must still be invoked on the Stream path. This
+	// guards against prepareCall's settings fallback being dropped before
+	// reaching processStepStream.
+	t.Run("Settings-level repair function is invoked on the Stream path", func(t *testing.T) {
+		t.Parallel()
+
+		var executed bool
+		tool := &mockTool{
+			name:        "grep",
+			description: "Search tool",
+			parameters: map[string]any{
+				"pattern": map[string]any{"type": "string"},
+			},
+			required: []string{"pattern"},
+			executeFunc: func(ctx context.Context, call ToolCall) (ToolResponse, error) {
+				executed = true
+				return ToolResponse{Content: "matched", IsError: false}, nil
+			},
+		}
+
+		model := &mockLanguageModel{
+			streamFunc: func(ctx context.Context, call Call) (StreamResponse, error) {
+				return func(yield func(StreamPart) bool) {
+					if !yield(StreamPart{
+						Type:          StreamPartTypeToolCall,
+						ID:            "call-1",
+						ToolCallName:  "Grep", // Misnamed like Claude Code's tool.
+						ToolCallInput: `{"pattern":"foo"}`,
+					}) {
+						return
+					}
+					yield(StreamPart{
+						Type:         StreamPartTypeFinish,
+						FinishReason: FinishReasonStop,
+						Usage:        Usage{TotalTokens: 10},
+					})
+				}, nil
+			},
+		}
+
+		repairFunc := func(ctx context.Context, options ToolCallRepairOptions) (*ToolCallContent, error) {
+			repaired := options.OriginalToolCall
+			repaired.ToolName = "grep"
+			return &repaired, nil
+		}
+
+		agent := NewAgent(model, WithTools(tool), WithRepairToolCall(repairFunc), WithStopConditions(StepCountIs(2)))
+
+		// Note: RepairToolCall is intentionally left unset on
+		// AgentStreamCall so only the settings-level fallback applies.
+		result, err := agent.Stream(context.Background(), AgentStreamCall{
+			Prompt: "test prompt",
+		})
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.True(t, executed, "expected the repaired \"grep\" tool to be executed")
+
+		toolCalls := result.Steps[0].Content.ToolCalls()
+		require.Len(t, toolCalls, 1)
+		require.False(t, toolCalls[0].Invalid, "expected the misnamed tool call to be repaired, not marked invalid")
+		require.Equal(t, "grep", toolCalls[0].ToolName)
+
+		var toolResults []ToolResultContent
+		for _, c := range result.Steps[0].Content {
+			if tr, ok := AsContentType[ToolResultContent](c); ok {
+				toolResults = append(toolResults, tr)
+			}
+		}
+		require.Len(t, toolResults, 1)
+		require.Equal(t, "call-1", toolResults[0].ToolCallID)
+	})
 }
 
 // Test media and image tool responses

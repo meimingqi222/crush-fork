@@ -127,7 +127,7 @@ func renderHeaderDetails(
 		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, errorCount)))
 	}
 
-	formattedUsage := t.Header.Percentage.Render(common.FormatContextUsage(usage.TotalTokens, usage.ContextWindow))
+	formattedUsage := t.Header.Percentage.Render(common.FormatContextUsage(usage.TotalTokens, usage.ContextWindow, usage.Estimated))
 	parts = append(parts, formattedUsage)
 
 	const keystroke = "ctrl+d"

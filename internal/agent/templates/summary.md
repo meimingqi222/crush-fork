@@ -46,3 +46,5 @@ Be specific. Don't write "implement authentication" - write:
 **Tone**: Write as if briefing a teammate taking over mid-task. Include everything they'd need to continue without asking questions. No emojis ever.
 
 **Length**: No limit. Err on the side of too much detail rather than too little. Critical context is worth the tokens.
+
+**Output format**: Respond in plain Markdown only. Do not use tool-call syntax, XML, DSML, or any structured pseudo-language to represent commands or tool invocations. Describe actions in plain text and preserve file paths, commands, and decisions as readable Markdown.

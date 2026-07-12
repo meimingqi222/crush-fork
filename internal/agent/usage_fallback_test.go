@@ -180,6 +180,9 @@ func TestUpdateSessionUsageIncludesEstimatedCost(t *testing.T) {
 	require.Equal(t, int64(1000), currentSession.PromptTokens)
 	require.Equal(t, int64(2000), currentSession.CompletionTokens)
 	require.True(t, currentSession.EstimatedUsage)
+
+	agent.updateSessionUsage(model, currentSession, usage, nil, 0, false, usagePurposeConversation)
+	require.False(t, currentSession.EstimatedUsage)
 }
 
 func TestUpdateSessionUsageKeepsCountersForZeroUsage(t *testing.T) {

@@ -730,6 +730,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		fantasy.WithSystemPrompt(requestState.SystemPrompt),
 		fantasy.WithTools(agentTools...),
 		fantasy.WithUserAgent(userAgent),
+		fantasy.WithRepairToolCall(a.repairToolCall),
 	)
 
 	startTime := time.Now()
@@ -868,6 +869,31 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if !largeModel.CatwalkCfg.SupportsImages {
 			hasVision := a.visionService != nil && a.visionService.IsAvailable()
 			userPrompt = promptWithImageAttachmentPlaceholdersForMessage(call.Prompt, call.Attachments, userMessage.ID, hasVision)
+		}
+		var streamFlusher *streamMessageFlusher
+		defer func() {
+			if streamFlusher != nil {
+				streamFlusher.Stop()
+			}
+		}()
+		persistAssistant := func(persistCtx context.Context) error {
+			if currentAssistant == nil {
+				return nil
+			}
+			return a.messages.Update(persistCtx, *currentAssistant)
+		}
+		markAssistantDirty := func() error {
+			if streamFlusher == nil {
+				return persistAssistant(genCtx)
+			}
+			streamFlusher.MarkDirty()
+			return nil
+		}
+		flushAssistant := func() error {
+			if streamFlusher == nil {
+				return persistAssistant(genCtx)
+			}
+			return streamFlusher.FlushNow()
 		}
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:           userPrompt,
@@ -1185,6 +1211,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					currentStepToolMessageIDs = nil
 					currentStepToolResultChars = 0
 					allRunMessageIDs = append(allRunMessageIDs, assistantMsg.ID)
+					if streamFlusher != nil {
+						streamFlusher.Stop()
+					}
+					streamFlusher = newStreamMessageFlusher(callContext, func() error {
+						return persistAssistant(callContext)
+					})
 				}
 
 				prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
@@ -1301,11 +1333,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			},
 			OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
 				currentAssistant.AppendReasoningContent(reasoning.Text)
-				return a.messages.Update(genCtx, *currentAssistant)
+				return markAssistantDirty()
 			},
 			OnReasoningDelta: func(id string, text string) error {
 				currentAssistant.AppendReasoningContent(text)
-				return a.messages.Update(genCtx, *currentAssistant)
+				return markAssistantDirty()
 			},
 			OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
 				// handle anthropic signature
@@ -1325,7 +1357,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					}
 				}
 				currentAssistant.FinishThinking()
-				return a.messages.Update(genCtx, *currentAssistant)
+				if err := flushAssistant(); err != nil {
+					return err
+				}
+				return nil
 			},
 			OnTextDelta: func(id string, text string) error {
 				// Strip leading newline from initial text content. This is is
@@ -1340,7 +1375,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// cancel-time error synthesis can surface partial output
 				// instead of just a generic cancellation message.
 				salvage.append(text)
-				return a.messages.Update(genCtx, *currentAssistant)
+				return markAssistantDirty()
 			},
 			OnToolInputStart: func(id string, toolName string) error {
 				currentAssistant.FinishThinking()
@@ -1361,7 +1396,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						"tool_name", toolName,
 					)
 				}
-				return a.messages.Update(ctx, *currentAssistant)
+				return flushAssistant()
 			},
 			OnRetry: func(providerErr *fantasy.ProviderError, delay time.Duration) {
 				slog.Info("Retrying after network error", "error", providerErr.Error(), "delay", delay)
@@ -1371,6 +1406,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if err := a.resetRetriedStep(ctx, currentAssistant, currentStepToolMessageIDs); err != nil {
 					slog.Warn("Failed to reset step state before retry", "error", err, "session_id", currentAssistant.SessionID, "message_id", currentAssistant.ID)
 					return
+				}
+				if streamFlusher != nil {
+					streamFlusher.Stop()
+					streamFlusher = nil
 				}
 				currentStepToolMessageIDs = nil
 				currentStepToolResultChars = 0
@@ -1397,7 +1436,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				runToolUses++
 				runLastTool = tc.ToolName
-				return a.messages.Update(ctx, *currentAssistant)
+				return flushAssistant()
 			},
 			OnToolResult: func(result fantasy.ToolResultContent) error {
 				toolResult := a.convertToToolResult(genCtx, result)
@@ -2456,7 +2495,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	hasQueuedMessages := ok && len(queuedMessages) > 0
 
 	if shouldSummarize {
-		a.activeRequests.Del(call.SessionID)
 		if compactionTrigger == sessionCompactionTriggerNone {
 			compactionTrigger = sessionCompactionTriggerNormal
 		}
@@ -2466,7 +2504,31 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				genCtx = withCompactionRescue(genCtx, rescuePayload)
 			}
 		}
-		if summarizeErr := a.Summarize(withSessionCompactingPurpose(copilot.ContextWithInitiatorType(genCtx, copilot.InitiatorAgent), compactionTrigger.Purpose()), call.SessionID, call.ProviderOptions); summarizeErr != nil {
+		// Mark this end-of-turn Summarize call as an internal compaction
+		// (mirroring the preflight-compaction call above) instead of
+		// deleting the activeRequests entry before calling Summarize.
+		// Summarize's own busy check (isInternalCompaction(ctx) is false =>
+		// a.IsSessionBusy(sessionID) => ErrSessionBusy) exists to reject
+		// externally-triggered compaction while a request is in flight; it
+		// was previously bypassed here by deleting the activeRequests entry
+		// registered at the top of this Run call *before* invoking
+		// Summarize. That early deletion opened a TOCTOU window: between the
+		// Del and Summarize actually finishing (Summarize does a fair amount
+		// of I/O first -- loading the session, pruning tool results, running
+		// plugin transforms -- before it re-registers activeRequests itself),
+		// a queued-prompt dispatch or a fresh externally-triggered Run for
+		// the same session could see the session as no longer busy and start
+		// running concurrently with this compaction, racing to register its
+		// own activeRequests entry. Flagging the context instead makes
+		// Summarize skip both its busy check and its own
+		// activeRequests.Set/Del bookkeeping (see isInternalCompaction usage
+		// inside Summarize), so the entry registered at the top of this Run
+		// invocation (a.activeRequests.Set above) stays held for the entire
+		// compaction and is released exactly once, by the unconditional
+		// a.activeRequests.Del call below, before any recursive Run
+		// invocation (queued-message dispatch) or return from this function.
+		summarizeCtx := context.WithValue(genCtx, internalCompactionKey{}, true)
+		if summarizeErr := a.Summarize(withSessionCompactingPurpose(copilot.ContextWithInitiatorType(summarizeCtx, copilot.InitiatorAgent), compactionTrigger.Purpose()), call.SessionID, call.ProviderOptions); summarizeErr != nil {
 			return nil, summarizeErr
 		}
 		hasPendingToolCalls := currentAssistant != nil && len(currentAssistant.ToolCalls()) > 0
@@ -2835,6 +2897,18 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		transformedMsgs = msgs
 	}
 	aiMsgs, _ := a.preparePrompt(transformedMsgs)
+	// Textualize native tool-call/tool-result parts before sending the
+	// history to the summary model. The summarize request carries no tool
+	// definitions (the agent below is built without WithTools) and forces
+	// ToolChoiceNone, but native tool_calls parts left in the history are
+	// still rendered by the provider's server-side chat template in the
+	// model's native tool-call syntax (e.g. DeepSeek DSML) — and a weak
+	// summary model presented with a prompt full of such traces tends to
+	// continue the pattern and emit tool-call markup instead of a prose
+	// summary (the DSML garbage-summary incident). Flattening removes the
+	// inducement at the source; isInvalidSummaryText below remains as the
+	// safety net.
+	aiMsgs = flattenToolCallsForSummary(aiMsgs)
 	// preCompactionTokens is the estimated prompt size just before
 	// compaction. Compared against the post-compaction baseline below, this
 	// yields the number of tokens compaction actually discarded, used to
@@ -2929,11 +3003,26 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
+	var summaryRaw summaryTextAccumulator
 	summaryStream := func() (*fantasy.AgentResult, error) {
+		summaryFlusher := newStreamMessageFlusher(genCtx, func() error {
+			return a.messages.Update(genCtx, summaryMessage)
+		})
+		defer summaryFlusher.Stop()
+		markSummaryDirty := func() error {
+			summaryFlusher.MarkDirty()
+			return nil
+		}
+		// Force a text-only response during summarization. The summary model
+		// may be the same tool-capable model used for the main agent, and
+		// without an explicit tool choice it can emit tool-call syntax (e.g.
+		// DSML) instead of a real summary.
+		toolChoiceNone := fantasy.ToolChoiceNone
 		return agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:          summaryPromptText,
 			Messages:        aiMsgs,
 			ProviderOptions: opts,
+			ToolChoice:      &toolChoiceNone,
 			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 				callContext = copilot.ContextWithInitiatorType(callContext, copilot.InitiatorAgent)
 				prepared.Messages = options.Messages
@@ -2942,35 +3031,35 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 				}
 				return callContext, prepared, nil
 			},
+			OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
+				return nil
+			},
 			OnReasoningDelta: func(id string, text string) error {
-				summaryMessage.AppendReasoningContent(text)
-				return a.messages.Update(genCtx, summaryMessage)
+				return nil
 			},
 			OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
-				if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
-					if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
-						summaryMessage.AppendReasoningSignature(signature.Signature)
-					}
-				}
-				summaryMessage.FinishThinking()
-				return a.messages.Update(genCtx, summaryMessage)
+				return nil
 			},
 			OnTextDelta: func(id, text string) error {
-				summaryMessage.AppendContent(text)
-				return a.messages.Update(genCtx, summaryMessage)
+				summaryRaw.appendDelta(&summaryMessage, text)
+				return markSummaryDirty()
 			},
 		})
 	}
 
 	var (
-		resp                    *fantasy.AgentResult
-		summaryRetry            int
-		summaryThinkingDisabled bool
-		summaryRedactedStripped bool
-		forceTruncated          bool
+		resp                     *fantasy.AgentResult
+		summaryRetry             int
+		summaryThinkingDisabled  bool
+		summaryRedactedStripped  bool
+		forceTruncated           bool
+		summaryContentRetry      int
+		summaryContentGuardAdded bool
 	)
 	resetSummaryMessage := func() error {
 		summaryMessage.Parts = nil
+		summaryRaw.reset()
+		summaryMessage.StripReasoningParts()
 		if resetErr := a.messages.Update(genCtx, summaryMessage); resetErr != nil {
 			slog.Warn("Failed to reset summary message before retry", "error", resetErr, "session_id", sessionID, "message_id", summaryMessage.ID)
 			return resetErr
@@ -2980,7 +3069,44 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	for {
 		resp, err = summaryStream()
 		if err == nil {
-			break
+			// A tool-capable model (e.g. DeepSeek V4 Flash) can ignore the
+			// ToolChoiceNone instruction above and stream its native
+			// tool-call protocol (DSML/antml-style tags) as plain text
+			// instead of producing a real summary. ToolChoiceNone alone
+			// can't stop this, so validate the accumulated, already
+			// think-stripped text before accepting it as a summary.
+			if isInvalidSummaryText(summaryMessage.Content().Text) {
+				if summaryContentRetry < maxSummaryContentRetries {
+					summaryContentRetry++
+					slog.Warn("Retrying summarization: model produced tool-call markup instead of a summary",
+						"session_id", sessionID,
+						"model", summaryModel.ModelCfg.Model,
+						"provider", summaryModel.ModelCfg.Provider,
+						"attempt", summaryContentRetry,
+					)
+					if resetErr := resetSummaryMessage(); resetErr != nil {
+						return resetErr
+					}
+					if !summaryContentGuardAdded {
+						summaryPromptText += summaryContentRetryGuard
+						summaryContentGuardAdded = true
+					}
+					continue
+				}
+				// Retries exhausted: don't persist tool-call markup as a
+				// summary. Clear the garbage content and fall through into
+				// the same error-handling path used for transport failures
+				// below, so the summary message ends up with no body, a
+				// FinishReasonError, and is never adopted as the session's
+				// active summary (SummaryMessageID is only set on the
+				// success path further down, which this return bypasses).
+				if resetErr := resetSummaryMessage(); resetErr != nil {
+					return resetErr
+				}
+				err = errSummaryToolCallMarkup
+			} else {
+				break
+			}
 		}
 
 		if !summaryThinkingDisabled && shouldRetryWithoutAnthropicThinking(err, opts) {
@@ -3093,6 +3219,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
+	summaryMessage.StripReasoningParts()
 	summaryMessage.SetUsage(normalizedMessageUsage(resp.TotalUsage, usageProvider(summaryModel), summarizeEstimatedPromptTokens))
 	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
 	err = a.messages.Update(genCtx, summaryMessage)

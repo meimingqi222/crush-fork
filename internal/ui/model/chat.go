@@ -75,9 +75,18 @@ type Chat struct {
 	// bottom on new messages.
 	follow bool
 
+	// showAllThinking expands the reasoning block on every assistant
+	// message inline (Claude Code-style ctrl+o toggle). It is sticky:
+	// items added later (streaming or session load) inherit it.
+	showAllThinking bool
+
 	// scrollbarRect is the screen area of the scrollbar, set by Draw and used
 	// for mouse interaction.
 	scrollbarRect image.Rectangle
+
+	// anchorStripRect is the screen area of the user-message anchor strip,
+	// set by Draw and used for mouse interaction.
+	anchorStripRect image.Rectangle
 }
 
 // NewChat creates a new instance of [Chat] that handles chat interactions and
@@ -108,12 +117,24 @@ func (m *Chat) Height() int {
 // Draw renders the chat UI component to the screen and the given area.
 func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
 	m.scrollbarRect = image.Rectangle{}
+	m.anchorStripRect = image.Rectangle{}
 	uv.NewStyledString(m.list.Render()).Draw(scr, area)
 
 	// Draw a scrollbar on the right edge when the content overflows.
 	contentHeight := m.list.TotalContentHeight()
 	viewportHeight := m.list.Height()
 	if contentHeight > viewportHeight {
+		userOffsets := m.userMessageOffsets()
+		if len(userOffsets) > 0 {
+			anchorStrip := common.AnchorStrip(m.com.Styles, viewportHeight, contentHeight, userOffsets, m.list.Offset())
+			anchorArea := image.Rectangle{
+				Min: image.Pt(area.Max.X-2, area.Min.Y),
+				Max: image.Pt(area.Max.X-1, area.Max.Y),
+			}
+			m.anchorStripRect = anchorArea
+			uv.NewStyledString(anchorStrip).Draw(scr, anchorArea)
+		}
+
 		scrollbar := common.Scrollbar(m.com.Styles, viewportHeight, contentHeight, viewportHeight, m.list.Offset())
 		if scrollbar != "" {
 			scrollbarArea := image.Rectangle{
@@ -130,6 +151,69 @@ func (m *Chat) Draw(scr uv.Screen, area uv.Rectangle) {
 // Draw has been called and empty when no scrollbar is shown.
 func (m *Chat) ScrollbarRect() image.Rectangle {
 	return m.scrollbarRect
+}
+
+// AnchorStripRect returns the screen area of the user-message anchor strip.
+// It is valid after Draw has been called and empty when no strip is shown.
+func (m *Chat) AnchorStripRect() image.Rectangle {
+	return m.anchorStripRect
+}
+
+// userMessageOffsets returns the content offsets of each user message top.
+func (m *Chat) userMessageOffsets() []int {
+	var offsets []int
+	offset := 0
+	for i := 0; i < m.list.Len(); i++ {
+		item := m.list.ItemAt(i)
+		if _, ok := item.(*chat.UserMessageItem); ok {
+			offsets = append(offsets, offset)
+		}
+		height := m.list.ItemHeight(i)
+		if height > 0 {
+			offset += height
+		}
+		if m.list.Gap() > 0 && i < m.list.Len()-1 {
+			offset += m.list.Gap()
+		}
+	}
+	return offsets
+}
+
+// ScrollToUserMessage scrolls the chat view to the user message at the given
+// index among all user messages. It returns true if such a message exists.
+func (m *Chat) ScrollToUserMessage(userIdx int) bool {
+	offsets := m.userMessageOffsets()
+	if userIdx < 0 || userIdx >= len(offsets) {
+		return false
+	}
+	target := offsets[userIdx]
+	m.SetScrollOffset(target)
+	return true
+}
+
+// UserMessageIndexAtY returns the user message index whose anchor marker is at
+// the given vertical position within the anchor strip, or -1 if none.
+func (m *Chat) UserMessageIndexAtY(y int) int {
+	rect := m.AnchorStripRect()
+	if rect.Empty() || y < rect.Min.Y || y >= rect.Max.Y {
+		return -1
+	}
+	relY := y - rect.Min.Y
+	contentHeight := m.list.TotalContentHeight()
+	if contentHeight <= 0 {
+		return -1
+	}
+	offsets := m.userMessageOffsets()
+	for i, off := range offsets {
+		row := off * rect.Dy() / max(1, contentHeight)
+		if row > rect.Dy()-1 {
+			row = rect.Dy() - 1
+		}
+		if row == relY {
+			return i
+		}
+	}
+	return -1
 }
 
 // ContentHeight returns the total height of the chat content in lines.
@@ -172,6 +256,7 @@ func (m *Chat) SetMessages(msgs ...chat.MessageItem) {
 	m.idInxMap = make(map[string]int)
 	m.msgToolCallIDs = make(map[string]map[string]struct{})
 	m.pausedAnimations = make(map[string]struct{})
+	m.applyThinkingVisibility(msgs)
 
 	items := make([]list.Item, len(msgs))
 	for i, msg := range msgs {
@@ -194,6 +279,7 @@ func (m *Chat) SetMessages(msgs ...chat.MessageItem) {
 
 // AppendMessages appends a new message item to the chat list.
 func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
+	m.applyThinkingVisibility(msgs)
 	items := make([]list.Item, len(msgs))
 	indexOffset := m.list.Len()
 	for i, msg := range msgs {
@@ -220,6 +306,7 @@ func (m *Chat) PrependMessages(msgs ...chat.MessageItem) {
 	if len(msgs) == 0 {
 		return
 	}
+	m.applyThinkingVisibility(msgs)
 	items := make([]list.Item, len(msgs))
 	for i, msg := range msgs {
 		items[i] = msg
@@ -258,6 +345,7 @@ func (m *Chat) InsertMessagesBefore(beforeID string, msgs ...chat.MessageItem) b
 	if !ok {
 		return false
 	}
+	m.applyThinkingVisibility(msgs)
 	items := make([]list.Item, len(msgs))
 	for i, msg := range msgs {
 		items[i] = msg
@@ -779,6 +867,35 @@ func (m *Chat) RemoveTaskNodesForRemovedToolCalls(removedToolCallIDs map[string]
 	}
 	for _, id := range toRemove {
 		m.RemoveMessage(id)
+	}
+}
+
+// ShowAllThinking reports whether the global reasoning-visibility toggle is on.
+func (m *Chat) ShowAllThinking() bool {
+	return m.showAllThinking
+}
+
+// SetShowAllThinking expands or collapses the reasoning block on every
+// assistant message and makes the preference sticky for items added later.
+func (m *Chat) SetShowAllThinking(show bool) {
+	m.showAllThinking = show
+	for _, item := range m.MessageItems() {
+		if assistant, ok := item.(*chat.AssistantMessageItem); ok {
+			assistant.SetThinkingExpanded(show)
+		}
+	}
+}
+
+// applyThinkingVisibility applies the sticky reasoning-visibility preference
+// to newly added message items.
+func (m *Chat) applyThinkingVisibility(msgs []chat.MessageItem) {
+	if !m.showAllThinking {
+		return
+	}
+	for _, msg := range msgs {
+		if assistant, ok := msg.(*chat.AssistantMessageItem); ok {
+			assistant.SetThinkingExpanded(true)
+		}
 	}
 }
 

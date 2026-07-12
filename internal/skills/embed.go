@@ -3,6 +3,7 @@ package skills
 import (
 	_ "embed"
 	"log/slog"
+	"os"
 )
 
 //go:embed builtin/crush-config/SKILL.md
@@ -22,6 +23,17 @@ var embeddedSkillEntries = []struct {
 }{
 	{path: "crush://skills/crush-config/SKILL.md", content: crushConfigSkill},
 	{path: "crush://skills/jq/SKILL.md", content: jqSkill},
+}
+
+// ReadSkillFile reads a skill file. If path is a builtin virtual path
+// (crush://...), it returns the embedded content; otherwise it reads from disk.
+func ReadSkillFile(path string) ([]byte, error) {
+	for _, e := range embeddedSkillEntries {
+		if e.path == path {
+			return e.content, nil
+		}
+	}
+	return os.ReadFile(path)
 }
 
 // EmbeddedSkills parses the builtin SKILL.md files embedded into the binary

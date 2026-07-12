@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"charm.land/fantasy/schema"
@@ -484,8 +485,10 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 				if toolCall.ProviderExecuted {
 					continue
 				}
-				// Validate and potentially repair the tool call
-				validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, stepExecProviderTools, stepSystemPrompt, stepInputMessages, a.settings.repairToolCall)
+				// Validate and potentially repair the tool call. Use the
+				// per-call repair function resolved by prepareCall, which
+				// already falls back to the settings-level function.
+				validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, stepExecProviderTools, stepSystemPrompt, stepInputMessages, opts.RepairToolCall)
 				stepToolCalls = append(stepToolCalls, validatedToolCall)
 			}
 		}
@@ -733,7 +736,7 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 	}
 	if runTool == nil {
 		result.Result = ToolResultOutputContentError{
-			Error: errors.New("tool not found: " + toolCall.ToolName),
+			Error: errors.New(toolNotFoundMessage(toolCall.ToolName, slices.Collect(maps.Keys(toolMap)), slices.Collect(maps.Keys(execProviderToolMap)))),
 		}
 		if toolResultCallback != nil {
 			_ = toolResultCallback(result)
@@ -782,6 +785,42 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 	return result, false
 }
 
+// maxToolNotFoundListed caps how many available tool names are included in a
+// "tool not found" error message, to keep it readable when many tools
+// (e.g. MCP servers) are registered.
+const maxToolNotFoundListed = 20
+
+// toolNotFoundMessage builds a "tool not found" error message that includes
+// (a possibly truncated) list of the available tool names, to help callers
+// (including repair hooks and the model itself) recover from a bad tool
+// name. The returned message always starts with "tool not found: <name>" —
+// callers rely on that exact prefix (see docs/pitfalls in the crush repo),
+// so any additional detail must be appended after it, never prepended.
+func toolNotFoundMessage(name string, nameLists ...[]string) string {
+	var names []string
+	for _, list := range nameLists {
+		names = append(names, list...)
+	}
+	if len(names) == 0 {
+		return "tool not found: " + name
+	}
+
+	slices.Sort(names)
+	names = slices.Compact(names)
+
+	truncated := false
+	if len(names) > maxToolNotFoundListed {
+		names = names[:maxToolNotFoundListed]
+		truncated = true
+	}
+
+	available := strings.Join(names, ", ")
+	if truncated {
+		available += ", ..."
+	}
+	return fmt.Sprintf("tool not found: %s (available tools: %s)", name, available)
+}
+
 // Stream implements Agent.
 func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult, error) {
 	// Convert AgentStreamCall to AgentCall for preparation
@@ -806,6 +845,10 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 	}
 
 	call = a.prepareCall(call)
+	// Propagate the repair function back onto opts so processStepStream,
+	// which still receives the original AgentStreamCall, can see the
+	// settings-level fallback resolved by prepareCall.
+	opts.RepairToolCall = call.RepairToolCall
 
 	initialPrompt, err := a.createPrompt(a.settings.systemPrompt, call.Prompt, call.Messages, call.Files...)
 	if err != nil {
@@ -1072,8 +1115,8 @@ func (a *agent) validateAndRepairToolCall(ctx context.Context, toolCall ToolCall
 // by the caller (e.g. via activeTools); this function trusts that the slices
 // represent exactly the tools permitted for the current step.
 //
-// When normalization changes the arguments, the returned ToolCallContent carries
-// the updated JSON input.
+// When normalization or top-level JSON repair changes the arguments, the
+// returned ToolCallContent carries the updated JSON input.
 func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []AgentTool, execProviderTools []ExecutableProviderTool) (ToolCallContent, error) {
 	var tool AgentTool
 	for _, t := range availableTools {
@@ -1089,19 +1132,34 @@ func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []Agen
 		// we only validate that the input is parseable JSON.
 		for _, ept := range execProviderTools {
 			if ept.GetName() == toolCall.ToolName {
-				var input map[string]any
-				if err := json.Unmarshal([]byte(toolCall.Input), &input); err != nil {
-					return toolCall, fmt.Errorf("invalid JSON input: %w", err)
+				_, repairedInput, err := parseToolCallInput(toolCall.Input)
+				if err != nil {
+					return toolCall, err
+				}
+				if repairedInput != toolCall.Input {
+					updated := toolCall
+					updated.Input = repairedInput
+					return updated, nil
 				}
 				return toolCall, nil
 			}
 		}
-		return toolCall, fmt.Errorf("tool not found: %s", toolCall.ToolName)
+		names := make([]string, 0, len(availableTools)+len(execProviderTools))
+		for _, t := range availableTools {
+			names = append(names, t.Info().Name)
+		}
+		for _, ept := range execProviderTools {
+			names = append(names, ept.GetName())
+		}
+		return toolCall, errors.New(toolNotFoundMessage(toolCall.ToolName, names))
 	}
 
-	var input map[string]any
-	if err := json.Unmarshal([]byte(toolCall.Input), &input); err != nil {
-		return toolCall, fmt.Errorf("invalid JSON input: %w", err)
+	input, repairedInput, err := parseToolCallInput(toolCall.Input)
+	if err != nil {
+		return toolCall, err
+	}
+	if repairedInput != toolCall.Input {
+		toolCall.Input = repairedInput
 	}
 
 	normalized, err := validateAndNormalizeToolArguments(tool.Info(), input)
@@ -1113,14 +1171,13 @@ func (a *agent) validateToolCall(toolCall ToolCallContent, availableTools []Agen
 		return toolCall, nil
 	}
 
-	repairedInput, err := json.Marshal(normalized)
+	finalInput, err := json.Marshal(normalized)
 	if err != nil {
 		return toolCall, fmt.Errorf("failed to marshal normalized arguments: %w", err)
 	}
 
-	updated := toolCall
-	updated.Input = string(repairedInput)
-	return updated, nil
+	toolCall.Input = string(finalInput)
+	return toolCall, nil
 }
 
 func (a *agent) createPrompt(system, prompt string, messages []Message, files ...FilePart) (Prompt, error) {

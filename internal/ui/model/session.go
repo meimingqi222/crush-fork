@@ -43,6 +43,12 @@ type loadSessionMsg struct {
 	goalPausedNotice    string
 }
 
+// forkSessionResultMsg is sent when a session has been forked.
+type forkSessionResultMsg struct {
+	sessionID string
+	err       error
+}
+
 // loadMoreMessagesMsg is sent when older messages have been loaded from the
 // database to prepend to the chat list.
 type loadMoreMessagesMsg struct {

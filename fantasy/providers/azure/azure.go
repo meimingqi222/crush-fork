@@ -123,11 +123,3 @@ func WithUseResponsesAPI() Option {
 		o.openaiOptions = append(o.openaiOptions, openai.WithUseResponsesAPI())
 	}
 }
-
-// WithForceResponsesModel configures a model ID to use the Responses API even when it
-// is not in the built-in OpenAI Responses model whitelist.
-func WithForceResponsesModel(modelID string) Option {
-	return func(o *options) {
-		o.openaiOptions = append(o.openaiOptions, openai.WithForceResponsesModel(modelID))
-	}
-}

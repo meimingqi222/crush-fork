@@ -789,6 +789,15 @@ func (l *List) ItemAt(index int) Item {
 	return l.items[index]
 }
 
+// ItemHeight returns the rendered height of the item at the given index.
+func (l *List) ItemHeight(index int) int {
+	if index < 0 || index >= len(l.items) {
+		return 0
+	}
+	item := l.getItem(index)
+	return item.height
+}
+
 // ItemIndexAtPosition returns the item at the given viewport-relative y
 // coordinate. Returns the item index and the y offset within that item. It
 // returns -1, -1 if no item is found.

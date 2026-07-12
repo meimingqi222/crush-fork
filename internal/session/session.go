@@ -356,6 +356,9 @@ type Service interface {
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
 	Delete(ctx context.Context, id string) error
+	// Fork creates a new session seeded with the messages from the source
+	// session up to and including the turn ending at the given message ID.
+	Fork(ctx context.Context, sessionID, messageID string) (Session, error)
 
 	// Agent tool session management
 	CreateAgentToolSessionID(messageID, toolCallID string) string
@@ -507,6 +510,115 @@ func (s *service) Delete(ctx context.Context, id string) error {
 	s.Publish(pubsub.DeletedEvent, session)
 	event.SessionDeleted()
 	return nil
+}
+
+func (s *service) Fork(ctx context.Context, sessionID, messageID string) (Session, error) {
+	source, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("loading source session: %w", err)
+	}
+
+	messages, err := s.q.ListMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("loading source messages: %w", err)
+	}
+
+	idx := -1
+	for i, m := range messages {
+		if m.ID == messageID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return Session{}, fmt.Errorf("message %s not found in session", messageID)
+	}
+
+	// Include the selected message and every message after it up to (but not
+	// including) the next user message. This captures the completed LLM turn
+	// that follows the selected user input.
+	end := idx + 1
+	for end < len(messages) {
+		if messages[end].Role == "user" {
+			break
+		}
+		end++
+	}
+	toCopy := messages[:end]
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+
+	title := source.Title
+	if strings.TrimSpace(title) == "" {
+		title = "Forked Session"
+	} else if !strings.HasPrefix(strings.ToLower(title), "fork of ") {
+		title = "Fork of " + title
+	}
+
+	dbSession, err := qtx.CreateSession(ctx, db.CreateSessionParams{
+		ID:              uuid.New().String(),
+		Title:           title,
+		WorkspaceCwd:    sql.NullString{String: source.WorkspaceCWD, Valid: source.WorkspaceCWD != ""},
+		CollaborationMode: string(source.CollaborationMode),
+		PermissionMode:    string(source.PermissionMode),
+		PlanFilePath:    source.PlanFilePath,
+		Kind:            string(KindNormal),
+		HandoffGoal:          "",
+		HandoffDraftPrompt:   "",
+		HandoffRelevantFiles: "[]",
+	})
+	if err != nil {
+		return Session{}, fmt.Errorf("creating forked session: %w", err)
+	}
+
+	const insertCopy = `INSERT INTO messages (
+		id, session_id, role, parts, model, provider, is_summary_message,
+		created_at, updated_at, finished_at,
+		input_tokens, output_tokens, reasoning_tokens,
+		cache_read_tokens, cache_write_tokens
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	for _, m := range toCopy {
+		newID := uuid.New().String()
+		finishedAt := sql.NullInt64{}
+		if m.FinishedAt.Valid {
+			finishedAt = m.FinishedAt
+		}
+		if _, err := tx.ExecContext(ctx, insertCopy,
+			newID,
+			dbSession.ID,
+			m.Role,
+			m.Parts,
+			m.Model,
+			m.Provider,
+			m.IsSummaryMessage,
+			m.CreatedAt,
+			m.UpdatedAt,
+			finishedAt,
+			m.InputTokens,
+			m.OutputTokens,
+			m.ReasoningTokens,
+			m.CacheReadTokens,
+			m.CacheWriteTokens,
+		); err != nil {
+			return Session{}, fmt.Errorf("copying message %s: %w", m.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	session := s.fromDBItem(dbSession)
+	s.Publish(pubsub.CreatedEvent, session)
+	event.SessionCreated()
+	return session, nil
 }
 
 func (s *service) Get(ctx context.Context, id string) (Session, error) {

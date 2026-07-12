@@ -432,6 +432,23 @@ func (m *Message) FinishThinking() {
 	}
 }
 
+// StripReasoningParts removes all reasoning parts from the message. Used for
+// context-summary messages so summarizer reasoning is not persisted or sent as
+// conversation history.
+func (m *Message) StripReasoningParts() {
+	if len(m.Parts) == 0 {
+		return
+	}
+	filtered := m.Parts[:0]
+	for _, part := range m.Parts {
+		if _, ok := part.(ReasoningContent); ok {
+			continue
+		}
+		filtered = append(filtered, part)
+	}
+	m.Parts = filtered
+}
+
 func (m *Message) ThinkingDuration() time.Duration {
 	reasoning := m.ReasoningContent()
 	if reasoning.StartedAt == 0 {

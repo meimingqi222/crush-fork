@@ -12,6 +12,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
+	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -457,40 +458,6 @@ func TestConfig_configureProvidersWithOverride(t *testing.T) {
 	require.False(t, pc.ResponsesWebSocket)
 }
 
-func TestConfig_configureProvidersPreservesUseResponsesAPI(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{
-		Providers: csync.NewMap[string, ProviderConfig](),
-	}
-	cfg.Providers.Set("copilot-responses", ProviderConfig{
-		Type:    catwalk.TypeOpenAI,
-		BaseURL: "http://localhost:4141/v1",
-		APIKey:  "test-key",
-		Models: []ProviderModel{{
-			Model: catwalk.Model{
-				ID: "grok-composer-2.5-fast",
-			},
-			UseResponsesAPI: true,
-		}},
-	})
-	cfg.setDefaults("/tmp", "")
-
-	err := cfg.configureProviders(
-		testStore(cfg),
-		env.NewFromMap(nil),
-		NewEnvironmentVariableResolver(env.NewFromMap(nil)),
-		nil,
-	)
-	require.NoError(t, err)
-
-	pc, ok := cfg.Providers.Get("copilot-responses")
-	require.True(t, ok)
-	require.Len(t, pc.Models, 1)
-	require.True(t, pc.Models[0].UseResponsesAPI)
-	require.True(t, pc.ModelUseResponsesAPI("grok-composer-2.5-fast"))
-}
-
 func TestConfig_configureProvidersWithOverrideKeepsResponsesWebSocket(t *testing.T) {
 	knownProviders := []catwalk.Provider{
 		{
@@ -531,6 +498,51 @@ func TestConfig_configureProvidersWithOverrideKeepsResponsesWebSocket(t *testing
 	pc, ok := cfg.Providers.Get("openai")
 	require.True(t, ok)
 	require.True(t, pc.ResponsesWebSocket)
+}
+
+func TestProviderConfigResponsesWebSocketOptions(t *testing.T) {
+	t.Parallel()
+
+	pc := ProviderConfig{
+		ResponsesWebSocket:         true,
+		ResponsesWebSocketV2:       true,
+		ResponsesWebSocketFallback: "request",
+		ResponsesWebSocketPrewarm:  true,
+	}
+	opts := pc.ResponsesWebSocketOptions()
+	require.True(t, opts.Enabled)
+	require.True(t, opts.V2)
+	require.Equal(t, httpext.ResponsesWebSocketFallbackRequest, opts.Fallback)
+	require.True(t, opts.Prewarm)
+	require.True(t, opts.Chain)
+}
+
+func TestConfig_configureProvidersCopiesResponsesWebSocketFields(t *testing.T) {
+	t.Parallel()
+
+	knownProviders := []catwalk.Provider{{
+		ID:          "openai",
+		APIKey:      "$OPENAI_API_KEY",
+		APIEndpoint: "https://api.openai.com/v1",
+		Models:      []catwalk.Model{{ID: "test-model"}},
+	}}
+	cfg := &Config{Providers: csync.NewMap[string, ProviderConfig]()}
+	cfg.Providers.Set("openai", ProviderConfig{
+		APIKey:                     "xyz",
+		ResponsesWebSocket:         true,
+		ResponsesWebSocketV2:       true,
+		ResponsesWebSocketFallback: "off",
+		ResponsesWebSocketPrewarm:  true,
+	})
+	cfg.setDefaults("/tmp", "")
+	env := env.NewFromMap(map[string]string{"OPENAI_API_KEY": "test-key"})
+	require.NoError(t, cfg.configureProviders(testStore(cfg), env, NewEnvironmentVariableResolver(env), knownProviders))
+	pc, ok := cfg.Providers.Get("openai")
+	require.True(t, ok)
+	require.True(t, pc.ResponsesWebSocket)
+	require.True(t, pc.ResponsesWebSocketV2)
+	require.Equal(t, "off", pc.ResponsesWebSocketFallback)
+	require.True(t, pc.ResponsesWebSocketPrewarm)
 }
 
 func TestConfig_configureProvidersWithNewProvider(t *testing.T) {

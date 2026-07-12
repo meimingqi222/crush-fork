@@ -31,6 +31,7 @@ import (
 	"github.com/charmbracelet/crush/internal/checkpoint"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/httpext"
 	goalruntime "github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/hooks"
@@ -192,6 +193,11 @@ type coordinator struct {
 
 	// goalRuntime tracks goal state, token accounting, and wall-clock time.
 	goalRuntime *goalruntime.Runtime
+
+	responsesWSPool *httpext.ResponsesWebSocketPool
+
+	responsesWSTransportMu sync.Mutex
+	responsesWSTransport   map[responsesWSTransportKey]responsesWSTransportEntry
 }
 
 func NewCoordinator(
@@ -243,6 +249,7 @@ func NewCoordinator(
 		escalationBridge:           permission.NewEscalationBridge(),
 		transcriptTurnCounts:       make(map[string]int),
 		goalRuntime:                cmp.Or(goalRuntime, goalruntime.NewRuntime(sessions)),
+		responsesWSPool:            httpext.NewResponsesWebSocketPool(),
 	}
 	if c.pluginRuntime == nil {
 		c.pluginRuntime = plugin.DefaultRuntime()
@@ -842,6 +849,10 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if err := c.goalRuntime.OnTurnStart(ctx, sessionID, turnID, goalruntime.TokenUsage{}); err != nil {
 		slog.Warn("Failed to record goal turn start", "error", err, "session_id", sessionID)
 	}
+
+	turnCtx, endResponsesWSTurn := c.beginResponsesWebSocketTurn(ctx, sessionID)
+	defer endResponsesWSTurn()
+	ctx = turnCtx
 
 	run := func() (*fantasy.AgentResult, error) {
 		slog.Debug("[PERF] coordinator: starting sessionAgent.Run", "duration", time.Since(start), "session_id", sessionID)
