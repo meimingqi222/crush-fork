@@ -18,9 +18,12 @@ const (
 )
 
 type SearchParams struct {
-	Query     string
-	SessionID string
-	Limit     int
+	Query           string
+	SessionID       string
+	Limit           int
+	BeforeCreatedAt int64
+	BeforeID        string
+	AllowOneExtra   bool
 }
 
 type MessageSearchResult struct {
@@ -32,6 +35,15 @@ type MessageSearchResult struct {
 }
 
 func (s *service) SearchMessages(ctx context.Context, params SearchParams) ([]MessageSearchResult, error) {
+	return s.searchMessages(ctx, params, false)
+}
+
+// SearchMessagesPage uses a stable created_at/id keyset cursor for GUI paging.
+func (s *service) SearchMessagesPage(ctx context.Context, params SearchParams) ([]MessageSearchResult, error) {
+	return s.searchMessages(ctx, params, true)
+}
+
+func (s *service) searchMessages(ctx context.Context, params SearchParams, keyset bool) ([]MessageSearchResult, error) {
 	query := strings.TrimSpace(params.Query)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -41,19 +53,44 @@ func (s *service) SearchMessages(ctx context.Context, params SearchParams) ([]Me
 	if limit < 1 {
 		limit = DefaultSearchLimit
 	}
-	if limit > MaxSearchLimit {
-		limit = MaxSearchLimit
+	maxLimit := MaxSearchLimit
+	if params.AllowOneExtra {
+		maxLimit++
+	}
+	if limit > maxLimit {
+		limit = maxLimit
 	}
 
-	dbMessages, err := s.q.SearchMessages(ctx, db.SearchMessagesParams{
+	if !keyset {
+		dbMessages, err := s.q.SearchMessages(ctx, db.SearchMessagesParams{
+			SessionID: params.SessionID,
+			Query:     sql.NullString{String: query, Valid: true},
+			Limit:     int64(limit),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return searchResults(dbMessages)
+	}
+	dbParams := db.SearchMessagesBeforeParams{
 		SessionID: params.SessionID,
+		HasCursor: int64(0),
 		Query:     sql.NullString{String: query, Valid: true},
 		Limit:     int64(limit),
-	})
+	}
+	if params.BeforeID != "" {
+		dbParams.HasCursor = 1
+		dbParams.BeforeCreatedAt = params.BeforeCreatedAt
+		dbParams.BeforeID = params.BeforeID
+	}
+	dbMessages, err := s.q.SearchMessagesBefore(ctx, dbParams)
 	if err != nil {
 		return nil, err
 	}
+	return searchResults(dbMessages)
+}
 
+func searchResults(dbMessages []db.Message) ([]MessageSearchResult, error) {
 	results := make([]MessageSearchResult, 0, len(dbMessages))
 	for _, item := range dbMessages {
 		text, err := extractTextFromParts(item.Parts)

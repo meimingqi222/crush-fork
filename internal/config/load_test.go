@@ -505,16 +505,11 @@ func TestProviderConfigResponsesWebSocketOptions(t *testing.T) {
 
 	pc := ProviderConfig{
 		ResponsesWebSocket:         true,
-		ResponsesWebSocketV2:       true,
 		ResponsesWebSocketFallback: "request",
-		ResponsesWebSocketPrewarm:  true,
 	}
 	opts := pc.ResponsesWebSocketOptions()
 	require.True(t, opts.Enabled)
-	require.True(t, opts.V2)
 	require.Equal(t, httpext.ResponsesWebSocketFallbackRequest, opts.Fallback)
-	require.True(t, opts.Prewarm)
-	require.True(t, opts.Chain)
 }
 
 func TestConfig_configureProvidersCopiesResponsesWebSocketFields(t *testing.T) {
@@ -530,9 +525,7 @@ func TestConfig_configureProvidersCopiesResponsesWebSocketFields(t *testing.T) {
 	cfg.Providers.Set("openai", ProviderConfig{
 		APIKey:                     "xyz",
 		ResponsesWebSocket:         true,
-		ResponsesWebSocketV2:       true,
 		ResponsesWebSocketFallback: "off",
-		ResponsesWebSocketPrewarm:  true,
 	})
 	cfg.setDefaults("/tmp", "")
 	env := env.NewFromMap(map[string]string{"OPENAI_API_KEY": "test-key"})
@@ -540,9 +533,7 @@ func TestConfig_configureProvidersCopiesResponsesWebSocketFields(t *testing.T) {
 	pc, ok := cfg.Providers.Get("openai")
 	require.True(t, ok)
 	require.True(t, pc.ResponsesWebSocket)
-	require.True(t, pc.ResponsesWebSocketV2)
 	require.Equal(t, "off", pc.ResponsesWebSocketFallback)
-	require.True(t, pc.ResponsesWebSocketPrewarm)
 }
 
 func TestConfig_configureProvidersWithNewProvider(t *testing.T) {

@@ -78,8 +78,43 @@ tasks:
 
   test:
     desc: Run tests
+    env:
+      CGO_ENABLED: 1
     cmds:
       - go test -race -failfast ./... {{.CLI_ARGS}}
+
+  test:gui-release-race:
+    desc: Run the reduced GUI/ACP release profile and concurrent package gates under race
+    env:
+      CGO_ENABLED: 1
+    cmds:
+      - go test -race ./internal/releasegate ./internal/acp/... ./internal/guiapi/... ./internal/sessionevent/... ./internal/terminal ./internal/blob ./internal/mcplifecycle ./internal/providerauth ./internal/idempotency ./internal/turn -count=1 -timeout=10m
+      - go test -race ./internal/agent ./internal/session -count=1 -timeout=10m
+
+  test:gui-release-fault:
+    desc: Run deterministic GUI/ACP fault, reconnect, timeout, and recovery gates
+    cmds:
+      - go test ./internal/releasegate -run '^TestGUIACPReleaseFaultMatrix$' -count=1 -timeout=5m
+      - go test ./internal/acp -run 'Test(LineTransportCancellationInterruptsBlocked(Read|Write)|Server(BlockedWriterHasByteAndTimeBounds|DropsDuplicateResponseWithoutBlocking|EnforcesNestingAndMethodDeadline|MissingPermissionResponseHonorsCallerDeadline)|PermissionBridgeForwardsAuthoritySessionID)' -count=1 -timeout=5m
+      - go test ./internal/guiapi -run 'Test(SessionSyncReconnectAndExpiredSequence|BlockedNotificationWriterDoesNotBackpressurePublishAndPreservesReliableEvents|SessionSnapshotMapsNotFoundAndSourceFailure|TerminalRejectsOversizedInputBeforePermission|TurnStartIsImmediateIdempotentAndConflictSafe|TurnQueueHandlersCancelRetryAndSteer|TurnCancellationAcknowledgementP95BelowHundredMilliseconds)' -count=1 -timeout=5m
+      - go test ./internal/turn -run '^TestStartAcknowledgementP95BelowTwentyMilliseconds$' -count=1 -timeout=5m
+      - go test ./internal/mcplifecycle -run 'Test(DynamicReconnectDisableAndShutdown|DynamicReconnectDoesNotCancelSiblingStartup|CapacityAndSessionCloseRevokeBeforeBlockedCleanup)' -count=1 -timeout=5m
+      - go test ./internal/providerauth -run 'Test(ManagerCancelOwnershipAndConnectionBarrier|ManagerFailureNeverExposesRawProviderError)' -count=1 -timeout=5m
+
+  test:gui-release-full:
+    desc: Run the full 100-session GUI/ACP soak and canonical performance benchmarks without race
+    env:
+      CRUSH_GUI_SOAK_FULL: "1"
+    cmds:
+      - go test ./internal/releasegate -run '^TestGUIACP(ReleaseSoak|WarmSnapshotP95)$' -count=1 -timeout=20m -v
+      - go test ./internal/acp -run '^$' -bench 'Benchmark(ACPTextDelta|SessionSnapshot|SessionMessagePage|TerminalOutputCoalescing|LongSessionLoad|ConcurrentSessions)$' -benchmem -benchtime=1000x -count=1 -timeout=20m
+
+  test:gui-release:
+    desc: Run all deterministic GUI/ACP release gates without real providers or VCR recording
+    cmds:
+      - task: test:gui-release-race
+      - task: test:gui-release-fault
+      - task: test:gui-release-full
 
   test:record:
     desc: Run tests and record all VCR cassettes again

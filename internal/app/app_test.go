@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,13 +15,17 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/blob"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/log"
+	"github.com/charmbracelet/crush/internal/mcplifecycle"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/sessionevent"
+	"github.com/charmbracelet/crush/internal/terminal"
 	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/stretchr/testify/require"
@@ -254,6 +261,159 @@ func TestNew_EnablesDefaultLocalMemoryWhenMemoryConfigMissing(t *testing.T) {
 	t.Cleanup(func() {
 		app.Shutdown()
 	})
+}
+
+func TestNewOwnsSessionEventHubAndCleansDeletedSession(t *testing.T) {
+	conn, store := setupMessageSubscriberDependencies(t)
+	app, err := New(t.Context(), conn, store)
+	require.NoError(t, err)
+	require.NotNil(t, app.GetSessionEvents())
+	require.NotNil(t, app.Turns)
+	require.NotNil(t, app.Idempotency)
+	require.NotNil(t, app.GetBlobs())
+	require.NotNil(t, app.GetTerminals())
+	require.NotNil(t, app.GetProviderAuth())
+	require.NotNil(t, app.GetMCPLifecycle())
+	t.Cleanup(func() {
+		app.Shutdown()
+	})
+
+	sess, err := app.Sessions.Create(t.Context(), "live event cleanup")
+	require.NoError(t, err)
+	app.MCPLifecycle.Close(t.Context())
+	mcpBackend := &appMCPBackend{states: make(map[string]mcplifecycle.BackendInfo)}
+	app.MCPLifecycle = mcplifecycle.New(store, mcpBackend, app.SessionEvents, mcplifecycle.Config{})
+	require.NoError(t, app.MCPLifecycle.ReplaceAsync("client", sess.ID, []mcplifecycle.ServerConfig{{
+		Name: "dynamic", Config: config.MCPConfig{Type: config.MCPStdio, Command: "mock"},
+	}}))
+	require.Eventually(t, func() bool {
+		value, statusErr := app.MCPLifecycle.Status(sess.ID, "session:dynamic")
+		return statusErr == nil && value.Status == mcplifecycle.StatusConnected
+	}, time.Second, time.Millisecond)
+	_, err = app.SessionEvents.Publish(sess.ID, sessionevent.NewEvent{Kind: sessionevent.KindTurnStarted})
+	require.NoError(t, err)
+	data := []byte("blob")
+	sum := sha256.Sum256(data)
+	_, err = app.Blobs.Create(t.Context(), "client", blob.CreateInput{
+		SessionID: sess.ID, Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:]), Data: data,
+	})
+	require.NoError(t, err)
+	app.Terminals.Close()
+	terminalFactory := &appTerminalFactory{}
+	app.Terminals = terminal.New(terminal.Config{Factory: terminalFactory})
+	terminalMetadata, err := app.Terminals.Open(t.Context(), terminal.OpenRequest{
+		ClientID: "client", SessionID: sess.ID, Command: "fake",
+	})
+	require.NoError(t, err)
+	require.NoError(t, app.Sessions.Delete(t.Context(), sess.ID))
+
+	events, err := app.SessionEvents.ReplayAfter(sess.ID, 0)
+	require.NoError(t, err)
+	require.Empty(t, events)
+	count, retained := app.Blobs.Retained()
+	require.Zero(t, count)
+	require.Zero(t, retained)
+	_, err = app.Terminals.Get("client", sess.ID, terminalMetadata.ID)
+	require.ErrorIs(t, err, terminal.ErrNotFound)
+	require.True(t, terminalFactory.process.isClosed())
+	require.Eventually(t, func() bool { return mcpBackend.disableCount.Load() == 1 }, time.Second, time.Millisecond)
+}
+
+type appMCPBackend struct {
+	mu           sync.Mutex
+	states       map[string]mcplifecycle.BackendInfo
+	disableCount atomic.Int32
+}
+
+func (b *appMCPBackend) Connect(context.Context, *config.ConfigStore, string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for name := range b.states {
+		_ = name
+	}
+	return nil
+}
+
+func (b *appMCPBackend) Reconnect(ctx context.Context, store *config.ConfigStore, name string) error {
+	return b.Connect(ctx, store, name)
+}
+
+func (b *appMCPBackend) Disable(context.Context, *config.ConfigStore, string) error {
+	b.disableCount.Add(1)
+	return nil
+}
+
+func (b *appMCPBackend) State(name string) (mcplifecycle.BackendInfo, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	value, ok := b.states[name]
+	return value, ok
+}
+
+func (b *appMCPBackend) Subscribe(ctx context.Context) <-chan mcplifecycle.BackendEvent {
+	result := make(chan mcplifecycle.BackendEvent)
+	go func() {
+		<-ctx.Done()
+		close(result)
+	}()
+	return result
+}
+
+func (b *appMCPBackend) MarkScoped(name string) {
+	b.mu.Lock()
+	b.states[name] = mcplifecycle.BackendInfo{State: mcplifecycle.BackendConnected}
+	b.mu.Unlock()
+}
+
+type appTerminalFactory struct{ process *appTerminalProcess }
+
+func (f *appTerminalFactory) Start(context.Context, terminal.OpenRequest) (terminal.Process, error) {
+	f.process = &appTerminalProcess{readDone: make(chan struct{}), exit: make(chan terminal.ProcessExit, 1)}
+	return f.process, nil
+}
+
+type appTerminalProcess struct {
+	mu       sync.Mutex
+	readDone chan struct{}
+	exit     chan terminal.ProcessExit
+	closed   bool
+	once     sync.Once
+}
+
+func (p *appTerminalProcess) Read([]byte) (int, error)      { <-p.readDone; return 0, io.EOF }
+func (*appTerminalProcess) Write(value []byte) (int, error) { return len(value), nil }
+func (*appTerminalProcess) Resize(int, int) error           { return nil }
+func (p *appTerminalProcess) Kill(signal string) error {
+	select {
+	case p.exit <- terminal.ProcessExit{Signal: signal}:
+	default:
+	}
+	return p.Close()
+}
+
+func (p *appTerminalProcess) Wait(ctx context.Context) (terminal.ProcessExit, error) {
+	select {
+	case value := <-p.exit:
+		return value, nil
+	case <-ctx.Done():
+		return terminal.ProcessExit{}, ctx.Err()
+	}
+}
+
+func (p *appTerminalProcess) Close() error {
+	p.once.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
+		close(p.readDone)
+	})
+	return nil
+}
+
+func (p *appTerminalProcess) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
 }
 
 func setupMessageSubscriberDependencies(t *testing.T) (*sql.DB, *config.ConfigStore) {

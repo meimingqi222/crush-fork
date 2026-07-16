@@ -132,13 +132,21 @@ func TestWrapOpenAIResponsesWebSocketHTTPClientPassesThroughNonStreamingRequests
 func TestApplyResponsesWebSocketBetaHeaderV2(t *testing.T) {
 	t.Parallel()
 
+	// api.openai.com always gets the v2 beta header when none is set.
 	headers := http.Header{}
-	applyResponsesWebSocketBetaHeader(url.URL{Host: "api.openai.com"}, headers, ResponsesWebSocketOptions{V2: true})
+	applyResponsesWebSocketBetaHeader(url.URL{Host: "api.openai.com"}, headers)
 	require.Equal(t, OpenAIBetaResponsesWSV2, headers.Get("OpenAI-Beta"))
 
+	// An explicit beta header is preserved.
 	headers = http.Header{}
-	applyResponsesWebSocketBetaHeader(url.URL{Host: "api.openai.com"}, headers, ResponsesWebSocketOptions{V2: false})
+	headers.Set("OpenAI-Beta", OpenAIBetaResponsesAPIV1)
+	applyResponsesWebSocketBetaHeader(url.URL{Host: "api.openai.com"}, headers)
 	require.Equal(t, OpenAIBetaResponsesAPIV1, headers.Get("OpenAI-Beta"))
+
+	// Non-OpenAI hosts are left untouched.
+	headers = http.Header{}
+	applyResponsesWebSocketBetaHeader(url.URL{Host: "example.com"}, headers)
+	require.Equal(t, "", headers.Get("OpenAI-Beta"))
 }
 
 func TestResponsesWebSocketPoolProviderSessionKeyStable(t *testing.T) {

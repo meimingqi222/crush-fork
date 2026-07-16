@@ -33,14 +33,14 @@ func NormalizeResponsesWebSocketFallback(s string) ResponsesWebSocketFallback {
 }
 
 // ResponsesWebSocketOptions configures OpenAI Responses WebSocket transport.
+//
+// The transport is deliberately dumb: it dials the socket, reuses the pooled
+// connection, and reframes events as SSE. previous_response_id chaining is
+// handled once at the message layer (see internal/agent responses_chaining)
+// and rides through here transparently, so no chaining state lives here.
 type ResponsesWebSocketOptions struct {
 	Enabled  bool
-	V2       bool
 	Fallback ResponsesWebSocketFallback
-	Prewarm  bool
-	// Chain enables previous_response_id + store on the same WebSocket connection
-	// within a user turn (tool-loop steps). Requires V2.
-	Chain bool
 }
 
 func (o ResponsesWebSocketOptions) fallbackEnabled() bool {

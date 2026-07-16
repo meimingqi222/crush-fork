@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/autopermission"
+	"github.com/charmbracelet/crush/internal/blob"
 	"github.com/charmbracelet/crush/internal/checkpoint"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -33,19 +34,25 @@ import (
 	"github.com/charmbracelet/crush/internal/format"
 	"github.com/charmbracelet/crush/internal/goal"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/idempotency"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/mcplifecycle"
 	"github.com/charmbracelet/crush/internal/memory"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/plugin"
+	"github.com/charmbracelet/crush/internal/providerauth"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/redact"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/sessionevent"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/terminal"
 	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/charmbracelet/crush/internal/toolruntime"
+	"github.com/charmbracelet/crush/internal/turn"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/update"
@@ -75,6 +82,13 @@ type App struct {
 	Timeline      timeline.Service
 	PluginRuntime *plugin.Runtime
 	MemoryBackend memory.Backend
+	SessionEvents *sessionevent.Hub
+	Idempotency   *idempotency.Store
+	Turns         *turn.Service
+	Blobs         *blob.Service
+	Terminals     *terminal.Manager
+	ProviderAuth  *providerauth.Manager
+	MCPLifecycle  *mcplifecycle.Service
 
 	AgentCoordinator agent.Coordinator
 	GoalRuntime      *goal.Runtime
@@ -110,11 +124,28 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		if goalRuntime != nil {
 			goalRuntime.DeleteSession(sessionID)
 		}
+		if app != nil && app.Turns != nil {
+			app.Turns.CloseSession(sessionID)
+		}
+		if app != nil && app.MCPLifecycle != nil {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			app.MCPLifecycle.CloseSession(closeCtx, sessionID)
+			cancel()
+		}
+		if app != nil && app.Terminals != nil {
+			app.Terminals.CloseSession(sessionID)
+		}
+		if app != nil && app.Blobs != nil {
+			app.Blobs.ReleaseSession(sessionID)
+		}
+		if app != nil && app.SessionEvents != nil {
+			app.SessionEvents.CloseSession(sessionID)
+		}
 		if app != nil && app.AgentCoordinator != nil {
 			if coord, ok := app.AgentCoordinator.(interface {
-				onSessionDeleted(context.Context, string)
+				OnSessionDeleted(context.Context, string)
 			}); ok {
-				coord.onSessionDeleted(context.Background(), sessionID)
+				coord.OnSessionDeleted(context.Background(), sessionID)
 				return
 			}
 		}
@@ -167,6 +198,9 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		Timeline:      timelineService,
 		PluginRuntime: pluginRuntime,
 		LSPManager:    lsp.NewManager(store),
+		SessionEvents: sessionevent.NewHub(sessionevent.Config{}),
+		Idempotency:   idempotency.New(idempotency.Config{}),
+		Blobs:         blob.New(blob.Config{}),
 
 		globalCtx: ctx,
 
@@ -177,6 +211,38 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
 	}
+	app.Terminals = terminal.New(terminal.Config{
+		OnOutput: func(sessionID, terminalID string, offset uint64, data []byte) {
+			_, _ = app.SessionEvents.Publish(sessionID, sessionevent.NewEvent{
+				Kind: sessionevent.KindTerminalOutput, Delivery: sessionevent.DeliveryMerge,
+				CoalesceKey: terminalID,
+				Payload:     sessionevent.TerminalOutput{TerminalID: terminalID, Offset: offset, Data: data},
+			})
+		},
+		OnExit: func(sessionID, terminalID string, exit terminal.Exit) {
+			_, _ = app.SessionEvents.Publish(sessionID, sessionevent.NewEvent{
+				Kind: sessionevent.KindTerminalExited, Delivery: sessionevent.DeliveryReliable,
+				Payload: sessionevent.TerminalExit{
+					TerminalID: terminalID, State: string(exit.State), Code: exit.Code,
+					Signal: exit.Signal, Timestamp: exit.Timestamp.UnixMilli(), Offset: exit.Offset,
+				},
+			})
+		},
+	})
+	app.ProviderAuth = providerauth.New(
+		providerauth.NewConfigBackend(store),
+		providerauth.Config{Factories: providerauth.DefaultFactories()},
+	)
+	app.MCPLifecycle = mcplifecycle.New(store, mcplifecycle.NewBackend(), app.SessionEvents, mcplifecycle.Config{})
+	app.cleanupFuncs = append(app.cleanupFuncs, func(ctx context.Context) error {
+		app.ProviderAuth.Close()
+		app.MCPLifecycle.Close(ctx)
+		mcpErr := mcp.Close(ctx)
+		app.Terminals.Close()
+		app.Blobs.Close()
+		app.SessionEvents.Close()
+		return mcpErr
+	})
 
 	app.previousPluginRT = plugin.SetDefaultRuntime(app.PluginRuntime)
 	cleanupPluginRuntimeOnError := true
@@ -218,13 +284,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	go mcp.Initialize(ctx, app.Permissions, store)
 
 	// cleanup database upon app shutdown
-	app.cleanupFuncs = append(
-		app.cleanupFuncs,
-		func(context.Context) error {
-			return conn.Close()
-		},
-		func(ctx context.Context) error { return mcp.Close(ctx) },
-	)
+	app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error { return conn.Close() })
 
 	// Wire the memory backend before creating the coder agent so the agent
 	// receives working-memory stores and compaction hooks at construction.
@@ -303,12 +363,44 @@ func (app *App) GetSessions() session.Service {
 	return app.Sessions
 }
 
+func (app *App) GetSessionMutations() session.MutationService {
+	mutations, _ := app.Sessions.(session.MutationService)
+	return mutations
+}
+
+// CloseSession releases GUI turn state and cancels any standard Agent run for
+// a session before destructive desktop deletion reaches persistence.
+func (app *App) CloseSession(sessionID string) {
+	if app.Turns != nil {
+		app.Turns.CloseSession(sessionID)
+	}
+	if app.MCPLifecycle != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		app.MCPLifecycle.CloseSession(ctx, sessionID)
+		cancel()
+	}
+	if app.Terminals != nil {
+		app.Terminals.CloseSession(sessionID)
+	}
+	if app.Blobs != nil {
+		app.Blobs.ReleaseSession(sessionID)
+	}
+	if app.AgentCoordinator != nil && app.AgentCoordinator.IsSessionBusy(sessionID) {
+		app.AgentCoordinator.Cancel(sessionID)
+	}
+}
+
 func (app *App) GetMessages() message.Service {
 	return app.Messages
 }
 
 func (app *App) GetCoordinator() agent.Coordinator {
 	return app.AgentCoordinator
+}
+
+func (app *App) GetInferenceResolver() agent.InferenceResolver {
+	resolver, _ := app.AgentCoordinator.(agent.InferenceResolver)
+	return resolver
 }
 
 func (app *App) GetConfig() *config.ConfigStore {
@@ -326,6 +418,19 @@ func (app *App) GetToolRuntime() toolruntime.Service {
 func (app *App) GetTimeline() timeline.Service {
 	return app.Timeline
 }
+
+// GetSessionEvents returns the live desktop session event service.
+func (app *App) GetSessionEvents() *sessionevent.Hub {
+	return app.SessionEvents
+}
+
+func (app *App) GetBlobs() *blob.Service { return app.Blobs }
+
+func (app *App) GetTerminals() *terminal.Manager { return app.Terminals }
+
+func (app *App) GetProviderAuth() *providerauth.Manager { return app.ProviderAuth }
+
+func (app *App) GetMCPLifecycle() *mcplifecycle.Service { return app.MCPLifecycle }
 
 // resolveSession resolves which session to use for a non-interactive run.
 // If continueSessionID is set, it looks up that session by ID.
@@ -786,11 +891,21 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.PluginRuntime,
 		app.MemoryBackend,
 		app.GoalRuntime,
+		app.SessionEvents,
 	)
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
 		return err
 	}
+	if app.Turns != nil {
+		app.Turns.Close()
+	}
+	app.Turns = turn.New(
+		app.SessionEvents,
+		turn.CoordinatorRunner{Coordinator: app.AgentCoordinator},
+		turn.MessageRetrySource{Messages: app.Messages},
+		turn.Config{},
+	)
 	return nil
 }
 
@@ -850,6 +965,12 @@ func (app *App) Shutdown() {
 
 	// First, cancel all agents and wait for them to finish. This must complete
 	// before closing the DB so agents can finish writing their state.
+	if app.Turns != nil {
+		app.Turns.Close()
+	}
+	if app.Idempotency != nil {
+		app.Idempotency.Close()
+	}
 	if app.AgentCoordinator != nil {
 		app.AgentCoordinator.CancelAll()
 	}

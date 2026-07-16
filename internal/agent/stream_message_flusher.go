@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/charmbracelet/crush/internal/guimetrics"
 )
 
 const streamMessageFlushInterval = 150 * time.Millisecond
@@ -88,7 +90,14 @@ func (f *streamMessageFlusher) flushIfDirtyLocked() error {
 		f.dirty = false
 		return nil
 	}
-	if err := f.flush(); err != nil {
+	started := time.Now()
+	err := f.flush()
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	guimetrics.FromContext(f.ctx).ObserveDuration(guimetrics.SQLiteFlushDuration, time.Since(started), guimetrics.Labels{Outcome: outcome})
+	if err != nil {
 		// Keep dirty so the next tick or FlushNow retries the failed write.
 		f.dirty = true
 		return err

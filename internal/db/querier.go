@@ -45,6 +45,7 @@ type Querier interface {
 	GetMemorySourceByName(ctx context.Context, name string) (MemorySource, error)
 	GetMessage(ctx context.Context, id string) (Message, error)
 	GetRecentActivity(ctx context.Context) ([]GetRecentActivityRow, error)
+	GetRetrySourceMessage(ctx context.Context, arg GetRetrySourceMessageParams) (Message, error)
 	GetSessionByID(ctx context.Context, id string) (Session, error)
 	GetToolUsage(ctx context.Context) ([]GetToolUsageRow, error)
 	GetTotalStats(ctx context.Context) (GetTotalStatsRow, error)
@@ -62,23 +63,29 @@ type Querier interface {
 	ListMemoryEventsFiltered(ctx context.Context, arg ListMemoryEventsFilteredParams) ([]ListMemoryEventsFilteredRow, error)
 	ListMemoryJobsByStatus(ctx context.Context, status string) ([]MemoryJob, error)
 	ListMemorySources(ctx context.Context) ([]MemorySource, error)
+	ListMessagesBefore(ctx context.Context, arg ListMessagesBeforeParams) ([]Message, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	ListMessagesBySessionPage(ctx context.Context, arg ListMessagesBySessionPageParams) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListRecentMemoryJobs(ctx context.Context, limit int64) ([]MemoryJob, error)
+	ListRecentMessagesBySession(ctx context.Context, arg ListRecentMessagesBySessionParams) ([]Message, error)
 	ListSessionCheckpoints(ctx context.Context, sessionID string) ([]Checkpoint, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListSessionsByParentID(ctx context.Context, parentSessionID sql.NullString) ([]Session, error)
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
-	RenameSession(ctx context.Context, arg RenameSessionParams) error
+	RenameSession(ctx context.Context, arg RenameSessionParams) (Session, error)
 	ResetMaterializedViewWatermark(ctx context.Context, arg ResetMaterializedViewWatermarkParams) error
 	SearchMessages(ctx context.Context, arg SearchMessagesParams) ([]Message, error)
+	SearchMessagesBefore(ctx context.Context, arg SearchMessagesBeforeParams) ([]Message, error)
+	SetSessionArchived(ctx context.Context, arg SetSessionArchivedParams) (Session, error)
+	SetSessionPinned(ctx context.Context, arg SetSessionPinnedParams) (Session, error)
 	UpdateMemoryJobStatus(ctx context.Context, arg UpdateMemoryJobStatusParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionCollaborationMode(ctx context.Context, arg UpdateSessionCollaborationModeParams) (Session, error)
+	UpdateSessionInferenceConfig(ctx context.Context, arg UpdateSessionInferenceConfigParams) (Session, error)
 	UpdateSessionPermissionMode(ctx context.Context, arg UpdateSessionPermissionModeParams) (Session, error)
 	UpdateSessionPlanFilePath(ctx context.Context, arg UpdateSessionPlanFilePathParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) (Session, error)

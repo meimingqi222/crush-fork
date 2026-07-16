@@ -130,6 +130,50 @@ func (q *Queries) GetMessage(ctx context.Context, id string) (Message, error) {
 	return i, err
 }
 
+const getRetrySourceMessage = `-- name: GetRetrySourceMessage :one
+SELECT user.id, user.session_id, user.role, user.parts, user.model, user.created_at, user.updated_at, user.finished_at, user.provider, user.is_summary_message, user.input_tokens, user.output_tokens, user.reasoning_tokens, user.cache_read_tokens, user.cache_write_tokens
+FROM messages AS target
+JOIN messages AS user ON user.session_id = target.session_id
+WHERE target.id = ?1
+  AND target.session_id = ?2
+  AND target.role = 'assistant'
+  AND user.role = 'user'
+  AND (
+    user.created_at < target.created_at
+    OR (user.created_at = target.created_at AND user.rowid <= target.rowid)
+  )
+ORDER BY user.created_at DESC, user.rowid DESC
+LIMIT 1
+`
+
+type GetRetrySourceMessageParams struct {
+	MessageID string `json:"message_id"`
+	SessionID string `json:"session_id"`
+}
+
+func (q *Queries) GetRetrySourceMessage(ctx context.Context, arg GetRetrySourceMessageParams) (Message, error) {
+	row := q.queryRow(ctx, q.getRetrySourceMessageStmt, getRetrySourceMessage, arg.MessageID, arg.SessionID)
+	var i Message
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.Role,
+		&i.Parts,
+		&i.Model,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+		&i.Provider,
+		&i.IsSummaryMessage,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.ReasoningTokens,
+		&i.CacheReadTokens,
+		&i.CacheWriteTokens,
+	)
+	return i, err
+}
+
 const listAllUserMessages = `-- name: ListAllUserMessages :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
@@ -176,11 +220,77 @@ func (q *Queries) ListAllUserMessages(ctx context.Context) ([]Message, error) {
 	return items, nil
 }
 
+const listMessagesBefore = `-- name: ListMessagesBefore :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
+FROM messages
+WHERE session_id = ?1
+  AND (
+    ?2 = 0
+    OR created_at < ?3
+    OR (created_at = ?3 AND id < ?4)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT ?5
+`
+
+type ListMessagesBeforeParams struct {
+	SessionID       string      `json:"session_id"`
+	HasCursor       interface{} `json:"has_cursor"`
+	BeforeCreatedAt int64       `json:"before_created_at"`
+	BeforeID        string      `json:"before_id"`
+	Limit           int64       `json:"limit"`
+}
+
+func (q *Queries) ListMessagesBefore(ctx context.Context, arg ListMessagesBeforeParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.listMessagesBeforeStmt, listMessagesBefore,
+		arg.SessionID,
+		arg.HasCursor,
+		arg.BeforeCreatedAt,
+		arg.BeforeID,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMessagesBySession = `-- name: ListMessagesBySession :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, rowid ASC
 `
 
 func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error) {
@@ -226,7 +336,7 @@ const listMessagesBySessionPage = `-- name: ListMessagesBySessionPage :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, rowid ASC
 LIMIT ?3 OFFSET ?2
 `
 
@@ -238,6 +348,58 @@ type ListMessagesBySessionPageParams struct {
 
 func (q *Queries) ListMessagesBySessionPage(ctx context.Context, arg ListMessagesBySessionPageParams) ([]Message, error) {
 	rows, err := q.query(ctx, q.listMessagesBySessionPageStmt, listMessagesBySessionPage, arg.SessionID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentMessagesBySession = `-- name: ListRecentMessagesBySession :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
+FROM messages
+WHERE session_id = ?
+ORDER BY created_at DESC, rowid DESC
+LIMIT ?2
+`
+
+type ListRecentMessagesBySessionParams struct {
+	SessionID string `json:"session_id"`
+	Limit     int64  `json:"limit"`
+}
+
+func (q *Queries) ListRecentMessagesBySession(ctx context.Context, arg ListRecentMessagesBySessionParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.listRecentMessagesBySessionStmt, listRecentMessagesBySession, arg.SessionID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +493,7 @@ WHERE (?1 = '' OR session_id = ?1)
     WHERE json_extract(json_each.value, '$.type') = 'text'
       AND lower(COALESCE(json_extract(json_each.value, '$.data.text'), '')) LIKE lower('%' || ?2 || '%')
   )
-ORDER BY created_at DESC
+ORDER BY created_at DESC, rowid DESC
 LIMIT ?3
 `
 
@@ -343,6 +505,80 @@ type SearchMessagesParams struct {
 
 func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) ([]Message, error) {
 	rows, err := q.query(ctx, q.searchMessagesStmt, searchMessages, arg.SessionID, arg.Query, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Message{}
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.Parts,
+			&i.Model,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FinishedAt,
+			&i.Provider,
+			&i.IsSummaryMessage,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchMessagesBefore = `-- name: SearchMessagesBefore :many
+SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens
+FROM messages
+WHERE (?1 = '' OR session_id = ?1)
+  AND (
+    ?2 = 0
+    OR created_at < ?3
+    OR (created_at = ?3 AND id < ?4)
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM json_each(messages.parts)
+    WHERE json_extract(json_each.value, '$.type') = 'text'
+      AND lower(COALESCE(json_extract(json_each.value, '$.data.text'), '')) LIKE lower('%' || ?5 || '%')
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT ?6
+`
+
+type SearchMessagesBeforeParams struct {
+	SessionID       interface{}    `json:"session_id"`
+	HasCursor       interface{}    `json:"has_cursor"`
+	BeforeCreatedAt int64          `json:"before_created_at"`
+	BeforeID        string         `json:"before_id"`
+	Query           sql.NullString `json:"query"`
+	Limit           int64          `json:"limit"`
+}
+
+func (q *Queries) SearchMessagesBefore(ctx context.Context, arg SearchMessagesBeforeParams) ([]Message, error) {
+	rows, err := q.query(ctx, q.searchMessagesBeforeStmt, searchMessagesBefore,
+		arg.SessionID,
+		arg.HasCursor,
+		arg.BeforeCreatedAt,
+		arg.BeforeID,
+		arg.Query,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}

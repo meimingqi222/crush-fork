@@ -129,6 +129,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getRecentActivityStmt, err = db.PrepareContext(ctx, getRecentActivity); err != nil {
 		return nil, fmt.Errorf("error preparing query GetRecentActivity: %w", err)
 	}
+	if q.getRetrySourceMessageStmt, err = db.PrepareContext(ctx, getRetrySourceMessage); err != nil {
+		return nil, fmt.Errorf("error preparing query GetRetrySourceMessage: %w", err)
+	}
 	if q.getSessionByIDStmt, err = db.PrepareContext(ctx, getSessionByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetSessionByID: %w", err)
 	}
@@ -180,6 +183,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listMemorySourcesStmt, err = db.PrepareContext(ctx, listMemorySources); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMemorySources: %w", err)
 	}
+	if q.listMessagesBeforeStmt, err = db.PrepareContext(ctx, listMessagesBefore); err != nil {
+		return nil, fmt.Errorf("error preparing query ListMessagesBefore: %w", err)
+	}
 	if q.listMessagesBySessionStmt, err = db.PrepareContext(ctx, listMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMessagesBySession: %w", err)
 	}
@@ -191,6 +197,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listRecentMemoryJobsStmt, err = db.PrepareContext(ctx, listRecentMemoryJobs); err != nil {
 		return nil, fmt.Errorf("error preparing query ListRecentMemoryJobs: %w", err)
+	}
+	if q.listRecentMessagesBySessionStmt, err = db.PrepareContext(ctx, listRecentMessagesBySession); err != nil {
+		return nil, fmt.Errorf("error preparing query ListRecentMessagesBySession: %w", err)
 	}
 	if q.listSessionCheckpointsStmt, err = db.PrepareContext(ctx, listSessionCheckpoints); err != nil {
 		return nil, fmt.Errorf("error preparing query ListSessionCheckpoints: %w", err)
@@ -219,6 +228,15 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.searchMessagesStmt, err = db.PrepareContext(ctx, searchMessages); err != nil {
 		return nil, fmt.Errorf("error preparing query SearchMessages: %w", err)
 	}
+	if q.searchMessagesBeforeStmt, err = db.PrepareContext(ctx, searchMessagesBefore); err != nil {
+		return nil, fmt.Errorf("error preparing query SearchMessagesBefore: %w", err)
+	}
+	if q.setSessionArchivedStmt, err = db.PrepareContext(ctx, setSessionArchived); err != nil {
+		return nil, fmt.Errorf("error preparing query SetSessionArchived: %w", err)
+	}
+	if q.setSessionPinnedStmt, err = db.PrepareContext(ctx, setSessionPinned); err != nil {
+		return nil, fmt.Errorf("error preparing query SetSessionPinned: %w", err)
+	}
 	if q.updateMemoryJobStatusStmt, err = db.PrepareContext(ctx, updateMemoryJobStatus); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateMemoryJobStatus: %w", err)
 	}
@@ -230,6 +248,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.updateSessionCollaborationModeStmt, err = db.PrepareContext(ctx, updateSessionCollaborationMode); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionCollaborationMode: %w", err)
+	}
+	if q.updateSessionInferenceConfigStmt, err = db.PrepareContext(ctx, updateSessionInferenceConfig); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateSessionInferenceConfig: %w", err)
 	}
 	if q.updateSessionPermissionModeStmt, err = db.PrepareContext(ctx, updateSessionPermissionMode); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSessionPermissionMode: %w", err)
@@ -432,6 +453,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getRecentActivityStmt: %w", cerr)
 		}
 	}
+	if q.getRetrySourceMessageStmt != nil {
+		if cerr := q.getRetrySourceMessageStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getRetrySourceMessageStmt: %w", cerr)
+		}
+	}
 	if q.getSessionByIDStmt != nil {
 		if cerr := q.getSessionByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getSessionByIDStmt: %w", cerr)
@@ -517,6 +543,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listMemorySourcesStmt: %w", cerr)
 		}
 	}
+	if q.listMessagesBeforeStmt != nil {
+		if cerr := q.listMessagesBeforeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listMessagesBeforeStmt: %w", cerr)
+		}
+	}
 	if q.listMessagesBySessionStmt != nil {
 		if cerr := q.listMessagesBySessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listMessagesBySessionStmt: %w", cerr)
@@ -535,6 +566,11 @@ func (q *Queries) Close() error {
 	if q.listRecentMemoryJobsStmt != nil {
 		if cerr := q.listRecentMemoryJobsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listRecentMemoryJobsStmt: %w", cerr)
+		}
+	}
+	if q.listRecentMessagesBySessionStmt != nil {
+		if cerr := q.listRecentMessagesBySessionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listRecentMessagesBySessionStmt: %w", cerr)
 		}
 	}
 	if q.listSessionCheckpointsStmt != nil {
@@ -582,6 +618,21 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing searchMessagesStmt: %w", cerr)
 		}
 	}
+	if q.searchMessagesBeforeStmt != nil {
+		if cerr := q.searchMessagesBeforeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing searchMessagesBeforeStmt: %w", cerr)
+		}
+	}
+	if q.setSessionArchivedStmt != nil {
+		if cerr := q.setSessionArchivedStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setSessionArchivedStmt: %w", cerr)
+		}
+	}
+	if q.setSessionPinnedStmt != nil {
+		if cerr := q.setSessionPinnedStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setSessionPinnedStmt: %w", cerr)
+		}
+	}
 	if q.updateMemoryJobStatusStmt != nil {
 		if cerr := q.updateMemoryJobStatusStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateMemoryJobStatusStmt: %w", cerr)
@@ -600,6 +651,11 @@ func (q *Queries) Close() error {
 	if q.updateSessionCollaborationModeStmt != nil {
 		if cerr := q.updateSessionCollaborationModeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateSessionCollaborationModeStmt: %w", cerr)
+		}
+	}
+	if q.updateSessionInferenceConfigStmt != nil {
+		if cerr := q.updateSessionInferenceConfigStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateSessionInferenceConfigStmt: %w", cerr)
 		}
 	}
 	if q.updateSessionPermissionModeStmt != nil {
@@ -711,6 +767,7 @@ type Queries struct {
 	getMemorySourceByNameStmt          *sql.Stmt
 	getMessageStmt                     *sql.Stmt
 	getRecentActivityStmt              *sql.Stmt
+	getRetrySourceMessageStmt          *sql.Stmt
 	getSessionByIDStmt                 *sql.Stmt
 	getToolUsageStmt                   *sql.Stmt
 	getTotalStatsStmt                  *sql.Stmt
@@ -728,10 +785,12 @@ type Queries struct {
 	listMemoryEventsFilteredStmt       *sql.Stmt
 	listMemoryJobsByStatusStmt         *sql.Stmt
 	listMemorySourcesStmt              *sql.Stmt
+	listMessagesBeforeStmt             *sql.Stmt
 	listMessagesBySessionStmt          *sql.Stmt
 	listMessagesBySessionPageStmt      *sql.Stmt
 	listNewFilesStmt                   *sql.Stmt
 	listRecentMemoryJobsStmt           *sql.Stmt
+	listRecentMessagesBySessionStmt    *sql.Stmt
 	listSessionCheckpointsStmt         *sql.Stmt
 	listSessionReadFilesStmt           *sql.Stmt
 	listSessionsStmt                   *sql.Stmt
@@ -741,10 +800,14 @@ type Queries struct {
 	renameSessionStmt                  *sql.Stmt
 	resetMaterializedViewWatermarkStmt *sql.Stmt
 	searchMessagesStmt                 *sql.Stmt
+	searchMessagesBeforeStmt           *sql.Stmt
+	setSessionArchivedStmt             *sql.Stmt
+	setSessionPinnedStmt               *sql.Stmt
 	updateMemoryJobStatusStmt          *sql.Stmt
 	updateMessageStmt                  *sql.Stmt
 	updateSessionStmt                  *sql.Stmt
 	updateSessionCollaborationModeStmt *sql.Stmt
+	updateSessionInferenceConfigStmt   *sql.Stmt
 	updateSessionPermissionModeStmt    *sql.Stmt
 	updateSessionPlanFilePathStmt      *sql.Stmt
 	updateSessionTitleAndUsageStmt     *sql.Stmt
@@ -793,6 +856,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getMemorySourceByNameStmt:          q.getMemorySourceByNameStmt,
 		getMessageStmt:                     q.getMessageStmt,
 		getRecentActivityStmt:              q.getRecentActivityStmt,
+		getRetrySourceMessageStmt:          q.getRetrySourceMessageStmt,
 		getSessionByIDStmt:                 q.getSessionByIDStmt,
 		getToolUsageStmt:                   q.getToolUsageStmt,
 		getTotalStatsStmt:                  q.getTotalStatsStmt,
@@ -810,10 +874,12 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listMemoryEventsFilteredStmt:       q.listMemoryEventsFilteredStmt,
 		listMemoryJobsByStatusStmt:         q.listMemoryJobsByStatusStmt,
 		listMemorySourcesStmt:              q.listMemorySourcesStmt,
+		listMessagesBeforeStmt:             q.listMessagesBeforeStmt,
 		listMessagesBySessionStmt:          q.listMessagesBySessionStmt,
 		listMessagesBySessionPageStmt:      q.listMessagesBySessionPageStmt,
 		listNewFilesStmt:                   q.listNewFilesStmt,
 		listRecentMemoryJobsStmt:           q.listRecentMemoryJobsStmt,
+		listRecentMessagesBySessionStmt:    q.listRecentMessagesBySessionStmt,
 		listSessionCheckpointsStmt:         q.listSessionCheckpointsStmt,
 		listSessionReadFilesStmt:           q.listSessionReadFilesStmt,
 		listSessionsStmt:                   q.listSessionsStmt,
@@ -823,10 +889,14 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		renameSessionStmt:                  q.renameSessionStmt,
 		resetMaterializedViewWatermarkStmt: q.resetMaterializedViewWatermarkStmt,
 		searchMessagesStmt:                 q.searchMessagesStmt,
+		searchMessagesBeforeStmt:           q.searchMessagesBeforeStmt,
+		setSessionArchivedStmt:             q.setSessionArchivedStmt,
+		setSessionPinnedStmt:               q.setSessionPinnedStmt,
 		updateMemoryJobStatusStmt:          q.updateMemoryJobStatusStmt,
 		updateMessageStmt:                  q.updateMessageStmt,
 		updateSessionStmt:                  q.updateSessionStmt,
 		updateSessionCollaborationModeStmt: q.updateSessionCollaborationModeStmt,
+		updateSessionInferenceConfigStmt:   q.updateSessionInferenceConfigStmt,
 		updateSessionPermissionModeStmt:    q.updateSessionPermissionModeStmt,
 		updateSessionPlanFilePathStmt:      q.updateSessionPlanFilePathStmt,
 		updateSessionTitleAndUsageStmt:     q.updateSessionTitleAndUsageStmt,

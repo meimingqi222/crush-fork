@@ -18,8 +18,8 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
-	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/hooks"
+	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/invopop/jsonschema"
@@ -219,14 +219,8 @@ type ProviderConfig struct {
 	// When false, streaming uses HTTP SSE for compatibility.
 	ResponsesWebSocket bool `json:"responses_websocket,omitempty" jsonschema:"description=Use WebSocket transport for OpenAI Responses streaming when supported,default=false"`
 
-	// ResponsesWebSocketV2 uses the responses_websockets=2026-02-06 OpenAI-Beta value on api.openai.com.
-	ResponsesWebSocketV2 bool `json:"responses_websocket_v2,omitempty" jsonschema:"description=Use OpenAI Responses WebSocket v2 beta header when supported,default=false"`
-
 	// ResponsesWebSocketFallback selects HTTP fallback after WebSocket errors: session, request, or off.
 	ResponsesWebSocketFallback string `json:"responses_websocket_fallback,omitempty" jsonschema:"description=HTTP fallback mode after WebSocket failures: session, request, or off,default=session"`
-
-	// ResponsesWebSocketPrewarm enables turn-level prewarm (generate=false) before the first stream.
-	ResponsesWebSocketPrewarm bool `json:"responses_websocket_prewarm,omitempty" jsonschema:"description=Prewarm Responses WebSocket connections at turn start,default=false"`
 
 	// CopilotService indicates if this provider follows GitHub Copilot billing rules.
 	// When true, X-Initiator header is set based on request type:
@@ -267,10 +261,7 @@ func ProviderModelsFromCatwalk(models []catwalk.Model) []ProviderModel {
 func (pc *ProviderConfig) ResponsesWebSocketOptions() httpext.ResponsesWebSocketOptions {
 	return httpext.ResponsesWebSocketOptions{
 		Enabled:  pc.ResponsesWebSocket,
-		V2:       pc.ResponsesWebSocketV2,
 		Fallback: httpext.NormalizeResponsesWebSocketFallback(pc.ResponsesWebSocketFallback),
-		Prewarm:  pc.ResponsesWebSocketPrewarm,
-		Chain:    pc.ResponsesWebSocket && pc.ResponsesWebSocketV2,
 	}
 }
 
@@ -830,6 +821,7 @@ type Options struct {
 	AutoLSP                    *bool         `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
 	Progress                   *bool         `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	DisableNotifications       bool          `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
+	ResponsesChaining          bool          `json:"responses_chaining,omitempty" jsonschema:"description=Enable OpenAI Responses API server-side conversation chaining (previous_response_id) for providers that support store=true (xAI Grok via copilot-api, OpenAI o-series). Sends only incremental input per step instead of replaying full history. Experimental; defaults to false.,default=false"`
 	Recap                      *RecapConfig  `json:"recap,omitempty" jsonschema:"description=Idle recap configuration"`
 }
 

@@ -110,6 +110,11 @@ type PrepareStepResult struct {
 	ActiveTools     []string
 	DisableAllTools bool
 	Tools           []AgentTool
+	// ProviderOptions, when non-nil, replaces the call-level ProviderOptions
+	// for this step only. This lets a caller thread per-step provider state
+	// such as an OpenAI Responses `previous_response_id` (server-side
+	// conversation chaining) that changes from one step to the next.
+	ProviderOptions ProviderOptions
 }
 
 // ToolCallRepairOptions contains the options for repairing a tool call.
@@ -393,6 +398,7 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 		}
 		disableAllTools := false
 		stepTools := a.settings.tools
+		stepProviderOptions := opts.ProviderOptions
 		if opts.PrepareStep != nil {
 			updatedCtx, prepared, err := opts.PrepareStep(ctx, PrepareStepFunctionOptions{
 				Model:      stepModel,
@@ -425,6 +431,9 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 			disableAllTools = prepared.DisableAllTools
 			if prepared.Tools != nil {
 				stepTools = prepared.Tools
+			}
+			if prepared.ProviderOptions != nil {
+				stepProviderOptions = prepared.ProviderOptions
 			}
 		}
 
@@ -465,7 +474,7 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 				Tools:            preparedTools,
 				ToolChoice:       &stepToolChoice,
 				UserAgent:        a.settings.userAgent,
-				ProviderOptions:  opts.ProviderOptions,
+				ProviderOptions:  stepProviderOptions,
 			})
 		})
 		if err != nil {
@@ -583,6 +592,24 @@ func hasStopTurn(results []ToolResultContent) bool {
 		}
 	}
 	return false
+}
+
+// IsPreviousResponseNotFoundError reports whether err indicates that a
+// server-side conversation chain referenced via previous_response_id no longer
+// exists upstream (e.g. the stored response was evicted or the id is stale).
+// Callers using incremental Responses API chaining can use this to fall back
+// to a full transcript replay. Detection is by message inspection because the
+// provider-specific error type cannot be imported here without an import
+// cycle.
+func IsPreviousResponseNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "previous_response_not_found") {
+		return true
+	}
+	return strings.Contains(msg, "previous response") && strings.Contains(msg, "not found")
 }
 
 func toResponseMessages(content []Content) []Message {
@@ -875,6 +902,12 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 		}
 		disableAllTools := false
 		stepTools := a.settings.tools
+		stepProviderOptions := call.ProviderOptions
+		// fullStepMessages retains the complete replayed transcript for this
+		// step before any PrepareStep incremental-chaining override, so a
+		// previous_response_not_found failure can be retried with a full replay.
+		fullStepMessages := stepInputMessages
+		chainingOverrideUsed := false
 		// Apply step preparation if provided
 		if call.PrepareStep != nil {
 			updatedCtx, prepared, err := call.PrepareStep(ctx, PrepareStepFunctionOptions{
@@ -907,6 +940,10 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			disableAllTools = prepared.DisableAllTools
 			if prepared.Tools != nil {
 				stepTools = prepared.Tools
+			}
+			if prepared.ProviderOptions != nil {
+				stepProviderOptions = prepared.ProviderOptions
+				chainingOverrideUsed = true
 			}
 		}
 
@@ -944,7 +981,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			Tools:            preparedTools,
 			ToolChoice:       &stepToolChoice,
 			UserAgent:        a.settings.userAgent,
-			ProviderOptions:  call.ProviderOptions,
+			ProviderOptions:  stepProviderOptions,
 		}
 
 		// Execute step with retry logic wrapping both stream creation and processing
@@ -969,6 +1006,25 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			}
 			return result, nil
 		})
+		if err != nil && chainingOverrideUsed && IsPreviousResponseNotFoundError(err) {
+			// The referenced previous_response_id no longer exists upstream.
+			// Retry this step once with the full transcript replay and the base
+			// provider options (which never carry previous_response_id).
+			fallbackCall := streamCall
+			fallbackCall.Prompt = fullStepMessages
+			fallbackCall.ProviderOptions = call.ProviderOptions
+			result, err = retry(ctx, func() (stepExecutionResult, error) {
+				stream, ferr := stepModel.Stream(ctx, fallbackCall)
+				if ferr != nil {
+					return stepExecutionResult{}, ferr
+				}
+				r, ferr := a.processStepStream(ctx, stream, opts, steps, stepTools, stepExecProviderTools)
+				if ferr != nil {
+					return stepExecutionResult{}, ferr
+				}
+				return r, nil
+			})
+		}
 		if err != nil {
 			if opts.OnError != nil {
 				opts.OnError(err)

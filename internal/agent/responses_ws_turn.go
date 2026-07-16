@@ -34,12 +34,6 @@ func (c *coordinator) beginResponsesWebSocketTurn(ctx context.Context, sessionID
 	ctx = httpext.WithResponsesWebSocketSession(ctx, sessionID)
 	turnCtx, cleanup := httpext.BeginResponsesWebSocketTurn(ctx, c.responsesWSPool, wsURL, headers, sessionID)
 
-	opts := providerCfg.ResponsesWebSocketOptions()
-	if opts.Prewarm {
-		httpClient, _ := c.responsesWebSocketWrappedClient(&http.Client{Transport: http.DefaultTransport}, providerCfg)
-		_ = httpext.PrewarmResponsesWebSocket(turnCtx, httpClient, c.responsesWSPool, opts, wsURL, headers, model.CatwalkCfg.ID)
-	}
-
 	return turnCtx, cleanup
 }
 

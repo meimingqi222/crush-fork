@@ -67,7 +67,7 @@ INSERT INTO sessions (
     null,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type CreateSessionParams struct {
@@ -157,6 +157,10 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
@@ -172,7 +176,7 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 }
 
 const getLastSession = `-- name: GetLastSession :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 FROM sessions
 WHERE parent_session_id IS NULL
 ORDER BY updated_at DESC
@@ -214,12 +218,16 @@ func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 FROM sessions
 WHERE id = ? LIMIT 1
 `
@@ -259,12 +267,16 @@ func (q *Queries) GetSessionByID(ctx context.Context, id string) (Session, error
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 FROM sessions
 WHERE parent_session_id is NULL
 ORDER BY updated_at DESC
@@ -311,6 +323,10 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 			&i.GoalCreatedAt,
 			&i.GoalUpdatedAt,
 			&i.GoalID,
+			&i.Archived,
+			&i.Pinned,
+			&i.InferenceConfig,
+			&i.InferenceRevision,
 		); err != nil {
 			return nil, err
 		}
@@ -326,7 +342,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 const listSessionsByParentID = `-- name: ListSessionsByParentID :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 FROM sessions
 WHERE parent_session_id = ?
 ORDER BY created_at DESC
@@ -373,6 +389,10 @@ func (q *Queries) ListSessionsByParentID(ctx context.Context, parentSessionID sq
 			&i.GoalCreatedAt,
 			&i.GoalUpdatedAt,
 			&i.GoalID,
+			&i.Archived,
+			&i.Pinned,
+			&i.InferenceConfig,
+			&i.InferenceRevision,
 		); err != nil {
 			return nil, err
 		}
@@ -387,11 +407,12 @@ func (q *Queries) ListSessionsByParentID(ctx context.Context, parentSessionID sq
 	return items, nil
 }
 
-const renameSession = `-- name: RenameSession :exec
+const renameSession = `-- name: RenameSession :one
 UPDATE sessions
 SET
     title = ?
 WHERE id = ?
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type RenameSessionParams struct {
@@ -399,9 +420,157 @@ type RenameSessionParams struct {
 	ID    string `json:"id"`
 }
 
-func (q *Queries) RenameSession(ctx context.Context, arg RenameSessionParams) error {
-	_, err := q.exec(ctx, q.renameSessionStmt, renameSession, arg.Title, arg.ID)
-	return err
+func (q *Queries) RenameSession(ctx context.Context, arg RenameSessionParams) (Session, error) {
+	row := q.queryRow(ctx, q.renameSessionStmt, renameSession, arg.Title, arg.ID)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.ParentSessionID,
+		&i.Title,
+		&i.MessageCount,
+		&i.PromptTokens,
+		&i.CompletionTokens,
+		&i.Cost,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.SummaryMessageID,
+		&i.Todos,
+		&i.CollaborationMode,
+		&i.LastPromptTokens,
+		&i.LastCompletionTokens,
+		&i.WorkspaceCwd,
+		&i.Kind,
+		&i.HandoffSourceSessionID,
+		&i.HandoffGoal,
+		&i.HandoffDraftPrompt,
+		&i.HandoffRelevantFiles,
+		&i.PermissionMode,
+		&i.LastSummaryAt,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
+		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
+	)
+	return i, err
+}
+
+const setSessionArchived = `-- name: SetSessionArchived :one
+UPDATE sessions
+SET archived = ?
+WHERE id = ?
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
+`
+
+type SetSessionArchivedParams struct {
+	Archived int64  `json:"archived"`
+	ID       string `json:"id"`
+}
+
+func (q *Queries) SetSessionArchived(ctx context.Context, arg SetSessionArchivedParams) (Session, error) {
+	row := q.queryRow(ctx, q.setSessionArchivedStmt, setSessionArchived, arg.Archived, arg.ID)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.ParentSessionID,
+		&i.Title,
+		&i.MessageCount,
+		&i.PromptTokens,
+		&i.CompletionTokens,
+		&i.Cost,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.SummaryMessageID,
+		&i.Todos,
+		&i.CollaborationMode,
+		&i.LastPromptTokens,
+		&i.LastCompletionTokens,
+		&i.WorkspaceCwd,
+		&i.Kind,
+		&i.HandoffSourceSessionID,
+		&i.HandoffGoal,
+		&i.HandoffDraftPrompt,
+		&i.HandoffRelevantFiles,
+		&i.PermissionMode,
+		&i.LastSummaryAt,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
+		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
+	)
+	return i, err
+}
+
+const setSessionPinned = `-- name: SetSessionPinned :one
+UPDATE sessions
+SET pinned = ?
+WHERE id = ?
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
+`
+
+type SetSessionPinnedParams struct {
+	Pinned int64  `json:"pinned"`
+	ID     string `json:"id"`
+}
+
+func (q *Queries) SetSessionPinned(ctx context.Context, arg SetSessionPinnedParams) (Session, error) {
+	row := q.queryRow(ctx, q.setSessionPinnedStmt, setSessionPinned, arg.Pinned, arg.ID)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.ParentSessionID,
+		&i.Title,
+		&i.MessageCount,
+		&i.PromptTokens,
+		&i.CompletionTokens,
+		&i.Cost,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.SummaryMessageID,
+		&i.Todos,
+		&i.CollaborationMode,
+		&i.LastPromptTokens,
+		&i.LastCompletionTokens,
+		&i.WorkspaceCwd,
+		&i.Kind,
+		&i.HandoffSourceSessionID,
+		&i.HandoffGoal,
+		&i.HandoffDraftPrompt,
+		&i.HandoffRelevantFiles,
+		&i.PermissionMode,
+		&i.LastSummaryAt,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
+		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
+	)
+	return i, err
 }
 
 const updateSession = `-- name: UpdateSession :one
@@ -433,7 +602,7 @@ SET
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type UpdateSessionParams struct {
@@ -527,6 +696,10 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
@@ -535,7 +708,7 @@ const updateSessionCollaborationMode = `-- name: UpdateSessionCollaborationMode 
 UPDATE sessions
 SET collaboration_mode = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type UpdateSessionCollaborationModeParams struct {
@@ -578,6 +751,68 @@ func (q *Queries) UpdateSessionCollaborationMode(ctx context.Context, arg Update
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
+	)
+	return i, err
+}
+
+const updateSessionInferenceConfig = `-- name: UpdateSessionInferenceConfig :one
+UPDATE sessions
+SET
+    inference_config = ?,
+    inference_revision = inference_revision + 1
+WHERE id = ? AND inference_revision = ?
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
+`
+
+type UpdateSessionInferenceConfigParams struct {
+	InferenceConfig   string `json:"inference_config"`
+	ID                string `json:"id"`
+	InferenceRevision int64  `json:"inference_revision"`
+}
+
+func (q *Queries) UpdateSessionInferenceConfig(ctx context.Context, arg UpdateSessionInferenceConfigParams) (Session, error) {
+	row := q.queryRow(ctx, q.updateSessionInferenceConfigStmt, updateSessionInferenceConfig, arg.InferenceConfig, arg.ID, arg.InferenceRevision)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.ParentSessionID,
+		&i.Title,
+		&i.MessageCount,
+		&i.PromptTokens,
+		&i.CompletionTokens,
+		&i.Cost,
+		&i.UpdatedAt,
+		&i.CreatedAt,
+		&i.SummaryMessageID,
+		&i.Todos,
+		&i.CollaborationMode,
+		&i.LastPromptTokens,
+		&i.LastCompletionTokens,
+		&i.WorkspaceCwd,
+		&i.Kind,
+		&i.HandoffSourceSessionID,
+		&i.HandoffGoal,
+		&i.HandoffDraftPrompt,
+		&i.HandoffRelevantFiles,
+		&i.PermissionMode,
+		&i.LastSummaryAt,
+		&i.PlanFilePath,
+		&i.GoalText,
+		&i.GoalStatus,
+		&i.GoalTokenBudget,
+		&i.GoalTokensUsed,
+		&i.GoalTimeSeconds,
+		&i.GoalCreatedAt,
+		&i.GoalUpdatedAt,
+		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
@@ -586,7 +821,7 @@ const updateSessionPermissionMode = `-- name: UpdateSessionPermissionMode :one
 UPDATE sessions
 SET permission_mode = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type UpdateSessionPermissionModeParams struct {
@@ -629,6 +864,10 @@ func (q *Queries) UpdateSessionPermissionMode(ctx context.Context, arg UpdateSes
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
@@ -637,7 +876,7 @@ const updateSessionPlanFilePath = `-- name: UpdateSessionPlanFilePath :one
 UPDATE sessions
 SET plan_file_path = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type UpdateSessionPlanFilePathParams struct {
@@ -680,6 +919,10 @@ func (q *Queries) UpdateSessionPlanFilePath(ctx context.Context, arg UpdateSessi
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }
@@ -693,7 +936,7 @@ SET
     cost = cost + ?,
     updated_at = strftime('%s', 'now')
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, collaboration_mode, last_prompt_tokens, last_completion_tokens, workspace_cwd, kind, handoff_source_session_id, handoff_goal, handoff_draft_prompt, handoff_relevant_files, permission_mode, last_summary_at, plan_file_path, goal_text, goal_status, goal_token_budget, goal_tokens_used, goal_time_seconds, goal_created_at, goal_updated_at, goal_id, archived, pinned, inference_config, inference_revision
 `
 
 type UpdateSessionTitleAndUsageParams struct {
@@ -745,6 +988,10 @@ func (q *Queries) UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSess
 		&i.GoalCreatedAt,
 		&i.GoalUpdatedAt,
 		&i.GoalID,
+		&i.Archived,
+		&i.Pinned,
+		&i.InferenceConfig,
+		&i.InferenceRevision,
 	)
 	return i, err
 }

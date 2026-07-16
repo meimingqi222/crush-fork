@@ -135,14 +135,16 @@ func TestPrepareParams_PreviousResponseID_Validation(t *testing.T) {
 		require.Empty(t, warnings)
 	})
 
-	t.Run("rejects tool messages", func(t *testing.T) {
+	t.Run("allows tool result messages", func(t *testing.T) {
 		t.Parallel()
 
+		// function_call_output items are the incremental input for within-run
+		// chaining and are valid alongside previous_response_id.
 		_, _, err := lm.prepareParams(testCall(fantasy.Prompt{
 			testToolResultMessage("done"),
 			testTextMessage(fantasy.MessageRoleUser, "hello"),
 		}, opts))
-		require.EqualError(t, err, previousResponseIDHistoryError)
+		require.NoError(t, err)
 	})
 
 	t.Run("rejects without store", func(t *testing.T) {
@@ -217,7 +219,14 @@ func TestValidatePreviousResponseIDPrompt(t *testing.T) {
 				testToolResultMessage("done"),
 				testTextMessage(fantasy.MessageRoleUser, "follow up"),
 			},
-			wantErr: true,
+			// Tool results (function_call_output) are the incremental input for
+			// within-run chaining and are allowed alongside previous_response_id.
+		},
+		{
+			name: "tool results only",
+			prompt: fantasy.Prompt{
+				testToolResultMessage("tool output"),
+			},
 		},
 	}
 

@@ -199,6 +199,7 @@ const (
 	EventToolsListChanged
 	EventPromptsListChanged
 	EventResourcesListChanged
+	EventLogMessage
 )
 
 // Event represents an event in the MCP system
@@ -208,6 +209,16 @@ type Event struct {
 	State  State
 	Error  error
 	Counts Counts
+	Log    LogMessage
+}
+
+// LogMessage is the raw in-process MCP logging notification. Consumers must
+// redact and bound Data before exposing or retaining it outside this package.
+type LogMessage struct {
+	Timestamp time.Time
+	Level     string
+	Logger    string
+	Data      any
 }
 
 // Counts number of available tools, prompts, etc.
@@ -623,7 +634,16 @@ func createSession(ctx context.Context, cfg *config.ConfigStore, name string, m 
 			},
 			LoggingMessageHandler: func(ctx context.Context, req *mcp.LoggingMessageRequest) {
 				level := parseLevel(req.Params.Level)
-				slog.Log(ctx, level, "MCP log", "name", name, "logger", req.Params.Logger, "data", req.Params.Data)
+				broker.Publish(pubsub.UpdatedEvent, Event{
+					Type: EventLogMessage, Name: name,
+					Log: LogMessage{
+						Timestamp: time.Now(), Level: string(req.Params.Level),
+						Logger: req.Params.Logger, Data: req.Params.Data,
+					},
+				})
+				// Raw MCP log data may contain credentials. Structured GUI consumers
+				// receive it only through the bounded redaction boundary above.
+				slog.Log(ctx, level, "MCP log received", "name", name, "logger", req.Params.Logger)
 			},
 		},
 	)

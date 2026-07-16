@@ -3,28 +3,17 @@ package httpext
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )
-
-func wsOptsChainV2() ResponsesWebSocketOptions {
-	return ResponsesWebSocketOptions{
-		Enabled:  true,
-		V2:       true,
-		Chain:    true,
-		Fallback: ResponsesWebSocketFallbackOff,
-	}
-}
 
 func writeResponseCompleted(conn *websocket.Conn, id string) error {
 	completed := map[string]any{
@@ -111,83 +100,6 @@ func TestResponsesWebSocketPoolReusesConnectionAcrossTwoTurns(t *testing.T) {
 	}
 
 	require.Equal(t, int32(1), dialCount.Load(), "expected one WebSocket dial for two turns in the same session")
-}
-
-// Chained tool-loop requests should send only appended input items over the socket.
-func TestResponsesWebSocketChainTrimsIncrementalInputOnSameConnection(t *testing.T) {
-	t.Parallel()
-
-	upgrader := wsUpgrader()
-	var mu sync.Mutex
-	var payloads []map[string]any
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		require.NoError(t, err)
-
-		go func() {
-			defer conn.Close()
-			step := 0
-			for {
-				_, msg, err := conn.ReadMessage()
-				if err != nil {
-					return
-				}
-				var payload map[string]any
-				require.NoError(t, json.Unmarshal(msg, &payload))
-				mu.Lock()
-				payloads = append(payloads, payload)
-				mu.Unlock()
-				step++
-				id := fmt.Sprintf("resp_chain_%d", step)
-				_ = writeResponseCompleted(conn, id)
-			}
-		}()
-	}))
-	defer srv.Close()
-
-	pool := NewResponsesWebSocketPool()
-	client := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client(), pool, wsOptsChainV2(), nil)
-
-	ctx := WithResponsesWebSocketSession(context.Background(), "chain-session")
-	postURL := srv.URL + "/v1/responses"
-
-	item0 := map[string]any{"type": "message", "role": "user", "content": "hi"}
-	item1 := map[string]any{"type": "message", "role": "assistant", "content": "hello"}
-	item2 := map[string]any{"type": "message", "role": "tool", "content": "result"}
-
-	firstBody, err := json.Marshal(map[string]any{
-		"model":  "gpt-5",
-		"stream": true,
-		"input":  []any{item0, item1},
-	})
-	require.NoError(t, err)
-	drainStreamingResponse(t, client, postURL, string(firstBody), ctx)
-
-	secondBody, err := json.Marshal(map[string]any{
-		"model":  "gpt-5",
-		"stream": true,
-		"input":  []any{item0, item1, item2},
-	})
-	require.NoError(t, err)
-	drainStreamingResponse(t, client, postURL, string(secondBody), ctx)
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, payloads, 2)
-
-	firstInput, ok := payloads[0]["input"].([]any)
-	require.True(t, ok)
-	require.Len(t, firstInput, 2)
-	_, hasPrev := payloads[0]["previous_response_id"]
-	require.False(t, hasPrev)
-
-	require.Equal(t, "resp_chain_1", payloads[1]["previous_response_id"])
-	require.Equal(t, true, payloads[1]["store"])
-	secondInput, ok := payloads[1]["input"].([]any)
-	require.True(t, ok)
-	require.Len(t, secondInput, 1)
-	require.Equal(t, item2, secondInput[0])
 }
 
 // Session-scoped preferHTTP must apply to every stream using the same transport session.

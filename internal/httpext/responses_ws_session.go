@@ -43,8 +43,8 @@ func (s *ResponsesWebSocketTransportSession) PreferHTTP() *atomic.Bool {
 	return &s.preferHTTP
 }
 
-// ResetTurnState clears sticky routing and in-turn chain state without closing
-// the pooled WebSocket connection.
+// ResetTurnState clears sticky routing for a turn without closing the pooled
+// WebSocket connection.
 func (p *ResponsesWebSocketPool) ResetTurnState(wsURL url.URL, headers http.Header, sessionID string) {
 	if p == nil {
 		return
@@ -58,7 +58,5 @@ func (p *ResponsesWebSocketPool) ResetTurnState(wsURL url.URL, headers http.Head
 	}
 	entry.turnMu.Lock()
 	entry.turnState = ""
-	entry.lastResponseIDValue = ""
-	entry.lastChainedInputCount = 0
 	entry.turnMu.Unlock()
 }

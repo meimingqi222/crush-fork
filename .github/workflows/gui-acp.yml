@@ -1,0 +1,54 @@
+name: GUI ACP release gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reduced-race:
+    name: Reduced race (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Reduced race gate
+        run: go test -race ./internal/releasegate ./internal/acp/... ./internal/guiapi/... ./internal/sessionevent/... ./internal/terminal ./internal/blob ./internal/mcplifecycle ./internal/providerauth ./internal/idempotency ./internal/turn -count=1 -timeout=10m
+      - name: Agent and session race gate
+        run: go test -race ./internal/agent ./internal/session -count=1 -timeout=10m
+      - name: Deterministic fault gate
+        run: go test ./internal/releasegate -run '^TestGUIACPReleaseFaultMatrix$' -count=1 -timeout=5m
+
+  full-soak:
+    name: Full non-race soak
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Full 100-session soak and snapshot SLO
+        env:
+          CRUSH_GUI_SOAK_FULL: "1"
+        run: go test ./internal/releasegate -run '^TestGUIACP(ReleaseSoak|WarmSnapshotP95)$' -count=1 -timeout=20m -v
+      - name: Canonical performance benchmarks
+        run: go test ./internal/acp -run '^$' -bench 'Benchmark(ACPTextDelta|SessionSnapshot|SessionMessagePage|TerminalOutputCoalescing|LongSessionLoad|ConcurrentSessions)$' -benchmem -benchtime=1000x -count=1 -timeout=20m

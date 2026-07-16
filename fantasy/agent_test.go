@@ -1105,6 +1105,15 @@ func TestStopConditions_Integration(t *testing.T) {
 	})
 }
 
+func TestIsPreviousResponseNotFoundError(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, IsPreviousResponseNotFoundError(nil))
+	require.False(t, IsPreviousResponseNotFoundError(errors.New("some other error")))
+	require.True(t, IsPreviousResponseNotFoundError(errors.New("response error: ... (code: previous_response_not_found)")))
+	require.True(t, IsPreviousResponseNotFoundError(errors.New("Previous response with id resp_x not found")))
+}
+
 func TestPrepareStep(t *testing.T) {
 	t.Parallel()
 

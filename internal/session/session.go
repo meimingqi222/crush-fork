@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +18,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/zeebo/xxh3"
 )
+
+var (
+	ErrForkBoundaryNotFound = errors.New("fork boundary message not found")
+	ErrInferenceConflict    = errors.New("session inference revision conflict")
+)
+
+type InferenceOverrides struct {
+	Model            string   `json:"model,omitempty"`
+	Provider         string   `json:"provider,omitempty"`
+	MaxOutputTokens  *int64   `json:"maxOutputTokens,omitempty"`
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"topP,omitempty"`
+	TopK             *int64   `json:"topK,omitempty"`
+	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty"`
+	PresencePenalty  *float64 `json:"presencePenalty,omitempty"`
+	Think            *bool    `json:"think,omitempty"`
+}
+
+type EffectiveInference struct {
+	InferenceOverrides
+	Revision uint64 `json:"revision"`
+}
 
 type TodoStatus string
 
@@ -313,6 +336,10 @@ type Session struct {
 	Cost                   float64
 	Todos                  []Todo
 	EstimatedUsage         bool
+	Archived               bool
+	Pinned                 bool
+	Inference              InferenceOverrides
+	InferenceRevision      uint64
 	CreatedAt              int64
 	UpdatedAt              int64
 }
@@ -364,6 +391,16 @@ type Service interface {
 	CreateAgentToolSessionID(messageID, toolCallID string) string
 	ParseAgentToolSessionID(sessionID string) (messageID string, toolCallID string, ok bool)
 	IsAgentToolSession(sessionID string) bool
+}
+
+// MutationService extends the stable cross-application session contract with
+// desktop-only metadata mutations. Keeping these methods separate avoids
+// forcing unrelated session.Service mocks to implement GUI concerns.
+type MutationService interface {
+	Service
+	SetArchived(ctx context.Context, id string, archived bool) (Session, error)
+	SetPinned(ctx context.Context, id string, pinned bool) (Session, error)
+	UpdateInference(ctx context.Context, id string, expectedRevision uint64, overrides InferenceOverrides) (Session, error)
 }
 
 type service struct {
@@ -518,34 +555,6 @@ func (s *service) Fork(ctx context.Context, sessionID, messageID string) (Sessio
 		return Session{}, fmt.Errorf("loading source session: %w", err)
 	}
 
-	messages, err := s.q.ListMessagesBySession(ctx, sessionID)
-	if err != nil {
-		return Session{}, fmt.Errorf("loading source messages: %w", err)
-	}
-
-	idx := -1
-	for i, m := range messages {
-		if m.ID == messageID {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return Session{}, fmt.Errorf("message %s not found in session", messageID)
-	}
-
-	// Include the selected message and every message after it up to (but not
-	// including) the next user message. This captures the completed LLM turn
-	// that follows the selected user input.
-	end := idx + 1
-	for end < len(messages) {
-		if messages[end].Role == "user" {
-			break
-		}
-		end++
-	}
-	toCopy := messages[:end]
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Session{}, fmt.Errorf("beginning transaction: %w", err)
@@ -553,6 +562,38 @@ func (s *service) Fork(ctx context.Context, sessionID, messageID string) (Sessio
 	defer tx.Rollback() //nolint:errcheck
 
 	qtx := s.q.WithTx(tx)
+	var nextCreatedAt, nextRowID int64
+	hasNextBoundary := false
+	if messageID != "" {
+		var boundaryCreatedAt, boundaryRowID int64
+		err = tx.QueryRowContext(ctx, `
+			SELECT created_at, rowid
+			FROM messages
+			WHERE id = ? AND session_id = ?
+			LIMIT 1`, messageID, sessionID).Scan(&boundaryCreatedAt, &boundaryRowID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Session{}, fmt.Errorf("%w: %s", ErrForkBoundaryNotFound, messageID)
+		}
+		if err != nil {
+			return Session{}, fmt.Errorf("loading fork boundary: %w", err)
+		}
+		err = tx.QueryRowContext(ctx, `
+			SELECT created_at, rowid
+			FROM messages
+			WHERE session_id = ?
+			  AND role = 'user'
+			  AND (created_at > ? OR (created_at = ? AND rowid > ?))
+			ORDER BY created_at ASC, rowid ASC
+			LIMIT 1`, sessionID, boundaryCreatedAt, boundaryCreatedAt, boundaryRowID).Scan(&nextCreatedAt, &nextRowID)
+		switch {
+		case err == nil:
+			hasNextBoundary = true
+		case errors.Is(err, sql.ErrNoRows):
+			err = nil
+		default:
+			return Session{}, fmt.Errorf("loading next fork boundary: %w", err)
+		}
+	}
 
 	title := source.Title
 	if strings.TrimSpace(title) == "" {
@@ -562,13 +603,13 @@ func (s *service) Fork(ctx context.Context, sessionID, messageID string) (Sessio
 	}
 
 	dbSession, err := qtx.CreateSession(ctx, db.CreateSessionParams{
-		ID:              uuid.New().String(),
-		Title:           title,
-		WorkspaceCwd:    sql.NullString{String: source.WorkspaceCWD, Valid: source.WorkspaceCWD != ""},
-		CollaborationMode: string(source.CollaborationMode),
-		PermissionMode:    string(source.PermissionMode),
-		PlanFilePath:    source.PlanFilePath,
-		Kind:            string(KindNormal),
+		ID:                   uuid.New().String(),
+		Title:                title,
+		WorkspaceCwd:         sql.NullString{String: source.WorkspaceCWD, Valid: source.WorkspaceCWD != ""},
+		CollaborationMode:    string(source.CollaborationMode),
+		PermissionMode:       string(source.PermissionMode),
+		PlanFilePath:         source.PlanFilePath,
+		Kind:                 string(KindNormal),
 		HandoffGoal:          "",
 		HandoffDraftPrompt:   "",
 		HandoffRelevantFiles: "[]",
@@ -582,40 +623,35 @@ func (s *service) Fork(ctx context.Context, sessionID, messageID string) (Sessio
 		created_at, updated_at, finished_at,
 		input_tokens, output_tokens, reasoning_tokens,
 		cache_read_tokens, cache_write_tokens
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-
-	for _, m := range toCopy {
-		newID := uuid.New().String()
-		finishedAt := sql.NullInt64{}
-		if m.FinishedAt.Valid {
-			finishedAt = m.FinishedAt
-		}
-		if _, err := tx.ExecContext(ctx, insertCopy,
-			newID,
-			dbSession.ID,
-			m.Role,
-			m.Parts,
-			m.Model,
-			m.Provider,
-			m.IsSummaryMessage,
-			m.CreatedAt,
-			m.UpdatedAt,
-			finishedAt,
-			m.InputTokens,
-			m.OutputTokens,
-			m.ReasoningTokens,
-			m.CacheReadTokens,
-			m.CacheWriteTokens,
-		); err != nil {
-			return Session{}, fmt.Errorf("copying message %s: %w", m.ID, err)
-		}
+	)
+	SELECT
+		lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+		'-4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
+		substr('89ab', (random() & 3) + 1, 1) ||
+		substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+		?, role, parts, model, provider, is_summary_message,
+		created_at, updated_at, finished_at,
+		input_tokens, output_tokens, reasoning_tokens,
+		cache_read_tokens, cache_write_tokens
+	FROM messages
+	WHERE session_id = ?
+	  AND (? = 0 OR created_at < ? OR (created_at = ? AND rowid < ?))
+	ORDER BY created_at ASC, rowid ASC`
+	if _, err := tx.ExecContext(ctx, insertCopy,
+		dbSession.ID, sessionID, boolInt64(hasNextBoundary),
+		nextCreatedAt, nextCreatedAt, nextRowID,
+	); err != nil {
+		return Session{}, fmt.Errorf("copying fork messages: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return Session{}, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	session := s.fromDBItem(dbSession)
+	session, err := s.Get(ctx, dbSession.ID)
+	if err != nil {
+		return Session{}, fmt.Errorf("loading forked session: %w", err)
+	}
 	s.Publish(pubsub.CreatedEvent, session)
 	event.SessionCreated()
 	return session, nil
@@ -824,10 +860,64 @@ func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title stri
 // Rename updates only the title of a session without touching updated_at or
 // usage fields.
 func (s *service) Rename(ctx context.Context, id string, title string) error {
-	return s.q.RenameSession(ctx, db.RenameSessionParams{
+	dbSession, err := s.q.RenameSession(ctx, db.RenameSessionParams{
 		ID:    id,
 		Title: title,
 	})
+	if err != nil {
+		return err
+	}
+	s.Publish(pubsub.UpdatedEvent, s.fromDBItem(dbSession))
+	return nil
+}
+
+func (s *service) SetArchived(ctx context.Context, id string, archived bool) (Session, error) {
+	dbSession, err := s.q.SetSessionArchived(ctx, db.SetSessionArchivedParams{
+		ID:       id,
+		Archived: boolInt64(archived),
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	updated := s.fromDBItem(dbSession)
+	s.Publish(pubsub.UpdatedEvent, updated)
+	return updated, nil
+}
+
+func (s *service) SetPinned(ctx context.Context, id string, pinned bool) (Session, error) {
+	dbSession, err := s.q.SetSessionPinned(ctx, db.SetSessionPinnedParams{
+		ID:     id,
+		Pinned: boolInt64(pinned),
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	updated := s.fromDBItem(dbSession)
+	s.Publish(pubsub.UpdatedEvent, updated)
+	return updated, nil
+}
+
+func (s *service) UpdateInference(ctx context.Context, id string, expectedRevision uint64, overrides InferenceOverrides) (Session, error) {
+	raw, err := json.Marshal(overrides)
+	if err != nil {
+		return Session{}, err
+	}
+	dbSession, err := s.q.UpdateSessionInferenceConfig(ctx, db.UpdateSessionInferenceConfigParams{
+		ID:                id,
+		InferenceConfig:   string(raw),
+		InferenceRevision: int64(expectedRevision),
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, getErr := s.q.GetSessionByID(ctx, id); getErr == nil {
+			return Session{}, ErrInferenceConflict
+		}
+	}
+	if err != nil {
+		return Session{}, err
+	}
+	updated := s.fromDBItem(dbSession)
+	s.Publish(pubsub.UpdatedEvent, updated)
+	return updated, nil
 }
 
 func (s *service) List(ctx context.Context) ([]Session, error) {
@@ -863,6 +953,10 @@ func (s service) fromDBItem(item db.Session) Session {
 	if err != nil {
 		slog.Error("Failed to unmarshal handoff relevant files", "session_id", item.ID, "error", err)
 	}
+	inference := InferenceOverrides{}
+	if err := json.Unmarshal([]byte(item.InferenceConfig), &inference); err != nil {
+		slog.Error("Failed to unmarshal session inference config", "session_id", item.ID, "error", err)
+	}
 	return Session{
 		ID:                     item.ID,
 		ParentSessionID:        item.ParentSessionID.String,
@@ -894,6 +988,10 @@ func (s service) fromDBItem(item db.Session) Session {
 		SummaryMessageID:     item.SummaryMessageID.String,
 		Cost:                 item.Cost,
 		Todos:                todos,
+		Archived:             item.Archived != 0,
+		Pinned:               item.Pinned != 0,
+		Inference:            inference,
+		InferenceRevision:    uint64(max(item.InferenceRevision, 0)),
 		CreatedAt:            item.CreatedAt,
 		UpdatedAt:            item.UpdatedAt,
 	}
@@ -943,11 +1041,18 @@ func unmarshalStringSlice(data string) ([]string, error) {
 	return values, nil
 }
 
-func NewService(q *db.Queries, conn *sql.DB, defaultModes ...CollaborationMode) Service {
+func boolInt64(value bool) int64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func NewService(q *db.Queries, conn *sql.DB, defaultModes ...CollaborationMode) MutationService {
 	return NewServiceWithDeleteCallback(q, conn, nil, defaultModes...)
 }
 
-func NewServiceWithDeleteCallback(q *db.Queries, conn *sql.DB, onDeleteSession func(sessionID string), defaultModes ...CollaborationMode) Service {
+func NewServiceWithDeleteCallback(q *db.Queries, conn *sql.DB, onDeleteSession func(sessionID string), defaultModes ...CollaborationMode) MutationService {
 	broker := pubsub.NewBroker[Session]()
 	defaultMode := CollaborationModeDefault
 	if len(defaultModes) > 0 {

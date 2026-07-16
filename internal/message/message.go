@@ -22,13 +22,21 @@ type CreateMessageParams struct {
 	ActivatedDeferredTools []string
 }
 
+type PageCursor struct {
+	CreatedAt int64
+	ID        string
+}
+
 type Service interface {
 	pubsub.Subscriber[Message]
 	Create(ctx context.Context, sessionID string, params CreateMessageParams) (Message, error)
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
+	GetRetrySource(ctx context.Context, sessionID, messageID string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
 	ListPage(ctx context.Context, sessionID string, offset, limit int) ([]Message, error)
+	ListRecent(ctx context.Context, sessionID string, limit int) ([]Message, error)
+	ListBefore(ctx context.Context, sessionID string, before *PageCursor, limit int) ([]Message, error)
 	Count(ctx context.Context, sessionID string) (int64, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
@@ -156,6 +164,17 @@ func (s *service) Get(ctx context.Context, id string) (Message, error) {
 	return s.fromDBItem(dbMessage)
 }
 
+func (s *service) GetRetrySource(ctx context.Context, sessionID, messageID string) (Message, error) {
+	dbMessage, err := s.q.GetRetrySourceMessage(ctx, db.GetRetrySourceMessageParams{
+		MessageID: messageID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return Message{}, err
+	}
+	return s.fromDBItem(dbMessage)
+}
+
 func (s *service) List(ctx context.Context, sessionID string) ([]Message, error) {
 	start := time.Now()
 	dbMessages, err := s.q.ListMessagesBySession(ctx, sessionID)
@@ -186,6 +205,51 @@ func (s *service) ListPage(ctx context.Context, sessionID string, offset, limit 
 	messages := make([]Message, len(dbMessages))
 	for i, dbMessage := range dbMessages {
 		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+// ListRecent returns at most limit newest messages in chronological order.
+// The SQL query reads the indexed tail directly and does not scan history via
+// OFFSET.
+func (s *service) ListRecent(ctx context.Context, sessionID string, limit int) ([]Message, error) {
+	dbMessages, err := s.q.ListRecentMessagesBySession(ctx, db.ListRecentMessagesBySessionParams{
+		SessionID: sessionID,
+		Limit:     int64(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for index := range dbMessages {
+		messages[len(dbMessages)-1-index], err = s.fromDBItem(dbMessages[index])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+// ListBefore performs reverse-chronological keyset pagination. The composite
+// created_at/id boundary remains valid when newer rows are inserted or earlier
+// pages are deleted.
+func (s *service) ListBefore(ctx context.Context, sessionID string, before *PageCursor, limit int) ([]Message, error) {
+	params := db.ListMessagesBeforeParams{SessionID: sessionID, HasCursor: int64(0), Limit: int64(limit)}
+	if before != nil {
+		params.HasCursor = 1
+		params.BeforeCreatedAt = before.CreatedAt
+		params.BeforeID = before.ID
+	}
+	dbMessages, err := s.q.ListMessagesBefore(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for index := range dbMessages {
+		messages[index], err = s.fromDBItem(dbMessages[index])
 		if err != nil {
 			return nil, err
 		}

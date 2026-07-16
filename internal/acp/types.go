@@ -92,9 +92,10 @@ type ClientInfo struct {
 
 // InitializeParams is the request sent by the client to start a session.
 type InitializeParams struct {
-	ProtocolVersion    int                `json:"protocolVersion"`
-	ClientCapabilities ClientCapabilities `json:"clientCapabilities"`
-	ClientInfo         ClientInfo         `json:"clientInfo"`
+	ProtocolVersion    int                        `json:"protocolVersion"`
+	ClientCapabilities ClientCapabilities         `json:"clientCapabilities"`
+	ClientInfo         ClientInfo                 `json:"clientInfo"`
+	Experimental       map[string]json.RawMessage `json:"experimental,omitempty"`
 }
 
 // SessionCapabilities describes session-level features the agent supports.
@@ -137,6 +138,7 @@ type InitializeResult struct {
 	AgentCapabilities AgentCapabilities `json:"agentCapabilities"`
 	AgentInfo         AgentInfo         `json:"agentInfo"`
 	AuthMethods       []string          `json:"authMethods"`
+	Experimental      map[string]any    `json:"experimental,omitempty"`
 }
 
 // ---- Session setup ----
@@ -470,6 +472,52 @@ type Response struct {
 type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+// Error lets outgoing client errors retain their structured identity while
+// satisfying error. The wire fields remain unchanged.
+func (e *RPCError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("acp: rpc error %d: %s", e.Code, e.Message)
+}
+
+// ClientFSCode exposes the stable private error name without coupling the
+// clientfs package to ACP's wire representation.
+func (e *RPCError) ClientFSCode() string {
+	if e == nil {
+		return ""
+	}
+	if code := structuredRPCErrorCode(e.Data); code != "" {
+		return code
+	}
+	return e.Message
+}
+
+func structuredRPCErrorCode(data any) string {
+	switch value := data.(type) {
+	case map[string]any:
+		code, _ := value["code"].(string)
+		return code
+	case json.RawMessage:
+		var decoded struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(value, &decoded)
+		return decoded.Code
+	default:
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return ""
+		}
+		var decoded struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(payload, &decoded)
+		return decoded.Code
+	}
 }
 
 // Standard JSON-RPC error codes.

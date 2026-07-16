@@ -76,6 +76,8 @@ func (m *mockSessionAgent) IsQueuePaused(sessionID string) bool                 
 func (m *mockSessionAgent) PrioritizeQueuedPrompt(sessionID string, index int) bool {
 	return false
 }
+func (m *mockSessionAgent) EnqueueSteer(string, SessionAgentCall) bool { return false }
+func (m *mockSessionAgent) RemoveQueuedTurn(string, string) bool       { return false }
 
 func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions) error {
 	if m.summarizeErr != nil {

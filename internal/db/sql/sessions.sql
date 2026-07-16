@@ -136,11 +136,32 @@ WHERE id = ?
 RETURNING *;
 
 
--- name: RenameSession :exec
+-- name: RenameSession :one
 UPDATE sessions
 SET
     title = ?
-WHERE id = ?;
+WHERE id = ?
+RETURNING *;
+
+-- name: SetSessionArchived :one
+UPDATE sessions
+SET archived = ?
+WHERE id = ?
+RETURNING *;
+
+-- name: SetSessionPinned :one
+UPDATE sessions
+SET pinned = ?
+WHERE id = ?
+RETURNING *;
+
+-- name: UpdateSessionInferenceConfig :one
+UPDATE sessions
+SET
+    inference_config = ?,
+    inference_revision = inference_revision + 1
+WHERE id = ? AND inference_revision = ?
+RETURNING *;
 
 -- name: ListSessionsByParentID :many
 SELECT *

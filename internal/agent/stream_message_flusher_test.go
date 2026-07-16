@@ -7,8 +7,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/guimetrics"
 	"github.com/stretchr/testify/require"
 )
+
+type flushMetricRecorder struct {
+	observed atomic.Int32
+	outcome  atomic.Value
+}
+
+func (r *flushMetricRecorder) ObserveDuration(name guimetrics.Name, _ time.Duration, labels guimetrics.Labels) {
+	if name == guimetrics.SQLiteFlushDuration {
+		r.observed.Add(1)
+		r.outcome.Store(labels.Outcome)
+	}
+}
+
+func (*flushMetricRecorder) Add(guimetrics.Name, int64, guimetrics.Labels)      {}
+func (*flushMetricRecorder) SetGauge(guimetrics.Name, int64, guimetrics.Labels) {}
 
 func TestStreamMessageFlusherCoalescesFlushes(t *testing.T) {
 	t.Parallel()
@@ -72,4 +88,17 @@ func TestStreamMessageFlusherKeepsDirtyOnFlushError(t *testing.T) {
 
 	require.Error(t, f.FlushNow())
 	require.Equal(t, int32(2), flushes.Load())
+}
+
+func TestStreamMessageFlusherRecordsPersistenceDuration(t *testing.T) {
+	t.Parallel()
+
+	recorder := &flushMetricRecorder{}
+	ctx := guimetrics.WithRecorder(context.Background(), recorder)
+	f := newStreamMessageFlusher(ctx, func() error { return nil })
+	defer f.Stop()
+
+	require.NoError(t, f.FlushNow())
+	require.Equal(t, int32(1), recorder.observed.Load())
+	require.Equal(t, "success", recorder.outcome.Load())
 }

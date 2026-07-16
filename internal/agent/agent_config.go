@@ -42,6 +42,13 @@ func applyRuntimeConfig(call *SessionAgentCall, runtimeConfig sessionAgentRuntim
 	}
 }
 
+func effectiveRuntimeModel(defaultModel Model, runtimeConfig *sessionAgentRuntimeConfig) Model {
+	if runtimeConfig != nil && runtimeConfig.Model != nil {
+		return *runtimeConfig.Model
+	}
+	return defaultModel
+}
+
 func (a *sessionAgent) refreshCallConfigIfNeeded(ctx context.Context, call *SessionAgentCall) (*sessionAgentRuntimeConfig, error) {
 	if runtimeConfig, ok := ctx.Value(sessionAgentRuntimeConfigContextKey{}).(*sessionAgentRuntimeConfig); ok && runtimeConfig != nil {
 		applyRuntimeConfig(call, *runtimeConfig)

@@ -92,6 +92,10 @@ func (m *mockHistoryService) SearchMessages(ctx context.Context, params history.
 	return nil, nil
 }
 
+func (m *mockHistoryService) SearchMessagesPage(ctx context.Context, params history.SearchParams) ([]history.MessageSearchResult, error) {
+	return m.SearchMessages(ctx, params)
+}
+
 func (m *mockHistoryService) Delete(ctx context.Context, id string) error {
 	return nil
 }

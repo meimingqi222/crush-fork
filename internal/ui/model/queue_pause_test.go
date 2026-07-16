@@ -32,16 +32,20 @@ func (m *mockQueueCoordinator) Run(context.Context, string, string, ...message.A
 func (m *mockQueueCoordinator) Cancel(sessionID string) {
 	m.cancelSessions = append(m.cancelSessions, sessionID)
 }
-func (m *mockQueueCoordinator) CancelAll()                          {}
-func (m *mockQueueCoordinator) IsSessionBusy(string) bool           { return m.busy }
-func (m *mockQueueCoordinator) IsBusy() bool                        { return false }
-func (m *mockQueueCoordinator) QueuedPrompts(string) int            { return m.queue }
-func (m *mockQueueCoordinator) QueuedPromptsList(string) []string   { return nil }
-func (m *mockQueueCoordinator) RemoveQueuedPrompt(string, int) bool { return false }
-func (m *mockQueueCoordinator) ClearQueue(string)                   {}
-func (m *mockQueueCoordinator) PauseQueue(string)                   { m.paused = true }
-func (m *mockQueueCoordinator) ResumeQueue(string)                  { m.paused = false }
-func (m *mockQueueCoordinator) IsQueuePaused(string) bool           { return m.paused }
+func (m *mockQueueCoordinator) CancelAll()                           {}
+func (m *mockQueueCoordinator) IsSessionBusy(string) bool            { return m.busy }
+func (m *mockQueueCoordinator) IsBusy() bool                         { return false }
+func (m *mockQueueCoordinator) QueuedPrompts(string) int             { return m.queue }
+func (m *mockQueueCoordinator) QueuedPromptsList(string) []string    { return nil }
+func (m *mockQueueCoordinator) RemoveQueuedPrompt(string, int) bool  { return false }
+func (m *mockQueueCoordinator) RemoveQueuedTurn(string, string) bool { return false }
+func (m *mockQueueCoordinator) Steer(string, string, ...message.Attachment) bool {
+	return false
+}
+func (m *mockQueueCoordinator) ClearQueue(string)         {}
+func (m *mockQueueCoordinator) PauseQueue(string)         { m.paused = true }
+func (m *mockQueueCoordinator) ResumeQueue(string)        { m.paused = false }
+func (m *mockQueueCoordinator) IsQueuePaused(string) bool { return m.paused }
 func (m *mockQueueCoordinator) Summarize(context.Context, string, fantasy.ProviderOptions) error {
 	return nil
 }

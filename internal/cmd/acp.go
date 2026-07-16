@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/acp"
-	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/guiapi"
+	"github.com/charmbracelet/crush/internal/sessionevent"
 	"github.com/spf13/cobra"
 )
 
@@ -52,15 +53,39 @@ crush acp --cwd /path/to/project
 			appInstance.ToolRuntime,
 			appInstance.Timeline,
 			appInstance.Store(),
-			acp.MCPManagerFuncs{
-				ReconnectFn:     mcp.Reconnect,
-				DisableSingleFn: mcp.DisableSingle,
-			},
+			appInstance.GetMCPLifecycle(),
 		)
 
 		handler := acp.NewHandler(adapter)
 		defer handler.Close(context.Background())
+		guiService := guiapi.NewService(appInstance.SessionEvents)
+		guiService.SetBlobService(appInstance.GetBlobs())
+		guiService.SetTerminalServices(appInstance.GetTerminals(), appInstance.GetPermissions())
+		guiService.SetProviderAuthService(appInstance.GetProviderAuth())
+		guiService.SetMCPLifecycleService(appInstance.GetMCPLifecycle())
+		defer guiService.Close()
+		runtimeSource := guiapi.NewCoordinatorSnapshotSource(appInstance.GetCoordinator())
+		runtimeSource.SetTerminalSource(appInstance.GetTerminals())
+		runtimeSource.SetMCPSource(appInstance.GetMCPLifecycle())
+		guiService.SetSnapshotSource(sessionevent.NewSnapshotService(
+			appInstance.GetSessions(),
+			appInstance.GetMessages(),
+			runtimeSource,
+			appInstance.GetSessionEvents(),
+		))
+		guiService.SetSessionContentSources(
+			appInstance.GetSessions(),
+			appInstance.GetMessages(),
+			appInstance.History,
+		)
+		guiService.SetTurnServices(appInstance.Turns, appInstance.Idempotency)
+		guiService.SetSessionMutationServices(appInstance.GetSessionMutations(), appInstance)
+		guiService.SetInferenceResolver(appInstance.GetInferenceResolver())
+		handler.SetExperimentalExtension(guiService)
 		server := acp.NewServer(handler)
+		guiService.SetClientFSCaller(server)
+		server.SetExtensionRouter(guiService)
+		guiService.SetNotificationWriter(server)
 		handler.SetServer(server)
 
 		// Bridge permission requests to the ACP client. Without this, any tool

@@ -79,19 +79,18 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 
 	wsURL := toWebSocketURL(*req.URL)
 	headers := req.Header.Clone()
-	applyResponsesWebSocketBetaHeader(wsURL, headers, t.opts)
+	applyResponsesWebSocketBetaHeader(wsURL, headers)
 	if turnState := pooledTurnState(t.pool, wsURL, headers, responsesWebSocketSessionID(req.Context())); turnState != "" {
 		headers.Set(HeaderCodexTurnState, turnState)
 	}
 
 	requestPayload := buildWebSocketResponseCreate(payload)
-	inputLen := responsesInputLen(requestPayload["input"])
 	message, err := json.Marshal(requestPayload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal websocket request: %w", err)
 	}
 
-	entry, reused, err := t.pool.acquireConn(req.Context(), wsURL, headers, t.opts, t.preferHTTP)
+	entry, reused, err := t.pool.acquireConn(req.Context(), wsURL, headers, t.preferHTTP)
 	if err != nil {
 		if errors.Is(err, errWebSocketDisabled) || t.shouldFallbackToHTTP() {
 			if !errors.Is(err, errWebSocketDisabled) {
@@ -106,12 +105,6 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 			return base.RoundTrip(req)
 		}
 		return nil, err
-	}
-
-	applyResponsesWebSocketChain(requestPayload, entry, t.opts)
-	message, err = json.Marshal(requestPayload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal websocket request: %w", err)
 	}
 
 	sessionID := responsesWebSocketSessionID(req.Context())
@@ -166,7 +159,6 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 				return
 			}
 			if eventType == "response.completed" || eventType == "response.failed" || eventType == "response.incomplete" {
-				recordResponsesWebSocketChainState(entry, data, inputLen)
 				return
 			}
 		}
@@ -236,7 +228,7 @@ func buildWebSocketResponseCreate(payload map[string]any) map[string]any {
 	return requestPayload
 }
 
-func applyResponsesWebSocketBetaHeader(wsURL url.URL, headers http.Header, opts ResponsesWebSocketOptions) {
+func applyResponsesWebSocketBetaHeader(wsURL url.URL, headers http.Header) {
 	if headers.Get("OpenAI-Beta") != "" {
 		return
 	}
@@ -244,22 +236,17 @@ func applyResponsesWebSocketBetaHeader(wsURL url.URL, headers http.Header, opts 
 	if host != "api.openai.com" && !strings.HasSuffix(host, ".api.openai.com") {
 		return
 	}
-	if opts.V2 {
-		headers.Set("OpenAI-Beta", OpenAIBetaResponsesWSV2)
-		return
-	}
-	headers.Set("OpenAI-Beta", OpenAIBetaResponsesAPIV1)
+	headers.Set("OpenAI-Beta", OpenAIBetaResponsesWSV2)
 }
 
 func dialResponsesWebSocket(
 	ctx context.Context,
 	wsURL url.URL,
 	headers http.Header,
-	opts ResponsesWebSocketOptions,
 	turnState string,
 ) (*websocket.Conn, bool, error) {
 	h := headers.Clone()
-	applyResponsesWebSocketBetaHeader(wsURL, h, opts)
+	applyResponsesWebSocketBetaHeader(wsURL, h)
 	if turnState != "" {
 		h.Set(HeaderCodexTurnState, turnState)
 	}

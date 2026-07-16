@@ -209,4 +209,8 @@ type Session struct {
 	GoalCreatedAt          int64          `json:"goal_created_at"`
 	GoalUpdatedAt          int64          `json:"goal_updated_at"`
 	GoalID                 string         `json:"goal_id"`
+	Archived               int64          `json:"archived"`
+	Pinned                 int64          `json:"pinned"`
+	InferenceConfig        string         `json:"inference_config"`
+	InferenceRevision      int64          `json:"inference_revision"`
 }

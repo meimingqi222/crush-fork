@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/charmbracelet/crush/internal/sessionevent"
 )
 
 func (a *sessionAgent) Cancel(sessionID string) {
@@ -12,7 +14,13 @@ func (a *sessionAgent) Cancel(sessionID string) {
 	// fully completes (including error handling that may access the DB).
 	// The defer in processRequest will clean up the entry.
 	if cancel, ok := a.activeRequests.Get(sessionID); ok && cancel != nil {
+		turnID, _ := a.activeTurnIDs.Get(sessionID)
 		slog.Debug("Request cancellation initiated", "session_id", sessionID)
+		a.publishSessionEvent(context.Background(), sessionID, time.Now(), sessionevent.NewEvent{
+			Kind:     sessionevent.KindCancelAcknowledged,
+			Delivery: sessionevent.DeliveryReliable,
+			Payload:  sessionevent.TurnEvent{TurnID: turnID, Reason: "user_requested"},
+		})
 		cancel()
 	}
 
@@ -27,6 +35,34 @@ func (a *sessionAgent) Cancel(sessionID string) {
 		a.clearQueuedCalls(sessionID)
 	}
 	a.pausedQueues.Del(sessionID)
+}
+
+func (a *sessionAgent) EnqueueSteer(sessionID string, call SessionAgentCall) bool {
+	if !a.IsSessionBusy(sessionID) {
+		return false
+	}
+	call.SessionID = sessionID
+	call.JoinActiveRun = true
+	a.enqueueQueuedCall(sessionID, call)
+	return true
+}
+
+func (a *sessionAgent) RemoveQueuedTurn(sessionID, turnID string) bool {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	queuedCalls, ok := a.messageQueue.Get(sessionID)
+	if !ok {
+		return false
+	}
+	for index := range queuedCalls {
+		if queuedCalls[index].TurnID != turnID {
+			continue
+		}
+		updated := append(queuedCalls[:index:index], queuedCalls[index+1:]...)
+		a.setQueuedCallsLocked(sessionID, updated)
+		return true
+	}
+	return false
 }
 
 func (a *sessionAgent) RemoveQueuedPrompt(sessionID string, index int) bool {

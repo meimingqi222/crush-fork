@@ -416,6 +416,25 @@ func TestPrioritizeQueuedPromptInvalidIndexReturnsFalse(t *testing.T) {
 	require.False(t, a.PrioritizeQueuedPrompt(sess.ID, 5))
 }
 
+func TestRemoveQueuedTurnAndEnqueueSteerUseStableTurnIdentity(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := newQueueControlTestAgent(env)
+	sess, err := env.sessions.Create(t.Context(), "turn queue identity")
+	require.NoError(t, err)
+	a.activeRequests.Set(sess.ID, func() {})
+	t.Cleanup(func() { a.activeRequests.Del(sess.ID) })
+
+	require.True(t, a.EnqueueSteer(sess.ID, SessionAgentCall{TurnID: "steer-1", Prompt: "direction"}))
+	queue := a.queuedCallsSnapshot(sess.ID)
+	require.Len(t, queue, 1)
+	require.Equal(t, "steer-1", queue[0].TurnID)
+	require.True(t, queue[0].JoinActiveRun)
+	require.True(t, a.RemoveQueuedTurn(sess.ID, "steer-1"))
+	require.False(t, a.RemoveQueuedTurn(sess.ID, "steer-1"))
+}
+
 // TestSummarizeRejectsBusySessionWithoutInternalCompactionContext is a
 // regression test for the external Summarize entry point's busy guard: an
 // externally-triggered compaction request must still be rejected while the

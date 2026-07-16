@@ -26,11 +26,23 @@ func (m *mockMessageService) Get(context.Context, string) (message.Message, erro
 	return message.Message{}, nil
 }
 
+func (m *mockMessageService) GetRetrySource(context.Context, string, string) (message.Message, error) {
+	return message.Message{}, nil
+}
+
 func (m *mockMessageService) List(context.Context, string) ([]message.Message, error) {
 	return m.messages, m.err
 }
 
 func (m *mockMessageService) ListPage(context.Context, string, int, int) ([]message.Message, error) {
+	return m.messages, m.err
+}
+
+func (m *mockMessageService) ListRecent(context.Context, string, int) ([]message.Message, error) {
+	return m.messages, m.err
+}
+
+func (m *mockMessageService) ListBefore(context.Context, string, *message.PageCursor, int) ([]message.Message, error) {
 	return m.messages, m.err
 }
 

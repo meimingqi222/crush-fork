@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -40,6 +41,8 @@ type WriteResponseMetadata struct {
 	Diff      string `json:"diff"`
 	Additions int    `json:"additions"`
 	Removals  int    `json:"removals"`
+	SourceURI string `json:"source_uri,omitempty"`
+	Revision  string `json:"revision,omitempty"`
 }
 
 const WriteToolName = "write"
@@ -88,13 +91,13 @@ func NewWriteTool(
 			pathMu.Lock()
 			defer pathMu.Unlock()
 
-			fileInfo, err := os.Stat(filePath)
+			fileInfo, err := clientfs.Stat(ctx, filePath)
 			if err == nil {
 				if fileInfo.IsDir() {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s. Use the 'read' tool to list directory contents.", filePath)), nil
 				}
 
-				oldContent, readErr := os.ReadFile(filePath)
+				oldContent, readErr := clientfs.ReadFile(ctx, filePath)
 				if readErr == nil && string(oldContent) == params.Content {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("File %s already contains the exact content. No changes made.", filePath)), nil
 				}
@@ -104,7 +107,7 @@ func NewWriteTool(
 
 			oldContent := ""
 			if fileInfo != nil && !fileInfo.IsDir() {
-				oldBytes, readErr := os.ReadFile(filePath)
+				oldBytes, readErr := clientfs.ReadFile(ctx, filePath)
 				if readErr == nil {
 					oldContent = string(oldBytes)
 				}
@@ -139,11 +142,11 @@ func NewWriteTool(
 			}
 
 			dir := filepath.Dir(filePath)
-			if err = os.MkdirAll(dir, 0o755); err != nil {
+			if err = clientfs.MkdirAll(ctx, dir, 0o755); err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error creating directory: %w", err)
 			}
 
-			err = os.WriteFile(filePath, []byte(params.Content), 0o644)
+			err = clientfs.WriteFile(ctx, filePath, []byte(params.Content), 0o644)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error writing file: %w", err)
 			}
@@ -180,13 +183,16 @@ func NewWriteTool(
 			result := fmt.Sprintf("File successfully written: %s", filePath)
 			result = fmt.Sprintf("<result>\n%s\n</result>", result)
 			result += getDiagnostics(filePath, lspManager)
-			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result),
-				WriteResponseMetadata{
-					FilePath:  filePath,
-					Diff:      diff,
-					Additions: additions,
-					Removals:  removals,
-				},
-			), nil
+			metadata := WriteResponseMetadata{
+				FilePath:  filePath,
+				Diff:      diff,
+				Additions: additions,
+				Removals:  removals,
+			}
+			if current, ok := clientfs.MetadataFor(ctx, filePath); ok {
+				metadata.SourceURI = current.SourceURI
+				metadata.Revision = current.Revision
+			}
+			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 		})
 }

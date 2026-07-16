@@ -21,6 +21,7 @@ import (
 	"charm.land/fantasy"
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -68,6 +69,8 @@ type ReadResponseMetadata struct {
 	IsURL               bool             `json:"is_url,omitempty"`
 	TotalLines          int              `json:"total_lines,omitempty"`
 	StartLine           int              `json:"start_line,omitempty"`
+	SourceURI           string           `json:"source_uri,omitempty"`
+	Revision            string           `json:"revision,omitempty"`
 }
 
 const (
@@ -460,12 +463,12 @@ func handleFileRead(
 	// Check if file exists.
 	requestedFilePath := filePath
 	var recovery readPathRecovery
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := clientfs.Stat(ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if !isOutsideWorkDir {
 				if recovered, ok := recoverMissingReadPath(absWorkingDir, relPath); ok {
-					if recoveredInfo, statErr := os.Stat(recovered.FilePath); statErr == nil {
+					if recoveredInfo, statErr := clientfs.Stat(ctx, recovered.FilePath); statErr == nil {
 						filePath = recovered.FilePath
 						fileInfo = recoveredInfo
 						recovery = recovered
@@ -532,7 +535,7 @@ func handleFileRead(
 		if !GetSupportsImagesFromContext(ctx) {
 			vision := GetVisionServiceFromContext(ctx)
 			if vision != nil && vision.IsAvailable() {
-				imageData, readErr := os.ReadFile(filePath)
+				imageData, readErr := clientfs.ReadFile(ctx, filePath)
 				if readErr != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error reading image file: %w", readErr)
 				}
@@ -541,6 +544,7 @@ func handleFileRead(
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to describe image: %v", descErr)), nil
 				}
 				meta := ReadResponseMetadata{Path: filePath}
+				applyClientFSReadMetadata(ctx, filePath, &meta)
 				meta.applyRecovery(recovery)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(desc), meta), nil
 			}
@@ -548,7 +552,7 @@ func handleFileRead(
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
 		}
 
-		imageData, readErr := os.ReadFile(filePath)
+		imageData, readErr := clientfs.ReadFile(ctx, filePath)
 		if readErr != nil {
 			return fantasy.ToolResponse{}, fmt.Errorf("error reading image file: %w", readErr)
 		}
@@ -567,6 +571,7 @@ func handleFileRead(
 		}
 
 		meta := ReadResponseMetadata{Path: filePath}
+		applyClientFSReadMetadata(ctx, filePath, &meta)
 		meta.applyRecovery(recovery)
 		return fantasy.WithResponseMetadata(fantasy.NewImageResponse(result.Data, result.MimeType), meta), nil
 	}
@@ -574,7 +579,7 @@ func handleFileRead(
 	// Read the file content.
 	var readResult textReadResult
 	if sessionID != "" {
-		allLines, rErr := readAllFileLines(filePath)
+		allLines, rErr := readAllFileLinesContext(ctx, filePath)
 		if rErr != nil {
 			return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", rErr)
 		}
@@ -656,6 +661,7 @@ func handleFileRead(
 		Hashline:  useHashline,
 		StartLine: readOffset + 1,
 	}
+	applyClientFSReadMetadata(ctx, filePath, &meta)
 	if readResult.TotalKnown {
 		meta.TotalLines = readResult.Total
 	}
@@ -1255,6 +1261,33 @@ func readAllFileLines(filePath string) ([]string, error) {
 		lines = append(lines, scanner.Text())
 	}
 	return lines, scanner.Err()
+}
+
+func readAllFileLinesContext(ctx context.Context, filePath string) ([]string, error) {
+	if _, ok := clientfs.FromContext(ctx); !ok {
+		return readAllFileLines(filePath)
+	}
+	data, err := clientfs.ReadFile(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(data)
+	var lines []string
+	scanner := NewLineScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines, scanner.Err()
+}
+
+func applyClientFSReadMetadata(ctx context.Context, path string, metadata *ReadResponseMetadata) {
+	if metadata == nil {
+		return
+	}
+	if current, ok := clientfs.MetadataFor(ctx, path); ok {
+		metadata.SourceURI = current.SourceURI
+		metadata.Revision = current.Revision
+	}
 }
 
 func extractReadResultFromLines(allLines []string, offset, limit int) (textReadResult, error) {

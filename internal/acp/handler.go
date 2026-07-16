@@ -20,7 +20,10 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/guimetrics"
+	"github.com/charmbracelet/crush/internal/mcplifecycle"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -49,20 +52,23 @@ type Handler struct {
 	activeToolParams map[string]any
 	clientCaps       ClientCapabilities
 
-	mcpLifecycleMu  sync.Mutex
-	sessionMCP      map[string][]string
-	dynamicMCP      map[string]string
-	knownDynamicMCP map[string]struct{}
-	mcpRevision     map[string]uint64
-	mcpGeneration   uint64
-	mcpInstanceID   string
+	mcpOwner string
+
+	experimental ExperimentalExtension
 }
 
-// MCPManager is the subset of the MCP manager the ACP handler needs to
-// connect and disconnect session-scoped MCP servers supplied by clients.
-type MCPManager interface {
-	Reconnect(ctx context.Context, cfg *config.ConfigStore, name string) error
-	DisableSingle(cfg *config.ConfigStore, name string) error
+// ExperimentalExtension augments initialize without adding private methods to
+// the standard ACP Handler.
+type ExperimentalExtension interface {
+	ExperimentalCapabilities() map[string]any
+	NegotiateExperimental(map[string]json.RawMessage) *RPCError
+}
+
+// MCPLifecycle is the shared asynchronous root-session MCP capability service.
+type MCPLifecycle interface {
+	ReplaceAsync(string, string, []mcplifecycle.ServerConfig) error
+	Access(string) *mcplifecycle.Access
+	CloseOwner(context.Context, string)
 }
 
 // App is the subset of app.App the ACP handler needs.
@@ -74,7 +80,7 @@ type App interface {
 	GetPermissions() permission.Service
 	GetToolRuntime() toolruntime.Service
 	GetTimeline() timeline.Service
-	GetMCPManager() MCPManager
+	GetMCPLifecycle() MCPLifecycle
 }
 
 // NewHandler constructs a Handler backed by the given App.
@@ -84,11 +90,7 @@ func NewHandler(app App) *Handler {
 		cancels:          make(map[string]*cancelEntry),
 		sessionCWD:       make(map[string]string),
 		activeToolParams: make(map[string]any),
-		sessionMCP:       make(map[string][]string),
-		dynamicMCP:       make(map[string]string),
-		knownDynamicMCP:  make(map[string]struct{}),
-		mcpRevision:      make(map[string]uint64),
-		mcpInstanceID:    uuid.NewString(),
+		mcpOwner:         uuid.NewString(),
 	}
 }
 
@@ -124,6 +126,12 @@ func (h *Handler) SetServer(s *Server) {
 	h.server = s
 }
 
+// SetExperimentalExtension installs connection-scoped capability negotiation.
+// It must be called before Serve starts.
+func (h *Handler) SetExperimentalExtension(extension ExperimentalExtension) {
+	h.experimental = extension
+}
+
 // ClientCapabilities returns the capabilities advertised by the connected
 // client during initialize. Returns the zero value before initialize is
 // called. Smaller features (e.g. image-block fallbacks) can consult these to
@@ -140,139 +148,22 @@ func (h *Handler) setClientCapabilities(caps ClientCapabilities) {
 	h.mu.Unlock()
 }
 
-// connectSessionMCP replaces the session's ephemeral MCP connections. Global
-// transport state is retained by the MCP manager, while visibility is
-// enforced by the access scope installed on each ACP prompt.
-func (h *Handler) connectSessionMCP(ctx context.Context, sessionID string, servers []MCPServerConfig) {
-	h.mcpLifecycleMu.Lock()
-	defer h.mcpLifecycleMu.Unlock()
-
-	mgr := h.app.GetMCPManager()
-	cfg := h.app.GetConfig()
-	if mgr == nil || cfg == nil {
-		return
+// replaceSessionMCP schedules root-session MCP replacement without waiting for
+// transport startup. The shared service owns generation, tombstones and access.
+func (h *Handler) replaceSessionMCP(sessionID string, servers []MCPServerConfig) error {
+	lifecycle := h.app.GetMCPLifecycle()
+	if lifecycle == nil {
+		return nil
 	}
-	h.disconnectSessionMCPLocked(ctx, sessionID)
-	if len(servers) == 0 {
-		return
+	configs := make([]mcplifecycle.ServerConfig, 0, len(servers))
+	for _, server := range servers {
+		configs = append(configs, mcplifecycle.ServerConfig{
+			Name: server.Name, Config: acpMCPConfigToConfig(server),
+		})
 	}
-
-	names := make([]string, 0, len(servers))
-	seen := make(map[string]struct{}, len(servers))
-	for _, s := range servers {
-		name := strings.TrimSpace(s.Name)
-		if name == "" {
-			slog.Warn("ACP: skipping session MCP server with empty name")
-			continue
-		}
-		if _, duplicate := seen[name]; duplicate {
-			slog.Warn("ACP: skipping duplicate session MCP server", "name", s.Name)
-			continue
-		}
-		seen[name] = struct{}{}
-		// The manager and ConfigStore are process-global. Namespace client
-		// registrations to avoid configured-server and cross-session collisions.
-		clientName := name
-		for {
-			h.mcpGeneration++
-			name = sessionMCPName(h.mcpInstanceID, sessionID, clientName, h.mcpGeneration)
-			if _, exists := cfg.Config().MCP[name]; !exists {
-				break
-			}
-		}
-		h.mu.Lock()
-		h.knownDynamicMCP[name] = struct{}{}
-		h.mu.Unlock()
-		agenttools.MarkMCPServerScoped(name)
-		mcpCfg := acpMCPConfigToConfig(s)
-		cfg.AddMCP(name, mcpCfg)
-		if err := mgr.Reconnect(ctx, cfg, name); err != nil {
-			slog.Warn("ACP: failed to connect session MCP server", "name", name, "err", err)
-			cfg.RemoveMCP(name)
-			continue
-		}
-		names = append(names, name)
-		h.mu.Lock()
-		h.dynamicMCP[name] = sessionID
-		h.mu.Unlock()
-	}
-
-	h.mu.Lock()
-	if len(names) == 0 {
-		delete(h.sessionMCP, sessionID)
-	} else {
-		h.sessionMCP[sessionID] = names
-	}
-	h.mcpRevision[sessionID]++
-	h.mu.Unlock()
+	return lifecycle.ReplaceAsync(h.mcpOwner, sessionID, configs)
 }
 
-func sessionMCPName(instanceID, sessionID, name string, generation uint64) string {
-	sum := sha256.Sum256([]byte(sessionID))
-	return fmt.Sprintf("acp-%s-%x-%d-%s", instanceID, sum[:6], generation, name)
-}
-
-// disconnectSessionMCP disconnects and removes all MCP servers registered for
-// the given session. Safe to call when no servers are registered.
-func (h *Handler) disconnectSessionMCP(ctx context.Context, sessionID string) {
-	h.mcpLifecycleMu.Lock()
-	defer h.mcpLifecycleMu.Unlock()
-	h.disconnectSessionMCPLocked(ctx, sessionID)
-}
-
-func (h *Handler) disconnectSessionMCPLocked(ctx context.Context, sessionID string) {
-	mgr := h.app.GetMCPManager()
-	cfg := h.app.GetConfig()
-
-	h.mu.Lock()
-	names := h.sessionMCP[sessionID]
-	delete(h.sessionMCP, sessionID)
-	for _, name := range names {
-		delete(h.dynamicMCP, name)
-	}
-	h.mcpRevision[sessionID]++
-	h.mu.Unlock()
-
-	if len(names) == 0 {
-		return
-	}
-	for _, name := range names {
-		if mgr != nil {
-			if err := mgr.DisableSingle(cfg, name); err != nil {
-				slog.Warn("ACP: failed to disconnect session MCP server", "name", name, "err", err)
-			}
-		}
-		if cfg != nil {
-			cfg.RemoveMCP(name)
-		}
-	}
-}
-
-type sessionMCPAccess struct {
-	handler   *Handler
-	sessionID string
-}
-
-func (a sessionMCPAccess) AllowsMCPServer(name string) bool {
-	a.handler.mu.RLock()
-	defer a.handler.mu.RUnlock()
-	if _, dynamic := a.handler.knownDynamicMCP[name]; !dynamic {
-		return true
-	}
-	return a.handler.dynamicMCP[name] == a.sessionID
-}
-
-func (a sessionMCPAccess) MCPServerRevision() uint64 {
-	a.handler.mu.RLock()
-	defer a.handler.mu.RUnlock()
-	return a.handler.mcpRevision[a.sessionID]
-}
-
-func (a sessionMCPAccess) MCPServerScope() string {
-	return a.sessionID
-}
-
-// acpMCPConfigToConfig converts an ACP MCPServerConfig to a config.MCPConfig.
 func acpMCPConfigToConfig(s MCPServerConfig) config.MCPConfig {
 	typ := config.MCPType(strings.ToLower(strings.TrimSpace(s.Type)))
 	if typ == "" {
@@ -296,27 +187,46 @@ func acpMCPConfigToConfig(s MCPServerConfig) config.MCPConfig {
 	}
 }
 
-// Close disconnects all MCP servers registered by ACP sessions.
+// Close cancels prompts and revokes every MCP session owned by this connection.
 func (h *Handler) Close(ctx context.Context) {
-	h.mcpLifecycleMu.Lock()
-	defer h.mcpLifecycleMu.Unlock()
-
 	h.mu.Lock()
 	for _, entry := range h.cancels {
 		entry.cancel()
 	}
-	sessionIDs := make([]string, 0, len(h.sessionMCP))
-	for sessionID := range h.sessionMCP {
-		sessionIDs = append(sessionIDs, sessionID)
-	}
+	clear(h.cancels)
+	activePromptCount := len(h.cancels)
 	h.mu.Unlock()
-	for _, sessionID := range sessionIDs {
-		h.disconnectSessionMCPLocked(ctx, sessionID)
+	recordActivePromptCount(ctx, activePromptCount)
+	if lifecycle := h.app.GetMCPLifecycle(); lifecycle != nil {
+		lifecycle.CloseOwner(ctx, h.mcpOwner)
 	}
 }
 
+func recordActivePromptCount(ctx context.Context, count int) {
+	guimetrics.FromContext(ctx).SetGauge(
+		guimetrics.ActivePromptCount,
+		int64(count),
+		guimetrics.Labels{},
+	)
+}
+
 // Handle dispatches an incoming request.
-func (h *Handler) Handle(ctx context.Context, req *Request) (any, *RPCError) {
+func (h *Handler) Handle(ctx context.Context, req *Request) (result any, rpcErr *RPCError) {
+	started := time.Now()
+	method := metricMethod(req.Method)
+	defer func() {
+		outcome := "success"
+		if rpcErr != nil {
+			outcome = "error"
+		}
+		labels := guimetrics.Labels{Method: method, Outcome: outcome, Transport: TransportName(ctx)}
+		recorder := guimetrics.FromContext(ctx)
+		recorder.ObserveDuration(guimetrics.ACPRequestDuration, time.Since(started), labels)
+		if method == "session/load" {
+			recorder.ObserveDuration(guimetrics.SessionLoadDuration, time.Since(started), labels)
+		}
+	}()
+
 	switch req.Method {
 	case "initialize":
 		return h.handleInitialize(ctx, req)
@@ -339,6 +249,17 @@ func (h *Handler) Handle(ctx context.Context, req *Request) (any, *RPCError) {
 	}
 }
 
+func metricMethod(method string) string {
+	switch method {
+	case "initialize", "session/new", "session/load", "session/list",
+		"session/prompt", "session/cancel", "session/set_config_option",
+		"session/set_mode":
+		return method
+	default:
+		return "other"
+	}
+}
+
 // handleInitialize processes the initialize handshake.
 func (h *Handler) handleInitialize(_ context.Context, req *Request) (any, *RPCError) {
 	var params InitializeParams
@@ -352,8 +273,13 @@ func (h *Handler) handleInitialize(_ context.Context, req *Request) (any, *RPCEr
 	// indirection for unsaved buffers) can consult them later without a
 	// deep refactor now.
 	h.setClientCapabilities(params.ClientCapabilities)
+	if h.experimental != nil {
+		if rpcErr := h.experimental.NegotiateExperimental(params.Experimental); rpcErr != nil {
+			return nil, rpcErr
+		}
+	}
 
-	return InitializeResult{
+	result := InitializeResult{
 		ProtocolVersion: ProtocolVersion,
 		AgentCapabilities: AgentCapabilities{
 			LoadSession: true,
@@ -375,7 +301,11 @@ func (h *Handler) handleInitialize(_ context.Context, req *Request) (any, *RPCEr
 			Version: version.Version,
 		},
 		AuthMethods: []string{},
-	}, nil
+	}
+	if h.experimental != nil {
+		result.Experimental = h.experimental.ExperimentalCapabilities()
+	}
+	return result, nil
 }
 
 // handleSessionNew creates a new session.
@@ -399,7 +329,9 @@ func (h *Handler) handleSessionNew(ctx context.Context, req *Request) (any, *RPC
 	}
 
 	// Connect any client-supplied session-scoped MCP servers.
-	h.connectSessionMCP(ctx, sess.ID, params.MCPServers)
+	if err := h.replaceSessionMCP(sess.ID, params.MCPServers); err != nil {
+		return nil, &RPCError{Code: CodeInternalError, Message: "failed to schedule session MCP lifecycle"}
+	}
 
 	// Use the internal session ID as the ACP session ID for simplicity.
 	slog.Info("ACP: created session", "session_id", sess.ID)
@@ -434,7 +366,9 @@ func (h *Handler) handleSessionLoad(ctx context.Context, req *Request) (any, *RP
 	}
 
 	// Connect any client-supplied session-scoped MCP servers.
-	h.connectSessionMCP(ctx, sess.ID, params.MCPServers)
+	if err := h.replaceSessionMCP(sess.ID, params.MCPServers); err != nil {
+		return nil, &RPCError{Code: CodeInternalError, Message: "failed to schedule session MCP lifecycle"}
+	}
 
 	h.replayHistory(ctx, sess.ID)
 
@@ -536,7 +470,20 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 
 	// Wrap context with cancellation so session/cancel can stop the run.
 	runCtx, cancel := context.WithCancel(ctx)
-	runCtx = agenttools.WithMCPServerAccess(runCtx, sessionMCPAccess{handler: h, sessionID: params.SessionID})
+	if lifecycle := h.app.GetMCPLifecycle(); lifecycle != nil {
+		runCtx = agenttools.WithMCPServerAccess(runCtx, lifecycle.Access(params.SessionID))
+	}
+	if provider, ok := h.experimental.(interface {
+		ClientFSForSession(string, string) *clientfs.Scope
+	}); ok {
+		if sess, getErr := h.app.GetSessions().Get(runCtx, params.SessionID); getErr == nil {
+			workspace := sess.WorkspaceCWD
+			if workspace == "" && h.app.GetConfig() != nil {
+				workspace = h.app.GetConfig().WorkingDir()
+			}
+			runCtx = clientfs.WithScope(runCtx, provider.ClientFSForSession(params.SessionID, workspace))
+		}
+	}
 	entry := &cancelEntry{cancel: cancel}
 	h.mu.Lock()
 	// Cancel any previous prompt for this session before overwriting.
@@ -544,7 +491,9 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 		oldEntry.cancel()
 	}
 	h.cancels[params.SessionID] = entry
+	activePromptCount := len(h.cancels)
 	h.mu.Unlock()
+	recordActivePromptCount(ctx, activePromptCount)
 	defer func() {
 		cancel()
 		h.mu.Lock()
@@ -554,7 +503,9 @@ func (h *Handler) handleSessionPrompt(ctx context.Context, req *Request) (any, *
 		if h.cancels[params.SessionID] == entry {
 			delete(h.cancels, params.SessionID)
 		}
+		activePromptCount := len(h.cancels)
 		h.mu.Unlock()
+		recordActivePromptCount(ctx, activePromptCount)
 	}()
 
 	// Track the last-known text length per message for streaming.
@@ -990,6 +941,7 @@ func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult, sessionID, 
 		Content:          content,
 		ParentToolCallID: parentTCID,
 		Locations:        h.getToolLocations(tr.Name, inputParams),
+		ClientMetadata:   clientFSClientMetadata(tr.Metadata),
 	}
 	h.deleteToolParams(tr.ToolCallID)
 	if hasSubtaskResult {
@@ -1009,6 +961,51 @@ func (h *Handler) sessionUpdateFromToolResult(tr message.ToolResult, sessionID, 
 		}
 	}
 	return update
+}
+
+func clientFSClientMetadata(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	type fileMetadata struct {
+		Path      string `json:"path"`
+		FilePath  string `json:"file_path"`
+		SourceURI string `json:"source_uri"`
+		Revision  string `json:"revision"`
+	}
+	var values []fileMetadata
+	if strings.HasPrefix(raw, "[") {
+		if json.Unmarshal([]byte(raw), &values) != nil {
+			return nil
+		}
+	} else {
+		var value fileMetadata
+		if json.Unmarshal([]byte(raw), &value) != nil {
+			return nil
+		}
+		values = []fileMetadata{value}
+	}
+	if len(values) > 50 {
+		values = values[:50]
+	}
+	files := make([]map[string]string, 0, len(values))
+	for _, value := range values {
+		if value.SourceURI == "" || value.Revision == "" {
+			continue
+		}
+		path := value.Path
+		if path == "" {
+			path = value.FilePath
+		}
+		files = append(files, map[string]string{
+			"path": path, "sourceUri": value.SourceURI, "revision": value.Revision,
+		})
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	return map[string]any{"clientFS": map[string]any{"files": files}}
 }
 
 // handleSessionCancel cancels a running prompt turn.

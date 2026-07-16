@@ -259,23 +259,21 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			headers[k] = resolved
 		}
 		prepared := ProviderConfig{
-			ID:                 string(p.ID),
-			Name:               p.Name,
-			BaseURL:            p.APIEndpoint,
-			APIKey:             p.APIKey,
-			APIKeyTemplate:     p.APIKey, // Store original template for re-resolution
-			OAuthToken:         config.OAuthToken,
-			Type:               p.Type,
-			Disable:            config.Disable,
-			SystemPromptPrefix: config.SystemPromptPrefix,
-			ExtraHeaders:       headers,
-			ExtraBody:          config.ExtraBody,
-			ExtraParams:        make(map[string]string),
+			ID:                         string(p.ID),
+			Name:                       p.Name,
+			BaseURL:                    p.APIEndpoint,
+			APIKey:                     p.APIKey,
+			APIKeyTemplate:             p.APIKey, // Store original template for re-resolution
+			OAuthToken:                 config.OAuthToken,
+			Type:                       p.Type,
+			Disable:                    config.Disable,
+			SystemPromptPrefix:         config.SystemPromptPrefix,
+			ExtraHeaders:               headers,
+			ExtraBody:                  config.ExtraBody,
+			ExtraParams:                make(map[string]string),
 			ResponsesWebSocket:         config.ResponsesWebSocket,
-			ResponsesWebSocketV2:       config.ResponsesWebSocketV2,
-			ResponsesWebSocketFallback:   config.ResponsesWebSocketFallback,
-			ResponsesWebSocketPrewarm:    config.ResponsesWebSocketPrewarm,
-			Models:             providerModels,
+			ResponsesWebSocketFallback: config.ResponsesWebSocketFallback,
+			Models:                     providerModels,
 		}
 
 		switch {

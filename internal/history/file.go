@@ -38,6 +38,7 @@ type Service interface {
 	ListBySession(ctx context.Context, sessionID string) ([]File, error)
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	SearchMessages(ctx context.Context, params SearchParams) ([]MessageSearchResult, error)
+	SearchMessagesPage(ctx context.Context, params SearchParams) ([]MessageSearchResult, error)
 	Delete(ctx context.Context, id string) error
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
 }

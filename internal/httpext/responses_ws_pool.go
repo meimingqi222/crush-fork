@@ -28,13 +28,11 @@ func NewResponsesWebSocketPool() *ResponsesWebSocketPool {
 }
 
 type pooledWebSocketConn struct {
-	conn                *websocket.Conn
-	turnState           string
-	lastResponseIDValue string
-	lastChainedInputCount int
-	sessionID           string
-	turnMu              sync.Mutex
-	streamMu            sync.Mutex
+	conn      *websocket.Conn
+	turnState string
+	sessionID string
+	turnMu    sync.Mutex
+	streamMu  sync.Mutex
 }
 
 func sortedHeaderKeys(headers http.Header) []string {
@@ -65,11 +63,10 @@ func (p *ResponsesWebSocketPool) acquireConn(
 	ctx context.Context,
 	wsURL url.URL,
 	headers http.Header,
-	opts ResponsesWebSocketOptions,
 	preferHTTP *atomic.Bool,
 ) (*pooledWebSocketConn, bool, error) {
 	if p == nil {
-		conn, _, err := dialResponsesWebSocket(ctx, wsURL, headers, opts, "")
+		conn, _, err := dialResponsesWebSocket(ctx, wsURL, headers, "")
 		if err != nil {
 			return nil, false, err
 		}
@@ -91,7 +88,7 @@ func (p *ResponsesWebSocketPool) acquireConn(
 	}
 	p.mu.Unlock()
 
-	conn, _, err := dialResponsesWebSocket(ctx, wsURL, headers, opts, "")
+	conn, _, err := dialResponsesWebSocket(ctx, wsURL, headers, "")
 	if err != nil {
 		return nil, false, err
 	}
@@ -121,33 +118,6 @@ func (p *ResponsesWebSocketPool) invalidate(wsURL url.URL, headers http.Header, 
 		}
 		delete(p.conns, key)
 	}
-}
-
-func (entry *pooledWebSocketConn) setLastChainInputLen(n int) {
-	entry.turnMu.Lock()
-	entry.lastChainedInputCount = n
-	entry.turnMu.Unlock()
-}
-
-func (entry *pooledWebSocketConn) lastChainInputLen() int {
-	entry.turnMu.Lock()
-	defer entry.turnMu.Unlock()
-	return entry.lastChainedInputCount
-}
-
-func (entry *pooledWebSocketConn) setLastResponseID(value string) {
-	if value == "" {
-		return
-	}
-	entry.turnMu.Lock()
-	entry.lastResponseIDValue = value
-	entry.turnMu.Unlock()
-}
-
-func (entry *pooledWebSocketConn) lastResponseID() string {
-	entry.turnMu.Lock()
-	defer entry.turnMu.Unlock()
-	return entry.lastResponseIDValue
 }
 
 func (entry *pooledWebSocketConn) setTurnState(value string) {

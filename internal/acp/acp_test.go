@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -20,8 +21,10 @@ import (
 	"github.com/charmbracelet/crush/internal/acp"
 	"github.com/charmbracelet/crush/internal/agent"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/log"
+	"github.com/charmbracelet/crush/internal/mcplifecycle"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -204,6 +207,10 @@ func (f *fakeMessageService) Get(_ context.Context, _ string) (message.Message, 
 	return message.Message{}, nil
 }
 
+func (f *fakeMessageService) GetRetrySource(_ context.Context, _, _ string) (message.Message, error) {
+	return message.Message{}, nil
+}
+
 func (f *fakeMessageService) List(_ context.Context, sessionID string) ([]message.Message, error) {
 	return f.lists[sessionID], nil
 }
@@ -222,19 +229,33 @@ func (f *fakeMessageService) ListPage(_ context.Context, _ string, _, _ int) ([]
 	return nil, nil
 }
 
+func (f *fakeMessageService) ListRecent(_ context.Context, _ string, _ int) ([]message.Message, error) {
+	return nil, nil
+}
+
+func (f *fakeMessageService) ListBefore(_ context.Context, _ string, _ *message.PageCursor, _ int) ([]message.Message, error) {
+	return nil, nil
+}
+
 type fakeCoordinator struct {
-	mu          sync.Mutex
-	runResult   *fantasy.AgentResult
-	runErr      error
-	lastPrompt  string
-	attachments []message.Attachment
-	mcpProbes   []string
-	mcpAllowed  map[string]bool
-	sessionSvc  *fakeSessionService
-	messageSvc  *fakeMessageService
-	runtimeSvc  toolruntime.Service
-	timelineSvc timeline.Service
-	sessions    map[string]session.Session
+	mu            sync.Mutex
+	runResult     *fantasy.AgentResult
+	runErr        error
+	lastPrompt    string
+	attachments   []message.Attachment
+	mcpProbes     []string
+	mcpAllowed    map[string]bool
+	clientFSScope bool
+	sessionSvc    *fakeSessionService
+	messageSvc    *fakeMessageService
+	runtimeSvc    toolruntime.Service
+	timelineSvc   timeline.Service
+	sessions      map[string]session.Session
+}
+
+func (f *fakeCoordinator) RemoveQueuedTurn(string, string) bool { return false }
+func (f *fakeCoordinator) Steer(string, string, ...message.Attachment) bool {
+	return false
 }
 
 func (f *fakeCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
@@ -245,6 +266,7 @@ func (f *fakeCoordinator) Run(ctx context.Context, sessionID, prompt string, att
 	for _, name := range f.mcpProbes {
 		f.mcpAllowed[name] = agenttools.MCPServerAllowed(ctx, name)
 	}
+	_, f.clientFSScope = clientfs.FromContext(ctx)
 	f.mu.Unlock()
 	if strings.Contains(prompt, "spawn-agent-subsession") {
 		subSessionID := "sub-session-1"
@@ -345,14 +367,14 @@ func (f *fakeCoordinator) RecapSession(_ context.Context, _ string) (string, err
 }
 
 type fakeApp struct {
-	sessions    *fakeSessionService
-	messages    *fakeMessageService
-	coordinator *fakeCoordinator
-	permissions permission.Service
-	cfg         *config.ConfigStore
-	runtime     toolruntime.Service
-	timeline    timeline.Service
-	mcpMgr      acp.MCPManager
+	sessions     *fakeSessionService
+	messages     *fakeMessageService
+	coordinator  *fakeCoordinator
+	permissions  permission.Service
+	cfg          *config.ConfigStore
+	runtime      toolruntime.Service
+	timeline     timeline.Service
+	mcpLifecycle acp.MCPLifecycle
 }
 
 type recordingPermissionService struct {
@@ -424,12 +446,7 @@ func (a *fakeApp) GetTimeline() timeline.Service {
 	return a.timeline
 }
 
-func (a *fakeApp) GetMCPManager() acp.MCPManager {
-	if a.mcpMgr != nil {
-		return a.mcpMgr
-	}
-	return acp.MCPManagerFuncs{}
-}
+func (a *fakeApp) GetMCPLifecycle() acp.MCPLifecycle { return a.mcpLifecycle }
 
 func newFakeApp() *fakeApp {
 	app := &fakeApp{
@@ -578,6 +595,46 @@ func TestInitialize(t *testing.T) {
 	require.True(t, result.AgentCapabilities.LoadSession)
 }
 
+func TestPromptInstallsPerSessionClientFSScope(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	app := newFakeApp()
+	app.sessions.sessions["session-1"] = session.Session{ID: "session-1", WorkspaceCWD: root}
+	scope, err := clientfs.New(clientfs.Config{
+		SessionID: "session-1", Workspace: root, Caller: noopClientFSCaller{},
+	})
+	require.NoError(t, err)
+	extension := &clientFSExtension{scope: scope}
+	handler := acp.NewHandler(app)
+	handler.SetExperimentalExtension(extension)
+	payload, err := json.Marshal(acp.PromptParams{
+		SessionID: "session-1", Prompt: []acp.ContentBlock{{Type: "text", Text: "inspect"}},
+	})
+	require.NoError(t, err)
+	_, rpcErr := handler.Handle(t.Context(), &acp.Request{JSONRPC: "2.0", Method: "session/prompt", Params: payload})
+	require.Nil(t, rpcErr)
+	app.coordinator.mu.Lock()
+	installed := app.coordinator.clientFSScope
+	app.coordinator.mu.Unlock()
+	require.True(t, installed)
+}
+
+type noopClientFSCaller struct{}
+
+func (noopClientFSCaller) Call(context.Context, string, any) (json.RawMessage, error) {
+	return nil, errors.New("not called")
+}
+
+type clientFSExtension struct {
+	scope *clientfs.Scope
+}
+
+func (*clientFSExtension) ExperimentalCapabilities() map[string]any { return nil }
+func (*clientFSExtension) NegotiateExperimental(map[string]json.RawMessage) *acp.RPCError {
+	return nil
+}
+func (e *clientFSExtension) ClientFSForSession(string, string) *clientfs.Scope { return e.scope }
+
 func TestSessionNew(t *testing.T) {
 	t.Parallel()
 
@@ -593,38 +650,96 @@ func TestSessionNew(t *testing.T) {
 	require.NotEmpty(t, result.SessionID)
 }
 
-// recordingMCPManager is an MCPManager that records calls for testing.
-type recordingMCPManager struct {
+type recordingMCPBackend struct {
 	mu           sync.Mutex
 	reconnected  []string
 	disabled     []string
 	reconnectErr error
+	states       map[string]mcplifecycle.BackendInfo
+	started      chan string
+	release      chan struct{}
 }
 
-func (m *recordingMCPManager) Reconnect(_ context.Context, _ *config.ConfigStore, name string) error {
+func (m *recordingMCPBackend) Connect(ctx context.Context, _ *config.ConfigStore, name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.reconnected = append(m.reconnected, name)
-	return m.reconnectErr
-}
-
-func (m *recordingMCPManager) DisableSingle(_ *config.ConfigStore, name string) error {
+	if m.states == nil {
+		m.states = make(map[string]mcplifecycle.BackendInfo)
+	}
+	m.states[name] = mcplifecycle.BackendInfo{State: mcplifecycle.BackendStarting}
+	release, err := m.release, m.reconnectErr
+	m.mu.Unlock()
+	if m.started != nil {
+		m.started <- name
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.disabled = append(m.disabled, name)
+	if err != nil {
+		m.states[name] = mcplifecycle.BackendInfo{State: mcplifecycle.BackendError}
+		return err
+	}
+	m.states[name] = mcplifecycle.BackendInfo{State: mcplifecycle.BackendConnected}
 	return nil
 }
 
-func (m *recordingMCPManager) Reconnected() []string {
+func (m *recordingMCPBackend) Reconnect(ctx context.Context, store *config.ConfigStore, name string) error {
+	return m.Connect(ctx, store, name)
+}
+
+func (m *recordingMCPBackend) Disable(_ context.Context, _ *config.ConfigStore, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.disabled = append(m.disabled, name)
+	if m.states == nil {
+		m.states = make(map[string]mcplifecycle.BackendInfo)
+	}
+	m.states[name] = mcplifecycle.BackendInfo{State: mcplifecycle.BackendDisabled}
+	return nil
+}
+
+func (m *recordingMCPBackend) State(name string) (mcplifecycle.BackendInfo, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, ok := m.states[name]
+	return state, ok
+}
+
+func (m *recordingMCPBackend) Subscribe(ctx context.Context) <-chan mcplifecycle.BackendEvent {
+	result := make(chan mcplifecycle.BackendEvent)
+	go func() {
+		<-ctx.Done()
+		close(result)
+	}()
+	return result
+}
+
+func (*recordingMCPBackend) MarkScoped(string) {}
+
+func (m *recordingMCPBackend) Reconnected() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.reconnected...)
 }
 
-func (m *recordingMCPManager) Disabled() []string {
+func (m *recordingMCPBackend) Disabled() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.disabled...)
+}
+
+func installMCPLifecycle(t *testing.T, app *fakeApp, store *config.ConfigStore, backend *recordingMCPBackend) *mcplifecycle.Service {
+	t.Helper()
+	service := mcplifecycle.New(store, backend, nil, mcplifecycle.Config{})
+	app.mcpLifecycle = service
+	t.Cleanup(func() { service.Close(t.Context()) })
+	return service
 }
 
 func TestSessionNewConnectsMCPServers(t *testing.T) {
@@ -645,9 +760,9 @@ func TestSessionNewConnectsMCPServers(t *testing.T) {
 		require.NoError(t, log.ResetForTesting())
 	})
 
-	mgr := &recordingMCPManager{}
+	mgr := &recordingMCPBackend{started: make(chan string, 2), release: make(chan struct{})}
 	app := newFakeAppWithConfig(store)
-	app.mcpMgr = mgr
+	installMCPLifecycle(t, app, store, mgr)
 
 	reqLine := buildRequest(t, 1, "session/new", acp.SessionNewParams{
 		CWD: "/tmp",
@@ -657,9 +772,13 @@ func TestSessionNewConnectsMCPServers(t *testing.T) {
 		},
 	})
 
+	started := time.Now()
 	resp := runSingleRequest(t, app, reqLine)
 	require.Nil(t, resp.Error)
+	require.Less(t, time.Since(started), 200*time.Millisecond, "session/new must not wait for MCP transport startup")
+	close(mgr.release)
 
+	require.Eventually(t, func() bool { return len(mgr.Reconnected()) == 2 }, time.Second, time.Millisecond)
 	reconnected := mgr.Reconnected()
 	require.Len(t, reconnected, 2)
 	require.Contains(t, reconnected[0]+reconnected[1], "server-a")
@@ -687,9 +806,9 @@ func TestSessionLoadConnectsMCPServers(t *testing.T) {
 		require.NoError(t, log.ResetForTesting())
 	})
 
-	mgr := &recordingMCPManager{}
+	mgr := &recordingMCPBackend{started: make(chan string, 1), release: make(chan struct{})}
 	app := newFakeAppWithConfig(store)
-	app.mcpMgr = mgr
+	installMCPLifecycle(t, app, store, mgr)
 
 	sessionID := "sess-mcp-load"
 	app.sessions.sessions[sessionID] = session.Session{ID: sessionID, Title: "test"}
@@ -701,9 +820,13 @@ func TestSessionLoadConnectsMCPServers(t *testing.T) {
 		},
 	})
 
+	started := time.Now()
 	resp := runSingleRequest(t, app, reqLine)
 	require.Nil(t, resp.Error)
+	require.Less(t, time.Since(started), 200*time.Millisecond, "session/load must not wait for MCP transport startup")
+	close(mgr.release)
 
+	require.Eventually(t, func() bool { return len(mgr.Reconnected()) == 1 }, time.Second, time.Millisecond)
 	reconnected := mgr.Reconnected()
 	require.Len(t, reconnected, 1)
 	require.True(t, strings.HasPrefix(reconnected[0], "acp-"))
@@ -720,9 +843,9 @@ func TestSessionMCPAccessIsIsolated(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, log.ResetForTesting()) })
 
-	mgr := &recordingMCPManager{}
+	mgr := &recordingMCPBackend{}
 	app := newFakeAppWithConfig(store)
-	app.mcpMgr = mgr
+	lifecycle := installMCPLifecycle(t, app, store, mgr)
 	handler := acp.NewHandler(app)
 	handle := func(method string, params any) *acp.RPCError {
 		data, marshalErr := json.Marshal(params)
@@ -739,7 +862,14 @@ func TestSessionMCPAccessIsIsolated(t *testing.T) {
 		require.Nil(t, rpcErr)
 	}
 
+	require.Eventually(t, func() bool { return len(mgr.Reconnected()) == 2 }, time.Second, time.Millisecond)
 	names := mgr.Reconnected()
+	for _, id := range []string{"session-a", "session-b"} {
+		require.Eventually(t, func() bool {
+			value, statusErr := lifecycle.Status(id, "session:private")
+			return statusErr == nil && value.Status == mcplifecycle.StatusConnected
+		}, time.Second, time.Millisecond)
+	}
 	require.Len(t, names, 2)
 	app.coordinator.mu.Lock()
 	app.coordinator.mcpProbes = append([]string{"static-server"}, names...)
@@ -765,9 +895,14 @@ func TestSessionMCPAccessIsIsolated(t *testing.T) {
 		MCPServers: []acp.MCPServerConfig{{Name: "private", Command: "replacement-server"}},
 	})
 	require.Nil(t, rpcErr)
+	require.Eventually(t, func() bool { return len(mgr.Reconnected()) == 3 }, time.Second, time.Millisecond)
 	reconnected := mgr.Reconnected()
 	require.Len(t, reconnected, 3)
 	replacement := reconnected[2]
+	require.Eventually(t, func() bool {
+		value, statusErr := lifecycle.Status("session-a", "session:private")
+		return statusErr == nil && value.Status == mcplifecycle.StatusConnected
+	}, time.Second, time.Millisecond)
 	require.NotEqual(t, names[0], replacement)
 	app.coordinator.mu.Lock()
 	app.coordinator.mcpProbes = []string{"static-server", names[0], names[1], replacement}
@@ -786,6 +921,7 @@ func TestSessionMCPAccessIsIsolated(t *testing.T) {
 	require.True(t, allowed[replacement])
 
 	handler.Close(t.Context())
+	require.Eventually(t, func() bool { return len(mgr.Disabled()) >= 3 }, time.Second, time.Millisecond)
 	require.ElementsMatch(t, []string{names[0], names[1], replacement}, mgr.Disabled())
 	for _, name := range []string{names[0], names[1], replacement} {
 		_, exists := store.Config().MCP[name]
@@ -814,7 +950,7 @@ func TestSessionMCPGenerationIsUniqueAcrossHandlerRestarts(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, log.ResetForTesting()) })
 
 	const sessionID = "session-restart"
-	load := func(handler *acp.Handler, app *fakeApp) string {
+	load := func(handler *acp.Handler, app *fakeApp, recording *recordingMCPBackend) string {
 		app.sessions.sessions[sessionID] = session.Session{ID: sessionID, Title: sessionID}
 		params, marshalErr := json.Marshal(acp.SessionLoadParams{
 			SessionID:  sessionID,
@@ -823,21 +959,24 @@ func TestSessionMCPGenerationIsUniqueAcrossHandlerRestarts(t *testing.T) {
 		require.NoError(t, marshalErr)
 		_, rpcErr := handler.Handle(t.Context(), &acp.Request{JSONRPC: "2.0", Method: "session/load", Params: params})
 		require.Nil(t, rpcErr)
-		names := app.mcpMgr.(*recordingMCPManager).Reconnected()
+		require.Eventually(t, func() bool { return len(recording.Reconnected()) == 1 }, time.Second, time.Millisecond)
+		names := recording.Reconnected()
 		require.Len(t, names, 1)
 		return names[0]
 	}
 
 	firstApp := newFakeAppWithConfig(store)
-	firstApp.mcpMgr = &recordingMCPManager{}
+	firstBackend := &recordingMCPBackend{}
+	installMCPLifecycle(t, firstApp, store, firstBackend)
 	firstHandler := acp.NewHandler(firstApp)
-	firstName := load(firstHandler, firstApp)
+	firstName := load(firstHandler, firstApp, firstBackend)
 	firstHandler.Close(t.Context())
 
 	secondApp := newFakeAppWithConfig(store)
-	secondApp.mcpMgr = &recordingMCPManager{}
+	secondBackend := &recordingMCPBackend{}
+	installMCPLifecycle(t, secondApp, store, secondBackend)
 	secondHandler := acp.NewHandler(secondApp)
-	secondName := load(secondHandler, secondApp)
+	secondName := load(secondHandler, secondApp, secondBackend)
 	secondHandler.Close(t.Context())
 
 	require.NotEqual(t, firstName, secondName)

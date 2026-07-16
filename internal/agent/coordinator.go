@@ -44,6 +44,7 @@ import (
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/sessionevent"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/timeline"
 	"github.com/charmbracelet/crush/internal/toolruntime"
@@ -99,6 +100,8 @@ type Coordinator interface {
 	ResumeQueue(sessionID string)
 	IsQueuePaused(sessionID string) bool
 	PrioritizeQueuedPrompt(sessionID string, index int) bool
+	RemoveQueuedTurn(sessionID, turnID string) bool
+	Steer(sessionID, prompt string, attachments ...message.Attachment) bool
 	Summarize(context.Context, string, fantasy.ProviderOptions) error
 	GenerateHandoff(ctx context.Context, sourceSessionID, goal string) (HandoffDraft, error)
 	ClassifyPermission(ctx context.Context, req permission.PermissionRequest) (permission.AutoClassification, error)
@@ -198,6 +201,8 @@ type coordinator struct {
 
 	responsesWSTransportMu sync.Mutex
 	responsesWSTransport   map[responsesWSTransportKey]responsesWSTransportEntry
+
+	sessionEvents *sessionevent.Hub
 }
 
 func NewCoordinator(
@@ -217,6 +222,7 @@ func NewCoordinator(
 	pluginRuntime *plugin.Runtime,
 	memoryBackend memory.Backend,
 	goalRuntime *goalruntime.Runtime,
+	sessionEvents ...*sessionevent.Hub,
 ) (Coordinator, error) {
 	hookMgr, err := hooks.NewManager(cfg.Config().Hooks)
 	if err != nil {
@@ -226,6 +232,10 @@ func NewCoordinator(
 		slog.Debug("Hook manager initialized", "hooks_count", len(cfg.Config().Hooks))
 	}
 
+	var eventHub *sessionevent.Hub
+	if len(sessionEvents) > 0 {
+		eventHub = sessionEvents[0]
+	}
 	c := &coordinator{
 		cfg:                        cfg,
 		sessions:                   sessions,
@@ -250,6 +260,7 @@ func NewCoordinator(
 		transcriptTurnCounts:       make(map[string]int),
 		goalRuntime:                cmp.Or(goalRuntime, goalruntime.NewRuntime(sessions)),
 		responsesWSPool:            httpext.NewResponsesWebSocketPool(),
+		sessionEvents:              eventHub,
 	}
 	if c.pluginRuntime == nil {
 		c.pluginRuntime = plugin.DefaultRuntime()
@@ -510,6 +521,14 @@ func (c *coordinator) onSessionDeleted(ctx context.Context, sessionID string) {
 	}
 }
 
+// OnSessionDeleted releases coordinator-owned state after persistent session
+// deletion. It is exported so App lifecycle wiring can invoke it across the
+// package boundary without adding deletion control to the public Coordinator
+// interface used by UI and test mocks.
+func (c *coordinator) OnSessionDeleted(ctx context.Context, sessionID string) {
+	c.onSessionDeleted(ctx, sessionID)
+}
+
 // memoryEngineHooks returns lifecycle callbacks for the session agent
 // when the memory backend is enabled. Returns nil when the backend is
 // disabled or not configured.
@@ -751,6 +770,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	ctx = context.WithValue(ctx, tools.WorkingDirContextKey, sessionWorkingDir)
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, sessionID)
 	ctx = context.WithValue(ctx, tools.SessionServiceContextKey, c.sessions)
+	ctx = freezeInferenceScope(ctx, sess)
 	ctx = toolruntime.WithService(ctx, c.toolRuntime)
 	ctx = toolruntime.WithSessionID(ctx, sessionID)
 	ctx = toolruntime.WithBackgroundAgentLookup(ctx, c.backgroundAgentLookup())
@@ -831,6 +851,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	slog.Debug("[PERF] coordinator: updated agent runtime", "duration", time.Since(start), "session_id", sessionID)
 
 	model := c.currentAgent.Model()
+	if runtimeConfig.Model != nil {
+		model = *runtimeConfig.Model
+	}
 	maxTokens := runtimeConfig.MaxOutputTokens
 	if maxTokens == 0 {
 		maxTokens = model.CatwalkCfg.DefaultMaxTokens
@@ -864,6 +887,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		slog.Debug("[PERF] coordinator: starting sessionAgent.Run", "duration", time.Since(start), "session_id", sessionID)
 		call := SessionAgentCall{
 			SessionID:           sessionID,
+			TurnID:              turnIDFromContext(ctx),
 			Prompt:              prompt,
 			Attachments:         attachments,
 			MaxOutputTokens:     maxTokens,
@@ -995,6 +1019,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		DeferredToolRuntime:  c,
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
+		ResponsesChaining:    c.cfg.Config().Options.ResponsesChaining || inferenceProviderCfg.ResponsesWebSocket,
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
@@ -1018,6 +1043,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		MemoryEngineRetriever:           c.memoryEngineRetriever(),
 		WorkingMemoryMinDiscardedTokens: c.workingMemoryMinDiscardedTokens(),
 		VisionService:                   c.visionService,
+		SessionEvents:                   c.sessionEvents,
 	})
 
 	// Only use async initialization for the primary agent (not subagents).
@@ -1072,6 +1098,10 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 			inferenceModel = planModel
 			providerCfg = planProviderCfg
 		}
+	}
+	inferenceModel, providerCfg, err = c.applyInferenceOverrides(ctx, inferenceModel, providerCfg, isSubAgent)
+	if err != nil {
+		return sessionAgentRuntimeConfig{}, err
 	}
 	currentAgent.SetModels(inferenceModel, small)
 
@@ -1132,6 +1162,7 @@ func (c *coordinator) refreshSessionAgentRuntimeConfig(ctx context.Context, curr
 	systemPromptPrefix := providerCfg.SystemPromptPrefix
 
 	return sessionAgentRuntimeConfig{
+		Model:              &inferenceModel,
 		ProviderOptions:    mergedOptions,
 		MaxOutputTokens:    maxTokens,
 		Temperature:        temp,

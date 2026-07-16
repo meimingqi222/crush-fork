@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
@@ -57,6 +58,8 @@ type EditResponseMetadata struct {
 	NewContent   string       `json:"new_content,omitempty"`
 	EditsApplied int          `json:"edits_applied,omitempty"`
 	EditsFailed  []FailedEdit `json:"edits_failed,omitempty"`
+	SourceURI    string       `json:"source_uri,omitempty"`
+	Revision     string       `json:"revision,omitempty"`
 }
 
 // FailedEdit records a single edit operation that could not be applied.
@@ -64,6 +67,42 @@ type FailedEdit struct {
 	Index int       `json:"index"`
 	Error string    `json:"error"`
 	Edit  EditEntry `json:"edit"`
+}
+
+func enrichClientFSEditMetadata(ctx context.Context, response *fantasy.ToolResponse) {
+	if response == nil || strings.TrimSpace(response.Metadata) == "" {
+		return
+	}
+	apply := func(metadata *EditResponseMetadata) {
+		if metadata == nil || metadata.FilePath == "" {
+			return
+		}
+		if current, ok := clientfs.MetadataFor(ctx, metadata.FilePath); ok {
+			metadata.SourceURI = current.SourceURI
+			metadata.Revision = current.Revision
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(response.Metadata), "[") {
+		var values []EditResponseMetadata
+		if json.Unmarshal([]byte(response.Metadata), &values) != nil {
+			return
+		}
+		for index := range values {
+			apply(&values[index])
+		}
+		if payload, err := json.Marshal(values); err == nil {
+			response.Metadata = string(payload)
+		}
+		return
+	}
+	var value EditResponseMetadata
+	if json.Unmarshal([]byte(response.Metadata), &value) != nil {
+		return
+	}
+	apply(&value)
+	if payload, err := json.Marshal(value); err == nil {
+		response.Metadata = string(payload)
+	}
 }
 
 const EditToolName = "edit"
@@ -176,6 +215,7 @@ func NewEditTool(
 				// This prevents unnecessary LSP diagnostics processing
 				return response, nil
 			}
+			enrichClientFSEditMetadata(ctx, &response)
 
 			modifiedFiles := []string{params.FilePath}
 			if params.Patch != "" && response.Metadata != "" {
@@ -307,14 +347,14 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 		return fantasy.NewTextErrorResponse("first edit must have empty old_string for file creation"), nil
 	}
 
-	if _, err := os.Stat(filePath); err == nil {
+	if _, err := clientfs.Stat(edit.ctx, filePath); err == nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("file already exists: %s", filePath)), nil
 	} else if !os.IsNotExist(err) {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to access file: %w", err)
 	}
 
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := clientfs.MkdirAll(edit.ctx, dir, 0o755); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
 	}
 
@@ -381,7 +421,7 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 		return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
 	}
 
-	if err := os.WriteFile(filePath, []byte(currentContent), 0o644); err != nil {
+	if err := clientfs.WriteFile(edit.ctx, filePath, []byte(currentContent), 0o644); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -418,11 +458,11 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 }
 
 func applyEditEntriesExistingFile(edit editContext, filePath string, entries []EditEntry, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	if err := checkPreflightLimits([]string{filePath}); err != nil {
+	if err := checkPreflightLimits(edit.ctx, []string{filePath}); err != nil {
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
 
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := clientfs.Stat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
@@ -439,7 +479,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for editing file")
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := clientfs.ReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -523,7 +563,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 		fileContent, _ = fsext.ToWindowsLineEndings(currentContent)
 	}
 
-	if err := os.WriteFile(filePath, []byte(fileContent), 0o644); err != nil {
+	if err := clientfs.WriteFile(edit.ctx, filePath, []byte(fileContent), 0o644); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -606,7 +646,7 @@ func applyEntryToContent(content string, entry EditEntry) (string, error) {
 }
 
 func createNewFile(edit editContext, filePath, content string, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := clientfs.Stat(edit.ctx, filePath)
 	if err == nil {
 		if fileInfo.IsDir() {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", filePath)), nil
@@ -617,7 +657,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 	}
 
 	dir := filepath.Dir(filePath)
-	if err = os.MkdirAll(dir, 0o755); err != nil {
+	if err = clientfs.MkdirAll(edit.ctx, dir, 0o755); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
 	}
 
@@ -654,7 +694,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 		return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
 	}
 
-	err = os.WriteFile(filePath, []byte(content), 0o644)
+	err = clientfs.WriteFile(edit.ctx, filePath, []byte(content), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -688,7 +728,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 }
 
 func deleteContent(edit editContext, filePath, oldString string, replaceAll bool, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := clientfs.Stat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
@@ -705,7 +745,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for deleting content")
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := clientfs.ReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -775,7 +815,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		fileContent, _ = fsext.ToWindowsLineEndings(newContent)
 	}
 
-	err = os.WriteFile(filePath, []byte(fileContent), 0o644)
+	err = clientfs.WriteFile(edit.ctx, filePath, []byte(fileContent), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -816,7 +856,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 }
 
 func replaceContent(edit editContext, filePath, oldString, newString string, replaceAll bool, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := clientfs.Stat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
@@ -833,7 +873,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for edit a file")
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := clientfs.ReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -916,7 +956,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		fileContent, _ = fsext.ToWindowsLineEndings(newContent)
 	}
 
-	err = os.WriteFile(filePath, []byte(fileContent), 0o644)
+	err = clientfs.WriteFile(edit.ctx, filePath, []byte(fileContent), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -1010,10 +1050,10 @@ func adjustIndentation(oldStr, actualMatch, newStr string) string {
 	return strings.Join(result, "\n")
 }
 
-func checkPreflightLimits(filePaths []string) error {
+func checkPreflightLimits(ctx context.Context, filePaths []string) error {
 	var totalSize int64
 	for _, fp := range filePaths {
-		fi, err := os.Stat(fp)
+		fi, err := clientfs.Stat(ctx, fp)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -1106,7 +1146,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for editing file")
 	}
 
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := clientfs.Stat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
@@ -1117,7 +1157,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", filePath)), nil
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := clientfs.ReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -1196,7 +1236,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 		fileContent, _ = fsext.ToWindowsLineEndings(newContent)
 	}
 
-	if err := os.WriteFile(filePath, []byte(fileContent), 0o644); err != nil {
+	if err := clientfs.WriteFile(edit.ctx, filePath, []byte(fileContent), 0o644); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -1368,7 +1408,7 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		}
 	}
 
-	if err := checkPreflightLimits(absPaths); err != nil {
+	if err := checkPreflightLimits(edit.ctx, absPaths); err != nil {
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
 
@@ -1378,14 +1418,14 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 	originalHadTrailingNewline := make(map[string]bool)
 
 	for _, absPath := range absPaths {
-		fileInfo, statErr := os.Stat(absPath)
+		fileInfo, statErr := clientfs.Stat(edit.ctx, absPath)
 		var fileLines []string
 		var crlf bool
 		var origContent string
 		hadTrailingNewline := true
 
 		if statErr == nil && !fileInfo.IsDir() {
-			content, readErr := os.ReadFile(absPath)
+			content, readErr := clientfs.ReadFile(edit.ctx, absPath)
 			if readErr != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to read file %s: %w", absPath, readErr)
 			}
@@ -1446,7 +1486,7 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		}
 
 		dir := filepath.Dir(absPath)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := clientfs.MkdirAll(edit.ctx, dir, 0o755); err != nil {
 			return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories for %s: %w", absPath, err)
 		}
 
@@ -1455,7 +1495,7 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 			fileContent, _ = fsext.ToWindowsLineEndings(newContent)
 		}
 
-		if err := os.WriteFile(absPath, []byte(fileContent), 0o644); err != nil {
+		if err := clientfs.WriteFile(edit.ctx, absPath, []byte(fileContent), 0o644); err != nil {
 			return fantasy.ToolResponse{}, fmt.Errorf("failed to write file %s: %w", absPath, err)
 		}
 

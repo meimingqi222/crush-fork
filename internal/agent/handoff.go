@@ -155,7 +155,10 @@ func (c *coordinator) selectedModelWithOverride(
 	if override != nil {
 		override(&selectedModel)
 	}
+	return c.modelFromSelected(ctx, selectedModel, isSubAgent)
+}
 
+func (c *coordinator) modelFromSelected(ctx context.Context, selectedModel config.SelectedModel, isSubAgent bool) (Model, config.ProviderConfig, error) {
 	providerCfg, ok := c.cfg.Config().Providers.Get(selectedModel.Provider)
 	if !ok {
 		return Model{}, config.ProviderConfig{}, errModelProviderNotConfigured

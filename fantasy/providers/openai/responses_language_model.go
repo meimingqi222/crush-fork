@@ -358,10 +358,18 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 	return params, warnings, nil
 }
 
+// validatePreviousResponseIDPrompt guards against sending both server-side
+// conversation state (previous_response_id) and a full replayed transcript in
+// the same request — the API rejects that duplicate state. Incremental
+// chaining is still allowed: the prompt may carry System/User turns plus Tool
+// results (function_call_output) for the tool calls made by the referenced
+// response. Assistant messages must not be replayed, because their content
+// (text, tool calls, reasoning) already lives server-side under the
+// previous_response_id.
 func validatePreviousResponseIDPrompt(prompt fantasy.Prompt) error {
 	for _, msg := range prompt {
 		switch msg.Role {
-		case fantasy.MessageRoleSystem, fantasy.MessageRoleUser:
+		case fantasy.MessageRoleSystem, fantasy.MessageRoleUser, fantasy.MessageRoleTool:
 			continue
 		default:
 			return errors.New(previousResponseIDHistoryError)

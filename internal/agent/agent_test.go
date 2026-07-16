@@ -1816,7 +1816,14 @@ func TestPreparePromptInjectsSyntheticToolResultForMissingToolCallResult(t *test
 	require.True(t, foundSynthetic)
 }
 
-func TestPreparePromptDropsLateToolResultForEarlierAssistantCall(t *testing.T) {
+// TestPreparePromptPairsLateToolResultForEarlierAssistantCall verifies that a
+// tool result which was persisted out of order (after a later assistant turn,
+// e.g. because parallel executions raced on a second-granularity created_at)
+// is still paired with the assistant tool_call that produced it and delivered
+// with its real content next to that call — rather than being dropped as an
+// orphan and replaced with a synthetic "interrupted" error, which would make
+// the model re-issue the identical call.
+func TestPreparePromptPairsLateToolResultForEarlierAssistantCall(t *testing.T) {
 	t.Parallel()
 
 	a := &sessionAgent{}
@@ -1845,7 +1852,86 @@ func TestPreparePromptDropsLateToolResultForEarlierAssistantCall(t *testing.T) {
 	})
 
 	var toolResultIDs []string
+	toolMsgIndex := -1
+	for i, msg := range history {
+		if msg.Role != fantasy.MessageRoleTool {
+			continue
+		}
+		if toolMsgIndex == -1 {
+			toolMsgIndex = i
+		}
+		for _, part := range msg.Content {
+			toolResultPart, ok := part.(fantasy.ToolResultPart)
+			if !ok {
+				continue
+			}
+			toolResultIDs = append(toolResultIDs, toolResultPart.ToolCallID)
+			textOutput, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](toolResultPart.Output)
+			require.True(t, ok, "late result should be delivered as its real (non-error) content")
+			require.Contains(t, textOutput.Text, "No files found")
+		}
+	}
+
+	require.Equal(t, []string{"call-1"}, toolResultIDs)
+	// The result is emitted immediately after its issuing assistant, i.e. before
+	// the later "Invalid parameters" assistant turn.
+	require.Equal(t, 1, toolMsgIndex,
+		"tool result should sit directly after the assistant that issued call-1")
+}
+
+// TestPreparePromptPairsReorderedParallelResultsAcrossLaterAssistant reproduces
+// the real grok/composer bug: assistant A fires several parallel tool calls,
+// assistant B fires its own call, and A's results get persisted AFTER B (a
+// straggler parallel result colliding on a second-granularity created_at).
+// The old adjacency matcher dropped A's whole batch as orphans and injected
+// synthetic errors, so the model re-issued the identical calls. Every result
+// must now be delivered with its real content, grouped next to its own
+// assistant, with nothing dropped.
+func TestPreparePromptPairsReorderedParallelResultsAcrossLaterAssistant(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{
+			ID:   "assistant-A",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ToolCall{ID: "call-a1", Name: agenttools.ReadToolName, Input: `{"file_path":"a.go"}`, Finished: true},
+				message.ToolCall{ID: "call-a2", Name: agenttools.GrepToolName, Input: `{"pattern":"foo"}`, Finished: true},
+			},
+		},
+		{
+			ID:   "assistant-B",
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ToolCall{ID: "call-b1", Name: agenttools.ReadToolName, Input: `{"file_path":"b.go"}`, Finished: true},
+			},
+		},
+		{
+			ID:   "tool-B",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{ToolCallID: "call-b1", Name: agenttools.ReadToolName, Content: "result-b1"},
+			},
+		},
+		{
+			ID:   "tool-A-late",
+			Role: message.Tool,
+			Parts: []message.ContentPart{
+				message.ToolResult{ToolCallID: "call-a1", Name: agenttools.ReadToolName, Content: "result-a1"},
+				message.ToolResult{ToolCallID: "call-a2", Name: agenttools.GrepToolName, Content: "result-a2"},
+			},
+		},
+	})
+
+	type delivered struct {
+		id   string
+		text string
+	}
+	var roles []fantasy.MessageRole
+	var results []delivered
 	for _, msg := range history {
+		roles = append(roles, msg.Role)
 		if msg.Role != fantasy.MessageRoleTool {
 			continue
 		}
@@ -1854,15 +1940,26 @@ func TestPreparePromptDropsLateToolResultForEarlierAssistantCall(t *testing.T) {
 			if !ok {
 				continue
 			}
-			toolResultIDs = append(toolResultIDs, toolResultPart.ToolCallID)
+			_, isErr := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](toolResultPart.Output)
+			require.False(t, isErr, "no result should be a synthetic interrupted error: %s", toolResultPart.ToolCallID)
+			textOutput, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](toolResultPart.Output)
+			require.True(t, ok)
+			results = append(results, delivered{id: toolResultPart.ToolCallID, text: textOutput.Text})
 		}
 	}
 
-	require.Len(t, toolResultIDs, 1)
-	require.Equal(t, "call-1", toolResultIDs[0])
-	errOutput, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](history[1].Content[0].(fantasy.ToolResultPart).Output)
-	require.True(t, ok)
-	require.ErrorContains(t, errOutput.Error, "tool execution was interrupted")
+	// Results grouped next to their own assistant, in call order, nothing dropped.
+	require.Equal(t, []delivered{
+		{id: "call-a1", text: "result-a1"},
+		{id: "call-a2", text: "result-a2"},
+		{id: "call-b1", text: "result-b1"},
+	}, results)
+	require.Equal(t, []fantasy.MessageRole{
+		fantasy.MessageRoleAssistant,
+		fantasy.MessageRoleTool,
+		fantasy.MessageRoleAssistant,
+		fantasy.MessageRoleTool,
+	}, roles)
 }
 
 func TestPreparePromptDropsCanceledAssistantToolBranchBeforeNextUser(t *testing.T) {
