@@ -1019,7 +1019,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		DeferredToolRuntime:  c,
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
-		ResponsesChaining:    c.cfg.Config().Options.ResponsesChaining || inferenceProviderCfg.ResponsesWebSocket,
+		ResponsesChaining:    c.cfg.Config().Options.ResponsesChaining,
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
