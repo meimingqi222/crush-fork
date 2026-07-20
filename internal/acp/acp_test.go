@@ -327,6 +327,7 @@ func (f *fakeCoordinator) Run(ctx context.Context, sessionID, prompt string, att
 func (f *fakeCoordinator) Cancel(_ string)                         {}
 func (f *fakeCoordinator) CancelAll()                              {}
 func (f *fakeCoordinator) IsSessionBusy(_ string) bool             { return false }
+func (f *fakeCoordinator) ActiveTurnID(_ string) string            { return "" }
 func (f *fakeCoordinator) IsBusy() bool                            { return false }
 func (f *fakeCoordinator) QueuedPrompts(_ string) int              { return 0 }
 func (f *fakeCoordinator) QueuedPromptsList(_ string) []string     { return nil }

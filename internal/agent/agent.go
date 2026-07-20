@@ -190,6 +190,7 @@ type SessionAgent interface {
 	Cancel(sessionID string)
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
+	ActiveTurnID(sessionID string) string
 	IsBusy() bool
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
@@ -1509,6 +1510,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					Kind:     sessionevent.KindMessageReset,
 					Delivery: sessionevent.DeliveryReliable,
 					Payload:  sessionevent.MessageEvent{MessageID: currentAssistant.ID},
+				})
+				// Heartbeat so desktop clients keep "working" chrome alive during
+				// the silent provider backoff instead of treating it as a stall.
+				a.publishSessionEvent(ctx, call.SessionID, time.Now(), sessionevent.NewEvent{
+					Kind:        sessionevent.KindTurnProgress,
+					Delivery:    sessionevent.DeliveryLatest,
+					CoalesceKey: "provider_retry:" + currentAssistant.ID,
+					Payload: sessionevent.TurnEvent{
+						MessageID: currentAssistant.ID,
+						Reason:    "provider_retry",
+						Phase:     "provider_retry",
+					},
 				})
 				if streamFlusher != nil {
 					streamFlusher.Stop()

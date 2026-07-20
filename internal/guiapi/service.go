@@ -35,6 +35,7 @@ const (
 	FeatureSessionControl Feature = "sessionControl"
 	FeatureTerminal       Feature = "terminal"
 	FeatureBlob           Feature = "blob"
+	FeatureBlobUpload     Feature = "blobUpload"
 	FeatureClientFS       Feature = "clientFS"
 	FeatureProviderAuth   Feature = "providerAuth"
 	FeatureMCPControl     Feature = "mcpControl"
@@ -58,6 +59,7 @@ var supportedFeatures = []Feature{
 	FeatureSessionControl,
 	FeatureTerminal,
 	FeatureBlob,
+	FeatureBlobUpload,
 	FeatureClientFS,
 	FeatureProviderAuth,
 	FeatureMCPControl,
@@ -482,6 +484,12 @@ func (s *Service) registerProtocolSurface() {
 	}
 	for _, method := range []string{"crush/blob/create", "crush/blob/read", "crush/blob/release"} {
 		s.routes[method] = route{feature: FeatureBlob}
+	}
+	for _, method := range []string{
+		"crush/blob/upload/start", "crush/blob/upload/chunk",
+		"crush/blob/upload/commit", "crush/blob/upload/abort",
+	} {
+		s.routes[method] = route{feature: FeatureBlobUpload}
 	}
 	for _, method := range []string{"crush/fs/read", "crush/fs/write", "crush/fs/stat"} {
 		s.routes[method] = route{feature: FeatureClientFS}

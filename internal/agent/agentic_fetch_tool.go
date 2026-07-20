@@ -190,6 +190,11 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				Sessions:             c.sessions,
 				Messages:             c.messages,
 				Tools:                fetchTools,
+				// Without the hub this child session publishes nothing, so its
+				// tool frames — the only carrier of tool input/result, which
+				// history deliberately omits — never reach a GUI client and its
+				// nested steps render with no query and an empty body.
+				SessionEvents: c.sessionEvents,
 			})
 
 			return c.runSubAgentDirect(ctx, subAgentParams{

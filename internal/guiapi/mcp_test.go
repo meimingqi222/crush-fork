@@ -276,9 +276,10 @@ func TestMCPLogsAreBoundedRedactedAndSnapshotIncludesStatus(t *testing.T) {
 
 type emptyCoordinatorSnapshotReader struct{}
 
-func (*emptyCoordinatorSnapshotReader) IsSessionBusy(string) bool { return false }
-func (*emptyCoordinatorSnapshotReader) QueuedPrompts(string) int  { return 0 }
-func (*emptyCoordinatorSnapshotReader) IsQueuePaused(string) bool { return false }
+func (*emptyCoordinatorSnapshotReader) IsSessionBusy(string) bool  { return false }
+func (*emptyCoordinatorSnapshotReader) ActiveTurnID(string) string { return "" }
+func (*emptyCoordinatorSnapshotReader) QueuedPrompts(string) int   { return 0 }
+func (*emptyCoordinatorSnapshotReader) IsQueuePaused(string) bool  { return false }
 func (*emptyCoordinatorSnapshotReader) ModelForSession(string) (agent.Model, bool) {
 	return agent.Model{}, false
 }

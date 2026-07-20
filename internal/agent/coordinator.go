@@ -91,6 +91,7 @@ type Coordinator interface {
 	Cancel(sessionID string)
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
+	ActiveTurnID(sessionID string) string
 	IsBusy() bool
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
@@ -1565,6 +1566,14 @@ func (c *coordinator) IsSessionBusy(sessionID string) bool {
 		return true
 	}
 	return len(c.activeSubAgentsForSession(sessionID)) > 0
+}
+
+// ActiveTurnID reports the root session's own active turn id. A busy session
+// keeps this set for the whole turn, including while a subagent tool
+// (agentic_fetch, agent) is running synchronously inside it, so subagent
+// activity needs no separate handling here.
+func (c *coordinator) ActiveTurnID(sessionID string) string {
+	return c.currentAgent.ActiveTurnID(sessionID)
 }
 
 func (c *coordinator) Model() Model {

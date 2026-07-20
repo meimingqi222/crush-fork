@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charm.land/crush/gui-acp/schema/v1/blob.schema.json",
+  "title": "Crush GUI Blob extension contracts v1",
+  "$comment": "Canonical Crush GUI Blob contract. Compatible GUI clients vendor this file byte-for-byte apart from repository identity metadata.",
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "x-maxUtf8Bytes": 128 },
+    "clientRequestId": { "type": "string", "format": "uuid", "minLength": 36, "maxLength": 36 },
+    "timestamp": { "type": "integer", "minimum": 0, "format": "unix-ms" },
+    "size": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+    "offset": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "metadataText": { "type": "string", "maxLength": 2048, "x-maxUtf8Bytes": 2048 },
+    "filename": { "type": "string", "maxLength": 2048, "x-maxUtf8Bytes": 2048, "pattern": "^[^/\\\\\\u0000]*$" },
+    "base64MiB": { "type": "string", "contentEncoding": "base64", "x-maxDecodedBytes": 1048576 },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blobId", "sessionId", "size", "sha256", "expiresAt"],
+      "properties": {
+        "blobId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "mimeType": { "$ref": "#/$defs/metadataText" },
+        "filename": { "$ref": "#/$defs/filename" },
+        "sourceUri": { "$ref": "#/$defs/metadataText" },
+        "size": { "$ref": "#/$defs/size" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "expiresAt": { "$ref": "#/$defs/timestamp", "format": "unix-ms" }
+      },
+      "examples": [{ "blobId": "blob-1", "sessionId": "session-1", "mimeType": "text/plain", "filename": "hello.txt", "size": 5, "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "expiresAt": 1784319000000 }]
+    },
+    "createRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "size", "sha256", "clientRequestId"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "mimeType": { "$ref": "#/$defs/metadataText" },
+        "filename": { "$ref": "#/$defs/filename" },
+        "sourceUri": { "$ref": "#/$defs/metadataText" },
+        "size": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "content": { "$ref": "#/$defs/base64MiB", "x-maxDecodedBytes": 1048576 },
+        "chunks": { "type": "array", "maxItems": 4096, "x-maxDecodedBytes": 1048576, "items": { "$ref": "#/$defs/base64MiB" } },
+        "clientRequestId": { "$ref": "#/$defs/clientRequestId" }
+      },
+      "oneOf": [
+        { "required": ["content"], "not": { "required": ["chunks"] } },
+        { "required": ["chunks"], "not": { "required": ["content"] } },
+        { "not": { "anyOf": [{ "required": ["content"] }, { "required": ["chunks"] }] } }
+      ],
+      "examples": [{ "sessionId": "session-1", "mimeType": "text/plain", "filename": "hello.txt", "size": 5, "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "content": "aGVsbG8=", "clientRequestId": "00000000-0000-4000-8000-000000000001" }]
+    },
+    "readRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "blobId", "offset", "limit"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "blobId": { "$ref": "#/$defs/id" },
+        "offset": { "$ref": "#/$defs/offset" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+      },
+      "examples": [{ "sessionId": "session-1", "blobId": "blob-1", "offset": 3, "limit": 1048576 }]
+    },
+    "readResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blobId", "sessionId", "size", "sha256", "expiresAt", "offset", "nextOffset", "eof", "content"],
+      "properties": {
+        "blobId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "mimeType": { "$ref": "#/$defs/metadataText" },
+        "filename": { "$ref": "#/$defs/filename" },
+        "sourceUri": { "$ref": "#/$defs/metadataText" },
+        "size": { "$ref": "#/$defs/size" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "expiresAt": { "$ref": "#/$defs/timestamp", "format": "unix-ms" },
+        "offset": { "$ref": "#/$defs/offset" },
+        "nextOffset": { "$ref": "#/$defs/offset" },
+        "eof": { "type": "boolean" },
+        "content": { "$ref": "#/$defs/base64MiB", "x-maxDecodedBytes": 1048576 }
+      },
+      "examples": [{ "blobId": "blob-1", "sessionId": "session-1", "mimeType": "text/plain", "filename": "hello.txt", "size": 5, "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "expiresAt": 1784319000000, "offset": 3, "nextOffset": 5, "eof": true, "content": "bG8=" }]
+    },
+    "releaseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "blobId", "clientRequestId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "blobId": { "$ref": "#/$defs/id" }, "clientRequestId": { "$ref": "#/$defs/clientRequestId" } },
+      "examples": [{ "sessionId": "session-1", "blobId": "blob-1", "clientRequestId": "00000000-0000-4000-8000-000000000002" }]
+    },
+    "releaseResult": {
+      "type": "object", "additionalProperties": false, "required": ["blobId", "released"],
+      "properties": { "blobId": { "$ref": "#/$defs/id" }, "released": { "const": true } },
+      "examples": [{ "blobId": "blob-1", "released": true }]
+    },
+    "uploadStartRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "size", "sha256", "clientRequestId"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" }, "mimeType": { "$ref": "#/$defs/metadataText" }, "filename": { "$ref": "#/$defs/filename" }, "sourceUri": { "$ref": "#/$defs/metadataText" },
+        "size": { "$ref": "#/$defs/size" }, "sha256": { "$ref": "#/$defs/sha256" }, "clientRequestId": { "$ref": "#/$defs/clientRequestId" }
+      },
+      "examples": [{ "sessionId": "session-1", "mimeType": "application/octet-stream", "filename": "large.bin", "size": 67108864, "sha256": "fae972222d45539ea99ac18d4e489c2405f6909e0225e3d62d4d7f7fbbd30583", "clientRequestId": "00000000-0000-4000-8000-000000000003" }]
+    },
+    "uploadStartResult": {
+      "type": "object", "additionalProperties": false, "required": ["uploadId", "sessionId", "size", "sha256", "expiresAt", "nextOffset", "chunkSize"],
+      "properties": { "uploadId": { "$ref": "#/$defs/id" }, "sessionId": { "$ref": "#/$defs/id" }, "size": { "$ref": "#/$defs/size" }, "sha256": { "$ref": "#/$defs/sha256" }, "expiresAt": { "$ref": "#/$defs/timestamp", "format": "unix-ms" }, "nextOffset": { "const": 0 }, "chunkSize": { "const": 1048576 } },
+      "examples": [{ "uploadId": "upload-1", "sessionId": "session-1", "size": 67108864, "sha256": "fae972222d45539ea99ac18d4e489c2405f6909e0225e3d62d4d7f7fbbd30583", "expiresAt": 1784319000000, "nextOffset": 0, "chunkSize": 1048576 }]
+    },
+    "uploadChunkRequest": {
+      "type": "object", "additionalProperties": false, "required": ["sessionId", "uploadId", "offset", "content", "clientRequestId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "uploadId": { "$ref": "#/$defs/id" }, "offset": { "$ref": "#/$defs/offset" }, "content": { "$ref": "#/$defs/base64MiB", "minLength": 1, "x-maxDecodedBytes": 1048576 }, "clientRequestId": { "$ref": "#/$defs/clientRequestId" } },
+      "examples": [{ "sessionId": "session-1", "uploadId": "upload-1", "offset": 0, "content": "aGVsbG8=", "clientRequestId": "00000000-0000-4000-8000-000000000004" }]
+    },
+    "uploadChunkResult": {
+      "type": "object", "additionalProperties": false, "required": ["uploadId", "nextOffset", "receivedBytes"],
+      "properties": { "uploadId": { "$ref": "#/$defs/id" }, "nextOffset": { "$ref": "#/$defs/offset" }, "receivedBytes": { "$ref": "#/$defs/size" } },
+      "examples": [{ "uploadId": "upload-1", "nextOffset": 5, "receivedBytes": 5 }]
+    },
+    "uploadCommitRequest": {
+      "type": "object", "additionalProperties": false, "required": ["sessionId", "uploadId", "clientRequestId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "uploadId": { "$ref": "#/$defs/id" }, "clientRequestId": { "$ref": "#/$defs/clientRequestId" } },
+      "examples": [{ "sessionId": "session-1", "uploadId": "upload-1", "clientRequestId": "00000000-0000-4000-8000-000000000005" }]
+    },
+    "uploadAbortRequest": {
+      "type": "object", "additionalProperties": false, "required": ["sessionId", "uploadId", "clientRequestId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "uploadId": { "$ref": "#/$defs/id" }, "clientRequestId": { "$ref": "#/$defs/clientRequestId" } },
+      "examples": [{ "sessionId": "session-1", "uploadId": "upload-1", "clientRequestId": "00000000-0000-4000-8000-000000000006" }]
+    },
+    "uploadAbortResult": {
+      "type": "object", "additionalProperties": false, "required": ["uploadId", "aborted"],
+      "properties": { "uploadId": { "$ref": "#/$defs/id" }, "aborted": { "const": true } },
+      "examples": [{ "uploadId": "upload-1", "aborted": true }]
+    }
+  }
+}

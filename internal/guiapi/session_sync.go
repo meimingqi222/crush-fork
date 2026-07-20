@@ -339,7 +339,8 @@ func toWirePayload(payload any) any {
 			TurnID    string `json:"turnId,omitempty"`
 			MessageID string `json:"messageId,omitempty"`
 			Reason    string `json:"reason,omitempty"`
-		}{value.TurnID, value.MessageID, value.Reason}
+			Phase     string `json:"phase,omitempty"`
+		}{value.TurnID, value.MessageID, value.Reason, value.Phase}
 	case sessionevent.QueueEvent:
 		turns := make([]struct {
 			TurnID   string `json:"turnId"`

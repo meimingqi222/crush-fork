@@ -14,7 +14,10 @@ const (
 	KindTurnFailed          Kind = "turn.failed"
 	KindTurnCancelled       Kind = "turn.cancelled"
 	KindTurnSteered         Kind = "turn.steered"
-	KindCancelAcknowledged  Kind = "cancel.acknowledged"
+	// KindTurnProgress is a best-effort heartbeat while a turn is still active
+	// but producing no message/tool deltas (e.g. provider stream retry delay).
+	KindTurnProgress       Kind = "turn.progress"
+	KindCancelAcknowledged Kind = "cancel.acknowledged"
 	KindMessageDelta        Kind = "message.delta"
 	KindMessageCreated      Kind = "message.created"
 	KindMessageCompleted    Kind = "message.completed"
@@ -130,11 +133,13 @@ type ToolFile struct {
 	Revision  string
 }
 
-// TurnEvent identifies a turn terminal or cancellation state.
+// TurnEvent identifies a turn terminal, cancellation, or progress state.
 type TurnEvent struct {
 	TurnID    string
 	MessageID string
 	Reason    string
+	// Phase is optional public progress detail (e.g. "provider_retry").
+	Phase string
 }
 
 type QueueEvent struct {

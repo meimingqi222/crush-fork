@@ -171,6 +171,16 @@ func (a *sessionAgent) IsSessionBusy(sessionID string) bool {
 	return busy
 }
 
+// ActiveTurnID returns the id of the turn currently running for sessionID, or
+// "" when the session is idle or its own request has no turn id (e.g. a
+// background/system call). Backs the GUI snapshot's activeTurn.id — without
+// it, a snapshot taken while busy reports state:"running" with an empty id,
+// which the gui-acp client correctly rejects as invalid.
+func (a *sessionAgent) ActiveTurnID(sessionID string) string {
+	id, _ := a.activeTurnIDs.Get(sessionID)
+	return id
+}
+
 func (a *sessionAgent) QueuedPrompts(sessionID string) int {
 	return len(a.queuedCallsSnapshot(sessionID))
 }

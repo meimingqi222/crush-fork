@@ -26,6 +26,7 @@ requirements and acceptance criteria are satisfied.
 - [Product requirements](00-product-requirements.md)
 - [Architecture](01-architecture.md)
 - [Protocol specification](02-protocol-spec.md)
+- [Versioned protocol field schemas](schema/v1/)
 - [Server implementation](03-server-implementation.md)
 - [Client state model](04-client-state-model.md)
 - [Performance and reliability](05-performance-and-reliability.md)
@@ -53,6 +54,7 @@ During `initialize`, the server SHOULD advertise an experimental capability:
         "sessionControl",
         "terminal",
         "blob",
+        "blobUpload",
         "clientFS",
         "providerAuth",
         "mcpControl"

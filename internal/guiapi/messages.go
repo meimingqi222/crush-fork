@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/sessionevent"
 )
 
 const (
@@ -82,10 +83,16 @@ type attachmentMetadata struct {
 	MIMEType string `json:"mimeType,omitempty"`
 }
 
+// toolCallMetadata is a bounded public tool lifecycle projection for history
+// pages and snapshots. It deliberately omits tool input/result bodies and
+// provider metadata (see gui-acp protocol: secrets stay off the wire).
 type toolCallMetadata struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Finished bool   `json:"finished"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Finished       bool   `json:"finished"`
+	Status         string `json:"status,omitempty"`
+	IsError        bool   `json:"isError,omitempty"`
+	ChildSessionID string `json:"childSessionId,omitempty"`
 }
 
 type usageMetadata struct {
@@ -181,10 +188,13 @@ func (s *Service) handleMessages(ctx context.Context, raw json.RawMessage) (any,
 	if hasMore {
 		items = items[:limit]
 	}
+	// Join tool-role results onto assistant toolCalls within this page so
+	// history can show failed vs completed without leaking result bodies.
+	resultsByCall := toolResultsByCallID(items)
 	result := messagesResult{Messages: make([]pageMessage, len(items)), HasMore: hasMore}
 	remainingText := maxPageTextBytes
 	for index := range items {
-		result.Messages[index], remainingText = projectPageMessage(&items[index], remainingText)
+		result.Messages[index], remainingText = projectPageMessage(&items[index], remainingText, resultsByCall)
 	}
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
@@ -250,7 +260,7 @@ func (s *Service) handleSearch(ctx context.Context, raw json.RawMessage) (any, *
 			Role:             string(item.Role),
 			Preview:          preview,
 			PreviewTruncated: truncated,
-			CreatedAt:        item.CreatedAt,
+			CreatedAt:        sessionevent.UnixSecondsToMilliseconds(item.CreatedAt),
 		}
 	}
 	if hasMore && len(items) > 0 {
@@ -260,7 +270,7 @@ func (s *Service) handleSearch(ctx context.Context, raw json.RawMessage) (any, *
 	return result, nil
 }
 
-func projectPageMessage(item *message.Message, remainingText int) (pageMessage, int) {
+func projectPageMessage(item *message.Message, remainingText int, resultsByCall map[string]message.ToolResult) (pageMessage, int) {
 	textLimit := min(maxMessageTextBytes, max(remainingText, 0))
 	text, truncated := truncatePageText(item.Content().Text, textLimit)
 	remainingText -= len(text)
@@ -271,11 +281,14 @@ func projectPageMessage(item *message.Message, remainingText int) (pageMessage, 
 	for _, attachment := range item.BinaryContent() {
 		attachments = append(attachments, attachmentMetadata{Kind: "binary", MIMEType: attachment.MIMEType})
 	}
-	toolCalls := item.ToolCalls()
-	toolMetadata := make([]toolCallMetadata, len(toolCalls))
-	for index, call := range toolCalls {
-		toolMetadata[index] = toolCallMetadata{ID: call.ID, Name: call.Name, Finished: call.Finished}
+	// Prefer same-message results, then page-scoped join from tool-role rows.
+	localResults := toolResultsByCallID([]message.Message{*item})
+	for id, result := range resultsByCall {
+		if _, exists := localResults[id]; !exists {
+			localResults[id] = result
+		}
 	}
+	toolMetadata := projectToolCallMetadata(item.ID, item.ToolCalls(), localResults)
 	return pageMessage{
 		ID:              item.ID,
 		Role:            string(item.Role),
@@ -295,9 +308,63 @@ func projectPageMessage(item *message.Message, remainingText int) (pageMessage, 
 			CacheReadTokens:  item.Usage.CacheReadTokens,
 			CacheWriteTokens: item.Usage.CacheWriteTokens,
 		},
-		CreatedAt: item.CreatedAt,
-		UpdatedAt: item.UpdatedAt,
+		CreatedAt: sessionevent.UnixSecondsToMilliseconds(item.CreatedAt),
+		UpdatedAt: sessionevent.UnixSecondsToMilliseconds(item.UpdatedAt),
 	}, remainingText
+}
+
+func toolResultsByCallID(items []message.Message) map[string]message.ToolResult {
+	out := make(map[string]message.ToolResult)
+	for index := range items {
+		for _, result := range items[index].ToolResults() {
+			if result.ToolCallID == "" {
+				continue
+			}
+			out[result.ToolCallID] = result
+		}
+	}
+	return out
+}
+
+func projectToolCallMetadata(messageID string, calls []message.ToolCall, resultsByCall map[string]message.ToolResult) []toolCallMetadata {
+	if len(calls) == 0 {
+		return []toolCallMetadata{}
+	}
+	toolMetadata := make([]toolCallMetadata, len(calls))
+	for index, call := range calls {
+		meta := toolCallMetadata{
+			ID:       call.ID,
+			Name:     call.Name,
+			Finished: call.Finished,
+			Status:   "ready",
+		}
+		if result, ok := resultsByCall[call.ID]; ok {
+			meta.Finished = true
+			meta.IsError = result.IsError
+			if result.IsError {
+				meta.Status = "failed"
+			} else {
+				meta.Status = "completed"
+			}
+		} else if call.Finished {
+			meta.Status = "completed"
+		}
+		if isAgentLikeToolName(call.Name) && messageID != "" && call.ID != "" {
+			// Same identity the runtime uses for agent tool child sessions.
+			meta.ChildSessionID = messageID + "$$" + call.ID
+		}
+		toolMetadata[index] = meta
+	}
+	return toolMetadata
+}
+
+func isAgentLikeToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "agent", "agentic_fetch":
+		return true
+	default:
+		return false
+	}
 }
 
 func boundedLimit(value, defaultValue, maxValue int) (int, error) {

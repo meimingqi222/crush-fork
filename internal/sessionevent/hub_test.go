@@ -251,3 +251,24 @@ func TestMetricKindBoundsUnknownValues(t *testing.T) {
 	require.Equal(t, "message", metricKind(KindMessageDelta))
 	require.Equal(t, "other", metricKind(Kind("session-id-controlled-value")))
 }
+
+func TestHubSnapshotCutClearsCompletedAndTerminalDrafts(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub(Config{})
+	t.Cleanup(hub.Close)
+	publish := func(event NewEvent) {
+		_, err := hub.Publish("session", event)
+		require.NoError(t, err)
+	}
+	publish(NewEvent{Kind: KindMessageCreated, Payload: MessageEvent{MessageID: "message-1"}})
+	publish(NewEvent{Kind: KindMessageDelta, Payload: TextDelta{MessageID: "message-1", Text: "draft"}})
+	require.True(t, hub.SnapshotCut("session").ActiveDraft.Available)
+	publish(NewEvent{Kind: KindMessageCompleted, Payload: MessageEvent{MessageID: "message-1"}})
+	require.False(t, hub.SnapshotCut("session").ActiveDraft.Available)
+
+	publish(NewEvent{Kind: KindMessageCreated, Payload: MessageEvent{MessageID: "message-2"}})
+	publish(NewEvent{Kind: KindMessageDelta, Payload: TextDelta{MessageID: "message-2", Text: "draft"}})
+	publish(NewEvent{Kind: KindTurnCancelled, Payload: TurnEvent{TurnID: "turn"}})
+	require.False(t, hub.SnapshotCut("session").ActiveDraft.Available)
+}

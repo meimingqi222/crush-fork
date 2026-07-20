@@ -25,6 +25,14 @@ applying every event in that range. A client may apply it only when
 `crush/session/sync`. `sessionRevision` increments on externally observable
 session configuration or ownership changes, including MCP replacement.
 
+`timestamp` in the common event envelope is an RFC 3339 UTC string. Every
+**numeric** wire timestamp in this protocol (including `createdAt`,
+`updatedAt`, `expiresAt`, and numeric payload `timestamp` fields) MUST be a
+Unix millisecond value. This does not change standard ACP's ISO 8601
+`session/update.updatedAt` field. Persistence models may retain Unix seconds;
+their DTO adapters MUST convert seconds to milliseconds at the wire boundary.
+This is a protocol projection rule and requires no database migration.
+
 All mutation requests MUST contain a UUID-like `clientRequestId`. The server
 MUST retain the completed result or error for at least 10 minutes and return it
 for duplicates. Reusing an ID with different parameters returns
@@ -94,10 +102,39 @@ initialize replaces prior negotiation state; malformed or unsupported
 renegotiation MUST clear the previous selection.
 
 Version 1 features are `sessionSync`, `sessionControl`, `terminal`, `blob`,
+`blobUpload`,
 `clientFS`, `providerAuth`, and `mcpControl`. `crush/protocol/status` returns the
 version and features selected for the current connection. Calls belonging to an
 unselected feature return `CRUSH_FEATURE_NOT_NEGOTIATED` without entering an
 application handler.
+
+## Standard ACP presentation and sequenced recovery
+
+Standard ACP `session/update` remains the interoperable, unsequenced
+presentation stream. Its standard variants carry message and thought chunks,
+tool calls and updates, plans, session information, and configuration/mode
+updates. It has no `sequence`, replay cursor, or snapshot contract. Crush also
+currently carries implementation-specific `childSessionId`, reducer metadata,
+and `timeline_event` data on this method; those fields/variants MUST NOT be
+described as portable standard ACP. A compatible Crush client may consume them
+only under an explicitly documented Crush compatibility policy until they move
+behind a negotiated extension or are standardized upstream.
+
+Negotiated `crush/session/event`, `crush/session/snapshot`, and
+`crush/session/sync` are the separate sequenced recovery surface. They carry
+the connection's private projection, sequence ranges, and the snapshot/replay
+cut needed to rebuild that projection. `goal.updated` (if introduced) has no
+standard ACP `session/update` equivalent; it MUST remain a sequenced private
+event with a snapshot projection rather than being described as standard ACP.
+
+Some standard and private events can present overlapping information, for
+example a tool call or plan. That overlap is intentional compatibility output,
+not permission to silently remove the private recovery state. An implementation
+MUST NOT remove a private event or snapshot field on the basis that a standard
+`session/update` looks similar until it proves that the resulting private
+projection can still be rebuilt from its negotiated snapshot plus sequenced
+replay after reconnect, overflow, and backend restart. Standard ACP updates
+alone cannot supply that proof.
 
 ## Session synchronization methods
 
@@ -135,8 +172,8 @@ the `session` field of `get`, is bounded and contains only public session state:
   "completionTokens": 250,
   "archived": false,
   "pinned": true,
-  "createdAt": 1783872000,
-  "updatedAt": 1783872060
+  "createdAt": 1783872000000,
+  "updatedAt": 1783872060000
 }
 ```
 
@@ -307,6 +344,19 @@ subscription. Both outcomes are successful and cleanup is idempotent.
 Snapshot MUST include session metadata, status, active turn summary, queued
 turn summaries, effective inference configuration, MCP summaries, terminal
 summaries, last 20 message summaries, latest sequence, and session revision.
+When an active assistant turn has an in-memory draft, its `activeTurn` MUST
+also contain a bounded `draft` projection. `draft.text` is valid UTF-8 and is
+capped at 64 KiB; `draft.truncated` is true exactly when the current draft
+exceeds that cap. The draft is a bounded display/recovery projection, not a
+full-history substitute.
+
+Snapshot construction MUST establish one sequence cut: `latestSequence` and
+the active draft MUST describe the same runtime state. `draft.capturedSequence`
+MUST equal the enclosing `latestSequence`; clients retain that draft and replay
+only events strictly after `latestSequence`. The server MUST NOT return a draft
+captured before or after that sequence cut. If no draft is available, it omits
+`draft`; a truncated draft MUST remain explicitly marked rather than appearing
+complete.
 Attachments are metadata plus blob handles; a snapshot MUST NOT inline binaries.
 Message summaries contain only a bounded UTF-8 preview (currently 512 bytes),
 attachment/tool counts, model/provider identity, finish state, and timestamps.
@@ -327,11 +377,20 @@ Representative snapshot result:
     "messageCount": 10000,
     "promptTokens": 1200,
     "completionTokens": 400,
-    "createdAt": 1783910000,
-    "updatedAt": 1783910300
+    "createdAt": 1783910000000,
+    "updatedAt": 1783910300000
   },
   "status": "running",
-  "activeTurn": { "state": "running" },
+  "activeTurn": {
+    "id": "turn-123",
+    "messageId": "message-456",
+    "state": "running",
+    "draft": {
+      "text": "Current assistant output",
+      "truncated": false,
+      "capturedSequence": 1842
+    }
+  },
   "queue": { "count": 1, "paused": false },
   "effectiveConfig": { "model": "model-id", "provider": "provider-id" },
   "mcpServers": [],
@@ -363,14 +422,21 @@ clients MUST NOT construct or reuse it for another session.
       "textTruncated": false,
       "hasReasoning": true,
       "attachments": [{ "kind": "binary", "mimeType": "application/pdf" }],
-      "toolCalls": [{ "id": "tool-1", "name": "read", "finished": true }],
+      "toolCalls": [{
+        "id": "tool-1",
+        "name": "read",
+        "finished": true,
+        "status": "completed",
+        "isError": false,
+        "childSessionId": ""
+      }],
       "toolResultCount": 1,
       "finishReason": "end_turn",
       "model": "model-id",
       "provider": "provider-id",
       "usage": { "inputTokens": 100, "outputTokens": 20 },
-      "createdAt": 1783910300,
-      "updatedAt": 1783910301
+      "createdAt": 1783910300000,
+      "updatedAt": 1783910301000
     }
   ],
   "nextCursor": "opaque-base64url",
@@ -383,6 +449,24 @@ UTF-8. Attachment bytes, attachment paths and source URLs, reasoning content or
 signatures, tool input, tool result content/metadata, and provider-internal
 state are never returned. Attachment and tool lifecycle metadata remain
 bounded public projections.
+
+`toolCalls[]` on history pages **and** snapshot `messages[]` is a public
+lifecycle projection only:
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `finished` | Identity + whether the call completed input streaming |
+| `status` | `ready` \| `completed` \| `failed` (joined from same-page tool results when present) |
+| `isError` | True when a joined tool result reported error |
+| `childSessionId` | For `agent` / `agentic_fetch`, `messageId$$toolCallId` child session id |
+
+Clients MUST still use live `tool.progress` / `tool.completed` for input/result
+bodies and file identities. Snapshot may omit `toolCalls` on older servers;
+clients fall back to `toolCallCount` + `crush/session/messages`.
+
+`turn.progress` is a best-effort heartbeat while a turn is active but silent
+(for example provider stream retry). Payload reuses the turn object with
+optional `phase` (e.g. `provider_retry`). It MUST NOT clear `activeTurn`.
 
 The database query uses keyset predicates over the indexed composite key
 `(session_id, created_at DESC, id DESC)`, fetching `limit + 1` rows to derive
@@ -483,6 +567,11 @@ never permits two GUI-owned active Agent runs for one session.
 
 ## Terminal methods
 
+The canonical field-level request/result/event shapes and byte limits for this
+section are versioned in [`schema/v1/terminal.schema.json`](schema/v1/terminal.schema.json).
+Client repositories may vendor that file but MUST retain provenance and verify
+shape drift before claiming compatibility.
+
 Terminal storage is App-owned. Every operation checks an unguessable internal
 connection owner and the request `sessionId`; ownership failures collapse to
 `CRUSH_TERMINAL_NOT_FOUND`. Unix uses a real PTY and Windows uses ConPTY.
@@ -535,6 +624,15 @@ to 4 MiB. If `afterOffset` predates retained output, snapshot starts at the
 oldest retained offset with `truncated:true`; an offset beyond current output
 is invalid.
 
+The ACP wire representation of terminal `data` and binary input `bytes` is the
+base64 JSON string above. A desktop Go-to-renderer bridge MAY validate the
+encoded length and base64 syntax, then preserve that original encoded string
+across its JSON bridge; it MUST NOT decode and immediately re-encode solely for
+bridge transport. The renderer decodes it once when producing terminal bytes
+(for example, a `Uint8Array`). This optimization does not alter ACP base64,
+offset, truncation, or frame-size semantics; the terminal service still decodes
+input before writing it to the PTY/ConPTY.
+
 Reliable `terminal.exited` events include state, code, signal, timestamp, and
 final offset. Completed terminals immediately close PTY/ConPTY process and
 display handles while retaining bounded metadata/output for ten minutes.
@@ -580,6 +678,40 @@ to 1 MiB maximum decoded bytes per read.
 `crush/blob/release` accepts `sessionId`, `blobId`, and `clientRequestId`, and
 returns `{blobId, released: true}`. Exact retries replay the successful result.
 Blobs are also released on owner-session deletion and connection shutdown.
+
+`crush/blob/create` remains the atomic compatibility path and is capped at
+1 MiB decoded content. It MUST NOT be used to evade the normal 4 MiB ACP frame
+limit by supplying many `chunks`. A client that needs a larger Blob selects the
+separate `blobUpload` feature and uses the following idempotent methods. A
+client normally selects both `blob` and `blobUpload`: the latter creates a
+handle, while the former reads, releases, or attaches its committed handle.
+
+`crush/blob/upload/start` accepts `sessionId`, optional `mimeType`, `filename`,
+and `sourceUri`, plus `size`, lowercase-hex `sha256`, and `clientRequestId`.
+It reserves the declared size immediately and returns:
+
+```json
+{"uploadId":"uuid","sessionId":"session-id","size":12345,"sha256":"lowercase-hex-sha256","expiresAt":1780000000000,"nextOffset":0,"chunkSize":1048576}
+```
+
+`crush/blob/upload/chunk` accepts `sessionId`, `uploadId`, exact `offset`, one
+base64 `content` value, and `clientRequestId`. Content is decoded and limited to
+1 MiB; offsets must be contiguous and a retry with the same request ID must
+have the same content hash. It returns `{uploadId,nextOffset,receivedBytes}`.
+The service stages chunks incrementally and never exposes them through read or
+attachment resolution before commit. After validation, commit materializes one
+bounded in-memory Blob buffer for the existing ranged-read service; it does not
+claim a streaming read representation.
+
+`crush/blob/upload/commit` accepts `sessionId`, `uploadId`, and
+`clientRequestId`. It succeeds only when the received size and streamed SHA-256
+match the declaration, then turns that same `uploadId` into the normal readable
+`blobId` and returns Blob metadata. `crush/blob/upload/abort` takes the same
+identifiers and returns `{uploadId,aborted:true}`. Pending uploads reserve and
+count toward the 64 MiB per-object, 256 MiB retained, 1,024 object, and TTL
+limits; owner/session deletion, connection shutdown, expiry, and abort release
+their reservation. Cross-owner, cross-session, expired, aborted, and
+uncommitted upload IDs all return `CRUSH_BLOB_NOT_FOUND` without disclosure.
 
 Version 1 defaults to a 10-minute TTL, 64 MiB per Blob, 256 MiB retained per
 backend process, and 1,024 retained objects. Policy may configure lower limits.
@@ -873,8 +1005,8 @@ Required event families include `session.*`, `turn.*`, `message.*`,
 
 | Event | Backpressure strategy |
 |---|---|
-| Text/reasoning delta | Merge adjacent compatible deltas for 16-33 ms. |
-| Terminal output | Coalesce by byte count and time, preserving offsets. |
+| Text/reasoning delta | Merge already-adjacent compatible queued deltas only when they are eligible within 16-33 ms; do not wait for a successor. |
+| Terminal output | Merge already-adjacent contiguous queued ranges by byte count and merge eligibility; do not add a timer delay. |
 | Tool progress | Latest wins per tool call. |
 | Usage/title/status update | Latest wins per entity. |
 | Permission request | Never drop. |

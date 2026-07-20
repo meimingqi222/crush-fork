@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charm.land/crush/schema/gui-acp/terminal-v1.json",
+  "title": "Crush terminal extension contracts v1",
+  "$comment": "Canonical server-owned field contract for the negotiated terminal extension. Client repositories may vendor this file and must verify drift.",
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "timestamp": { "type": "integer", "minimum": 0, "format": "unix-ms" },
+    "offset": { "type": "integer", "minimum": 0 },
+    "dimension": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "base64": { "type": "string", "contentEncoding": "base64" },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terminalId", "sessionId", "state", "cols", "rows", "offset", "createdAt"],
+      "properties": {
+        "terminalId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "state": { "enum": ["running", "exited", "killed"] },
+        "cols": { "$ref": "#/$defs/dimension" },
+        "rows": { "$ref": "#/$defs/dimension" },
+        "offset": { "$ref": "#/$defs/offset" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "exitedAt": { "$ref": "#/$defs/timestamp" },
+        "exitCode": { "type": "integer" },
+        "signal": { "type": "string", "maxLength": 16 }
+      },
+      "examples": [{ "terminalId": "term-1", "sessionId": "session-1", "state": "running", "cols": 120, "rows": 40, "offset": 0, "createdAt": 1784318400000 }]
+    },
+    "openRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "command", "clientRequestId"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "command": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 4096 },
+        "args": { "type": "array", "maxItems": 256, "items": { "type": "string", "x-maxUtf8Bytes": 4096 } },
+        "cwd": { "type": "string", "x-maxUtf8Bytes": 4096 },
+        "env": { "type": "object", "maxProperties": 256, "additionalProperties": { "type": "string", "x-maxUtf8Bytes": 4096 } },
+        "cols": { "$ref": "#/$defs/dimension" },
+        "rows": { "$ref": "#/$defs/dimension" },
+        "clientRequestId": { "$ref": "#/$defs/id" }
+      },
+      "examples": [{ "sessionId": "session-1", "command": "pwsh", "args": ["-NoLogo"], "cwd": "D:/workspace", "env": { "TERM": "xterm-256color" }, "cols": 120, "rows": 40, "clientRequestId": "request-1" }]
+    },
+    "inputRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "terminalId", "clientRequestId"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "terminalId": { "$ref": "#/$defs/id" },
+        "text": { "type": "string", "minLength": 1, "x-maxUtf8Bytes": 1048576 },
+        "bytes": { "$ref": "#/$defs/base64", "x-maxDecodedBytes": 1048576 },
+        "clientRequestId": { "$ref": "#/$defs/id" }
+      },
+      "oneOf": [{ "required": ["text"], "not": { "required": ["bytes"] } }, { "required": ["bytes"], "not": { "required": ["text"] } }],
+      "examples": [{ "sessionId": "session-1", "terminalId": "term-1", "text": "ls\r", "clientRequestId": "request-2" }]
+    },
+    "inputResult": {
+      "type": "object", "additionalProperties": false, "required": ["terminalId", "written"],
+      "properties": { "terminalId": { "$ref": "#/$defs/id" }, "written": { "type": "integer", "minimum": 1, "maximum": 1048576 } },
+      "examples": [{ "terminalId": "term-1", "written": 3 }]
+    },
+    "resizeRequest": {
+      "type": "object", "additionalProperties": false, "required": ["sessionId", "terminalId", "cols", "rows", "clientRequestId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "terminalId": { "$ref": "#/$defs/id" }, "cols": { "$ref": "#/$defs/dimension" }, "rows": { "$ref": "#/$defs/dimension" }, "clientRequestId": { "$ref": "#/$defs/id" } },
+      "examples": [{ "sessionId": "session-1", "terminalId": "term-1", "cols": 120, "rows": 40, "clientRequestId": "request-3" }]
+    },
+    "killRequest": {
+      "type": "object", "additionalProperties": false, "required": ["sessionId", "terminalId", "clientRequestId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "terminalId": { "$ref": "#/$defs/id" }, "signal": { "enum": ["interrupt", "terminate", "kill"] }, "clientRequestId": { "$ref": "#/$defs/id" } },
+      "examples": [{ "sessionId": "session-1", "terminalId": "term-1", "signal": "interrupt", "clientRequestId": "request-4" }]
+    },
+    "killResult": {
+      "type": "object", "additionalProperties": false, "required": ["acknowledged", "terminal"],
+      "properties": { "acknowledged": { "const": true }, "terminal": { "$ref": "#/$defs/terminal" } },
+      "examples": [{ "acknowledged": true, "terminal": { "terminalId": "term-1", "sessionId": "session-1", "state": "running", "cols": 120, "rows": 40, "offset": 0, "createdAt": 1784318400000 } }]
+    },
+    "snapshotRequest": {
+      "type": "object", "additionalProperties": false, "required": ["sessionId", "terminalId"],
+      "properties": { "sessionId": { "$ref": "#/$defs/id" }, "terminalId": { "$ref": "#/$defs/id" }, "afterOffset": { "$ref": "#/$defs/offset" } },
+      "examples": [{ "sessionId": "session-1", "terminalId": "term-1", "afterOffset": 0 }]
+    },
+    "snapshotResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["terminalId", "sessionId", "state", "cols", "rows", "offset", "createdAt", "startOffset", "endOffset", "truncated", "more", "data"],
+      "properties": { "terminalId": { "$ref": "#/$defs/id" }, "sessionId": { "$ref": "#/$defs/id" }, "state": { "enum": ["running", "exited", "killed"] }, "cols": { "$ref": "#/$defs/dimension" }, "rows": { "$ref": "#/$defs/dimension" }, "offset": { "$ref": "#/$defs/offset" }, "createdAt": { "$ref": "#/$defs/timestamp" }, "exitedAt": { "$ref": "#/$defs/timestamp" }, "exitCode": { "type": "integer" }, "signal": { "type": "string", "maxLength": 16 }, "startOffset": { "$ref": "#/$defs/offset" }, "endOffset": { "$ref": "#/$defs/offset" }, "truncated": { "type": "boolean" }, "more": { "type": "boolean" }, "data": { "$ref": "#/$defs/base64", "x-maxDecodedBytes": 2097152 } },
+      "examples": [{ "terminalId": "term-1", "sessionId": "session-1", "state": "running", "cols": 120, "rows": 40, "offset": 3, "createdAt": 1784318400000, "startOffset": 0, "endOffset": 3, "truncated": false, "more": false, "data": "bHM=" }]
+    },
+    "outputEvent": {
+      "type": "object", "additionalProperties": false, "required": ["terminalId", "offset", "data"],
+      "properties": { "terminalId": { "$ref": "#/$defs/id" }, "offset": { "$ref": "#/$defs/offset" }, "data": { "$ref": "#/$defs/base64", "x-maxDecodedBytes": 262144 } },
+      "examples": [{ "terminalId": "term-1", "offset": 0, "data": "bHM=" }]
+    },
+    "exitedEvent": {
+      "type": "object", "additionalProperties": false, "required": ["terminalId", "state", "code", "timestamp", "offset"],
+      "properties": { "terminalId": { "$ref": "#/$defs/id" }, "state": { "enum": ["exited", "killed"] }, "code": { "type": "integer" }, "signal": { "type": "string", "maxLength": 16 }, "timestamp": { "type": "integer", "minimum": 0, "format": "unix-ms" }, "offset": { "$ref": "#/$defs/offset" } },
+      "examples": [{ "terminalId": "term-1", "state": "exited", "code": 0, "timestamp": 1784318400000, "offset": 3 }]
+    }
+  }
+}
+
+

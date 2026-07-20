@@ -34,6 +34,7 @@ func (m *mockQueueCoordinator) Cancel(sessionID string) {
 }
 func (m *mockQueueCoordinator) CancelAll()                           {}
 func (m *mockQueueCoordinator) IsSessionBusy(string) bool            { return m.busy }
+func (m *mockQueueCoordinator) ActiveTurnID(string) string           { return "" }
 func (m *mockQueueCoordinator) IsBusy() bool                         { return false }
 func (m *mockQueueCoordinator) QueuedPrompts(string) int             { return m.queue }
 func (m *mockQueueCoordinator) QueuedPromptsList(string) []string    { return nil }

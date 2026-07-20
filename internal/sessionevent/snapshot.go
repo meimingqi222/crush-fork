@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/crush/internal/message"
@@ -14,6 +15,7 @@ const (
 	SnapshotMessageLimit  = 20
 	SnapshotPreviewBytes  = 512
 	SnapshotResourceLimit = 50
+	SnapshotDraftBytes    = 64 * 1024
 )
 
 // SnapshotSessionReader is the bounded metadata dependency for snapshots.
@@ -85,9 +87,18 @@ type RuntimeSnapshot struct {
 }
 
 type TurnSummary struct {
-	ID        string `json:"id,omitempty"`
-	MessageID string `json:"messageId,omitempty"`
-	State     string `json:"state"`
+	ID        string           `json:"id,omitempty"`
+	MessageID string           `json:"messageId,omitempty"`
+	State     string           `json:"state"`
+	Draft     *ActiveTurnDraft `json:"draft,omitempty"`
+}
+
+// ActiveTurnDraft is the bounded in-memory assistant text required to restore
+// an active turn after a sequenced snapshot.
+type ActiveTurnDraft struct {
+	Text             string `json:"text"`
+	Truncated        bool   `json:"truncated"`
+	CapturedSequence uint64 `json:"capturedSequence"`
 }
 
 type QueueSummary struct {
@@ -123,9 +134,23 @@ type MessageSummary struct {
 	Provider         string `json:"provider,omitempty"`
 	FinishReason     string `json:"finishReason,omitempty"`
 	ToolCallCount    int    `json:"toolCallCount,omitempty"`
-	AttachmentCount  int    `json:"attachmentCount,omitempty"`
-	CreatedAt        int64  `json:"createdAt"`
-	UpdatedAt        int64  `json:"updatedAt"`
+	// ToolCalls are bounded public lifecycle projections (id/name/status only).
+	// Input/result bodies are never included — use live tool.* events for those.
+	ToolCalls       []ToolCallSummary `json:"toolCalls,omitempty"`
+	AttachmentCount int               `json:"attachmentCount,omitempty"`
+	CreatedAt       int64             `json:"createdAt"`
+	UpdatedAt       int64             `json:"updatedAt"`
+}
+
+// ToolCallSummary is the snapshot/history public tool identity used by desktop
+// clients to hydrate ActivityShell without a second messages round-trip.
+type ToolCallSummary struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Finished       bool   `json:"finished"`
+	Status         string `json:"status,omitempty"`
+	IsError        bool   `json:"isError,omitempty"`
+	ChildSessionID string `json:"childSessionId,omitempty"`
 }
 
 func NewSnapshotService(
@@ -168,11 +193,21 @@ func (s *SnapshotService) Snapshot(ctx context.Context, sessionID string) (Snaps
 		status = "queued"
 	}
 
-	latestSequence := uint64(0)
-	revision := uint64(0)
+	cut := SnapshotCut{}
 	if s.events != nil {
-		latestSequence = s.events.LatestSequence(sessionID)
-		revision = s.events.LatestRevision(sessionID)
+		cut = s.events.SnapshotCut(sessionID)
+	}
+	if activeTurn != nil {
+		if activeTurn.MessageID == "" {
+			activeTurn.MessageID = cut.ActiveDraft.MessageID
+		}
+		if cut.ActiveDraft.Available {
+			activeTurn.Draft = &ActiveTurnDraft{
+				Text:             cut.ActiveDraft.Text,
+				Truncated:        cut.ActiveDraft.Truncated,
+				CapturedSequence: cut.LatestSequence,
+			}
+		}
 	}
 	effectiveConfig := InferenceConfig{Model: runtime.Model, Provider: runtime.Provider}
 	if runtime.Inference.Model != "" {
@@ -192,8 +227,8 @@ func (s *SnapshotService) Snapshot(ctx context.Context, sessionID string) (Snaps
 			CompletionTokens:  sess.CompletionTokens,
 			Archived:          sess.Archived,
 			Pinned:            sess.Pinned,
-			CreatedAt:         sess.CreatedAt,
-			UpdatedAt:         sess.UpdatedAt,
+			CreatedAt:         UnixSecondsToMilliseconds(sess.CreatedAt),
+			UpdatedAt:         UnixSecondsToMilliseconds(sess.UpdatedAt),
 		},
 		Status:          status,
 		ActiveTurn:      activeTurn,
@@ -202,11 +237,12 @@ func (s *SnapshotService) Snapshot(ctx context.Context, sessionID string) (Snaps
 		MCPServers:      boundedResources(runtime.MCPServers),
 		Terminals:       boundedResources(runtime.Terminals),
 		Messages:        make([]MessageSummary, len(messages)),
-		LatestSequence:  latestSequence,
-		SessionRevision: revision,
+		LatestSequence:  cut.LatestSequence,
+		SessionRevision: cut.SessionRevision,
 	}
+	resultsByCall := snapshotToolResultsByCallID(messages)
 	for index := range messages {
-		result.Messages[index] = summarizeMessage(&messages[index])
+		result.Messages[index] = summarizeMessage(&messages[index], resultsByCall)
 	}
 	return result, nil
 }
@@ -220,11 +256,18 @@ func inferenceConfig(value session.EffectiveInference) InferenceConfig {
 	}
 }
 
-func summarizeMessage(msg *message.Message) MessageSummary {
+func summarizeMessage(msg *message.Message, resultsByCall map[string]message.ToolResult) MessageSummary {
 	preview, truncated := truncateUTF8(msg.Content().Text, SnapshotPreviewBytes)
 	finishReason := ""
 	if finish := msg.FinishPart(); finish != nil {
 		finishReason = string(finish.Reason)
+	}
+	calls := msg.ToolCalls()
+	localResults := snapshotToolResultsByCallID([]message.Message{*msg})
+	for id, result := range resultsByCall {
+		if _, exists := localResults[id]; !exists {
+			localResults[id] = result
+		}
 	}
 	return MessageSummary{
 		ID:               msg.ID,
@@ -234,11 +277,71 @@ func summarizeMessage(msg *message.Message) MessageSummary {
 		Model:            msg.Model,
 		Provider:         msg.Provider,
 		FinishReason:     finishReason,
-		ToolCallCount:    len(msg.ToolCalls()),
+		ToolCallCount:    len(calls),
+		ToolCalls:        projectSnapshotToolCalls(msg.ID, calls, localResults),
 		AttachmentCount:  len(msg.ImageURLContent()) + len(msg.BinaryContent()),
-		CreatedAt:        msg.CreatedAt,
-		UpdatedAt:        msg.UpdatedAt,
+		CreatedAt:        UnixSecondsToMilliseconds(msg.CreatedAt),
+		UpdatedAt:        UnixSecondsToMilliseconds(msg.UpdatedAt),
 	}
+}
+
+func snapshotToolResultsByCallID(items []message.Message) map[string]message.ToolResult {
+	out := make(map[string]message.ToolResult)
+	for index := range items {
+		for _, result := range items[index].ToolResults() {
+			if result.ToolCallID == "" {
+				continue
+			}
+			out[result.ToolCallID] = result
+		}
+	}
+	return out
+}
+
+func projectSnapshotToolCalls(messageID string, calls []message.ToolCall, resultsByCall map[string]message.ToolResult) []ToolCallSummary {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]ToolCallSummary, len(calls))
+	for index, call := range calls {
+		meta := ToolCallSummary{
+			ID:       call.ID,
+			Name:     call.Name,
+			Finished: call.Finished,
+			Status:   "ready",
+		}
+		if result, ok := resultsByCall[call.ID]; ok {
+			meta.Finished = true
+			meta.IsError = result.IsError
+			if result.IsError {
+				meta.Status = "failed"
+			} else {
+				meta.Status = "completed"
+			}
+		} else if call.Finished {
+			meta.Status = "completed"
+		}
+		if isAgentLikeToolName(call.Name) && messageID != "" && call.ID != "" {
+			meta.ChildSessionID = messageID + "$$" + call.ID
+		}
+		out[index] = meta
+	}
+	return out
+}
+
+func isAgentLikeToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "agent", "agentic_fetch":
+		return true
+	default:
+		return false
+	}
+}
+
+// UnixSecondsToMilliseconds adapts persisted Unix-second values at the
+// private protocol DTO boundary. Persistence intentionally remains in seconds.
+func UnixSecondsToMilliseconds(seconds int64) int64 {
+	return seconds * 1000
 }
 
 func boundedResources(resources []ResourceSummary) []ResourceSummary {

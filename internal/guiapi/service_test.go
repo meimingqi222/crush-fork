@@ -86,6 +86,24 @@ func TestFeatureGatingAndRegistration(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load())
 }
 
+func TestBlobUploadIsAnIndependentlyNegotiatedFeature(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(nil)
+	require.Nil(t, service.NegotiateExperimental(experimentalSelection(t, Selection{
+		ProtocolVersion: ProtocolVersion, Features: []Feature{FeatureBlob},
+	})))
+	_, rpcErr := service.HandleExtension(t.Context(), "crush/blob/upload/start", nil)
+	require.Equal(t, codeFeatureNotNegotiated, rpcErr.Code)
+
+	require.Nil(t, service.NegotiateExperimental(experimentalSelection(t, Selection{
+		ProtocolVersion: ProtocolVersion, Features: []Feature{FeatureBlobUpload},
+	})))
+	result, rpcErr := service.HandleExtension(t.Context(), "crush/protocol/status", nil)
+	require.Nil(t, rpcErr)
+	require.Equal(t, []Feature{FeatureBlobUpload}, result.(statusResult).Features)
+}
+
 func TestOmittedCrushCapabilityResetsNegotiation(t *testing.T) {
 	t.Parallel()
 

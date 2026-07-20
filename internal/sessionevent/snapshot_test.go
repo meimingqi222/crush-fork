@@ -44,13 +44,14 @@ func TestSnapshotIsBoundedAndContainsRuntimeProjection(t *testing.T) {
 		resources[index] = ResourceSummary{ID: fmt.Sprintf("resource-%d", index), Status: "connected"}
 	}
 	runtime := fixedRuntimeSource{projection: RuntimeSnapshot{
-		Busy:        true,
-		QueueCount:  3,
-		QueuePaused: true,
-		Model:       "gpt-test",
-		Provider:    "mock",
-		MCPServers:  resources,
-		Terminals:   resources,
+		Busy:         true,
+		ActiveTurnID: "turn-9",
+		QueueCount:   3,
+		QueuePaused:  true,
+		Model:        "gpt-test",
+		Provider:     "mock",
+		MCPServers:   resources,
+		Terminals:    resources,
 	}}
 	hub := NewHub(Config{})
 	_, err := hub.Publish("session-1", NewEvent{SessionRevision: 7, Kind: KindSessionUpdated})
@@ -67,6 +68,11 @@ func TestSnapshotIsBoundedAndContainsRuntimeProjection(t *testing.T) {
 	require.Equal(t, int64(10_000), snapshot.Session.MessageCount)
 	require.Equal(t, "running", snapshot.Status)
 	require.NotNil(t, snapshot.ActiveTurn)
+	// Regression: a busy session used to always produce activeTurn.id == "",
+	// which the gui-acp client correctly rejects as an invalid snapshot,
+	// producing an unbreakable prepare-fail retry loop for the whole turn.
+	require.NotEmpty(t, snapshot.ActiveTurn.ID)
+	require.Equal(t, "turn-9", snapshot.ActiveTurn.ID)
 	require.Equal(t, QueueSummary{Count: 3, Paused: true}, snapshot.Queue)
 	require.Equal(t, InferenceConfig{Model: "gpt-test", Provider: "mock"}, snapshot.EffectiveConfig)
 	require.Len(t, snapshot.MCPServers, SnapshotResourceLimit)
@@ -99,6 +105,61 @@ func TestSnapshotUsesOneBoundedMessageQueryForEmptySession(t *testing.T) {
 	require.Empty(t, snapshot.Messages)
 	require.NotNil(t, snapshot.MCPServers)
 	require.NotNil(t, snapshot.Terminals)
+}
+
+func TestSnapshotProjectsPersistedTimestampsAsMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := NewSnapshotService(
+		&snapshotSessionReader{session: session.Session{
+			ID: "session", Kind: session.KindNormal, CreatedAt: 1_783_910_000, UpdatedAt: 1_783_910_123,
+		}},
+		&snapshotMessageReader{page: []message.Message{{
+			ID: "message", CreatedAt: 1_783_910_456, UpdatedAt: 1_783_910_789,
+		}}},
+		nil,
+		nil,
+	).Snapshot(t.Context(), "session")
+	require.NoError(t, err)
+	require.Equal(t, int64(1_783_910_000_000), snapshot.Session.CreatedAt)
+	require.Equal(t, int64(1_783_910_123_000), snapshot.Session.UpdatedAt)
+	require.Equal(t, int64(1_783_910_456_000), snapshot.Messages[0].CreatedAt)
+	require.Equal(t, int64(1_783_910_789_000), snapshot.Messages[0].UpdatedAt)
+}
+
+func TestSnapshotActiveDraftMatchesSequenceCutAndIsBounded(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub(Config{})
+	t.Cleanup(hub.Close)
+	_, err := hub.Publish("session", NewEvent{
+		Kind: KindMessageCreated, Payload: MessageEvent{MessageID: "message"},
+	})
+	require.NoError(t, err)
+	oversized := strings.Repeat("a", SnapshotDraftBytes-1) + "界"
+	_, err = hub.Publish("session", NewEvent{
+		Kind: KindMessageDelta, Payload: TextDelta{MessageID: "message", Text: oversized},
+	})
+	require.NoError(t, err)
+	_, err = hub.Publish("session", NewEvent{
+		Kind: KindUsageUpdated, Payload: UsageEvent{OutputTokens: 1},
+	})
+	require.NoError(t, err)
+
+	snapshot, err := NewSnapshotService(
+		&snapshotSessionReader{session: session.Session{ID: "session", Kind: session.KindNormal}},
+		&snapshotMessageReader{},
+		fixedRuntimeSource{projection: RuntimeSnapshot{Busy: true}},
+		hub,
+	).Snapshot(t.Context(), "session")
+	require.NoError(t, err)
+	require.NotNil(t, snapshot.ActiveTurn)
+	require.Equal(t, "message", snapshot.ActiveTurn.MessageID)
+	require.NotNil(t, snapshot.ActiveTurn.Draft)
+	require.Equal(t, snapshot.LatestSequence, snapshot.ActiveTurn.Draft.CapturedSequence)
+	require.True(t, snapshot.ActiveTurn.Draft.Truncated)
+	require.Len(t, snapshot.ActiveTurn.Draft.Text, SnapshotDraftBytes-1)
+	require.True(t, utf8.ValidString(snapshot.ActiveTurn.Draft.Text))
 }
 
 func TestSnapshotReadsOnlyTheIndexedMessageTail(t *testing.T) {

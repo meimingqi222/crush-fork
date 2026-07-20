@@ -135,7 +135,7 @@ func TestTurnStartResolvesOwnedBlobAttachment(t *testing.T) {
 	require.Nil(t, env.service.NegotiateExperimental(experimentalSelection(t, Selection{
 		ProtocolVersion: ProtocolVersion, Features: []Feature{FeatureSessionControl, FeatureBlob},
 	})))
-	data := bytes.Repeat([]byte("attachment"), 128*1024)
+	data := bytes.Repeat([]byte("attachment"), 64*1024)
 	created, rpcErr := env.service.HandleExtension(t.Context(), "crush/blob/create", mustRawJSON(t, blobCreateParams{
 		SessionID: env.sessionID, MIMEType: "application/pdf", Filename: "spec.pdf",
 		Size: int64(len(data)), SHA256: sha256Hex(data), Content: base64.StdEncoding.EncodeToString(data),
@@ -156,6 +156,116 @@ func TestTurnStartResolvesOwnedBlobAttachment(t *testing.T) {
 	require.Equal(t, "application/pdf", attachment.MimeType)
 	require.Equal(t, data, attachment.Content)
 	env.runner.complete(started.ID, turn.StatusCompleted)
+}
+
+func TestBlobUploadHandlersChunkingOwnershipAndReplay(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(nil)
+	shared := blob.New(blob.Config{})
+	service.SetBlobService(shared)
+	service.SetSessionContentSources(fixedSessionReader{id: "session-1"}, nil, nil)
+	require.Nil(t, service.NegotiateExperimental(experimentalSelection(t, Selection{
+		ProtocolVersion: ProtocolVersion, Features: []Feature{FeatureBlob, FeatureBlobUpload},
+	})))
+	t.Cleanup(service.Close)
+
+	data := bytes.Repeat([]byte("segment"), 200000) // >1 MiB and <64 MiB.
+	startParams := blobUploadStartParams{
+		SessionID: "session-1", MIMEType: "application/octet-stream", Filename: "large.bin",
+		Size: int64(len(data)), SHA256: sha256Hex(data), ClientRequestID: uuid.NewString(),
+	}
+	value, rpcErr := service.HandleExtension(t.Context(), "crush/blob/upload/start", mustRawJSON(t, startParams))
+	require.Nil(t, rpcErr)
+	started := value.(blobUploadStartResult)
+	require.Zero(t, started.NextOffset)
+
+	_, rpcErr = service.HandleExtension(t.Context(), "crush/blob/read", mustRawJSON(t, blobReadParams{
+		SessionID: "session-1", BlobID: started.UploadID, Limit: 1,
+	}))
+	require.Equal(t, errorBlobNotFound, rpcErr.Message)
+
+	first := data[:maxUploadChunkBytes]
+	chunkParams := blobUploadChunkParams{
+		SessionID: "session-1", UploadID: started.UploadID, Offset: 0,
+		Content: base64.StdEncoding.EncodeToString(first), ClientRequestID: uuid.NewString(),
+	}
+	value, rpcErr = service.HandleExtension(t.Context(), "crush/blob/upload/chunk", mustRawJSON(t, chunkParams))
+	require.Nil(t, rpcErr)
+	chunked := value.(blobUploadChunkResult)
+	require.Equal(t, int64(len(first)), chunked.NextOffset)
+	replayed, rpcErr := service.HandleExtension(t.Context(), "crush/blob/upload/chunk", mustRawJSON(t, chunkParams))
+	require.Nil(t, rpcErr)
+	require.Equal(t, chunked, replayed)
+
+	chunkParams.Offset = chunked.NextOffset + 1
+	chunkParams.Content = base64.StdEncoding.EncodeToString(data[len(first):])
+	chunkParams.ClientRequestID = uuid.NewString()
+	_, rpcErr = service.HandleExtension(t.Context(), "crush/blob/upload/chunk", mustRawJSON(t, chunkParams))
+	require.Equal(t, acpInvalidParamsCode(), rpcErr.Code)
+	chunkParams.Offset = chunked.NextOffset
+	chunkParams.ClientRequestID = uuid.NewString()
+	value, rpcErr = service.HandleExtension(t.Context(), "crush/blob/upload/chunk", mustRawJSON(t, chunkParams))
+	require.Nil(t, rpcErr)
+	chunked = value.(blobUploadChunkResult)
+	require.Equal(t, int64(len(data)), chunked.NextOffset)
+
+	value, rpcErr = service.HandleExtension(t.Context(), "crush/blob/upload/commit", mustRawJSON(t, blobUploadCommitParams{
+		SessionID: "session-1", UploadID: started.UploadID, ClientRequestID: uuid.NewString(),
+	}))
+	require.Nil(t, rpcErr)
+	metadata := value.(blobMetadata)
+	require.Equal(t, started.UploadID, metadata.BlobID)
+	read, rpcErr := service.HandleExtension(t.Context(), "crush/blob/read", mustRawJSON(t, blobReadParams{
+		SessionID: "session-1", BlobID: metadata.BlobID, Limit: maxUploadChunkBytes,
+	}))
+	require.Nil(t, rpcErr)
+	decoded, err := base64.StdEncoding.DecodeString(read.(blobReadResult).Content)
+	require.NoError(t, err)
+	require.Equal(t, data[:maxUploadChunkBytes], decoded)
+
+	tooLarge := blobUploadChunkParams{
+		SessionID: "session-1", UploadID: started.UploadID, Offset: int64(len(data)),
+		Content: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), maxUploadChunkBytes+1)), ClientRequestID: uuid.NewString(),
+	}
+	_, rpcErr = service.HandleExtension(t.Context(), "crush/blob/upload/chunk", mustRawJSON(t, tooLarge))
+	require.Equal(t, errorPayloadTooLarge, rpcErr.Message)
+}
+
+func TestBlobUploadAbortAndCrossOwnerAreNotFound(t *testing.T) {
+	t.Parallel()
+
+	shared := blob.New(blob.Config{})
+	t.Cleanup(shared.Close)
+	first, second := NewService(nil), NewService(nil)
+	first.SetBlobService(shared)
+	second.SetBlobService(shared)
+	for _, service := range []*Service{first, second} {
+		service.SetSessionContentSources(fixedSessionReader{id: "session-1"}, nil, nil)
+		require.Nil(t, service.NegotiateExperimental(experimentalSelection(t, Selection{
+			ProtocolVersion: ProtocolVersion, Features: []Feature{FeatureBlobUpload},
+		})))
+	}
+	t.Cleanup(first.Close)
+	t.Cleanup(second.Close)
+	data := []byte("pending")
+	value, rpcErr := first.HandleExtension(t.Context(), "crush/blob/upload/start", mustRawJSON(t, blobUploadStartParams{
+		SessionID: "session-1", Size: int64(len(data)), SHA256: sha256Hex(data), ClientRequestID: uuid.NewString(),
+	}))
+	require.Nil(t, rpcErr)
+	started := value.(blobUploadStartResult)
+	_, rpcErr = second.HandleExtension(t.Context(), "crush/blob/upload/abort", mustRawJSON(t, blobUploadAbortParams{
+		SessionID: "session-1", UploadID: started.UploadID, ClientRequestID: uuid.NewString(),
+	}))
+	require.Equal(t, errorBlobNotFound, rpcErr.Message)
+	value, rpcErr = first.HandleExtension(t.Context(), "crush/blob/upload/abort", mustRawJSON(t, blobUploadAbortParams{
+		SessionID: "session-1", UploadID: started.UploadID, ClientRequestID: uuid.NewString(),
+	}))
+	require.Nil(t, rpcErr)
+	require.True(t, value.(blobUploadAbortResult).Aborted)
+	count, retained := shared.Retained()
+	require.Zero(t, count)
+	require.Zero(t, retained)
 }
 
 func TestBlobConnectionAndSessionDeletionCleanup(t *testing.T) {

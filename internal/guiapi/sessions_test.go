@@ -176,6 +176,14 @@ func TestSessionInferenceHandlersResolvePrecedenceAndRejectStaleRevision(t *test
 	require.Equal(t, errorSessionNotFound, rpcErr.Message)
 }
 
+func TestSessionSummaryTimestampDTOsUseMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	summary := sessionSummary(session.Session{CreatedAt: 1_783_910_000, UpdatedAt: 1_783_910_123})
+	require.Equal(t, int64(1_783_910_000_000), summary.CreatedAt)
+	require.Equal(t, int64(1_783_910_123_000), summary.UpdatedAt)
+}
+
 type sessionMutationEnvironment struct {
 	gui       *Service
 	hub       *sessionevent.Hub

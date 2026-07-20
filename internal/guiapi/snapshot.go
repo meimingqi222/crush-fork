@@ -56,6 +56,7 @@ func (s *CoordinatorSnapshotSource) SetTerminalSource(source interface {
 
 type coordinatorSnapshotReader interface {
 	IsSessionBusy(string) bool
+	ActiveTurnID(string) string
 	QueuedPrompts(string) int
 	IsQueuePaused(string) bool
 	ModelForSession(string) (agent.Model, bool)
@@ -73,6 +74,14 @@ func (s *CoordinatorSnapshotSource) SnapshotRuntime(sessionID string) sessioneve
 		Busy:        s.coordinator.IsSessionBusy(sessionID),
 		QueueCount:  s.coordinator.QueuedPrompts(sessionID),
 		QueuePaused: s.coordinator.IsQueuePaused(sessionID),
+		// ActiveTurnID was never populated before this line existed: a snapshot
+		// taken while busy always reported activeTurn.id as "", which the
+		// gui-acp client correctly treats as an invalid snapshot and rejects,
+		// producing an unbreakable prepare-fail retry loop for the whole
+		// duration of the turn. ActiveMessage has no equivalent tracked source
+		// yet and stays unset; the client already tolerates that (only the
+		// turn id is required to be non-empty).
+		ActiveTurnID: s.coordinator.ActiveTurnID(sessionID),
 	}
 	if model, ok := s.coordinator.ModelForSession(sessionID); ok {
 		projection.Model = model.ModelCfg.Model

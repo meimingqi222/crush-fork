@@ -3,6 +3,7 @@ package sessionevent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,32 @@ type sessionState struct {
 	revision      uint64
 	journal       *Journal
 	subscriptions map[string]*Subscription
+	activeDraft   activeDraft
+}
+
+type activeDraft struct {
+	MessageID string
+	Text      string
+	Truncated bool
+	Available bool
+}
+
+// SnapshotCut is the sequence-consistent in-memory portion of a session
+// snapshot. ActiveDraft is captured while the Hub holds the same lock that
+// allocates and journals event sequences.
+type SnapshotCut struct {
+	LatestSequence  uint64
+	SessionRevision uint64
+	ActiveDraft     ActiveDraftCut
+}
+
+// ActiveDraftCut is the in-memory state needed by SnapshotService to project
+// an active assistant draft at a precise sequence.
+type ActiveDraftCut struct {
+	MessageID string
+	Text      string
+	Truncated bool
+	Available bool
 }
 
 // Subscription is a bounded pull queue. Next is the only blocking operation;
@@ -128,11 +155,33 @@ func (h *Hub) Publish(sessionID string, input NewEvent) (Event, error) {
 		CoalesceKey:     input.CoalesceKey,
 		MergedCount:     1,
 	}
+	state.applyDraft(event)
 	state.journal.Append(event, now)
 	for _, subscription := range state.subscriptions {
 		subscription.enqueue(event)
 	}
 	return event, nil
+}
+
+// SnapshotCut returns the latest sequence and active assistant draft from one
+// Hub lock acquisition. A snapshot consumer may replay only after this cut.
+func (h *Hub) SnapshotCut(sessionID string) SnapshotCut {
+	state := h.getSession(sessionID)
+	if state == nil {
+		return SnapshotCut{}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return SnapshotCut{
+		LatestSequence:  state.latest,
+		SessionRevision: state.revision,
+		ActiveDraft: ActiveDraftCut{
+			MessageID: state.activeDraft.MessageID,
+			Text:      state.activeDraft.Text,
+			Truncated: state.activeDraft.Truncated,
+			Available: state.activeDraft.Available,
+		},
+	}
 }
 
 // LatestRevision returns the revision attached to the newest session event.
@@ -405,7 +454,7 @@ func metricKind(kind Kind) string {
 	switch kind {
 	case KindSessionUpdated:
 		return "session"
-	case KindTurnStarted, KindTurnCompleted, KindTurnFailed, KindTurnCancelled, KindTurnSteered, KindCancelAcknowledged:
+	case KindTurnStarted, KindTurnCompleted, KindTurnFailed, KindTurnCancelled, KindTurnSteered, KindTurnProgress, KindCancelAcknowledged:
 		return "turn"
 	case KindMessageDelta, KindMessageCreated, KindMessageCompleted, KindMessageReset:
 		return "message"
@@ -433,4 +482,51 @@ func (s *Subscription) signal() {
 	case s.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (s *sessionState) applyDraft(event Event) {
+	switch event.Kind {
+	case KindMessageCreated:
+		if value, ok := event.Payload.(MessageEvent); ok && value.MessageID != "" {
+			s.activeDraft = activeDraft{MessageID: value.MessageID}
+		}
+	case KindMessageDelta:
+		value, ok := event.Payload.(TextDelta)
+		if !ok || value.MessageID == "" {
+			return
+		}
+		if s.activeDraft.MessageID == "" {
+			s.activeDraft.MessageID = value.MessageID
+		}
+		if s.activeDraft.MessageID != value.MessageID {
+			return
+		}
+		s.activeDraft.append(value.Text)
+	case KindMessageCompleted, KindMessageReset:
+		if value, ok := event.Payload.(MessageEvent); ok && value.MessageID == s.activeDraft.MessageID {
+			s.activeDraft = activeDraft{}
+		}
+	case KindTurnCompleted, KindTurnFailed, KindTurnCancelled:
+		s.activeDraft = activeDraft{}
+	}
+}
+
+func (d *activeDraft) append(text string) {
+	if text == "" || d.Truncated {
+		return
+	}
+	d.Available = true
+	text = strings.ToValidUTF8(text, "�")
+	remaining := SnapshotDraftBytes - len(d.Text)
+	if remaining <= 0 {
+		d.Truncated = true
+		return
+	}
+	if len(text) <= remaining {
+		d.Text += text
+		return
+	}
+	prefix, _ := truncateUTF8(text, remaining)
+	d.Text += prefix
+	d.Truncated = true
 }

@@ -109,6 +109,62 @@ func TestMessagePaginationLimitCursorValidationAndRedaction(t *testing.T) {
 	} {
 		require.NotContains(t, string(raw), secret)
 	}
+	require.Len(t, page.Messages[0].ToolCalls, 1)
+	require.Equal(t, "tool-1", page.Messages[0].ToolCalls[0].ID)
+	require.Equal(t, "read", page.Messages[0].ToolCalls[0].Name)
+	require.True(t, page.Messages[0].ToolCalls[0].Finished)
+	require.Equal(t, "completed", page.Messages[0].ToolCalls[0].Status)
+	require.False(t, page.Messages[0].ToolCalls[0].IsError)
+}
+
+func TestMessageToolCallsProjectStatusErrorAndChildSession(t *testing.T) {
+	t.Parallel()
+
+	env := newContentTestEnvironment(t)
+	assistant, err := env.messages.Create(t.Context(), env.session.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "delegating"},
+			message.ToolCall{ID: "agent-1", Name: "agentic_fetch", Input: "secret-input", Finished: true},
+			message.ToolCall{ID: "bash-1", Name: "bash", Input: "echo hi", Finished: true},
+			message.Finish{Reason: message.FinishReasonToolUse},
+		},
+	})
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), env.session.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "bash-1", Name: "bash", Content: "fail-body", IsError: true},
+		},
+	})
+	require.NoError(t, err)
+
+	service := negotiatedContentService(t, env)
+	page := callMessages(t, service, messagesParams{SessionID: env.session.ID, Limit: 10})
+	var assistantRow *pageMessage
+	for index := range page.Messages {
+		if page.Messages[index].ID == assistant.ID {
+			assistantRow = &page.Messages[index]
+			break
+		}
+	}
+	require.NotNil(t, assistantRow)
+	require.Len(t, assistantRow.ToolCalls, 2)
+
+	byID := map[string]toolCallMetadata{}
+	for _, call := range assistantRow.ToolCalls {
+		byID[call.ID] = call
+	}
+	require.Equal(t, "completed", byID["agent-1"].Status)
+	require.Equal(t, assistant.ID+"$$agent-1", byID["agent-1"].ChildSessionID)
+	require.Equal(t, "failed", byID["bash-1"].Status)
+	require.True(t, byID["bash-1"].IsError)
+	require.Empty(t, byID["bash-1"].ChildSessionID)
+
+	raw, err := json.Marshal(page)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "secret-input")
+	require.NotContains(t, string(raw), "fail-body")
 }
 
 func TestSessionSearchIsBoundedAndCursorScoped(t *testing.T) {
@@ -184,6 +240,27 @@ func TestMessagePaginationMapsMissingSessionAndRedactsSourceFailure(t *testing.T
 	require.Equal(t, errorQueryFailed, rpcErr.Data.(ErrorData).Code)
 	require.True(t, rpcErr.Data.(ErrorData).Retryable)
 	require.NotContains(t, rpcErr.Message, "database path secret")
+}
+
+func TestMessageAndSearchTimestampDTOsUseMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	env := newContentTestEnvironment(t)
+	parts := `[{"type":"text","data":{"text":"timestamp-contract-marker"}}]`
+	_, err := env.conn.ExecContext(t.Context(), `INSERT INTO messages
+		(id, session_id, role, parts, model, provider, created_at, updated_at)
+		VALUES (?, ?, 'assistant', ?, 'model', 'provider', ?, ?)`,
+		"timestamped", env.session.ID, parts, 1_783_910_456, 1_783_910_789)
+	require.NoError(t, err)
+	service := negotiatedContentService(t, env)
+
+	page := callMessages(t, service, messagesParams{SessionID: env.session.ID, Limit: 1})
+	require.Equal(t, int64(1_783_910_456_000), page.Messages[0].CreatedAt)
+	require.Equal(t, int64(1_783_910_789_000), page.Messages[0].UpdatedAt)
+
+	search := callSearch(t, service, searchParams{Query: "timestamp-contract-marker", SessionID: env.session.ID, Limit: 1})
+	require.Equal(t, "timestamped", search.Results[0].MessageID)
+	require.Equal(t, int64(1_783_910_456_000), search.Results[0].CreatedAt)
 }
 
 type contentTestEnvironment struct {

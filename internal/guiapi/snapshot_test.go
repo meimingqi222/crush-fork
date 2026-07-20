@@ -81,9 +81,10 @@ func TestCoordinatorSnapshotSource(t *testing.T) {
 	t.Parallel()
 
 	source := NewCoordinatorSnapshotSource(fakeSnapshotCoordinator{
-		busy:   true,
-		queued: 2,
-		paused: true,
+		busy:         true,
+		activeTurnID: "turn-1",
+		queued:       2,
+		paused:       true,
 		model: agent.Model{ModelCfg: config.SelectedModel{
 			Model:    "model-1",
 			Provider: "provider-1",
@@ -96,6 +97,7 @@ func TestCoordinatorSnapshotSource(t *testing.T) {
 	})
 	projection := source.SnapshotRuntime("session-1")
 	require.True(t, projection.Busy)
+	require.Equal(t, "turn-1", projection.ActiveTurnID)
 	require.Equal(t, 2, projection.QueueCount)
 	require.True(t, projection.QueuePaused)
 	require.Equal(t, "model-1", projection.Model)
@@ -122,16 +124,18 @@ func (s *fixedSnapshotSource) Snapshot(context.Context, string) (sessionevent.Sn
 }
 
 type fakeSnapshotCoordinator struct {
-	busy      bool
-	queued    int
-	paused    bool
-	model     agent.Model
-	effective session.EffectiveInference
+	busy         bool
+	activeTurnID string
+	queued       int
+	paused       bool
+	model        agent.Model
+	effective    session.EffectiveInference
 }
 
-func (c fakeSnapshotCoordinator) IsSessionBusy(string) bool { return c.busy }
-func (c fakeSnapshotCoordinator) QueuedPrompts(string) int  { return c.queued }
-func (c fakeSnapshotCoordinator) IsQueuePaused(string) bool { return c.paused }
+func (c fakeSnapshotCoordinator) IsSessionBusy(string) bool  { return c.busy }
+func (c fakeSnapshotCoordinator) ActiveTurnID(string) string { return c.activeTurnID }
+func (c fakeSnapshotCoordinator) QueuedPrompts(string) int   { return c.queued }
+func (c fakeSnapshotCoordinator) IsQueuePaused(string) bool  { return c.paused }
 func (c fakeSnapshotCoordinator) ModelForSession(string) (agent.Model, bool) {
 	return c.model, true
 }

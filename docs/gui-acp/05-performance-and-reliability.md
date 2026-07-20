@@ -6,7 +6,7 @@
 |---|---:|
 | Decode, validate, enqueue prompt | 20 ms total acknowledgement |
 | Provider callback to hub publish | 5 ms |
-| Coalescing window | 16-33 ms |
+| Adjacent-event merge eligibility | 16-33 ms; not an added wait window |
 | Event encode and local transport enqueue | 10 ms |
 | Cancellation request to acknowledgement | 100 ms total |
 | Warm session snapshot | 150 ms total |
@@ -14,6 +14,13 @@
 Instrumentation MUST distinguish provider latency from Crush-added latency.
 No lock held by SQLite, a terminal writer, or a client transport may be acquired
 on the provider callback hot path.
+
+The coalescer evaluates events that are already adjacent in a connection-local
+subscriber queue. It MAY merge a compatible successor within the configured
+16-33 ms eligibility range (33 ms from the first event in a merged range), but
+it MUST NOT hold an event waiting for that range to expire. A measured
+callback-to-transport delay therefore must not be modelled as two serial timer
+windows merely because the GUI bridge also batches its own events.
 
 ## Backpressure and bounds
 

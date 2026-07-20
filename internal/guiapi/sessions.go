@@ -392,7 +392,8 @@ func sessionSummary(value session.Session) sessionevent.SessionSummary {
 		CollaborationMode: string(value.CollaborationMode), PermissionMode: string(value.PermissionMode),
 		MessageCount: value.MessageCount, PromptTokens: value.PromptTokens,
 		CompletionTokens: value.CompletionTokens, Archived: value.Archived, Pinned: value.Pinned,
-		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
+		CreatedAt: sessionevent.UnixSecondsToMilliseconds(value.CreatedAt),
+		UpdatedAt: sessionevent.UnixSecondsToMilliseconds(value.UpdatedAt),
 	}
 }
 

@@ -50,7 +50,7 @@ interval. GUI text MUST bypass that interval:
 
 ```text
 provider chunk
-  +-> session event hub -> 16-33 ms subscriber coalescer -> transport
+  +-> session event hub -> adjacent-event merge eligibility (<=33 ms) -> transport
   |
   +-> in-memory message draft -> 150-500 ms flusher -> SQLite
 ```
@@ -58,6 +58,12 @@ provider chunk
 The event hub MUST be published from the agent's canonical stream callbacks,
 not reconstructed by watching database updates. Tool start/result, reasoning,
 usage, permissions, cancellation, and terminal output follow the same principle.
+
+The 33 ms value is an eligibility bound, not a timer that delays a published
+event. A subscriber coalescer MAY merge an already queued compatible successor
+whose timestamp is within 33 ms of the first event in that merged range. It
+MUST otherwise make the event available to the transport immediately; the hub
+does not wait for a second event merely to form a batch.
 
 ## Ownership and concurrency
 
@@ -83,7 +89,7 @@ usage, permissions, cancellation, and terminal output follow the same principle.
 
 | State | Authoritative source | Recovery source |
 |---|---|---|
-| Live deltas/current turn | session runtime/event hub | snapshot + replay; incomplete draft may be DB-backed after restart |
+| Live deltas/current turn | session runtime/event hub | snapshot + replay, including the bounded active-turn draft projection |
 | Completed messages | SQLite | paginated SQLite query |
 | Session metadata | session service/SQLite | SQLite |
 | MCP authorization | Handler/session access registry | rebuilt session scope; dynamic transports reconnect explicitly |
@@ -91,6 +97,13 @@ usage, permissions, cancellation, and terminal output follow the same principle.
 | Attachments | App-owned blob registry with connection/client and session ownership plus durable metadata | blob or original URI according to lifetime |
 | Unsaved files | Negotiated connection/root-session client FS plus opaque client revision | client-owned durable file or editor buffer; local FS only when no private scope is installed |
 | Provider catalog and credentials | ConfigStore snapshot plus App-owned provider auth manager | persisted global provider config; interactive login state is intentionally not recovered |
+
+Standard ACP `session/update` and negotiated `crush/session/event` have
+different responsibilities. The former remains the unsequenced interoperable
+presentation stream; the latter is the sequenced snapshot-and-replay recovery
+stream. A standard update cannot be used as a replay cursor or as evidence that
+a private projection is recoverable. See the protocol specification before
+removing a duplicated live presentation from the private stream.
 
 ## Transport
 

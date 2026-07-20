@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"hash"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,8 @@ var (
 	ErrBlobTooLarge  = errors.New("blob exceeds size limit")
 	ErrCapacity      = errors.New("blob capacity exhausted")
 	ErrInvalidRange  = errors.New("invalid blob range")
+	ErrUploadOffset  = errors.New("invalid upload offset")
+	ErrChunkTooLarge = errors.New("upload chunk exceeds size limit")
 	ErrClosed        = errors.New("blob service is closed")
 )
 
@@ -32,6 +36,7 @@ const (
 	defaultMaxRetainedBytes = 256 * 1024 * 1024
 	defaultMaxBlobs         = 1024
 	defaultMaxReadBytes     = 1024 * 1024
+	defaultMaxUploadChunk   = 1024 * 1024
 	maxMetadataBytes        = 2048
 )
 
@@ -41,6 +46,7 @@ type Config struct {
 	MaxRetainedBytes int64
 	MaxBlobs         int
 	MaxReadBytes     int64
+	MaxUploadChunk   int64
 	Clock            func() time.Time
 }
 
@@ -73,16 +79,36 @@ type ReadResult struct {
 	EOF        bool
 }
 
+// UploadMetadata describes a reserved, not-yet-readable Blob upload.
+type UploadMetadata struct {
+	UploadID   string
+	SessionID  string
+	Size       int64
+	SHA256     string
+	ExpiresAt  time.Time
+	NextOffset int64
+}
+
 type entry struct {
 	metadata Metadata
 	clientID string
 	data     []byte
 }
 
+type upload struct {
+	metadata   Metadata
+	clientID   string
+	file       *os.File
+	path       string
+	digest     hash.Hash
+	nextOffset int64
+}
+
 type Service struct {
 	mu       sync.Mutex
 	config   Config
 	entries  map[string]*entry
+	pending  map[string]*upload
 	retained int64
 	closed   bool
 }
@@ -103,10 +129,154 @@ func New(config Config) *Service {
 	if config.MaxReadBytes <= 0 {
 		config.MaxReadBytes = defaultMaxReadBytes
 	}
+	if config.MaxUploadChunk <= 0 {
+		config.MaxUploadChunk = defaultMaxUploadChunk
+	}
 	if config.Clock == nil {
 		config.Clock = time.Now
 	}
-	return &Service{config: config, entries: make(map[string]*entry)}
+	return &Service{config: config, entries: make(map[string]*entry), pending: make(map[string]*upload)}
+}
+
+// StartUpload reserves Blob capacity before accepting segmented content.
+func (s *Service) StartUpload(ctx context.Context, clientID string, input CreateInput) (UploadMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return UploadMetadata{}, err
+	}
+	if strings.TrimSpace(clientID) == "" || len(input.Data) != 0 {
+		return UploadMetadata{}, ErrInvalidInput
+	}
+	if err := validateInput(input); err != nil {
+		return UploadMetadata{}, err
+	}
+	if input.Size > s.config.MaxBlobBytes {
+		return UploadMetadata{}, ErrBlobTooLarge
+	}
+	now := s.config.Clock()
+	metadata := Metadata{
+		ID: uuid.NewString(), SessionID: input.SessionID, MIMEType: input.MIMEType,
+		Filename: input.Filename, SourceURI: input.SourceURI, Size: input.Size,
+		SHA256: input.SHA256, ExpiresAt: now.Add(s.config.TTL),
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return UploadMetadata{}, ErrClosed
+	}
+	s.pruneLocked(now)
+	if len(s.entries)+len(s.pending) >= s.config.MaxBlobs || input.Size > s.config.MaxRetainedBytes-s.retained {
+		return UploadMetadata{}, ErrCapacity
+	}
+	file, err := os.CreateTemp("", "crush-blob-upload-*")
+	if err != nil {
+		return UploadMetadata{}, err
+	}
+	s.pending[metadata.ID] = &upload{
+		metadata: metadata, clientID: clientID, file: file, path: file.Name(),
+		digest: sha256.New(),
+	}
+	s.retained += input.Size
+	return uploadMetadata(metadata, 0), nil
+}
+
+// AppendUpload accepts only contiguous chunks and never exposes pending data.
+func (s *Service) AppendUpload(ctx context.Context, clientID, sessionID, uploadID string, offset int64, data []byte) (UploadMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return UploadMetadata{}, err
+	}
+	if len(data) == 0 {
+		return UploadMetadata{}, ErrInvalidInput
+	}
+	if int64(len(data)) > s.config.MaxUploadChunk {
+		return UploadMetadata{}, ErrChunkTooLarge
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return UploadMetadata{}, ErrClosed
+	}
+	s.pruneLocked(s.config.Clock())
+	current := s.pending[uploadID]
+	if current == nil {
+		return UploadMetadata{}, ErrNotFound
+	}
+	if current.clientID != clientID || current.metadata.SessionID != sessionID {
+		return UploadMetadata{}, ErrOwnerMismatch
+	}
+	if offset != current.nextOffset || int64(len(data)) > current.metadata.Size-offset {
+		return UploadMetadata{}, ErrUploadOffset
+	}
+	if written, err := current.file.Write(data); err != nil || written != len(data) {
+		return UploadMetadata{}, errors.New("failed to stage upload chunk")
+	}
+	_, _ = current.digest.Write(data)
+	current.nextOffset += int64(len(data))
+	return uploadMetadata(current.metadata, current.nextOffset), nil
+}
+
+// CommitUpload atomically turns a complete pending upload into its readable
+// Blob handle. The upload ID becomes the Blob ID.
+func (s *Service) CommitUpload(ctx context.Context, clientID, sessionID, uploadID string) (Metadata, error) {
+	if err := ctx.Err(); err != nil {
+		return Metadata{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return Metadata{}, ErrClosed
+	}
+	s.pruneLocked(s.config.Clock())
+	current := s.pending[uploadID]
+	if current == nil {
+		return Metadata{}, ErrNotFound
+	}
+	if current.clientID != clientID || current.metadata.SessionID != sessionID {
+		return Metadata{}, ErrOwnerMismatch
+	}
+	if current.nextOffset != current.metadata.Size {
+		return Metadata{}, ErrSizeMismatch
+	}
+	if !strings.EqualFold(current.metadata.SHA256, hex.EncodeToString(current.digest.Sum(nil))) {
+		return Metadata{}, ErrHashMismatch
+	}
+	if err := current.file.Sync(); err != nil {
+		return Metadata{}, err
+	}
+	data, err := os.ReadFile(current.path)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if int64(len(data)) != current.metadata.Size {
+		clear(data)
+		return Metadata{}, ErrSizeMismatch
+	}
+	if err := current.file.Close(); err != nil {
+		clear(data)
+		return Metadata{}, err
+	}
+	_ = os.Remove(current.path)
+	delete(s.pending, uploadID)
+	s.entries[uploadID] = &entry{metadata: current.metadata, clientID: current.clientID, data: data}
+	return current.metadata, nil
+}
+
+// AbortUpload releases a pending capacity reservation.
+func (s *Service) AbortUpload(clientID, sessionID, uploadID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	s.pruneLocked(s.config.Clock())
+	current := s.pending[uploadID]
+	if current == nil {
+		return ErrNotFound
+	}
+	if current.clientID != clientID || current.metadata.SessionID != sessionID {
+		return ErrOwnerMismatch
+	}
+	s.deleteUploadLocked(uploadID, current)
+	return nil
 }
 
 func (s *Service) Create(ctx context.Context, clientID string, input CreateInput) (Metadata, error) {
@@ -228,6 +398,11 @@ func (s *Service) ReleaseSession(sessionID string) {
 			s.deleteLocked(id, current)
 		}
 	}
+	for id, current := range s.pending {
+		if current.metadata.SessionID == sessionID {
+			s.deleteUploadLocked(id, current)
+		}
+	}
 }
 
 func (s *Service) ReleaseClient(clientID string) {
@@ -238,6 +413,11 @@ func (s *Service) ReleaseClient(clientID string) {
 			s.deleteLocked(id, current)
 		}
 	}
+	for id, current := range s.pending {
+		if current.clientID == clientID {
+			s.deleteUploadLocked(id, current)
+		}
+	}
 }
 
 func (s *Service) Retained() (count int, bytes int64) {
@@ -246,7 +426,7 @@ func (s *Service) Retained() (count int, bytes int64) {
 	if !s.closed {
 		s.pruneLocked(s.config.Clock())
 	}
-	return len(s.entries), s.retained
+	return len(s.entries) + len(s.pending), s.retained
 }
 
 func (s *Service) Close() {
@@ -257,10 +437,15 @@ func (s *Service) Close() {
 	}
 	s.closed = true
 	clear(s.entries)
+	for id, current := range s.pending {
+		s.deleteUploadLocked(id, current)
+	}
 	s.retained = 0
 }
 
 func (s *Service) MaxBlobBytes() int64 { return s.config.MaxBlobBytes }
+
+func (s *Service) MaxUploadChunk() int64 { return s.config.MaxUploadChunk }
 
 func validateInput(input CreateInput) error {
 	if strings.TrimSpace(input.SessionID) == "" || input.Size < 0 || len(input.SHA256) != sha256.Size*2 {
@@ -272,6 +457,9 @@ func validateInput(input CreateInput) error {
 		}
 	}
 	if strings.ContainsAny(input.Filename, `/\\`) {
+		return ErrInvalidInput
+	}
+	if input.SHA256 != strings.ToLower(input.SHA256) {
 		return ErrInvalidInput
 	}
 	if _, err := hex.DecodeString(input.SHA256); err != nil {
@@ -286,10 +474,33 @@ func (s *Service) pruneLocked(now time.Time) {
 			s.deleteLocked(id, current)
 		}
 	}
+	for id, current := range s.pending {
+		if !now.Before(current.metadata.ExpiresAt) {
+			s.deleteUploadLocked(id, current)
+		}
+	}
 }
 
 func (s *Service) deleteLocked(id string, current *entry) {
 	delete(s.entries, id)
 	s.retained -= current.metadata.Size
 	clear(current.data)
+}
+
+func (s *Service) deleteUploadLocked(id string, current *upload) {
+	delete(s.pending, id)
+	s.retained -= current.metadata.Size
+	if current.file != nil {
+		_ = current.file.Close()
+	}
+	if current.path != "" {
+		_ = os.Remove(current.path)
+	}
+}
+
+func uploadMetadata(metadata Metadata, nextOffset int64) UploadMetadata {
+	return UploadMetadata{
+		UploadID: metadata.ID, SessionID: metadata.SessionID, Size: metadata.Size,
+		SHA256: metadata.SHA256, ExpiresAt: metadata.ExpiresAt, NextOffset: nextOffset,
+	}
 }

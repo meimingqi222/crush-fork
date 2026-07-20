@@ -8,9 +8,84 @@ command are insufficient.
 Overall status: `blocked`  
 Release scope: Phases 0-5, WP-01 through WP-17  
 Active work package: WP-17  
-Last updated: 2026-07-15
+Last updated: 2026-07-18
 
 Allowed status values: `pending`, `in_progress`, `complete`, `blocked`.
+
+## Documentation alignment record — 2026-07-18
+
+Scope: protocol-document correction only; no Go, database, GUI, or generated
+DTO code changed in this record.
+
+Files changed: `docs/gui-acp/01-architecture.md`,
+`02-protocol-spec.md`, and `05-performance-and-reliability.md`.
+
+Corrections: The 33 ms session-event value is merge eligibility for already
+adjacent queued events, not a second serial waiting window. Standard ACP
+`session/update` is documented as an unsequenced compatibility presentation
+surface, while negotiated `crush/session/event` plus snapshot/replay owns
+recovery; a future `goal.updated` has no standard ACP equivalent. Numeric wire
+timestamps are now specified as Unix milliseconds, with persistence-second to
+DTO-millisecond conversion and no database migration. Snapshots now require a
+sequence-consistent, bounded 64 KiB UTF-8 active-turn draft with an explicit
+truncation flag. Terminal base64 may remain encoded across a desktop JSON
+bridge after validation, avoiding a bridge-only decode/re-encode cycle.
+
+Implementation follow-up: existing DTO adapters and snapshot sources must be
+checked against these clarified requirements before the next desktop protocol
+package or release signoff. In particular, the current snapshot implementation
+only exposes active-turn identity/state, and persisted session/message seconds
+must be converted where their numeric DTOs are emitted.
+
+Verification: `git -C D:\\code\\copilot-refs\\crush diff --check` — PASS
+(no output). No code test was run for this documentation-only correction; a
+subsequent implementation change MUST add focused contract tests for timestamps,
+active-draft sequence cuts, and terminal bridge encoding.
+
+## Contract implementation follow-up — 2026-07-18
+
+Scope: implemented the timestamp and active-draft portions of the preceding
+documentation alignment record. Terminal bridge encoding remains an independent
+desktop-client concern and is unchanged here.
+
+Files changed: `internal/sessionevent/{hub.go,hub_test.go,snapshot.go,snapshot_test.go}`
+and `internal/guiapi/{sessions.go,sessions_test.go,messages.go,messages_test.go}`.
+
+Timestamp contract: persisted session and message timestamps remain Unix
+seconds. The private DTO adapters for snapshot/get/sync/fork, session mutation
+results and `session.updated`, message pages, and search hits now project Unix
+milliseconds. Opaque keyset cursor timestamps deliberately remain database
+seconds because they are storage keys, not numeric wire fields. Existing turn,
+terminal, Blob, MCP, provider, and terminal-exit projections were audited and
+already used milliseconds; the standard ACP RFC 3339 event timestamp is
+unchanged.
+
+Active draft cut: the session event Hub is the authoritative in-memory source
+for assistant `message.created`, `message.delta`, completion/reset, and
+terminal-state turn events. Under its existing per-session lock, publication
+assigns the next sequence, updates a bounded active draft, and journals the event.
+`SnapshotCut` copies the draft and latest sequence under that same lock.
+Snapshots attach the draft only for an active runtime, set
+`draft.capturedSequence` to that cut's `latestSequence`, and replay strictly
+after the cut. Draft text is normalized to valid UTF-8, capped at 64 KiB,
+explicitly marked when truncated, and cleared on message completion/reset or a
+terminal-state turn event.
+
+Verification:
+
+`go test -race ./internal/sessionevent ./internal/guiapi ./internal/agent
+./internal/turn -count=1 -timeout=10m` — PASS (`sessionevent` 1.990s,
+`guiapi` 7.956s, `agent` 62.161s, and `turn` 1.427s).
+
+`gofumpt -w internal/sessionevent/{hub.go,hub_test.go,snapshot.go,snapshot_test.go}
+internal/guiapi/{sessions.go,sessions_test.go,messages.go,messages_test.go}` —
+PASS.
+
+`git diff --check` — PASS (no output).
+
+Focused regression coverage proves persisted-second to DTO-millisecond
+conversion; active-draft captured-sequence equality; truncation at a multi-byte
+UTF-8 boundary; valid UTF-8 output; and message/search/mutation projections.
 
 ## Work-package checklist
 
