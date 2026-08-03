@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,7 +90,7 @@ func testSimpleObject(t *testing.T, pair builderPair) {
 	}
 
 	t.Run("simple object", func(t *testing.T) {
-		r := newVCRRecorder(t)
+		r := vcr.NewRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -112,7 +113,7 @@ func testSimpleObject(t *testing.T, pair builderPair) {
 	})
 
 	t.Run("simple object streaming", func(t *testing.T) {
-		r := newVCRRecorder(t)
+		r := vcr.NewRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -262,7 +263,7 @@ func testComplexObject(t *testing.T, pair builderPair) {
 	}
 
 	t.Run("complex object", func(t *testing.T) {
-		r := newVCRRecorder(t)
+		r := vcr.NewRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")
@@ -285,7 +286,7 @@ func testComplexObject(t *testing.T, pair builderPair) {
 	})
 
 	t.Run("complex object streaming", func(t *testing.T) {
-		r := newVCRRecorder(t)
+		r := vcr.NewRecorder(t)
 
 		languageModel, err := pair.builder(t, r)
 		require.NoError(t, err, "failed to build language model")

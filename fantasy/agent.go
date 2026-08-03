@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -176,9 +177,17 @@ type AgentCall struct {
 	FrequencyPenalty *float64    `json:"frequency_penalty"`
 	ActiveTools      []string    `json:"active_tools"`
 	ToolChoice       *ToolChoice `json:"tool_choice"`
+	Headers          map[string]string
 	ProviderOptions  ProviderOptions
 	OnRetry          OnRetryCallback
+	OnAuthRefresh    OnAuthRefreshFunc
 	MaxRetries       *int
+
+	// ModelProvider, when non-nil, is called on each retry attempt to
+	// obtain the language model. This allows callers to swap in a
+	// refreshed model after OnAuthRefresh rebuilds credentials. When
+	// nil, the model captured at step preparation time is used.
+	ModelProvider func() LanguageModel
 
 	StopWhen       []StopCondition
 	PrepareStep    PrepareStepFunction
@@ -204,6 +213,16 @@ type (
 
 	// OnErrorFunc is called when an error occurs.
 	OnErrorFunc func(error)
+
+	// OnAuthRefreshFunc is called when a stream fails with an authentication
+	// error that the caller may be able to resolve (e.g. an expired SSO
+	// session or OAuth token). The function should perform whatever credential
+	// refresh is needed and return nil on success, in which case fantasy
+	// retries the operation transparently. Returning an error surfaces the
+	// original auth error to the caller without retry. Pair this with
+	// ModelProvider to supply a rebuilt model carrying the refreshed
+	// credentials on the retry attempt.
+	OnAuthRefreshFunc func(ctx context.Context, err *ProviderError) error
 )
 
 // Stream part callbacks - called for each corresponding stream part type.
@@ -270,7 +289,14 @@ type AgentStreamCall struct {
 	Headers          map[string]string
 	ProviderOptions  ProviderOptions
 	OnRetry          OnRetryCallback
+	OnAuthRefresh    OnAuthRefreshFunc
 	MaxRetries       *int
+
+	// ModelProvider, when non-nil, is called on each retry attempt to
+	// obtain the language model. This allows callers to swap in a
+	// refreshed model after OnAuthRefresh rebuilds credentials. When
+	// nil, the model captured at step preparation time is used.
+	ModelProvider func() LanguageModel
 
 	StopWhen       []StopCondition
 	PrepareStep    PrepareStepFunction
@@ -305,9 +331,42 @@ type AgentStreamCall struct {
 // AgentResult represents the result of an agent execution.
 type AgentResult struct {
 	Steps []StepResult
-	// Final response
+	// Final response. When the last step is tool-only (no text content),
+	// this is the response from the most recent step that contained text,
+	// so callers always see meaningful output without walking Steps manually.
 	Response   Response
 	TotalUsage Usage
+}
+
+// finalResponse picks the best Response from a slice of steps. It walks
+// backwards to find the most recent step with non-blank text content. If no
+// step has text content (e.g. all steps were tool calls), the last step's
+// response is returned as-is.
+func finalResponse(steps []StepResult) Response {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if hasNonBlankText(steps[i].Content) {
+			return steps[i].Response
+		}
+	}
+	if len(steps) > 0 {
+		return steps[len(steps)-1].Response
+	}
+	return Response{}
+}
+
+// hasNonBlankText reports whether content contains at least one text block
+// with non-whitespace characters.
+func hasNonBlankText(content ResponseContent) bool {
+	for _, c := range content {
+		if c.GetType() == ContentTypeText {
+			if tc, ok := AsContentType[TextContent](c); ok {
+				if strings.TrimSpace(tc.Text) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Agent represents an AI agent that can generate responses and stream responses.
@@ -373,6 +432,10 @@ func (a *agent) prepareCall(call AgentCall) AgentCall {
 	if a.settings.headers != nil {
 		maps.Copy(headers, a.settings.headers)
 	}
+	if call.Headers != nil {
+		maps.Copy(headers, call.Headers)
+	}
+	call.Headers = headers
 
 	return call
 }
@@ -461,9 +524,17 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 			retryOptions.MaxRetries = *opts.MaxRetries
 		}
 		retryOptions.OnRetry = opts.OnRetry
+		retryOptions.OnAuthRefresh = opts.OnAuthRefresh
 		retry := RetryWithExponentialBackoffRespectingRetryHeaders[*Response](retryOptions)
 		result, err := retry(ctx, func() (*Response, error) {
-			return stepModel.Generate(ctx, Call{
+			// Re-read the model on each retry attempt so that
+			// OnAuthRefresh can swap in a model with fresh credentials.
+			retryModel := stepModel
+			if opts.ModelProvider != nil {
+				retryModel = opts.ModelProvider()
+			}
+
+			return retryModel.Generate(ctx, Call{
 				Prompt:           stepInputMessages,
 				MaxOutputTokens:  opts.MaxOutputTokens,
 				Temperature:      opts.Temperature,
@@ -474,6 +545,7 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 				Tools:            preparedTools,
 				ToolChoice:       &stepToolChoice,
 				UserAgent:        a.settings.userAgent,
+				Headers:          opts.Headers,
 				ProviderOptions:  stepProviderOptions,
 			})
 		})
@@ -494,10 +566,8 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 				if toolCall.ProviderExecuted {
 					continue
 				}
-				// Validate and potentially repair the tool call. Use the
-				// per-call repair function resolved by prepareCall, which
-				// already falls back to the settings-level function.
-				validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, stepExecProviderTools, stepSystemPrompt, stepInputMessages, opts.RepairToolCall)
+				// Validate and potentially repair the tool call
+				validatedToolCall := a.validateAndRepairToolCall(ctx, toolCall, stepTools, stepExecProviderTools, stepSystemPrompt, stepInputMessages, a.settings.repairToolCall)
 				stepToolCalls = append(stepToolCalls, validatedToolCall)
 			}
 		}
@@ -566,7 +636,7 @@ func (a *agent) Generate(ctx context.Context, opts AgentCall) (*AgentResult, err
 
 	agentResult := &AgentResult{
 		Steps:      steps,
-		Response:   steps[len(steps)-1].Response,
+		Response:   finalResponse(steps),
 		TotalUsage: totalUsage,
 	}
 	return agentResult, nil
@@ -672,6 +742,7 @@ func toResponseMessages(content []Content) []Message {
 				Output:           result.Result,
 				ProviderExecuted: result.ProviderExecuted,
 				ProviderOptions:  ProviderOptions(result.ProviderMetadata),
+				ClientMetadata:   result.ClientMetadata,
 			}
 			if result.ProviderExecuted {
 				// Provider-executed tool results (e.g. web search)
@@ -754,16 +825,14 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 	// Find the run function — either from a regular AgentTool or an
 	// executable provider tool.
 	var runTool func(ctx context.Context, call ToolCall) (ToolResponse, error)
-	isExecutableProviderTool := false
 	if tool, exists := toolMap[toolCall.ToolName]; exists {
 		runTool = tool.Run
 	} else if ept, ok := execProviderToolMap[toolCall.ToolName]; ok {
 		runTool = ept.Run
-		isExecutableProviderTool = true
 	}
 	if runTool == nil {
 		result.Result = ToolResultOutputContentError{
-			Error: errors.New(toolNotFoundMessage(toolCall.ToolName, slices.Collect(maps.Keys(toolMap)), slices.Collect(maps.Keys(execProviderToolMap)))),
+			Error: errors.New("tool not found: " + toolCall.ToolName),
 		}
 		if toolResultCallback != nil {
 			_ = toolResultCallback(result)
@@ -771,8 +840,11 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 		return result, false
 	}
 
-	// Execute the tool
-	toolResult, err := runTool(ctx, ToolCall{
+	// Execute the tool, converting a panic into a failed tool result so a
+	// single misbehaving tool cannot take down the whole process. The panic
+	// value and stack are included so they survive in the transcript even
+	// when stderr is lost.
+	toolResult, err := runToolSafely(ctx, runTool, ToolCall{
 		ID:    toolCall.ToolCallID,
 		Name:  toolCall.ToolName,
 		Input: toolCall.Input,
@@ -786,7 +858,7 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 		if toolResultCallback != nil {
 			_ = toolResultCallback(result)
 		}
-		return result, isExecutableProviderTool
+		return result, true
 	}
 
 	result.ClientMetadata = toolResult.Metadata
@@ -810,6 +882,25 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 		_ = toolResultCallback(result)
 	}
 	return result, false
+}
+
+// runToolSafely invokes a tool's run function and converts any panic into a
+// failed tool result. Tool implementations run on goroutines spawned by the
+// agent's step processor where an unrecovered panic would crash the entire
+// host process, so this boundary is the last line of defense. The panic
+// value and stack trace are captured in the returned error so they are
+// preserved in the conversation transcript and any persisted logs.
+func runToolSafely(ctx context.Context, runTool func(ctx context.Context, call ToolCall) (ToolResponse, error), call ToolCall) (toolResult ToolResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			toolResult = NewTextErrorResponse(fmt.Sprintf(
+				"tool %q panicked: %v\n\n%s", call.Name, r, stack,
+			))
+			err = nil
+		}
+	}()
+	return runTool(ctx, call)
 }
 
 // maxToolNotFoundListed caps how many available tool names are included in a
@@ -863,9 +954,12 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 		FrequencyPenalty: opts.FrequencyPenalty,
 		ActiveTools:      opts.ActiveTools,
 		ToolChoice:       opts.ToolChoice,
+		Headers:          opts.Headers,
 		ProviderOptions:  opts.ProviderOptions,
 		MaxRetries:       opts.MaxRetries,
 		OnRetry:          opts.OnRetry,
+		OnAuthRefresh:    opts.OnAuthRefresh,
+		ModelProvider:    opts.ModelProvider,
 		StopWhen:         opts.StopWhen,
 		PrepareStep:      opts.PrepareStep,
 		RepairToolCall:   opts.RepairToolCall,
@@ -981,6 +1075,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			Tools:            preparedTools,
 			ToolChoice:       &stepToolChoice,
 			UserAgent:        a.settings.userAgent,
+			Headers:          call.Headers,
 			ProviderOptions:  stepProviderOptions,
 		}
 
@@ -990,11 +1085,19 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			retryOptions.MaxRetries = *call.MaxRetries
 		}
 		retryOptions.OnRetry = call.OnRetry
+		retryOptions.OnAuthRefresh = call.OnAuthRefresh
 		retry := RetryWithExponentialBackoffRespectingRetryHeaders[stepExecutionResult](retryOptions)
 
 		result, err := retry(ctx, func() (stepExecutionResult, error) {
+			// Re-read the model on each retry attempt so that
+			// OnAuthRefresh can swap in a model with fresh credentials.
+			retryModel := stepModel
+			if call.ModelProvider != nil {
+				retryModel = call.ModelProvider()
+			}
+
 			// Create the stream
-			stream, err := stepModel.Stream(ctx, streamCall)
+			stream, err := retryModel.Stream(ctx, streamCall)
 			if err != nil {
 				return stepExecutionResult{}, err
 			}
@@ -1054,7 +1157,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 	// Finish agent stream
 	agentResult := &AgentResult{
 		Steps:      steps,
-		Response:   steps[len(steps)-1].Response,
+		Response:   finalResponse(steps),
 		TotalUsage: totalUsage,
 	}
 
@@ -1100,11 +1203,9 @@ func (a *agent) prepareTools(tools []AgentTool, providerDefinedTools []ProviderD
 			continue
 		}
 		info := tool.Info()
-		// Deep clone Parameters to prevent schema.Normalize from mutating the
-		// tool's internal state.
 		inputSchema := map[string]any{
 			"type":       "object",
-			"properties": cloneDefaultValue(info.Parameters),
+			"properties": info.Parameters,
 			"required":   info.Required,
 		}
 		schema.Normalize(inputSchema)

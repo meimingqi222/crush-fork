@@ -32,7 +32,7 @@ func NewRequestUserInputToolMessageItem(
 type RequestUserInputToolRenderContext struct{}
 
 func (r *RequestUserInputToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Request User Input", opts.Anim, opts.Compact)
 	}

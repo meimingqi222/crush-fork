@@ -2,12 +2,16 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
@@ -22,7 +26,10 @@ const (
 	contextWindowToolResultMaxChars              = 20_000
 	contextWindowStepToolResultCharsLimit        = 40_000
 	contextWindowExhaustedToolResultPreviewChars = 2_000
-	contextWindowTruncationDir                   = ".crush/truncation"
+	// contextWindowArchiveDir is where oversized tool results are archived
+	// before they are truncated or pruned, so the model can re-read the full
+	// output via the read tool. Content-addressed by sha256 for deduplication.
+	contextWindowArchiveDir = ".crush/archive"
 
 	// contextWindowMessageToolResultCharsLimit is the aggregate character budget
 	// for all tool results within a single API-level message. When multiple tool
@@ -163,33 +170,100 @@ func exhaustedToolResultContent(preview, notice string) string {
 	return preview + "\n\n" + notice
 }
 
+// archiveToolResultForSession returns an archive callback bound to a session,
+// for use by the built-in prune pass. It returns the on-disk path of the
+// archived content (or empty on failure/unavailable), which the placeholder
+// embeds so the model can re-read the full output.
+func (a *sessionAgent) archiveToolResultForSession(sessionID string) func(tr message.ToolResult) string {
+	return func(tr message.ToolResult) string {
+		if a == nil {
+			return ""
+		}
+		path, err := a.persistToolResultContent(sessionID, tr)
+		if err != nil {
+			slog.Warn("Failed to archive tool result during prune", "error", err, "session_id", sessionID, "tool_name", tr.Name)
+			return ""
+		}
+		return path
+	}
+}
+
+// archivedToolResultMeta is the sidecar metadata for an archived tool result.
+// The content itself lives in a plain-text <hash>.txt file so the model can
+// read the full output directly with the read tool; the JSON sidecar carries
+// provenance only.
+type archivedToolResultMeta struct {
+	SessionID     string `json:"session_id,omitempty"`
+	ToolName      string `json:"tool_name,omitempty"`
+	CreatedAt     int64  `json:"created_at"`
+	TokenEstimate int64  `json:"token_estimate,omitempty"`
+}
+
 func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.ToolResult) (string, error) {
-	if a == nil || a.workingDir == "" || tr.Content == "" {
+	if a == nil || tr.Content == "" {
 		return "", nil
 	}
-	var truncationDir string
+	// Guard against archive loops: never re-archive content that is already
+	// an archive placeholder.
+	if strings.HasPrefix(tr.Content, "[Old tool result content cleared") {
+		return "", nil
+	}
+	// Both dataDirectory and workingDir empty means there is no safe place
+	// to archive; do not fall back to writing into the process cwd.
+	if a.dataDirectory == "" && a.workingDir == "" {
+		return "", nil
+	}
+	var archiveDir string
 	if a.dataDirectory != "" {
-		truncationDir = filepath.Join(a.dataDirectory, "truncation")
+		archiveDir = filepath.Join(a.dataDirectory, "archive")
 	} else {
-		truncationDir = filepath.Join(a.workingDir, ".crush", "truncation")
+		archiveDir = filepath.Join(a.workingDir, contextWindowArchiveDir)
 	}
-	if err := os.MkdirAll(truncationDir, 0o755); err != nil {
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 		return "", err
 	}
-	pattern := fmt.Sprintf("%s-%s-*.txt", sanitizeTruncationPathPart(sessionID), sanitizeTruncationPathPart(tr.Name))
-	file, err := os.CreateTemp(truncationDir, pattern)
-	if err != nil {
+
+	sum := sha256.Sum256([]byte(tr.Content))
+	hash := hex.EncodeToString(sum[:16])
+	// Content in plain text so the read tool can surface it directly.
+	contentPath := filepath.Join(archiveDir, hash+".txt")
+
+	// Content-addressed: if the archive already exists, reuse it.
+	if _, err := os.Stat(contentPath); err == nil {
+		return contentPath, nil
+	}
+
+	// Write content atomically with a unique temp name (pid + random) so
+	// concurrent archives of different contents never collide on the same
+	// temp file; same-content archives dedupe at the final path.
+	tmpContent := filepath.Join(archiveDir, fmt.Sprintf(".tmp-%d-%s", os.Getpid(), hash))
+	if err := os.WriteFile(tmpContent, []byte(tr.Content), 0o644); err != nil {
 		return "", err
 	}
-	defer file.Close()
-	if _, err = file.WriteString(tr.Content); err != nil {
+	if err := os.Rename(tmpContent, contentPath); err != nil {
 		return "", err
 	}
-	path := file.Name()
-	if relPath, err := filepath.Rel(a.workingDir, path); err == nil && !strings.HasPrefix(relPath, "..") {
-		return relPath, nil
+
+	// Sidecar metadata (best-effort; failure does not lose the content).
+	meta := archivedToolResultMeta{
+		SessionID:     sessionID,
+		ToolName:      tr.Name,
+		CreatedAt:     time.Now().Unix(),
+		TokenEstimate: estimateStringTokens(tr.Content),
 	}
-	return path, nil
+	if metaData, err := json.Marshal(meta); err == nil {
+		metaPath := filepath.Join(archiveDir, hash+".meta.json")
+		_ = os.WriteFile(metaPath, metaData, 0o644)
+	}
+
+	// Return a path relative to the working dir when possible so the model
+	// can read it with the read tool.
+	if a.workingDir != "" {
+		if relPath, err := filepath.Rel(a.workingDir, contentPath); err == nil && !strings.HasPrefix(relPath, "..") {
+			return relPath, nil
+		}
+	}
+	return contentPath, nil
 }
 
 func sanitizeTruncationPathPart(value string) string {

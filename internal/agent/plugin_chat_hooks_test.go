@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -349,7 +350,12 @@ func TestSessionAgentRunSkipsTitleGenerationForNonInteractiveCalls(t *testing.T)
 		MaxOutputTokens: 1000,
 	})
 	require.NoError(t, err)
-	require.Equal(t, "interactive prompt", titlePrompt)
+
+	// Title generation runs asynchronously after Run returns, so poll until
+	// the title model has been invoked with the interactive prompt.
+	require.Eventually(t, func() bool {
+		return titlePrompt == "interactive prompt"
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestSessionAgentRunRegeneratesMissingTitleOnLaterInteractiveTurn(t *testing.T) {
@@ -434,11 +440,13 @@ func TestSessionAgentRunRegeneratesMissingTitleOnLaterInteractiveTurn(t *testing
 		MaxOutputTokens: 1000,
 	})
 	require.NoError(t, err)
-	require.Equal(t, "follow-up prompt", titlePrompt)
 
-	afterInteractive, err := env.sessions.Get(t.Context(), testSession.ID)
-	require.NoError(t, err)
-	require.Equal(t, "captured title", afterInteractive.Title)
+	// Title generation runs asynchronously after Run returns, so poll until
+	// the generated title is persisted instead of asserting once.
+	require.Eventually(t, func() bool {
+		s, err := env.sessions.Get(t.Context(), testSession.ID)
+		return err == nil && s.Title == "captured title"
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 func TestSessionAgentRunAppliesChatTransforms(t *testing.T) {

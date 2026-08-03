@@ -1,6 +1,8 @@
 package model
 
 import (
+	"image"
+
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -37,7 +39,11 @@ func (m *UI) landingView() string {
 	parts = append(parts, "", m.modelInfo(width))
 	infoSection := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
-	_, remainingHeightArea := layout.SplitVertical(m.layout.main, layout.Fixed(lipgloss.Height(infoSection)+1))
+	var remainingHeightArea image.Rectangle
+	layout.Vertical(
+		layout.Len(lipgloss.Height(infoSection)+1),
+		layout.Fill(1),
+	).Split(m.layout.main).Assign(new(image.Rectangle), &remainingHeightArea)
 
 	mcpLspSectionWidth := min(30, (width-1)/2)
 

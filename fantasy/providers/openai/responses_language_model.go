@@ -5,17 +5,18 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 
 	"charm.land/fantasy"
 	"charm.land/fantasy/object"
 	"charm.land/fantasy/schema"
-	"github.com/charmbracelet/openai-go"
-	"github.com/charmbracelet/openai-go/packages/param"
-	"github.com/charmbracelet/openai-go/responses"
-	"github.com/charmbracelet/openai-go/shared"
 	"github.com/google/uuid"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 const topLogprobsMax = 20
@@ -58,11 +59,11 @@ func getResponsesModelConfig(modelID string) responsesModelConfig {
 		strings.Contains(modelID, "-o3") || strings.Contains(modelID, "o4-mini") ||
 		(strings.Contains(modelID, "gpt-5") && !strings.Contains(modelID, "gpt-5-chat"))
 
-	supportsPriorityProcessing := strings.Contains(modelID, "gpt-4") ||
-		strings.Contains(modelID, "gpt-5-mini") ||
-		(strings.Contains(modelID, "gpt-5") &&
-			!strings.Contains(modelID, "gpt-5-nano") &&
-			!strings.Contains(modelID, "gpt-5-chat")) ||
+	supportsPriorityProcessing := strings.Contains(strings.ToLower(modelID), "gpt-4") ||
+		strings.Contains(strings.ToLower(modelID), "gpt-5-mini") ||
+		(strings.Contains(strings.ToLower(modelID), "gpt-5") &&
+			!strings.Contains(strings.ToLower(modelID), "gpt-5-nano") &&
+			!strings.Contains(strings.ToLower(modelID), "gpt-5-chat")) ||
 		strings.HasPrefix(modelID, "o3") ||
 		strings.Contains(modelID, "-o3") ||
 		strings.Contains(modelID, "o4-mini")
@@ -74,7 +75,7 @@ func getResponsesModelConfig(modelID string) responsesModelConfig {
 		supportsPriorityProcessing: supportsPriorityProcessing,
 	}
 
-	if strings.Contains(modelID, "gpt-5-chat") {
+	if strings.Contains(strings.ToLower(modelID), "gpt-5-chat") {
 		return responsesModelConfig{
 			isReasoningModel:           false,
 			systemMessageMode:          defaults.systemMessageMode,
@@ -88,8 +89,8 @@ func getResponsesModelConfig(modelID string) responsesModelConfig {
 		strings.HasPrefix(modelID, "o3") || strings.Contains(modelID, "-o3") ||
 		strings.HasPrefix(modelID, "o4") || strings.Contains(modelID, "-o4") ||
 		strings.HasPrefix(modelID, "oss") || strings.Contains(modelID, "-oss") ||
-		strings.Contains(modelID, "gpt-5") || strings.Contains(modelID, "codex-") ||
-		strings.Contains(modelID, "computer-use") {
+		strings.Contains(strings.ToLower(modelID), "gpt-5") ||
+		strings.Contains(modelID, "codex-") || strings.Contains(modelID, "computer-use") {
 		if strings.Contains(modelID, "o1-mini") || strings.Contains(modelID, "o1-preview") {
 			return responsesModelConfig{
 				isReasoningModel:           true,
@@ -174,7 +175,7 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 	}
 
 	storeEnabled := openaiOptions != nil && openaiOptions.Store != nil && *openaiOptions.Store
-	input, systemInstructions, inputWarnings := toResponsesPrompt(call.Prompt, modelConfig.systemMessageMode, storeEnabled)
+	input, inputWarnings := toResponsesPrompt(call.Prompt, modelConfig.systemMessageMode, storeEnabled)
 	warnings = append(warnings, inputWarnings...)
 
 	var include []IncludeType
@@ -265,16 +266,6 @@ func (o responsesLanguageModel) prepareParams(call fantasy.Call) (*responses.Res
 			}
 			params.Reasoning = reasoning
 		}
-	}
-
-	// Apply system instructions extracted from the input array when not
-	// explicitly set via openaiOptions.Instructions. This runs outside the
-	// openaiOptions nil-check so it also applies when openaiOptions is nil.
-	// Using the instructions field enables providers (xAI, OpenAI) to cache
-	// the system prompt as part of the stable prefix, which significantly
-	// improves cache hit rates.
-	if !params.Instructions.Valid() && systemInstructions != "" {
-		params.Instructions = param.NewOpt(systemInstructions)
 	}
 
 	if modelConfig.requiredAutoTruncation {
@@ -407,10 +398,9 @@ func responsesUsage(resp responses.Response) fantasy.Usage {
 	return usage
 }
 
-func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bool) (responses.ResponseInputParam, string, []fantasy.CallWarning) {
+func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bool) (responses.ResponseInputParam, []fantasy.CallWarning) {
 	var input responses.ResponseInputParam
 	var warnings []fantasy.CallWarning
-	var instructionsText string
 
 	for _, msg := range prompt {
 		switch msg.Role {
@@ -446,18 +436,10 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 			}
 
 			switch systemMessageMode {
-			case "system", "developer":
-				// Collect system text for the instructions field instead of
-				// injecting it as a system/developer message in the input
-				// array. The Responses API's `instructions` field is cached
-				// separately by providers (xAI, OpenAI) as part of the stable
-				// prefix, which dramatically improves cache hit rates. When
-				// system messages are in the input array, they are part of
-				// the conversation history and not cached as a stable prefix.
-				if instructionsText != "" {
-					instructionsText += "\n\n"
-				}
-				instructionsText += systemText
+			case "system":
+				input = append(input, responses.ResponseInputItemParamOfMessage(systemText, responses.EasyInputMessageRoleSystem))
+			case "developer":
+				input = append(input, responses.ResponseInputItemParamOfMessage(systemText, responses.EasyInputMessageRoleDeveloper))
 			case "remove":
 				warnings = append(warnings, fantasy.CallWarning{
 					Type:    fantasy.CallWarningTypeOther,
@@ -582,53 +564,13 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 					// recognised Responses API input type; skip.
 					continue
 				case fantasy.ContentTypeReasoning:
-					// When store is enabled, the API already has reasoning
-					// items persisted server-side — skip replay.
-					if store {
-						continue
-					}
-					// When store is disabled, replay reasoning items that
-					// carry encrypted_content so the model can maintain
-					// chain-of-thought continuity across turns. The OpenAI
-					// Responses API doc says: "Be sure to include these
-					// items in your input to the Responses API for
-					// subsequent turns of a conversation if you are
-					// manually managing context." Without encrypted_content
-					// the item cannot be reconstructed, so skip it.
-					reasoningPart, ok := fantasy.AsContentType[fantasy.ReasoningPart](c)
-					if !ok {
-						continue
-					}
-					var meta *ResponsesReasoningMetadata
-					if reasoningPart.ProviderOptions != nil {
-						if v, ok := reasoningPart.ProviderOptions[Name]; ok {
-							if m, ok := v.(*ResponsesReasoningMetadata); ok {
-								meta = m
-							}
-						}
-					}
-					if meta == nil || meta.EncryptedContent == nil || *meta.EncryptedContent == "" {
-						continue
-					}
-					summary := make([]responses.ResponseReasoningItemSummaryParam, 0, len(meta.Summary))
-					for _, s := range meta.Summary {
-						summary = append(summary, responses.ResponseReasoningItemSummaryParam{
-							Text: s,
-						})
-					}
-					if len(summary) == 0 {
-						summary = append(summary, responses.ResponseReasoningItemSummaryParam{
-							Text: "",
-						})
-					}
-					reasoningItem := responses.ResponseReasoningItemParam{
-						ID:      meta.ItemID,
-						Summary: summary,
-					}
-					reasoningItem.EncryptedContent = param.NewOpt(*meta.EncryptedContent)
-					input = append(input, responses.ResponseInputItemUnionParam{
-						OfReasoning: &reasoningItem,
-					})
+					// Reasoning items are always skipped during replay.
+					// When store is enabled, the API already has them
+					// persisted server-side. When store is disabled, the
+					// item IDs are ephemeral and referencing them causes
+					// "Item not found" errors. In both cases, replaying
+					// reasoning inline is not supported by the API.
+					continue
 				}
 			}
 
@@ -739,7 +681,7 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 		}
 	}
 
-	return input, instructionsText, warnings
+	return input, warnings
 }
 
 func hasVisibleResponsesUserContent(content responses.ResponseInputMessageContentListParam) bool {
@@ -749,7 +691,7 @@ func hasVisibleResponsesUserContent(content responses.ResponseInputMessageConten
 func hasVisibleResponsesAssistantContent(items []responses.ResponseInputItemUnionParam, startIdx int) bool {
 	// Check if we added any assistant content parts from this message
 	for i := startIdx; i < len(items); i++ {
-		if items[i].OfMessage != nil || items[i].OfFunctionCall != nil || items[i].OfItemReference != nil || items[i].OfReasoning != nil {
+		if items[i].OfMessage != nil || items[i].OfFunctionCall != nil || items[i].OfItemReference != nil {
 			return true
 		}
 	}
@@ -842,10 +784,11 @@ func (o responsesLanguageModel) Generate(ctx context.Context, call fantasy.Call)
 		return nil, err
 	}
 
-	response, err := o.client.Responses.New(ctx, *params, callUARequestOptions(call)...)
+	response, err := o.client.Responses.New(ctx, *params, append(callUARequestOptions(call), callHeadersRequestOptions(call)...)...)
 	if err != nil {
 		return nil, toProviderErr(err)
 	}
+
 	if response == nil {
 		return nil, &fantasy.Error{Title: "no response", Message: "provider returned nil response"}
 	}
@@ -996,7 +939,7 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 		return nil, err
 	}
 
-	stream := o.client.Responses.NewStreaming(ctx, *params, callUARequestOptions(call)...)
+	stream := o.client.Responses.NewStreaming(ctx, *params, append(callUARequestOptions(call), callHeadersRequestOptions(call)...)...)
 
 	finishReason := fantasy.FinishReasonUnknown
 	var usage fantasy.Usage
@@ -1006,6 +949,7 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 	// identical; the overwrites ensure we have the final value even if an event
 	// is missed.
 	responseID := ""
+	sawTerminalEvent := false
 	ongoingToolCalls := make(map[int64]*ongoingToolCall)
 	hasFunctionCall := false
 	activeReasoning := make(map[string]*reasoningState)
@@ -1265,22 +1209,34 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 				}
 
 			case "response.completed":
+				sawTerminalEvent = true
 				completed := event.AsResponseCompleted()
 				responseID = completed.Response.ID
 				finishReason = mapResponsesFinishReason(completed.Response.IncompleteDetails.Reason, hasFunctionCall)
 				usage = responsesUsage(completed.Response)
 
 			case "response.incomplete":
+				sawTerminalEvent = true
 				incomplete := event.AsResponseIncomplete()
 				responseID = incomplete.Response.ID
 				finishReason = mapResponsesFinishReason(incomplete.Response.IncompleteDetails.Reason, hasFunctionCall)
 				usage = responsesUsage(incomplete.Response)
 
+			case "response.failed":
+				failed := event.AsResponseFailed()
+				if !yield(fantasy.StreamPart{
+					Type:  fantasy.StreamPartTypeError,
+					Error: responsesFailedStreamError(failed.Response.Error.Message, string(failed.Response.Error.Code)),
+				}) {
+					return
+				}
+				return
+
 			case "error":
 				errorEvent := event.AsError()
 				if !yield(fantasy.StreamPart{
 					Type:  fantasy.StreamPartTypeError,
-					Error: fmt.Errorf("response error: %s (code: %s)", errorEvent.Message, errorEvent.Code),
+					Error: responsesErrorStreamError(errorEvent.Message, errorEvent.Code),
 				}) {
 					return
 				}
@@ -1289,10 +1245,22 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 		}
 
 		err := stream.Err()
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			yield(fantasy.StreamPart{
 				Type:  fantasy.StreamPartTypeError,
 				Error: toProviderErr(err),
+			})
+			return
+		}
+
+		if !sawTerminalEvent {
+			err := ctx.Err()
+			if err == nil {
+				err = fantasy.NewIncompleteStreamError()
+			}
+			yield(fantasy.StreamPart{
+				Type:  fantasy.StreamPartTypeError,
+				Error: err,
 			})
 			return
 		}
@@ -1304,6 +1272,24 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 			ProviderMetadata: responsesProviderMetadata(responseID),
 		})
 	}, nil
+}
+
+// responsesFailedStreamError intentionally returns a provider-declared failure
+// instead of a retryable transport error. Only synthetic stream truncation
+// errors are wrapped with io.ErrUnexpectedEOF.
+func responsesFailedStreamError(message, code string) error {
+	return responsesStreamFailureError("response failed", message, code)
+}
+
+func responsesErrorStreamError(message, code string) error {
+	return responsesStreamFailureError("response error", message, code)
+}
+
+func responsesStreamFailureError(title, message, code string) error {
+	if code != "" {
+		message = fmt.Sprintf("%s (code: %s)", message, code)
+	}
+	return &fantasy.Error{Title: title, Message: message}
 }
 
 // toWebSearchToolParam converts a ProviderDefinedTool with ID
@@ -1440,7 +1426,7 @@ func (o responsesLanguageModel) generateObjectWithJSONMode(ctx context.Context, 
 	}
 
 	// Make request
-	response, err := o.client.Responses.New(ctx, *params, objectCallUARequestOptions(call)...)
+	response, err := o.client.Responses.New(ctx, *params, append(objectCallUARequestOptions(call), objectCallHeadersRequestOptions(call)...)...)
 	if err != nil {
 		return nil, toProviderErr(err)
 	}
@@ -1543,7 +1529,7 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 		Format: responses.ResponseFormatTextConfigParamOfJSONSchema(schemaName, jsonSchemaMap),
 	}
 
-	stream := o.client.Responses.NewStreaming(ctx, *params, objectCallUARequestOptions(call)...)
+	stream := o.client.Responses.NewStreaming(ctx, *params, append(objectCallUARequestOptions(call), objectCallHeadersRequestOptions(call)...)...)
 
 	return func(yield func(fantasy.ObjectStreamPart) bool) {
 		if len(warnings) > 0 {
@@ -1565,7 +1551,7 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 		// identical; the overwrites ensure we have the final value even if an event
 		// is missed.
 		var responseID string
-		var streamErr error
+		var sawTerminalEvent bool
 		hasFunctionCall := false
 
 		for stream.Next() {
@@ -1620,23 +1606,34 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 				}
 
 			case "response.completed":
+				sawTerminalEvent = true
 				completed := event.AsResponseCompleted()
 				responseID = completed.Response.ID
 				finishReason = mapResponsesFinishReason(completed.Response.IncompleteDetails.Reason, hasFunctionCall)
 				usage = responsesUsage(completed.Response)
 
 			case "response.incomplete":
+				sawTerminalEvent = true
 				incomplete := event.AsResponseIncomplete()
 				responseID = incomplete.Response.ID
 				finishReason = mapResponsesFinishReason(incomplete.Response.IncompleteDetails.Reason, hasFunctionCall)
 				usage = responsesUsage(incomplete.Response)
 
-			case "error":
-				errorEvent := event.AsError()
-				streamErr = fmt.Errorf("response error: %s (code: %s)", errorEvent.Message, errorEvent.Code)
+			case "response.failed":
+				failed := event.AsResponseFailed()
 				if !yield(fantasy.ObjectStreamPart{
 					Type:  fantasy.ObjectStreamPartTypeError,
-					Error: streamErr,
+					Error: responsesFailedStreamError(failed.Response.Error.Message, string(failed.Response.Error.Code)),
+				}) {
+					return
+				}
+				return
+
+			case "error":
+				errorEvent := event.AsError()
+				if !yield(fantasy.ObjectStreamPart{
+					Type:  fantasy.ObjectStreamPartTypeError,
+					Error: responsesErrorStreamError(errorEvent.Message, errorEvent.Code),
 				}) {
 					return
 				}
@@ -1645,7 +1642,7 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 		}
 
 		err := stream.Err()
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			yield(fantasy.ObjectStreamPart{
 				Type:  fantasy.ObjectStreamPartTypeError,
 				Error: toProviderErr(err),
@@ -1653,15 +1650,27 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 			return
 		}
 
+		if !sawTerminalEvent {
+			err := ctx.Err()
+			if err == nil {
+				err = fantasy.NewIncompleteStreamError()
+			}
+			yield(fantasy.ObjectStreamPart{
+				Type:  fantasy.ObjectStreamPartTypeError,
+				Error: err,
+			})
+			return
+		}
+
 		// Final validation and emit
-		if streamErr == nil && lastParsedObject != nil {
+		if lastParsedObject != nil {
 			yield(fantasy.ObjectStreamPart{
 				Type:             fantasy.ObjectStreamPartTypeFinish,
 				Usage:            usage,
 				FinishReason:     finishReason,
 				ProviderMetadata: responsesProviderMetadata(responseID),
 			})
-		} else if streamErr == nil && lastParsedObject == nil {
+		} else {
 			// No object was generated
 			yield(fantasy.ObjectStreamPart{
 				Type: fantasy.ObjectStreamPartTypeError,

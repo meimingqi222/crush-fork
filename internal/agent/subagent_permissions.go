@@ -79,7 +79,13 @@ func subagentToolProfileFromPermissions(permissions DerivedSubagentPermissions) 
 }
 
 func mandatorySubagentToolNames() []string {
-	return []string{agenttools.YieldToolName}
+	return []string{
+		agenttools.YieldToolName,
+		// irc is mandatory for subagents even though it is deferred for the
+		// main agent: subagent coordination depends on it, and a subagent
+		// should not need to run tool_search before it can talk to peers.
+		agenttools.IrcToolName,
+	}
 }
 
 func globalSubagentDeniedTools() []string {

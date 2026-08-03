@@ -1,130 +1,45 @@
 Executes bash commands with automatic background conversion for long-running tasks.
 
 <cross_platform>
-Uses mvdan/sh interpreter (Bash-compatible on all platforms including Windows).
-Use forward slashes for paths: "ls C:/foo/bar" not "ls C:\foo\bar".
-Common shell builtins and core utils available on Windows.
-For null redirection, always use `/dev/null`, never `nul` or `$null`.
-Do not wrap commands in another shell: never use `bash -lc`, `sh -c`, `cmd /c`, `powershell -Command`, or `pwsh -c`.
-This tool is not PowerShell. Use direct POSIX-style commands or the dedicated View/Grep/Glob tools instead.
+Uses the mvdan/sh interpreter (Bash-compatible on all platforms including Windows).
+- Use forward slashes: "ls C:/foo/bar" not "ls C:\foo\bar".
+- For null redirection always use /dev/null, never `nul` or `$null`.
+- Never wrap in another shell: no `bash -lc`, `sh -c`, `cmd /c`, `powershell -Command`, or `pwsh -c`.
+- This tool is not PowerShell; use direct POSIX-style commands or the dedicated View/Grep/Glob tools.
 </cross_platform>
 
 <execution_steps>
-1. Directory Verification: If creating directories/files, use View on the parent directory to verify it exists
-2. Security Check: Banned commands ({{ .BannedCommands }}) return error - explain to user. Safe read-only commands execute without prompts
-3. Command Execution: Execute with proper quoting, capture output
-4. Auto-Background: commands that exceed their timeout are automatically promoted to background jobs; use run_in_background=true upfront for commands you know will run long
-5. Output Processing: Truncate if exceeds {{ .MaxOutputLength }} characters
-6. Return Result: Include errors, metadata with <cwd></cwd> tags
+1. Directory verification: before creating directories/files, check the parent exists.
+2. Security check: banned commands ({{ .BannedCommands }}) return an error; safe read-only commands run without prompts.
+3. Execute with proper quoting; capture output.
+4. Auto-background: commands exceeding their timeout are promoted to background jobs; set run_in_background=true upfront for known long-running commands.
+5. Output is truncated if it exceeds {{ .MaxOutputLength }} characters.
+6. Return results with errors and metadata (<cwd></cwd> tags).
 </execution_steps>
 
 <usage_notes>
-- Command required, working_dir optional (defaults to current directory)
-- IMPORTANT: Always provide a brief `description` parameter (under 30 chars) summarizing what the command does, try to keep it under 30 characters or so
-- IMPORTANT: Use Grep/Glob/Agent tools instead of 'find'/'grep'. Use View instead of 'cat'/'head'/'tail'/'ls'
-- If you must search from bash, use 'rg' (ripgrep) instead of 'grep' for much better performance
-- Chain with ';' or '&&', avoid newlines except in quoted strings
-- Each command runs in independent shell (no state persistence between calls)
-- Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)
-- skill:// URLs in commands are auto-resolved to filesystem paths (e.g. `python skill://pdf/scripts/run.py` → `python '/path/to/skills/pdf/scripts/run.py'`)
+- Command is required; working_dir is optional (defaults to the current directory).
+- Always provide a brief `description` parameter (under 30 chars).
+- Prefer Grep/Glob/Agent tools over `find`/`grep`; use View instead of `cat`/`head`/`tail`/`ls`. If you must search from bash, use `rg` (ripgrep).
+- Chain with `;` or `&&`; avoid newlines except inside quoted strings.
+- Each command runs in an independent shell (no state persists between calls).
+- Prefer absolute paths over `cd` (use `cd` only when the user explicitly requests it).
+- skill:// URLs in commands auto-resolve to filesystem paths (e.g. `python skill://pdf/scripts/run.py`).
 </usage_notes>
 
 <background_execution>
-- Set run_in_background=true to run commands in a separate background shell
-- Returns a shell ID for managing the background process
-- Use job_output tool to view current output from background shell
-- Use job_kill tool to terminate a background shell
-- IMPORTANT: NEVER use `&` at the end of commands to run in background - use run_in_background parameter instead
-- Commands that should run in background:
-  * Long-running servers (e.g., `npm start`, `python -m http.server`, `node server.js`)
-  * Watch/monitoring tasks (e.g., `npm run watch`, `tail -f logfile`)
-  * Continuous processes that don't exit on their own
-  * Any command expected to run indefinitely
-- Commands that should NOT run in background:
-  * Build commands (e.g., `npm run build`, `go build`)
-  * Test suites (e.g., `npm test`, `pytest`)
-  * Git operations
-  * File operations
-  * Short-lived scripts
+- Set run_in_background=true to run in a separate background shell; it returns a shell ID. To read output, wait, or kill it, activate the deferred `job` tool with tool_search (query "select:job").
+- NEVER use `&` to background a command — use the run_in_background parameter.
+- Good candidates: long-running servers, watch tasks, anything that runs indefinitely.
+- Do NOT background: builds, test suites, git operations, file operations, short-lived scripts.
 </background_execution>
 
 <git_commits>
-When user asks to create git commit:
-
-1. Single message with three tool_use blocks (IMPORTANT for speed):
-   - git status (untracked files)
-   - git diff (staged/unstaged changes)
-   - git log (recent commit message style)
-
-2. Add relevant untracked files to staging. Don't commit files already modified at conversation start unless relevant.
-
-3. Analyze staged changes in <commit_analysis> tags:
-   - List changed/added files, summarize nature (feature/enhancement/bug fix/refactoring/test/docs)
-   - Brainstorm purpose/motivation, assess project impact, check for sensitive info
-   - Don't use tools beyond git context
-   - Draft concise (1-2 sentences) message focusing on "why" not "what"
-   - Use clear language, accurate reflection ("add"=new feature, "update"=enhancement, "fix"=bug fix)
-   - Avoid generic messages, review draft
-
-4. Create commit using HEREDOC:
-   git commit -m "$(cat <<'EOF'
-   Commit message here.
-
-   EOF
-   )"
-
-5. If pre-commit hook fails, retry ONCE. If fails again, hook preventing commit. If succeeds but files modified, MUST amend.
-
-6. Run git status to verify.
-
-Notes: Use "git commit -am" when possible, don't stage unrelated files, NEVER update config, don't push, no -i flags, no empty commits, return empty response.
+When the user asks to create a commit: gather status/diff/log in one message, stage relevant files, draft a concise "why"-focused message, commit via HEREDOC, and verify with git status. Retry once on pre-commit hook failure; amend if files were modified. Don't push, don't stage unrelated files, never update git config.
 </git_commits>
 
 <pull_requests>
-Use gh command for ALL GitHub tasks. When user asks to create PR:
-
-1. Single message with multiple tool_use blocks (VERY IMPORTANT for speed):
-   - git status (untracked files)
-   - git diff (staged/unstaged changes)
-   - Check if branch tracks remote and is up to date
-   - git log and 'git diff main...HEAD' (full commit history from main divergence)
-
-2. Create new branch if needed
-3. Commit changes if needed
-4. Push to remote with -u flag if needed
-
-5. Analyze changes in <pr_analysis> tags:
-   - List commits since diverging from main
-   - Summarize nature of changes
-   - Brainstorm purpose/motivation
-   - Assess project impact
-   - Don't use tools beyond git context
-   - Check for sensitive information
-   - Draft concise (1-2 bullet points) PR summary focusing on "why"
-   - Ensure summary reflects ALL changes since main divergence
-   - Clear, concise language
-   - Accurate reflection of changes and purpose
-   - Avoid generic summaries
-   - Review draft
-
-6. Create PR with gh pr create using HEREDOC:
-   gh pr create --title "title" --body "$(cat <<'EOF'
-
-   ## Summary
-
-   <1-3 bullet points>
-
-   ## Test plan
-
-   [Checklist of TODOs...]
-
-   EOF
-   )"
-
-Important:
-
-- Return empty response - user sees gh output
-- Never update git config
+Use `gh` for GitHub tasks. When creating a PR: gather status/diff/branch state in one message, create/commit/push the branch, draft a concise summary of all changes since main divergence, and create the PR with `gh pr create --title --body` using a HEREDOC. Return an empty response (the user sees gh output); never update git config.
 </pull_requests>
 
 <examples>

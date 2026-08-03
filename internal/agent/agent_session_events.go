@@ -79,11 +79,6 @@ func boundedLiveToolText(text string) (string, bool) {
 }
 
 func (a *sessionAgent) publishLiveTextDelta(ctx context.Context, sessionID string, started time.Time, kind sessionevent.Kind, messageID, partID, text string) {
-	// TEMPORARY diagnostics for the "not streaming, renders in one shot"
-	// report — logs the raw chunk size as handed to us by the provider
-	// adapter's OnTextDelta callback, before any of crush's own >64KB
-	// splitting. Remove once the cadence is confirmed.
-	slog.Info("bridge: DIAG live text delta", "kind", kind, "message_id", messageID, "part_id", partID, "bytes", len(text), "runes", utf8.RuneCountInString(text), "at", time.Now().Format("15:04:05.000"))
 	for _, chunk := range splitLiveText(text) {
 		a.publishSessionEvent(ctx, sessionID, started, sessionevent.NewEvent{
 			Kind:        kind,

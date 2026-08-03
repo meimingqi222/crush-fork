@@ -6,12 +6,46 @@ import (
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/plugin"
+	"github.com/charmbracelet/crush/internal/session"
 )
+
+// subagentAlwaysExposedTools are deferred for primary agents but stay in the
+// default toolset for subagents, where they are the working channel rather
+// than an occasional utility: irc is peer coordination, send_message and
+// task_stop are how a subagent talks back to and halts its batch. Forcing a
+// tool_search round trip before a subagent's first message would be pure
+// overhead. Keep this in sync with the availability claims in
+// templates/agent_tool.md.
+var subagentAlwaysExposedTools = map[string]struct{}{
+	tools.IrcToolName:         {},
+	tools.SendMessageToolName: {},
+	tools.TaskStopToolName:    {},
+}
+
+// builtinToolMetadataForAgent returns the builtin metadata for a tool with
+// agent-scoped exposure overrides applied.
+//
+// The agent tool carries the largest description in the toolset, so it is
+// deferred for ordinary sessions and activated on demand. Orchestrate mode is
+// the exception: delegation is that mode's entire purpose, so paying a
+// tool_search round trip before the first spawn would be pure loss.
+func builtinToolMetadataForAgent(name string, isSubagent bool, mode session.CollaborationMode) tools.ToolMetadata {
+	metadata := builtinToolMetadata(name)
+	if isSubagent {
+		if _, ok := subagentAlwaysExposedTools[name]; ok {
+			metadata.Exposure = tools.ToolExposureDefault
+		}
+	}
+	if name == AgentToolName && mode == session.CollaborationModeOrchestrate {
+		metadata.Exposure = tools.ToolExposureDefault
+	}
+	return metadata
+}
 
 func builtinToolMetadata(name string) tools.ToolMetadata {
 	switch name {
 	case AgentToolName:
-		return tools.ToolMetadata{RiskHint: "delegation", SearchHint: "delegate independent work to subagents", SearchTags: []string{"subagent", "delegate", "parallel", "worker", "task"}}
+		return tools.ToolMetadata{RiskHint: "delegation", SearchHint: "delegate independent work to subagents (explore, general, review) and run them in parallel", SearchTags: []string{"subagent", "delegate", "parallel", "worker", "task", "explore", "review", "spawn", "fan-out"}, Exposure: tools.ToolExposureDeferred}
 	case tools.ToolSearchToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "load deferred tool definitions and activate them for this run", SearchTags: []string{"discover-tools", "activate-tools", "tool-registry", "deferred-tools", "select-tool"}, Direct: true}
 	case tools.AgenticFetchToolName:
@@ -19,9 +53,11 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 	case tools.BashToolName:
 		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "execute shell commands", SearchTags: []string{"terminal", "shell-command", "command-line", "script", "process"}}
 	case tools.JobToolName:
-		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "inspect or control background shell jobs", SearchTags: []string{"background-job", "process", "terminal", "shell"}}
+		return tools.ToolMetadata{RiskHint: "execute", SearchHint: "inspect or control background shell jobs", SearchTags: []string{"background-job", "process", "terminal", "shell", "job-output", "job-kill", "job-wait"}, Exposure: tools.ToolExposureDeferred}
 	case tools.DownloadToolName:
-		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "network", SearchHint: "download URL to local file", SearchTags: []string{"url-download", "http", "fetch", "file"}}
+		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "network", SearchHint: "download URL to local file", SearchTags: []string{"url-download", "http", "fetch", "file"}, Exposure: tools.ToolExposureDeferred}
+	case tools.IrcToolName:
+		return tools.ToolMetadata{ConcurrencySafe: true, RiskHint: "write", SearchHint: "send messages between subagents in a task batch", SearchTags: []string{"irc", "subagent", "coordination", "message"}, Exposure: tools.ToolExposureDeferred}
 	case tools.EditToolName, tools.WriteToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "modify local files", SearchTags: []string{"file-edit", "file-write", "patch", "modify"}, Direct: true}
 	case tools.ReadToolName:
@@ -35,17 +71,17 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 	case tools.RecallToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "recall materialized memory summaries and events", SearchTags: []string{"memory", "recall", "history", "summary"}}
 	case tools.ReflectToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "reflect on memories across sessions", SearchTags: []string{"memory", "reflection", "synthesis", "cross-session"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "reflect on memories across sessions", SearchTags: []string{"memory", "reflection", "synthesis", "cross-session"}, Exposure: tools.ToolExposureDeferred}
 	case tools.MemoryStatusToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory backend status", SearchTags: []string{"memory", "status", "observability"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory backend status", SearchTags: []string{"memory", "status", "observability", "backend", "diagnostics"}, Exposure: tools.ToolExposureDeferred}
 	case tools.GraphToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "traverse the memory knowledge graph or query structured triples", SearchTags: []string{"memory", "knowledge-graph", "triples", "traversal", "facts"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "traverse the memory knowledge graph or query structured triples", SearchTags: []string{"memory", "knowledge-graph", "triples", "traversal", "facts"}, Exposure: tools.ToolExposureDeferred}
 	case tools.TodosToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track structured task progress", SearchTags: []string{"todo", "task-list", "planning", "progress"}, Direct: true}
 	case tools.SendMessageToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "send mailbox messages to running task graph tasks", SearchTags: []string{"mailbox", "taskgraph", "message", "subagent"}, Direct: true}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "send mailbox messages to running task graph tasks", SearchTags: []string{"mailbox", "taskgraph", "message", "subagent"}, Direct: true, Exposure: tools.ToolExposureDeferred}
 	case tools.TaskStopToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "request task cancellation through mailbox protocol", SearchTags: []string{"mailbox", "taskgraph", "cancel", "stop-task"}, Direct: true}
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "request task cancellation through mailbox protocol", SearchTags: []string{"mailbox", "taskgraph", "cancel", "stop-task"}, Direct: true, Exposure: tools.ToolExposureDeferred}
 	case tools.LSPToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "query language-server code intelligence", SearchTags: []string{"lsp", "code-intelligence", "symbols", "definitions", "references", "diagnostics"}, Direct: true}
 	case tools.RequestUserInputToolName, tools.ResolveToolName:
@@ -53,7 +89,7 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 	case tools.YieldToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "result", "metadata"}}
 	case tools.CrushToolName:
-		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect Crush instance status and logs", SearchTags: []string{"crush", "status", "logs", "debug", "diagnostics"}}
+		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect Crush instance status and logs", SearchTags: []string{"crush", "status", "logs", "debug", "diagnostics"}, Exposure: tools.ToolExposureDeferred}
 	default:
 		return tools.ToolMetadata{RiskHint: "execute"}
 	}

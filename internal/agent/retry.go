@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"charm.land/fantasy"
@@ -12,8 +13,26 @@ import (
 )
 
 // streamIdleTimeout is the maximum time to wait between stream parts before
-// considering the connection stalled and triggering a retry.
-var streamIdleTimeout = 45 * time.Second
+// considering the connection stalled and triggering a retry. Overridable via
+// the CRUSH_STREAM_IDLE_TIMEOUT env var (e.g. "30s").
+var streamIdleTimeout = envDuration("CRUSH_STREAM_IDLE_TIMEOUT", 45*time.Second)
+
+// streamConnectTimeout is the maximum time to wait for the first stream part
+// before considering the connection stalled. Slower than the inter-part idle
+// timeout so a slow model that eventually produces a first token is not
+// killed prematurely. Overridable via CRUSH_STREAM_CONNECT_TIMEOUT.
+var streamConnectTimeout = envDuration("CRUSH_STREAM_CONNECT_TIMEOUT", 90*time.Second)
+
+// envDuration returns the value of the named env var parsed as a duration,
+// or fallback when unset/invalid.
+func envDuration(name string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(name); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
+}
 
 // retryableStreamModel wraps a fantasy.LanguageModel and converts bare
 // retryable network errors (such as io.ErrUnexpectedEOF) inside stream parts
@@ -43,8 +62,11 @@ func (m retryableStreamModel) Stream(ctx context.Context, call fantasy.Call) (fa
 
 	return func(yield func(fantasy.StreamPart) bool) {
 		sawToolUse := false
-		// idleTimer tracks time between stream parts to detect stalled connections.
-		idleTimer := time.NewTimer(streamIdleTimeout)
+		sawFirstPart := false
+		// idleTimer tracks time between stream parts to detect stalled
+		// connections. Before the first part arrives it uses the (longer)
+		// connect timeout; afterwards it uses the inter-part idle timeout.
+		idleTimer := time.NewTimer(streamConnectTimeout)
 		defer idleTimer.Stop()
 		defer localCancel()
 
@@ -77,7 +99,13 @@ func (m retryableStreamModel) Stream(ctx context.Context, call fantasy.Call) (fa
 		for {
 			select {
 			case part := <-partCh:
-				// Reset idle timer on each part received.
+				// Reset the idle timer on each part received. The initial
+				// timer uses the longer connect timeout; once the first
+				// part arrives we switch to the shorter inter-part idle
+				// timeout so a stall between parts is caught sooner.
+				if !sawFirstPart {
+					sawFirstPart = true
+				}
 				resetTimer(idleTimer, streamIdleTimeout)
 
 				if isToolStreamPart(part.Type) {
@@ -93,16 +121,26 @@ func (m retryableStreamModel) Stream(ctx context.Context, call fantasy.Call) (fa
 			case <-activityCh:
 				// HTTP response body received data (e.g. SSE ping events
 				// that the SDK consumes without yielding StreamParts).
-				// Reset the idle timer to prevent false timeouts.
-				resetTimer(idleTimer, streamIdleTimeout)
+				// Reset the idle timer to prevent false timeouts. Before the
+				// first part arrives we keep the (longer) connect timeout.
+				if !sawFirstPart {
+					resetTimer(idleTimer, streamConnectTimeout)
+				} else {
+					resetTimer(idleTimer, streamIdleTimeout)
+				}
 
 			case <-idleTimer.C:
 				// Stream has been idle for too long - trigger a retryable error.
+				// Report the actual timeout that fired so the message is truthful.
+				timeout := streamIdleTimeout
+				if !sawFirstPart {
+					timeout = streamConnectTimeout
+				}
 				yield(fantasy.StreamPart{
 					Type: fantasy.StreamPartTypeError,
 					Error: &fantasy.ProviderError{
 						Title:   "network error",
-						Message: streamIdleTimeoutMessage(),
+						Message: streamIdleTimeoutMessage(timeout),
 						Cause:   errors.New("stream idle timeout"),
 					},
 				})
@@ -148,10 +186,10 @@ func isToolStreamPart(partType fantasy.StreamPartType) bool {
 	}
 }
 
-func streamIdleTimeoutMessage() string {
+func streamIdleTimeoutMessage(timeout time.Duration) string {
 	return fmt.Sprintf(
 		"stream idle timeout: no data received for %ds",
-		int(streamIdleTimeout/time.Second),
+		int(timeout/time.Second),
 	)
 }
 

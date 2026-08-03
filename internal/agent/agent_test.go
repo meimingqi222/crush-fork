@@ -1409,11 +1409,10 @@ func (a *textualToolProtocolTestAgent) Stream(ctx context.Context, call fantasy.
 	a.mu.Unlock()
 
 	if attempt == 1 || a.alwaysText {
-		if call.OnTextDelta != nil {
-			require.NoError(a.t, call.OnTextDelta(
-				"assistant",
-				"<|tool_calls_section_begin|><|tool_call_begin|>functions.read:15<|tool_call_argument_begin|>{\"file_path\":\"main.go\"}<|tool_call_end|><|tool_calls_section_end|>",
-			))
+		if call.OnReasoningStart != nil {
+			require.NoError(a.t, call.OnReasoningStart("assistant", fantasy.ReasoningContent{
+				Text: `<｜DSML｜tool_calls><｜DSML｜invoke name="read"><｜DSML｜parameter name="file_path" string="true">main.go</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`,
+			}))
 		}
 		if call.OnStepFinish != nil {
 			require.NoError(a.t, call.OnStepFinish(fantasy.StepResult{
@@ -1497,9 +1496,87 @@ func TestParseTextualToolCallsFromAssistantUsesAnthropicSafeIDs(t *testing.T) {
 	toolCalls := parseTextualToolCallsFromAssistant(msg)
 
 	require.Len(t, toolCalls, 1)
-	require.Equal(t, "functions_read_25", toolCalls[0].ID)
+	require.True(t, strings.HasPrefix(toolCalls[0].ID, "functions_read_25_"))
 	require.Equal(t, agenttools.ReadToolName, toolCalls[0].Name)
 	require.Equal(t, `{"file_path":"main.go"}`, toolCalls[0].Input)
+}
+
+func TestParseTextualToolCallsFromAssistantParsesDSML(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: `<｜DSML｜tool_calls>
+<｜DSML｜invoke name="read">
+<｜DSML｜parameter name="path" string="true">docs/a&amp;b.md:1-10</｜DSML｜parameter>
+<｜DSML｜parameter name="offset">12</｜DSML｜parameter>
+</｜DSML｜invoke>
+<｜DSML｜invoke name="status"></｜DSML｜invoke>
+</｜DSML｜tool_calls>`},
+		},
+	}
+
+	toolCalls := parseTextualToolCallsFromAssistant(msg)
+
+	require.Len(t, toolCalls, 2)
+	require.True(t, strings.HasPrefix(toolCalls[0].ID, "dsml_read_0_"))
+	require.Equal(t, "read", toolCalls[0].Name)
+	require.JSONEq(t, `{"offset":12,"path":"docs/a&b.md:1-10"}`, toolCalls[0].Input)
+	require.Equal(t, "status", toolCalls[1].Name)
+	require.JSONEq(t, `{}`, toolCalls[1].Input)
+}
+
+func TestParseTextualToolCallsFromAssistantParsesASCIIDSML(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: `<|DSML|tool_calls><|DSML|invoke name="read"><|DSML|parameter name="path" string="true">main.go</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`},
+		},
+	}
+
+	toolCalls := parseTextualToolCallsFromAssistant(msg)
+
+	require.Len(t, toolCalls, 1)
+	require.Equal(t, "read", toolCalls[0].Name)
+	require.JSONEq(t, `{"path":"main.go"}`, toolCalls[0].Input)
+}
+
+func TestParseTextualToolCallsFromAssistantScopesIDsByAssistant(t *testing.T) {
+	t.Parallel()
+
+	dsml := `<|DSML|tool_calls><|DSML|invoke name="bash"><|DSML|parameter name="command" string="true">go test ./...</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`
+	first := &message.Message{ID: "assistant-1", Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: dsml}}}
+	second := &message.Message{ID: "assistant-2", Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: dsml}}}
+
+	firstCalls := parseTextualToolCallsFromAssistant(first)
+	repeatedFirstCalls := parseTextualToolCallsFromAssistant(first)
+	secondCalls := parseTextualToolCallsFromAssistant(second)
+
+	require.Len(t, firstCalls, 1)
+	require.Len(t, repeatedFirstCalls, 1)
+	require.Len(t, secondCalls, 1)
+	require.Equal(t, firstCalls[0].ID, repeatedFirstCalls[0].ID)
+	require.NotEqual(t, firstCalls[0].ID, secondCalls[0].ID)
+}
+
+func TestParseTextualToolCallsFromAssistantRejectsIncompleteDSML(t *testing.T) {
+	t.Parallel()
+
+	msg := &message.Message{
+		ID:   "assistant-1",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: `<｜DSML｜tool_calls><｜DSML｜invoke name="read"><｜DSML｜parameter name="path" string="true">main.go</｜DSML｜invoke></｜DSML｜tool_calls>`},
+		},
+	}
+
+	require.Empty(t, parseTextualToolCallsFromAssistant(msg))
+	require.False(t, hasTextualToolCallProtocol("The model documentation mentions DSML tool calls."))
 }
 
 func TestStripTextualToolCallProtocolFromAssistant(t *testing.T) {
@@ -1621,6 +1698,7 @@ func TestRunRecoversFromTextualToolCallProtocol(t *testing.T) {
 		Sessions:             env.sessions,
 		Messages:             env.messages,
 		DisableAutoSummarize: true,
+		Tools:                []fantasy.AgentTool{&mockAgentTool{name: agenttools.ReadToolName}},
 		AgentFactory: func(fantasy.LanguageModel, ...fantasy.AgentOption) fantasy.Agent {
 			return testAgent
 		},
@@ -1638,14 +1716,20 @@ func TestRunRecoversFromTextualToolCallProtocol(t *testing.T) {
 	require.NoError(t, err)
 
 	foundRecoveredToolResult := false
+	foundDSMLToolAttempt := false
 	for _, msg := range msgs {
 		if msg.Role == message.Assistant {
-			require.NotContains(t, msg.Content().Text, "<|tool_calls_section_begin|>")
+			require.NotContains(t, msg.Content().Text, "DSML")
+			require.NotContains(t, msg.ReasoningContent().Thinking, "DSML")
 		}
 		if msg.Role != message.Tool {
 			continue
 		}
 		for _, tr := range msg.ToolResults() {
+			if strings.HasPrefix(tr.ToolCallID, "dsml_read_0_") {
+				foundDSMLToolAttempt = true
+				require.False(t, tr.IsError)
+			}
 			if tr.ToolCallID == "call-recovered" {
 				foundRecoveredToolResult = true
 				require.False(t, tr.IsError)
@@ -1653,6 +1737,7 @@ func TestRunRecoversFromTextualToolCallProtocol(t *testing.T) {
 			}
 		}
 	}
+	require.True(t, foundDSMLToolAttempt)
 	require.True(t, foundRecoveredToolResult)
 }
 
@@ -1698,8 +1783,8 @@ func TestRunFailsAfterRepeatedTextualToolCallProtocol(t *testing.T) {
 	for _, msg := range msgs {
 		if msg.Role == message.Assistant {
 			assistantCount++
-			require.NotContains(t, msg.Content().Text, "<|tool_calls_section_begin|>")
-			require.NotContains(t, msg.ReasoningContent().Thinking, "<|tool_calls_section_begin|>")
+			require.NotContains(t, msg.Content().Text, "DSML")
+			require.NotContains(t, msg.ReasoningContent().Thinking, "DSML")
 		}
 		if msg.Role == message.Tool {
 			for _, tr := range msg.ToolResults() {
@@ -1960,6 +2045,47 @@ func TestPreparePromptPairsReorderedParallelResultsAcrossLaterAssistant(t *testi
 		fantasy.MessageRoleAssistant,
 		fantasy.MessageRoleTool,
 	}, roles)
+}
+
+func TestPreparePromptPairsRepeatedToolCallIDsByOccurrence(t *testing.T) {
+	t.Parallel()
+
+	a := &sessionAgent{}
+	history, _ := a.preparePrompt([]message.Message{
+		{ID: "assistant-1", Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{ID: "dsml_bash_0", Name: agenttools.BashToolName, Input: `{"command":"first"}`, Finished: true},
+		}},
+		{ID: "tool-1", Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "dsml_bash_0", Name: agenttools.BashToolName, Content: "first result"},
+		}},
+		{ID: "assistant-2", Role: message.Assistant, Parts: []message.ContentPart{
+			message.ToolCall{ID: "dsml_bash_0", Name: agenttools.BashToolName, Input: `{"command":"second"}`, Finished: true},
+		}},
+		{ID: "tool-2", Role: message.Tool, Parts: []message.ContentPart{
+			message.ToolResult{ToolCallID: "dsml_bash_0", Name: agenttools.BashToolName, Content: "second result"},
+		}},
+	})
+
+	require.Equal(t, []fantasy.MessageRole{
+		fantasy.MessageRoleAssistant,
+		fantasy.MessageRoleTool,
+		fantasy.MessageRoleAssistant,
+		fantasy.MessageRoleTool,
+	}, []fantasy.MessageRole{history[0].Role, history[1].Role, history[2].Role, history[3].Role})
+
+	var results []string
+	for _, msg := range history {
+		for _, part := range msg.Content {
+			result, ok := part.(fantasy.ToolResultPart)
+			if !ok {
+				continue
+			}
+			output, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](result.Output)
+			require.True(t, ok)
+			results = append(results, output.Text)
+		}
+	}
+	require.Equal(t, []string{"first result", "second result"}, results)
 }
 
 func TestPreparePromptDropsCanceledAssistantToolBranchBeforeNextUser(t *testing.T) {

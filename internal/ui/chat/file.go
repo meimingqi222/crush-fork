@@ -36,7 +36,7 @@ type ReadToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (v *ReadToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Read", opts.Anim, opts.Compact)
 	}
@@ -146,7 +146,7 @@ type WriteToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (w *WriteToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Write", opts.Anim, opts.Compact)
 	}
@@ -269,7 +269,7 @@ type DownloadToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (d *DownloadToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Download", opts.Anim, opts.Compact)
 	}

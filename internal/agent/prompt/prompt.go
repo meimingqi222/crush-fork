@@ -30,6 +30,7 @@ type Prompt struct {
 	contextPathsOverride []string
 	gitStatus            string
 	role                 string
+	hasBashTool          bool
 }
 
 type PromptDat struct {
@@ -45,6 +46,10 @@ type PromptDat struct {
 	GlobalContextFiles []ContextFile
 	AvailSkillXML      string
 	Role               string
+	// HasBashTool gates the <bash_commands> section: it is only rendered
+	// when the bash tool is in the agent's toolset, keeping the prompt
+	// stable per agent configuration.
+	HasBashTool bool
 }
 
 type ContextFile struct {
@@ -111,6 +116,14 @@ func WithRole(role string) Option {
 	}
 }
 
+// WithHasBashTool marks whether the bash tool is in the agent's toolset, so
+// the template can conditionally render the <bash_commands> section.
+func WithHasBashTool(has bool) Option {
+	return func(p *Prompt) {
+		p.hasBashTool = has
+	}
+}
+
 func NewPrompt(name, promptTemplate string, opts ...Option) (*Prompt, error) {
 	p := &Prompt{
 		name:     name,
@@ -140,18 +153,99 @@ func (p *Prompt) Build(ctx context.Context, provider, model string, store *confi
 	return sb.String(), nil
 }
 
-func processFile(filePath string) *ContextFile {
+// Default context file size limits, aligned with maka-agent's workspace
+// instructions budget. 0 disables the per-file cap; a total of 0 disables
+// the aggregate cap (restores the previous unbounded behavior).
+const (
+	defaultContextFileMaxChars       = 6000
+	defaultContextFilesMaxTotalChars = 14000
+)
+
+// contextFileTruncateMarker is appended to a context file whose content was
+// truncated so the model knows the injected text is a prefix, not the whole
+// file.
+const contextFileTruncateMarker = "\n\n[context truncated: content exceeds the configured context file size limit]"
+
+// contextFileBudgetExhaustedMarker is injected in place of a file that could
+// not fit within the aggregate budget, so the model knows the file exists but
+// was omitted (it would otherwise silently lose project instructions).
+const contextFileBudgetExhaustedMarker = "[context file omitted: aggregate context file budget exhausted — read this file directly if needed]"
+
+// processFile reads a context file, truncating it to maxChars runes when
+// maxChars > 0. It returns the content and its rune length so callers can
+// account against a shared budget in a single unit (runes).
+func processFile(filePath string, maxChars int) (*ContextFile, int) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil
+		return nil, 0
+	}
+	text := string(content)
+	runes := []rune(text)
+	if maxChars > 0 && len(runes) > maxChars {
+		// Truncate on a rune boundary so we never split a multi-byte rune.
+		text = string(runes[:maxChars]) + contextFileTruncateMarker
+		runes = []rune(text)
 	}
 	return &ContextFile{
 		Path:    filePath,
-		Content: string(content),
-	}
+		Content: text,
+	}, len(runes)
 }
 
-func processContextPath(p string, store *config.ConfigStore) []ContextFile {
+// contextFileBudget tracks the shared aggregate budget across all context
+// paths. It uses a rune counter so per-file truncation (runes) and the
+// aggregate cap (runes) are measured in the same unit.
+type contextFileBudget struct {
+	// remaining is the number of runes still available for context files.
+	// 0 or negative means no aggregate cap is active.
+	remaining int
+	// capped reports whether the aggregate budget is active.
+	capped bool
+}
+
+func newContextFileBudget(maxTotalChars int) *contextFileBudget {
+	if maxTotalChars <= 0 {
+		return &contextFileBudget{capped: false}
+	}
+	return &contextFileBudget{remaining: maxTotalChars, capped: true}
+}
+
+// account consumes n runes from the budget. It returns false when the file
+// no longer fits and the caller should emit a budget-exhausted marker.
+func (b *contextFileBudget) account(n int) bool {
+	if !b.capped {
+		return true
+	}
+	if b.remaining <= 0 {
+		return false
+	}
+	if n > b.remaining {
+		return false
+	}
+	b.remaining -= n
+	return true
+}
+
+// appendGlobalContextFile appends the global AGENTS.md to out, accounting it
+// against the shared budget. Project context paths are processed first, so a
+// large project AGENTS.md can crowd this file out; when that happens emit the
+// same marker processContextPath uses instead of dropping it silently, or the
+// user's global instructions disappear with no trace.
+func appendGlobalContextFile(out []ContextFile, path string, maxFileChars int, budget *contextFileBudget) []ContextFile {
+	result, runeLen := processFile(path, maxFileChars)
+	if result == nil {
+		return out
+	}
+	if !budget.account(runeLen) {
+		return append(out, ContextFile{
+			Path:    path,
+			Content: contextFileBudgetExhaustedMarker,
+		})
+	}
+	return append(out, *result)
+}
+
+func processContextPath(p string, store *config.ConfigStore, maxFileChars int, budget *contextFileBudget) []ContextFile {
 	var contexts []ContextFile
 	fullPath := p
 	if !filepath.IsAbs(p) {
@@ -161,23 +255,41 @@ func processContextPath(p string, store *config.ConfigStore) []ContextFile {
 	if err != nil {
 		return contexts
 	}
+
+	appendFile := func(path string) {
+		if budget.capped && budget.remaining <= 0 {
+			contexts = append(contexts, ContextFile{
+				Path:    path,
+				Content: contextFileBudgetExhaustedMarker,
+			})
+			return
+		}
+		result, runeLen := processFile(path, maxFileChars)
+		if result == nil {
+			return
+		}
+		if !budget.account(runeLen) {
+			contexts = append(contexts, ContextFile{
+				Path:    path,
+				Content: contextFileBudgetExhaustedMarker,
+			})
+			return
+		}
+		contexts = append(contexts, *result)
+	}
+
 	if info.IsDir() {
 		filepath.WalkDir(fullPath, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if !d.IsDir() {
-				if result := processFile(path); result != nil {
-					contexts = append(contexts, *result)
-				}
+				appendFile(path)
 			}
 			return nil
 		})
 	} else {
-		result := processFile(fullPath)
-		if result != nil {
-			contexts = append(contexts, *result)
-		}
+		appendFile(fullPath)
 	}
 	return contexts
 }
@@ -207,6 +319,16 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	if p.contextPathsOverride != nil {
 		contextPaths = p.contextPathsOverride
 	}
+	// Pointer semantics: nil (unset) → default; 0 → unbounded; >0 → that cap.
+	maxFileChars := defaultContextFileMaxChars
+	if cfg.Options.ContextFileMaxChars != nil {
+		maxFileChars = *cfg.Options.ContextFileMaxChars
+	}
+	maxTotalChars := defaultContextFilesMaxTotalChars
+	if cfg.Options.ContextFilesMaxTotalChars != nil {
+		maxTotalChars = *cfg.Options.ContextFilesMaxTotalChars
+	}
+	budget := newContextFileBudget(maxTotalChars)
 	if !p.omitProjectContext {
 		for _, pth := range contextPaths {
 			expanded := expandPath(pth, store)
@@ -215,7 +337,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 			if _, ok := projectFiles[pathKey]; ok {
 				continue
 			}
-			content := processContextPath(expanded, store)
+			content := processContextPath(expanded, store, maxFileChars, budget)
 			projectFiles[pathKey] = content
 		}
 	}
@@ -224,9 +346,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	var globalFiles []ContextFile
 	if !p.disableGlobalFile {
 		if globalAgentsPath := config.GlobalAgentsMD(); globalAgentsPath != "" {
-			if result := processFile(globalAgentsPath); result != nil {
-				globalFiles = append(globalFiles, *result)
-			}
+			globalFiles = appendGlobalContextFile(globalFiles, globalAgentsPath, maxFileChars, budget)
 		}
 	}
 
@@ -238,7 +358,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 			expandedPaths = append(expandedPaths, expandPath(pth, store))
 		}
 		if discoveredSkills := skills.DiscoverCached(expandedPaths); len(discoveredSkills) > 0 {
-			availSkillXML = skills.ToPromptXML(discoveredSkills)
+			availSkillXML = skills.ToPromptXML(discoveredSkills, skills.SkillsPromptTokenBudget(effectiveContextWindowForConfig(*cfg)))
 		}
 	}
 
@@ -253,6 +373,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		Date:          p.now().Format("1/2/2006"),
 		AvailSkillXML: availSkillXML,
 		Role:          p.role,
+		HasBashTool:   p.hasBashTool,
 	}
 	if isGit {
 		if p.gitStatus != "" {
@@ -285,6 +406,16 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 func isGitRepo(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// effectiveContextWindowForConfig returns the large model's context window,
+// or 0 when it cannot be resolved (callers fall back to the minimum budget).
+func effectiveContextWindowForConfig(cfg config.Config) int {
+	model := cfg.GetModelByType(config.SelectedModelTypeLarge)
+	if model == nil || model.ContextWindow <= 0 {
+		return 0
+	}
+	return int(model.ContextWindow)
 }
 
 // GetGitStatus computes the git status string for a directory.

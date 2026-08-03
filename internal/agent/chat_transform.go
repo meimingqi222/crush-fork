@@ -66,6 +66,11 @@ type chatRequestStateInput struct {
 	PromptPrefix          string
 	PermissionMode        session.PermissionMode
 	EstimatedPromptTokens int64
+	// Tools, when non-nil, are included in the per-step token segment
+	// breakdown (tool_schema_tokens). Callers that have the prepared tool
+	// list (e.g. estimateNextStepPromptTokens) pass it so the diagnostic
+	// reflects the real wire cost of tool definitions.
+	Tools []fantasy.AgentTool
 }
 
 func withSessionCompactingPurpose(ctx context.Context, purpose plugin.ChatTransformPurpose) context.Context {
@@ -258,8 +263,16 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 	history, files := a.preparePrompt(transformedMessages, input.Attachments...)
 	files = filterImageFilesForModel(files, input.Model)
 	transformedEstimate := estimatePromptStateTokens(history, systemPrompt, promptPrefix) + estimateStringTokens(promptSuffix)
-	slog.Debug("[PERF] buildChatRequestState: preparePrompt done", "duration", time.Since(start), "session_id", input.SessionID)
-	slog.Debug("Built chat request token estimate",
+	// Per-segment breakdown so context-growth optimizations can be measured
+	// and compared against a fixed baseline. tool_schema_tokens is only
+	// non-zero when the caller passes the prepared tool list.
+	systemPromptTokens := estimateStringTokens(systemPrompt)
+	promptPrefixTokens := estimateStringTokens(promptPrefix)
+	promptSuffixTokens := estimateStringTokens(promptSuffix)
+	toolSchemaTokens := estimatePromptTokens(nil, input.Tools)
+	historyTokens := estimatePromptTokens(history, nil)
+	userTokens := estimateStringTokens(message.PromptWithTextAttachments(input.Message.Content().Text, input.Attachments))
+	segmentAttrs := []any{
 		"session_id", input.SessionID,
 		"agent", input.Agent,
 		"purpose", input.Purpose,
@@ -272,10 +285,30 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		"original_estimate_tokens", originalEstimate,
 		"transformed_estimate_tokens", transformedEstimate,
 		"estimate_reduced", transformedEstimate < originalEstimate,
-		"system_prompt_tokens", estimateStringTokens(systemPrompt),
-		"prompt_prefix_tokens", estimateStringTokens(promptPrefix),
-		"prompt_suffix_tokens", estimateStringTokens(promptSuffix),
-	)
+		"system_prompt_tokens", systemPromptTokens,
+		"tool_schema_tokens", toolSchemaTokens,
+		"tool_count", len(input.Tools),
+		"prior_history_tokens", historyTokens,
+		"current_user_tokens", userTokens,
+		"prompt_prefix_tokens", promptPrefixTokens,
+		"prompt_suffix_tokens", promptSuffixTokens,
+	}
+	slog.Debug("Built chat request token estimate", segmentAttrs...)
+	if contextUsageDiagEnabled() {
+		slog.Info("Context usage segments",
+			"session_id", input.SessionID,
+			"model", input.Model.ModelCfg.Model,
+			"purpose", input.Purpose,
+			"system_prompt_tokens", systemPromptTokens,
+			"tool_schema_tokens", toolSchemaTokens,
+			"tool_count", len(input.Tools),
+			"prior_history_tokens", historyTokens,
+			"current_user_tokens", userTokens,
+			"prompt_prefix_tokens", promptPrefixTokens,
+			"prompt_suffix_tokens", promptSuffixTokens,
+			"total_estimated_tokens", transformedEstimate,
+		)
+	}
 	return chatRequestState{
 		Messages:     transformedMessages,
 		History:      history,

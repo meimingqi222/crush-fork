@@ -33,6 +33,18 @@ func init() {
 	formatters.Register(formatterName, xchroma.Formatter(zero, nil))
 }
 
+// ResetMarkdownRenderers drops every cached renderer.
+//
+// The cache is keyed by the *address* of the [styles.Styles] value, so a theme
+// switch that rewrites those styles in place leaves the key unchanged and
+// would otherwise keep serving renderers built from the previous palette.
+// Callers that mutate styles in place must call this afterwards.
+func ResetMarkdownRenderers() {
+	rendererCacheMu.Lock()
+	defer rendererCacheMu.Unlock()
+	clear(rendererCache)
+}
+
 func getCachedRenderer(plain bool, sty *styles.Styles, width int) *glamour.TermRenderer {
 	key := rendererCacheKey{
 		plain:   plain,

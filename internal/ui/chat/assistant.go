@@ -821,6 +821,12 @@ func (a *AssistantMessageItem) SetThinkingExpanded(expanded bool) {
 }
 
 // HandleMouseClick implements MouseClickable.
+//
+// Clicks on the thinking/summary regions toggle their expanded state. Any
+// other click on the item (e.g. the main markdown content) is consumed
+// without action so HandleDelayedClick does not fall through to
+// ToggleExpanded — clicking or selecting non-thinking text must not
+// unexpectedly expand the thinking block.
 func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) (bool, tea.Cmd) {
 	if btn != ansi.MouseLeft {
 		return false, nil
@@ -840,7 +846,7 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 			}
 		}
 	}
-	return false, nil
+	return true, nil
 }
 
 // HandleKeyEvent implements KeyEventHandler.

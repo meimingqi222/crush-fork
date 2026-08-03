@@ -257,6 +257,8 @@ type sessionAgent struct {
 
 	refreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
 	deferredToolRuntime  deferredToolRuntime
+	onAuthRefresh        func(context.Context, *fantasy.ProviderError) error
+	modelProvider        func() fantasy.LanguageModel
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
@@ -323,29 +325,36 @@ type sessionAgent struct {
 }
 
 type SessionAgentOptions struct {
-	LargeModel             Model
-	SmallModel             Model
-	SystemPromptPrefix     string
-	SystemPrompt           string
-	WorkingDir             string
-	AgentFactory           func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
-	RefreshCallConfig      func(context.Context) (sessionAgentRuntimeConfig, error)
-	DeferredToolRuntime    deferredToolRuntime
-	IsSubAgent             bool
-	DisableAutoSummarize   bool
-	IsYolo                 bool
-	ResponsesChaining      bool
-	Sessions               session.Service
-	Messages               message.Service
-	BackgroundModel        *backgroundModel
-	ReviewToolResult       func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
-	Tools                  []fantasy.AgentTool
-	Notify                 pubsub.Publisher[notify.Notification]
-	HookManager            *hooks.Manager
-	PluginRuntime          *plugin.Runtime
-	Filetracker            filetracker.Service
-	Checkpoint             checkpoint.Service
-	RetryDelayFunc         func(attempt int, serverRetryAfter time.Duration) time.Duration
+	LargeModel           Model
+	SmallModel           Model
+	SystemPromptPrefix   string
+	SystemPrompt         string
+	WorkingDir           string
+	AgentFactory         func(model fantasy.LanguageModel, opts ...fantasy.AgentOption) fantasy.Agent
+	RefreshCallConfig    func(context.Context) (sessionAgentRuntimeConfig, error)
+	DeferredToolRuntime  deferredToolRuntime
+	IsSubAgent           bool
+	DisableAutoSummarize bool
+	IsYolo               bool
+	ResponsesChaining    bool
+	Sessions             session.Service
+	Messages             message.Service
+	BackgroundModel      *backgroundModel
+	ReviewToolResult     func(context.Context, string, message.ToolResult, session.PermissionMode) (message.ToolResult, error)
+	Tools                []fantasy.AgentTool
+	Notify               pubsub.Publisher[notify.Notification]
+	HookManager          *hooks.Manager
+	PluginRuntime        *plugin.Runtime
+	Filetracker          filetracker.Service
+	Checkpoint           checkpoint.Service
+	RetryDelayFunc       func(attempt int, serverRetryAfter time.Duration) time.Duration
+	// OnAuthRefresh, when set, is called by the fantasy layer when a stream
+	// fails with an authentication error, so credentials can be refreshed
+	// and the current step retried (instead of rerunning the whole Run).
+	OnAuthRefresh func(context.Context, *fantasy.ProviderError) error
+	// ModelProvider, when set with OnAuthRefresh, rebuilds the language
+	// model with fresh credentials after a refresh.
+	ModelProvider          func() fantasy.LanguageModel
 	EnableSessionMemory    bool
 	MemoryEngineEnabled    bool
 	MemoryEngineEventStore engine.EventStore
@@ -423,6 +432,8 @@ func NewSessionAgent(
 		agentFactory:                    agentFactory,
 		refreshCallConfig:               opts.RefreshCallConfig,
 		deferredToolRuntime:             opts.DeferredToolRuntime,
+		onAuthRefresh:                   opts.OnAuthRefresh,
+		modelProvider:                   opts.ModelProvider,
 		isSubAgent:                      opts.IsSubAgent,
 		sessions:                        opts.Sessions,
 		messages:                        opts.Messages,
@@ -634,7 +645,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// pure in-memory operation that clears oversized tool output from
 		// older messages, preventing the stdin/stdout JSON payload from
 		// exceeding plugin buffer limits on session restore.
-		msgs = builtinPruneToolResultsWithProtection(msgs, a.planCompactionProtector(genCtx, call.SessionID), nil)
+		msgs = builtinPruneToolResultsWithArchive(msgs, a.planCompactionProtector(genCtx, call.SessionID), nil, a.archiveToolResultForSession(call.SessionID))
 	}
 	slog.Debug("[PERF] sessionAgent: restored session context", "duration", time.Since(start), "session_id", call.SessionID)
 
@@ -651,6 +662,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		SystemPrompt:   systemPrompt,
 		PromptPrefix:   promptPrefix,
 		PermissionMode: currentSession.PermissionMode,
+		Tools:          agentTools,
 	})
 	if err != nil {
 		return nil, err
@@ -757,6 +769,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		SystemPrompt:   systemPrompt,
 		PromptPrefix:   promptPrefix,
 		PermissionMode: currentSession.PermissionMode,
+		Tools:          agentTools,
 	})
 	if err != nil {
 		return nil, err
@@ -778,6 +791,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.eventPromptSent(call.SessionID)
 
 	var shouldSummarize bool
+	sanitizedToolCalls := make(map[string]bool)
 	var compactionTrigger sessionCompactionTrigger
 	var contextWindowExceeded bool
 	var currentAssistant *message.Message
@@ -933,14 +947,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 		markAssistantDirty := func() error {
 			if streamFlusher == nil {
-				return persistAssistant(genCtx)
+				// Use parent ctx instead of genCtx so the update succeeds even
+				// if the request is canceled mid-stream.
+				return persistAssistant(ctx)
 			}
 			streamFlusher.MarkDirty()
 			return nil
 		}
 		flushAssistant := func() error {
 			if streamFlusher == nil {
-				return persistAssistant(genCtx)
+				// Use parent ctx instead of genCtx so the update succeeds even
+				// if the request is canceled mid-stream.
+				return persistAssistant(ctx)
 			}
 			return streamFlusher.FlushNow()
 		}
@@ -955,6 +973,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			PresencePenalty:  call.PresencePenalty,
 			TopK:             call.TopK,
 			FrequencyPenalty: call.FrequencyPenalty,
+			OnAuthRefresh:    a.onAuthRefresh,
+			ModelProvider:    a.modelProvider,
 			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 				// Explicitly tag every LLM request with the correct X-Initiator value
 				// so GitHub Copilot billing is correct regardless of how the fantasy
@@ -1296,10 +1316,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// do not mutate messages that are part of the warm cache prefix.
 				if len(prepared.Messages) > builtinPruneRecentUserTurns*3 {
 					internalForPrune := message.FromFantasyMessages(prepared.Messages)
-					pruned := builtinPruneToolResultsWithProtection(
+					pruned := builtinPruneToolResultsWithArchive(
 						internalForPrune,
 						a.planCompactionProtector(genCtx, call.SessionID),
 						cacheProtectedIndicesForPrune(cacheBreakpointIndices),
+						a.archiveToolResultForSession(call.SessionID),
 					)
 					if len(pruned) > 0 && &pruned[0] != &internalForPrune[0] {
 						prepared.Messages, _ = a.preparePrompt(pruned)
@@ -1533,11 +1554,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			OnToolCall: func(tc fantasy.ToolCallContent) error {
 				callbackStarted := time.Now()
 				currentAssistant.FinishThinking()
-				liveInput, liveInputTruncated := boundedLiveToolText(redactSecrets(tc.Input))
+				input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
+				if wasSanitized {
+					sanitizedToolCalls[tc.ToolCallID] = true
+				}
+				liveInput, liveInputTruncated := boundedLiveToolText(redactSecrets(input))
 				toolCall := message.ToolCall{
 					ID:               tc.ToolCallID,
 					Name:             tc.ToolName,
-					Input:            tc.Input,
+					Input:            input,
 					ProviderExecuted: false,
 					Finished:         true,
 				}
@@ -1572,6 +1597,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			OnToolResult: func(result fantasy.ToolResultContent) error {
 				callbackStarted := time.Now()
 				toolResult := a.convertToToolResult(genCtx, result)
+				if sanitizedToolCalls[result.ToolCallID] {
+					toolResult.Content = "Tool call failed: arguments were not valid JSON. Please check your tool call format and try again."
+					toolResult.IsError = true
+				}
 				if toolResult.Name == tools.ToolSearchToolName {
 					if state, ok := deferredToolStateFromToolSearchResult(toolResult.Content); ok {
 						toolResult = toolResult.WithDeferredToolState(state)
@@ -2001,6 +2030,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					SystemPrompt:   systemPrompt,
 					PromptPrefix:   promptPrefix,
 					PermissionMode: currentSession.PermissionMode,
+					Tools:          agentTools,
 				})
 				if buildErr != nil {
 					return nil, buildErr
@@ -2045,6 +2075,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					SystemPrompt:   systemPrompt,
 					PromptPrefix:   promptPrefix,
 					PermissionMode: currentSession.PermissionMode,
+					Tools:          agentTools,
 				})
 				if buildErr != nil {
 					return nil, buildErr
@@ -2092,6 +2123,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					SystemPrompt:   systemPrompt,
 					PromptPrefix:   promptPrefix,
 					PermissionMode: currentSession.PermissionMode,
+					Tools:          agentTools,
 				})
 				if buildErr != nil {
 					return nil, buildErr
@@ -2207,6 +2239,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					SystemPrompt:   systemPrompt,
 					PromptPrefix:   promptPrefix,
 					PermissionMode: currentSession.PermissionMode,
+					Tools:          agentTools,
 				})
 				if buildErr != nil {
 					slog.Warn("Failed to rebuild request state for retry",
@@ -2308,6 +2341,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				SystemPrompt:   systemPrompt,
 				PromptPrefix:   promptPrefix,
 				PermissionMode: currentSession.PermissionMode,
+				Tools:          agentTools,
 			})
 			if buildErr != nil {
 				return nil, buildErr
@@ -2351,6 +2385,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				SystemPrompt:   systemPrompt,
 				PromptPrefix:   promptPrefix,
 				PermissionMode: currentSession.PermissionMode,
+				Tools:          agentTools,
 			})
 			if buildErr != nil {
 				return nil, buildErr
@@ -3050,7 +3085,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// Prune old tool results before sending to plugins during
 	// summarization. Without this, the full unpruned payload sent
 	// to transforms can exceed plugin buffer limits on large sessions.
-	msgs = builtinPruneToolResultsWithProtection(msgs, a.planCompactionProtector(ctx, sessionID), nil)
+	msgs = builtinPruneToolResultsWithArchive(msgs, a.planCompactionProtector(ctx, sessionID), nil, a.archiveToolResultForSession(sessionID))
 
 	// Filter out non-text content if the summary model doesn't support images
 	if !summaryModel.CatwalkCfg.SupportsImages {
@@ -3888,8 +3923,7 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 	// positional matching would drop legitimate results as "orphaned" and force
 	// the model to re-issue identical calls. Precomputing lookup maps keeps this
 	// O(n) (the earlier global rescan per tool message was O(n^2)).
-	resultsByToolCallID := make(map[string]message.ToolResult)
-	resultOwnerByToolCallID := make(map[string]message.Message)
+	resultsByToolCallID := make(map[string][]persistedToolResult)
 	assistantToolCallIDs := make(map[string]bool)
 	for _, m := range msgs {
 		switch m.Role {
@@ -3899,12 +3933,14 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 			}
 		case message.Tool:
 			for _, tr := range m.ToolResults() {
-				resultsByToolCallID[tr.ToolCallID] = tr
-				resultOwnerByToolCallID[tr.ToolCallID] = m
+				resultsByToolCallID[tr.ToolCallID] = append(resultsByToolCallID[tr.ToolCallID], persistedToolResult{
+					result: tr,
+					owner:  m,
+				})
 			}
 		}
 	}
-	consumedToolResults := make(map[string]bool)
+	consumedToolResults := make(map[string]int)
 
 	for i := 0; i < len(msgs); i++ {
 		m := msgs[i]
@@ -3935,7 +3971,7 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 		history = append(history, m.ToAIMessage()...)
 
 		if m.Role == message.Assistant {
-			history = appendToolResultsForAssistant(history, m, resultsByToolCallID, resultOwnerByToolCallID, consumedToolResults)
+			history = appendToolResultsForAssistant(history, m, resultsByToolCallID, consumedToolResults)
 		}
 	}
 
@@ -3954,6 +3990,11 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 	return history, files
 }
 
+type persistedToolResult struct {
+	result message.ToolResult
+	owner  message.Message
+}
+
 // appendToolResultsForAssistant emits, immediately after an assistant turn,
 // the tool results for every tool_call it made — gathered by tool_call_id from
 // anywhere in the persisted history so out-of-order parallel results are still
@@ -3962,9 +4003,8 @@ func (a *sessionAgent) preparePrompt(msgs []message.Message, attachments ...mess
 func appendToolResultsForAssistant(
 	history []fantasy.Message,
 	assistant message.Message,
-	resultsByToolCallID map[string]message.ToolResult,
-	resultOwnerByToolCallID map[string]message.Message,
-	consumed map[string]bool,
+	resultsByToolCallID map[string][]persistedToolResult,
+	consumed map[string]int,
 ) []fantasy.Message {
 	toolCalls := assistant.ToolCalls()
 	if len(toolCalls) == 0 {
@@ -3975,14 +4015,13 @@ func appendToolResultsForAssistant(
 	var owner *message.Message
 	var missing []fantasy.MessagePart
 	for _, tc := range toolCalls {
-		if consumed[tc.ID] {
-			continue
-		}
-		consumed[tc.ID] = true
-		if tr, ok := resultsByToolCallID[tc.ID]; ok {
-			grouped = append(grouped, tr)
+		resultIndex := consumed[tc.ID]
+		consumed[tc.ID] = resultIndex + 1
+		if results := resultsByToolCallID[tc.ID]; resultIndex < len(results) {
+			persisted := results[resultIndex]
+			grouped = append(grouped, persisted.result)
 			if owner == nil {
-				o := resultOwnerByToolCallID[tc.ID]
+				o := persisted.owner
 				owner = &o
 			}
 			continue
@@ -3992,7 +4031,7 @@ func appendToolResultsForAssistant(
 		missing = append(missing, fantasy.ToolResultPart{
 			ToolCallID: tc.ID,
 			Output: fantasy.ToolResultOutputContentError{
-				Error: fmt.Errorf("tool execution was interrupted"),
+				Error: fmt.Errorf("tool execution was interrupted before completion; verify the current state before continuing"),
 			},
 		})
 	}
@@ -4069,4 +4108,20 @@ func excludeCurrentUserMessage(msgs []message.Message, userMessage *message.Mess
 		return msgs
 	}
 	return filtered
+}
+
+// sanitizeToolInput validates tool call JSON from the provider.
+// Malformed input is replaced with an empty object to prevent
+// stuck conversations from truncated or malformed model output.
+// The second return value indicates whether sanitization occurred.
+func sanitizeToolInput(toolName, toolCallID, input string) (string, bool) {
+	if !json.Valid([]byte(input)) {
+		slog.Warn("Malformed tool call JSON from provider, replacing with empty object",
+			"tool", toolName,
+			"id", toolCallID,
+			"input_len", len(input),
+		)
+		return "{}", true
+	}
+	return input, false
 }

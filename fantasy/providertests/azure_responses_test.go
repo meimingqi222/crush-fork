@@ -30,7 +30,7 @@ func azureReasoningBuilder(model string) builderFunc {
 		provider, err := azure.New(
 			azure.WithBaseURL(cmp.Or(os.Getenv("FANTASY_AZURE_BASE_URL"), defaultBaseURL)),
 			azure.WithAPIKey(cmp.Or(os.Getenv("FANTASY_AZURE_API_KEY"), "(missing)")),
-			azure.WithHTTPClient(&http.Client{Transport: openAIResponsesVCRTransport{next: r}}),
+			azure.WithHTTPClient(&http.Client{Transport: r}),
 			azure.WithUseResponsesAPI(),
 		)
 		if err != nil {

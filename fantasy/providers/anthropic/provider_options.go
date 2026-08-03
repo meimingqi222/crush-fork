@@ -25,6 +25,16 @@ const (
 	EffortMax Effort = "max"
 )
 
+// ThinkingDisplay controls whether Anthropic returns visible thinking content.
+type ThinkingDisplay string
+
+const (
+	// ThinkingDisplaySummarized requests visible summarized thinking content.
+	ThinkingDisplaySummarized ThinkingDisplay = "summarized"
+	// ThinkingDisplayOmitted requests hidden thinking content.
+	ThinkingDisplayOmitted ThinkingDisplay = "omitted"
+)
+
 // Global type identifiers for Anthropic-specific provider data.
 const (
 	TypeProviderOptions         = Name + ".options"
@@ -70,8 +80,9 @@ type ProviderOptions struct {
 	SendReasoning          *bool                   `json:"send_reasoning"`
 	Thinking               *ThinkingProviderOption `json:"thinking"`
 	Effort                 *Effort                 `json:"effort"`
-	ThinkingDisplay        string                  `json:"thinking_display,omitempty"` // "summarized" or "omitted", for effort mode
+	ThinkingDisplay        *ThinkingDisplay        `json:"thinking_display"`
 	DisableParallelToolUse *bool                   `json:"disable_parallel_tool_use"`
+	ExtraBody              map[string]any          `json:"extra_body,omitempty"`
 }
 
 // Options implements the ProviderOptions interface.
@@ -96,8 +107,7 @@ func (o *ProviderOptions) UnmarshalJSON(data []byte) error {
 
 // ThinkingProviderOption represents thinking options for the Anthropic provider.
 type ThinkingProviderOption struct {
-	BudgetTokens int64  `json:"budget_tokens"`
-	Display      string `json:"display,omitempty"` // "summarized" or "omitted"
+	BudgetTokens int64 `json:"budget_tokens"`
 }
 
 // ReasoningOptionMetadata represents reasoning metadata for the Anthropic provider.
@@ -161,10 +171,14 @@ type WebSearchResultItem struct {
 }
 
 // WebSearchResultMetadata stores web search results from Anthropic's
-// server-executed web_search tool. The structured data (especially
-// EncryptedContent) must be preserved for multi-turn conversations.
+// server-executed web_search tool. The structured data, especially
+// encrypted content and error codes, must be preserved for multi-turn
+// conversations.
 type WebSearchResultMetadata struct {
-	Results []WebSearchResultItem `json:"results"`
+	Results []WebSearchResultItem `json:"results,omitempty"`
+	// ErrorCode is the Anthropic web_search_tool_result_error.error_code.
+	// At most one of Results or ErrorCode should be non-empty.
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // Options implements the ProviderOptions interface.

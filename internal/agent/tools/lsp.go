@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,14 +20,21 @@ import (
 
 const LSPToolName = "lsp"
 
+// lspUnknownOpMessage is the recovery hint returned for an unrecognized op.
+// It must list exactly the ops NewLSPTool dispatches; TestLSPUnknownOpErrorListsRealOps
+// pins that, along with the LSPParams.Op schema description.
+const lspUnknownOpMessage = "Valid ops: diagnostics, references, definition, document_symbols, " +
+	"workspace_symbols, code_action, rename, replace_symbol, call_hierarchy, restart"
+
 //go:embed lsp.md
 var lspDescription []byte
 
 // LSPParams is the unified parameter struct for the consolidated lsp tool.
 type LSPParams struct {
-	Op string `json:"op" description:"The LSP operation to perform. One of: diagnostics, references, declaration, definition, implementation, type_definition, hover, document_symbols, workspace_symbols, code_action, rename, format, restart."`
+	Op string `json:"op" description:"The LSP operation to perform. One of: diagnostics, references, definition, document_symbols, workspace_symbols, code_action, rename, replace_symbol, call_hierarchy, restart."`
 
-	// Position-based params (declaration, definition, implementation, type_definition, hover, code_action, rename).
+	// Position-based params (code_action, rename, and call_hierarchy when no
+	// symbol name is given).
 	FilePath  string `json:"file_path,omitempty" description:"The file path containing the symbol or range to inspect."`
 	Line      int    `json:"line,omitempty" description:"The 1-based line number of the symbol position."`
 	Character int    `json:"character,omitempty" description:"The 1-based column number of the symbol position."`
@@ -34,9 +42,12 @@ type LSPParams struct {
 	// Diagnostics params.
 	// FilePath is reused (empty = project diagnostics).
 
-	// References params.
-	Symbol string `json:"symbol,omitempty" description:"The symbol name to search for references (references op only)."`
-	Path   string `json:"path,omitempty" description:"The directory to search in for references (references op only)."`
+	// Name-based params, shared by references, definition, replace_symbol and
+	// call_hierarchy. Prefer these over Line/Character: they are
+	// language-aware and skip matches in comments, strings and partial
+	// identifiers.
+	Symbol string `json:"symbol,omitempty" description:"The symbol name to look up (references, definition, replace_symbol, call_hierarchy)."`
+	Path   string `json:"path,omitempty" description:"The directory to search in when resolving a symbol by name. Defaults to the working directory."`
 
 	// Document symbols params.
 	// FilePath is reused.
@@ -52,12 +63,13 @@ type LSPParams struct {
 	// Rename params.
 	NewName string `json:"new_name,omitempty" description:"The new symbol name to apply (rename op only)."`
 
-	// Format params.
-	TabSize                int   `json:"tab_size,omitempty" description:"Tab width in spaces, default 4 (format op only)."`
-	InsertSpaces           *bool `json:"insert_spaces,omitempty" description:"Prefer spaces over tabs, default true (format op only)."`
-	TrimTrailingWhitespace *bool `json:"trim_trailing_whitespace,omitempty" description:"Trim trailing whitespace on each line (format op only)."`
-	InsertFinalNewline     *bool `json:"insert_final_newline,omitempty" description:"Ensure file ends with a final newline (format op only)."`
-	TrimFinalNewlines      *bool `json:"trim_final_newlines,omitempty" description:"Trim extra trailing newlines at end of file (format op only)."`
+	// Replace symbol params.
+	Replacement string `json:"replacement,omitempty" description:"The replacement text. Required for 'replace'/'add_before'/'add_after' actions (replace_symbol op only)."`
+	Action      string `json:"action,omitempty" description:"The action to perform for replace_symbol: replace (default), add_before, add_after, or delete."`
+
+	// Call hierarchy params.
+	// Symbol is preferred; FilePath / Line / Character are reused when
+	// resolving by position instead.
 
 	// Restart params.
 	Name string `json:"name,omitempty" description:"Optional name of a specific LSP client to restart (restart op only). Empty restarts all."`
@@ -74,16 +86,8 @@ func NewLSPTool(lspManager *lsp.Manager, permissions permission.Service, working
 				return lspDiagnostics(ctx, lspManager, params.FilePath)
 			case "references":
 				return lspReferences(ctx, lspManager, params.Symbol, params.Path)
-			case "declaration":
-				return lspNavigate(ctx, lspManager, params, "declaration")
 			case "definition":
-				return lspNavigate(ctx, lspManager, params, "definition")
-			case "implementation":
-				return lspNavigate(ctx, lspManager, params, "implementation")
-			case "type_definition":
-				return lspNavigate(ctx, lspManager, params, "type definition")
-			case "hover":
-				return lspHover(ctx, lspManager, params)
+				return lspDefinition(ctx, lspManager, params)
 			case "document_symbols":
 				return lspDocumentSymbols(ctx, lspManager, params.FilePath)
 			case "workspace_symbols":
@@ -92,12 +96,14 @@ func NewLSPTool(lspManager *lsp.Manager, permissions permission.Service, working
 				return lspCodeAction(ctx, lspManager, permissions, workingDir, params, call)
 			case "rename":
 				return lspRename(ctx, lspManager, permissions, workingDir, params, call)
-			case "format":
-				return lspFormat(ctx, lspManager, permissions, workingDir, params, call)
+			case "replace_symbol":
+				return lspReplaceSymbol(ctx, lspManager, permissions, workingDir, params, call)
+			case "call_hierarchy":
+				return lspCallHierarchy(ctx, lspManager, params)
 			case "restart":
 				return lspRestart(ctx, lspManager, params.Name)
 			default:
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("unknown lsp op: %q. Valid ops: diagnostics, references, declaration, definition, implementation, type_definition, hover, document_symbols, workspace_symbols, code_action, rename, format, restart", params.Op)), nil
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("unknown lsp op: %q. %s", params.Op, lspUnknownOpMessage)), nil
 			}
 		},
 	)
@@ -167,60 +173,41 @@ func lspReferences(ctx context.Context, lspManager *lsp.Manager, symbol, path st
 	return fantasy.NewTextResponse(fmt.Sprintf("No references found for symbol '%s'", symbol)), nil
 }
 
-// lspNavigate handles declaration, definition, implementation, type_definition.
-func lspNavigate(ctx context.Context, lspManager *lsp.Manager, params LSPParams, kind string) (fantasy.ToolResponse, error) {
-	client, absPath, response, ok := lspClientForPosition(ctx, lspManager, lspPositionParams{
-		FilePath:  params.FilePath,
-		Line:      params.Line,
-		Character: params.Character,
-	})
-	if !ok {
-		return response, nil
+// lspDefinition resolves a symbol by name and returns its definition
+// locations. Name-based resolution is more robust than requiring the model to
+// supply exact 1-based coordinates.
+func lspDefinition(ctx context.Context, lspManager *lsp.Manager, params LSPParams) (fantasy.ToolResponse, error) {
+	if strings.TrimSpace(params.Symbol) == "" {
+		return fantasy.NewTextErrorResponse("symbol is required for definition op"), nil
+	}
+	if lspManager == nil || lspManager.Clients().Len() == 0 {
+		return fantasy.NewTextErrorResponse("no LSP clients available"), nil
 	}
 
-	var (
-		locations []protocol.Location
-		err       error
-	)
-	switch kind {
-	case "declaration":
-		locations, err = client.FindDeclaration(ctx, absPath, params.Line, params.Character)
-	case "definition":
-		locations, err = client.FindDefinition(ctx, absPath, params.Line, params.Character)
-	case "implementation":
-		locations, err = client.FindImplementation(ctx, absPath, params.Line, params.Character)
-	case "type definition":
-		locations, err = client.FindTypeDefinition(ctx, absPath, params.Line, params.Character)
+	wd := params.Path
+	if wd == "" {
+		wd = GetWorkingDirFromContext(ctx)
 	}
+	if wd == "" {
+		wd = "."
+	}
+	resolved, err := resolveSymbol(ctx, lspManager, params.Symbol, wd)
 	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("Symbol '%s' not found", params.Symbol)), nil
+	}
+
+	locations, err := resolved.client.FindDefinition(ctx, resolved.path, resolved.line, resolved.char)
+	if err != nil {
+		if isNoIdentifierError(err) {
+			return fantasy.NewTextResponse(fmt.Sprintf("Symbol '%s' not found as an identifier", params.Symbol)), nil
+		}
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
 	locations = cleanupLocations(locations)
 	if len(locations) == 0 {
-		return fantasy.NewTextResponse(fmt.Sprintf("No %s found.", kind)), nil
+		return fantasy.NewTextResponse(fmt.Sprintf("No definition found for '%s'.", params.Symbol)), nil
 	}
-	return fantasy.NewTextResponse(formatLocations(kind, locations)), nil
-}
-
-// lspHover handles the hover operation.
-func lspHover(ctx context.Context, lspManager *lsp.Manager, params LSPParams) (fantasy.ToolResponse, error) {
-	client, absPath, response, ok := lspClientForPosition(ctx, lspManager, lspPositionParams{
-		FilePath:  params.FilePath,
-		Line:      params.Line,
-		Character: params.Character,
-	})
-	if !ok {
-		return response, nil
-	}
-	hover, err := client.Hover(ctx, absPath, params.Line, params.Character)
-	if err != nil {
-		return fantasy.NewTextErrorResponse(err.Error()), nil
-	}
-	text := strings.TrimSpace(formatHover(hover))
-	if text == "" {
-		return fantasy.NewTextResponse("No hover information found."), nil
-	}
-	return fantasy.NewTextResponse(text), nil
+	return fantasy.NewTextResponse(formatLocations("definition", locations)), nil
 }
 
 // lspDocumentSymbols handles document symbols.
@@ -362,50 +349,6 @@ func lspRename(ctx context.Context, lspManager *lsp.Manager, permissions permiss
 	return fantasy.NewTextResponse(fmt.Sprintf("Renamed symbol to %s.", strings.TrimSpace(params.NewName))), nil
 }
 
-// lspFormat handles document formatting.
-func lspFormat(ctx context.Context, lspManager *lsp.Manager, permissions permission.Service, workingDir string, params LSPParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	client, absPath, response, ok := lspClientForFile(ctx, lspManager, params.FilePath)
-	if !ok {
-		return response, nil
-	}
-
-	formatParams := LSPFormatParams{
-		FilePath:               params.FilePath,
-		TabSize:                params.TabSize,
-		InsertSpaces:           params.InsertSpaces,
-		TrimTrailingWhitespace: params.TrimTrailingWhitespace,
-		InsertFinalNewline:     params.InsertFinalNewline,
-		TrimFinalNewlines:      params.TrimFinalNewlines,
-	}
-	edits, err := client.FormatDocument(ctx, absPath, formattingOptions(formatParams))
-	if err != nil {
-		return fantasy.NewTextErrorResponse(err.Error()), nil
-	}
-	if len(edits) == 0 {
-		return fantasy.NewTextResponse("No formatting changes returned."), nil
-	}
-
-	workspaceEdit := protocol.WorkspaceEdit{
-		Changes: map[protocol.DocumentURI][]protocol.TextEdit{
-			protocol.URIFromPath(absPath): edits,
-		},
-	}
-
-	permissionResponse, err := requestLSPWritePermission(ctx, permissions, workingDir, call, absPath, LSPToolName, fmt.Sprintf("Format %s with LSP", absPath), params)
-	if err != nil {
-		return fantasy.ToolResponse{}, err
-	}
-	if permissionResponse != nil {
-		return *permissionResponse, nil
-	}
-
-	if err := client.ApplyWorkspaceEdit(workspaceEdit); err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to apply formatting edits: %s", err)), nil
-	}
-	notifyWorkspaceEditPaths(ctx, lspManager, workspaceEdit)
-	return fantasy.NewTextResponse(fmt.Sprintf("Applied %d formatting edit(s).", len(edits))), nil
-}
-
 // lspRestart handles LSP client restart.
 func lspRestart(ctx context.Context, lspManager *lsp.Manager, name string) (fantasy.ToolResponse, error) {
 	if lspManager.Clients().Len() == 0 {
@@ -463,4 +406,203 @@ func lspRestart(ctx context.Context, lspManager *lsp.Manager, name string) (fant
 		return fantasy.NewTextErrorResponse(output), nil
 	}
 	return fantasy.NewTextResponse(output), nil
+}
+
+// lspReplaceSymbol replaces, inserts before/after, or deletes a symbol by
+// name using the LSP document-symbol tree, so the edit is anchored to the
+// symbol's semantic range rather than a fragile text match.
+func lspReplaceSymbol(ctx context.Context, lspManager *lsp.Manager, permissions permission.Service, workingDir string, params LSPParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	if strings.TrimSpace(params.FilePath) == "" {
+		return fantasy.NewTextErrorResponse("file_path is required for replace_symbol op"), nil
+	}
+	symbol := strings.TrimSpace(params.Symbol)
+	if symbol == "" {
+		return fantasy.NewTextErrorResponse("symbol is required for replace_symbol op"), nil
+	}
+	action := strings.TrimSpace(params.Action)
+	if action == "" {
+		action = "replace"
+	}
+	switch action {
+	case "replace", "add_before", "add_after", "delete":
+	default:
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("invalid action %q: must be replace, add_before, add_after, or delete", action)), nil
+	}
+	if (action == "replace" || action == "add_before" || action == "add_after") && params.Replacement == "" {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("replacement is required for action %q", action)), nil
+	}
+
+	absPath, err := filepath.Abs(filepath.FromSlash(params.FilePath))
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get absolute path: %s", err)), nil
+	}
+	if lspManager == nil || lspManager.Clients().Len() == 0 {
+		return fantasy.NewTextErrorResponse("no LSP clients available"), nil
+	}
+	openInLSPs(ctx, lspManager, absPath)
+	client := firstHandlingClient(lspManager, absPath)
+	if client == nil {
+		return fantasy.NewTextResponse(fmt.Sprintf("No LSP client handles %s", absPath)), nil
+	}
+
+	symbols, err := client.DocumentSymbols(ctx, absPath)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get document symbols: %s", err)), nil
+	}
+	target := findSymbolByName(symbols, symbol)
+	if target == nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("symbol '%s' not found in %s", symbol, absPath)), nil
+	}
+	rng := target.GetRange()
+
+	content, err := os.ReadFile(absPath)
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
+	}
+	lines := strings.Split(string(content), "\n")
+	startLine := int(rng.Start.Line)
+	endLine := int(rng.End.Line)
+	if startLine >= len(lines) || endLine >= len(lines) {
+		return fantasy.NewTextErrorResponse("symbol range exceeds file length"), nil
+	}
+
+	var newLines []string
+	switch action {
+	case "replace":
+		newLines = make([]string, 0, len(lines))
+		newLines = append(newLines, lines[:startLine]...)
+		newLines = append(newLines, strings.Split(params.Replacement, "\n")...)
+		newLines = append(newLines, lines[endLine+1:]...)
+	case "add_before":
+		newLines = make([]string, 0, len(lines)+strings.Count(params.Replacement, "\n")+1)
+		newLines = append(newLines, lines[:startLine]...)
+		newLines = append(newLines, strings.Split(params.Replacement, "\n")...)
+		newLines = append(newLines, lines[startLine:]...)
+	case "add_after":
+		newLines = make([]string, 0, len(lines)+strings.Count(params.Replacement, "\n")+1)
+		newLines = append(newLines, lines[:endLine+1]...)
+		newLines = append(newLines, strings.Split(params.Replacement, "\n")...)
+		newLines = append(newLines, lines[endLine+1:]...)
+	case "delete":
+		newLines = make([]string, 0, len(lines))
+		newLines = append(newLines, lines[:startLine]...)
+		newLines = append(newLines, lines[endLine+1:]...)
+	}
+	newContent := strings.Join(newLines, "\n")
+
+	permissionResponse, err := requestLSPWritePermission(ctx, permissions, workingDir, call, absPath, LSPToolName, fmt.Sprintf("%s symbol '%s' in %s", action, symbol, absPath), params)
+	if err != nil {
+		return fantasy.ToolResponse{}, err
+	}
+	if permissionResponse != nil {
+		return *permissionResponse, nil
+	}
+
+	if err := os.WriteFile(absPath, []byte(newContent), 0o644); err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
+	}
+	notifyLSPs(ctx, lspManager, absPath)
+
+	var summary string
+	switch action {
+	case "replace":
+		summary = fmt.Sprintf("Replaced symbol '%s' in %s (lines %d-%d)", symbol, absPath, startLine+1, endLine+1)
+	case "add_before":
+		summary = fmt.Sprintf("Inserted before symbol '%s' in %s (before line %d)", symbol, absPath, startLine+1)
+	case "add_after":
+		summary = fmt.Sprintf("Inserted after symbol '%s' in %s (after line %d)", symbol, absPath, endLine+1)
+	case "delete":
+		summary = fmt.Sprintf("Deleted symbol '%s' from %s (lines %d-%d)", symbol, absPath, startLine+1, endLine+1)
+	}
+	resp := fantasy.NewTextResponse(summary + "\n" + getDiagnostics(absPath, lspManager))
+	return resp, nil
+}
+
+// findSymbolByName searches for a symbol by name in the document symbol tree.
+func findSymbolByName(symbols []protocol.DocumentSymbolResult, name string) protocol.DocumentSymbolResult {
+	for _, sym := range symbols {
+		if sym.GetName() == name {
+			return sym
+		}
+		if ds, ok := sym.(*protocol.DocumentSymbol); ok && len(ds.Children) > 0 {
+			children := make([]protocol.DocumentSymbolResult, len(ds.Children))
+			for i := range ds.Children {
+				children[i] = &ds.Children[i]
+			}
+			if found := findSymbolByName(children, name); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+// lspCallHierarchy resolves a symbol to a position and returns its incoming
+// (callers) and outgoing (callees) call hierarchy.
+func lspCallHierarchy(ctx context.Context, lspManager *lsp.Manager, params LSPParams) (fantasy.ToolResponse, error) {
+	if lspManager == nil || lspManager.Clients().Len() == 0 {
+		return fantasy.NewTextErrorResponse("no LSP clients available"), nil
+	}
+
+	var (
+		client     *lsp.Client
+		absPath    string
+		line, char int
+	)
+	if strings.TrimSpace(params.Symbol) != "" {
+		wd := GetWorkingDirFromContext(ctx)
+		if wd == "" {
+			wd = "."
+		}
+		resolved, err := resolveSymbol(ctx, lspManager, params.Symbol, wd)
+		if err != nil {
+			return fantasy.NewTextErrorResponse(err.Error()), nil
+		}
+		client = resolved.client
+		absPath = resolved.path
+		line = resolved.line
+		char = resolved.char
+	} else {
+		c, p, resp, ok := lspClientForPosition(ctx, lspManager, lspPositionParams{
+			FilePath:  params.FilePath,
+			Line:      params.Line,
+			Character: params.Character,
+		})
+		if !ok {
+			return resp, nil
+		}
+		client = c
+		absPath = p
+		line = params.Line
+		char = params.Character
+	}
+
+	items, err := client.PrepareCallHierarchy(ctx, absPath, line, char)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+	if len(items) == 0 {
+		return fantasy.NewTextResponse("No call hierarchy found for this symbol."), nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Found %d call hierarchy root(s):\n", len(items))
+	for _, item := range items {
+		fmt.Fprintf(&sb, "- %s (%s:%d)\n", item.Name, item.URI, item.Range.Start.Line+1)
+		incoming, err := client.IncomingCalls(ctx, item)
+		if err == nil && len(incoming) > 0 {
+			fmt.Fprintf(&sb, "  Callers (%d):\n", len(incoming))
+			for _, call := range incoming {
+				fmt.Fprintf(&sb, "    - %s (%s:%d)\n", call.From.Name, call.From.URI, call.From.Range.Start.Line+1)
+			}
+		}
+		outgoing, err := client.OutgoingCalls(ctx, item)
+		if err == nil && len(outgoing) > 0 {
+			fmt.Fprintf(&sb, "  Callees (%d):\n", len(outgoing))
+			for _, call := range outgoing {
+				fmt.Fprintf(&sb, "    - %s (%s:%d)\n", call.To.Name, call.To.URI, call.To.Range.Start.Line+1)
+			}
+		}
+	}
+	return fantasy.NewTextResponse(sb.String()), nil
 }

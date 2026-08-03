@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -291,27 +290,6 @@ func TestGenerateSchemaStructTypes(t *testing.T) {
 			tt.validate(t, schema)
 		})
 	}
-}
-
-func TestGenerateSchemaRawMessage(t *testing.T) {
-	t.Parallel()
-
-	type StructWithRawMessage struct {
-		Name    string          `json:"name"`
-		Payload json.RawMessage `json:"payload,omitempty"`
-	}
-
-	schema := Generate(reflect.TypeFor[StructWithRawMessage]())
-
-	require.Equal(t, "object", schema.Type)
-
-	payloadSchema := schema.Properties["payload"]
-	require.NotNil(t, payloadSchema, "Expected payload property to exist")
-	// json.RawMessage should produce an empty schema (no type constraint)
-	// so any JSON value is accepted, not "array of integers" which is
-	// what []byte would normally generate.
-	require.Empty(t, payloadSchema.Type, "json.RawMessage should not have a type constraint")
-	require.Nil(t, payloadSchema.Items, "json.RawMessage should not have items schema")
 }
 
 func TestGenerateSchemaPointerTypes(t *testing.T) {

@@ -48,10 +48,16 @@ type ContentPart interface {
 	isPart()
 }
 
-var textualToolCallProtocolBlockRegex = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?(?:<\|tool_calls_section_end\|>|$)`)
+var textualToolCallProtocolBlockRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?(?:<\|tool_calls_section_end\|>|$)`),
+	regexp.MustCompile(`(?is)<[|｜]DSML[|｜]tool_calls\s*>.*?(?:</[|｜]DSML[|｜]tool_calls\s*>|$)`),
+}
 
 func StripTextualToolCallProtocol(text string) (string, bool) {
-	cleaned := textualToolCallProtocolBlockRegex.ReplaceAllString(text, "")
+	cleaned := text
+	for _, blockRegex := range textualToolCallProtocolBlockRegexes {
+		cleaned = blockRegex.ReplaceAllString(cleaned, "")
+	}
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned, cleaned != text
 }

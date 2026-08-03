@@ -312,6 +312,13 @@ func cappedMessageWidth(availableWidth int) int {
 	return min(availableWidth-MessageLeftPaddingTotal, maxTextWidth)
 }
 
+// toolMessageWidth returns the full available width for tool content.
+// Unlike text messages, tool output (code, diffs, command results) uses all
+// available horizontal space so content like diffs and logs is not cramped.
+func toolMessageWidth(availableWidth int) int {
+	return availableWidth - MessageLeftPaddingTotal
+}
+
 // ExtractMessageItems extracts [MessageItem]s from a [message.Message]. It
 // returns all parts of the message as [MessageItem]s.
 //

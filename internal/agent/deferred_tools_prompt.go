@@ -53,16 +53,26 @@ func appendDeferredToolsPromptSection(basePrompt string, deferredEntries []tools
 		toolLines[i] = "- " + entry.Name + " — " + deferredToolPromptHint(entry)
 	}
 
+	// Derive the list of deferred built-in (non-MCP) tools from the actual
+	// entries so the prose stays in sync with the toolset.
+	var builtinNames []string
+	for _, entry := range deferredEntries {
+		if !strings.HasPrefix(entry.Source, "mcp:") {
+			builtinNames = append(builtinNames, entry.Name)
+		}
+	}
+	sort.Strings(builtinNames)
+
 	lines := []string{
 		"<available_deferred_tools>",
-		"Some tools are deferred (not loaded yet) to reduce context size. These are primarily MCP and external integration tools.",
-		"",
-		"Important: ALL MCP tools are deferred and are NOT in your default tool set. You MUST use tool_search to activate an MCP tool before calling it. Do NOT call MCP tools directly, and do NOT use display titles like \"Server → Tool\"; use the exact registered name (e.g. \"mcp_<server>_<tool>\").",
+		"Some tools are deferred (not loaded yet) to reduce context size. Two kinds of tools are deferred:",
+		"- MCP/external integration tools (all MCP tools are deferred and NOT in your default tool set).",
+		"- Low-frequency built-in tools: " + strings.Join(builtinNames, ", "),
 		"",
 		"When to use tool_search:",
 		"- When the task involves external systems, APIs, databases, deployments, or other non-local integrations",
 		"- When you need an MCP tool that isn't in your default tool set",
-		"- Do NOT call tool_search for routine local coding tasks (file editing, searching, running tests, etc.)",
+		"- When a task matches a listed deferred built-in tool's purpose",
 		"",
 		"Usage workflow:",
 		"1. Call tool_search with query \"select:tool_name\" to get the full schema",

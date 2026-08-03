@@ -64,7 +64,7 @@ func TestIsRetriableError(t *testing.T) {
 		t.Parallel()
 		err := &fantasy.ProviderError{
 			Title:   "network error",
-			Message: streamIdleTimeoutMessage(),
+			Message: streamIdleTimeoutMessage(streamIdleTimeout),
 			Cause:   errors.New("stream idle timeout"),
 		}
 		require.True(t, isRetriableError(err),

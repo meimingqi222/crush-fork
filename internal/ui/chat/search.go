@@ -34,7 +34,7 @@ type GlobToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (g *GlobToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Glob", opts.Anim, opts.Compact)
 	}
@@ -90,7 +90,7 @@ type GrepToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (g *GrepToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Grep", opts.Anim, opts.Compact)
 	}
@@ -155,7 +155,7 @@ type SourcegraphToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (s *SourcegraphToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Sourcegraph", opts.Anim, opts.Compact)
 	}

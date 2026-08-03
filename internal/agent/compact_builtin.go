@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
@@ -52,6 +53,15 @@ func builtinPruneToolResults(msgs []message.Message) []message.Message {
 }
 
 func builtinPruneToolResultsWithProtection(msgs []message.Message, protect func(message.ToolResult) bool, cacheProtectedIndices map[int]struct{}) []message.Message {
+	return builtinPruneToolResultsWithArchive(msgs, protect, cacheProtectedIndices, nil)
+}
+
+// builtinPruneToolResultsWithArchive prunes oversized old tool results,
+// optionally archiving each pruned result via archiveToolResult before
+// replacing it with a source-bearing placeholder. archiveToolResult returns
+// the on-disk path (or empty when archiving is unavailable); the placeholder
+// includes that path so the model can re-read the full output.
+func builtinPruneToolResultsWithArchive(msgs []message.Message, protect func(message.ToolResult) bool, cacheProtectedIndices map[int]struct{}, archiveToolResult func(message.ToolResult) string) []message.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
@@ -138,7 +148,15 @@ loop:
 			modifiedMsgs[t.msgIdx] = true
 		}
 		tr := result[t.msgIdx].Parts[t.partIdx].(message.ToolResult)
-		tr.Content = fmt.Sprintf("[Old tool result content cleared to reduce context size. %d estimated tokens omitted, %d characters omitted.]", t.tokens, t.chars)
+		archivePath := ""
+		if archiveToolResult != nil {
+			archivePath = archiveToolResult(tr)
+		}
+		if archivePath != "" {
+			tr.Content = fmt.Sprintf("[Old tool result content cleared to reduce context size. %d estimated tokens omitted, %d characters omitted. The full output was archived to `%s`; use the read tool to inspect it.]", t.tokens, t.chars, filepath.ToSlash(archivePath))
+		} else {
+			tr.Content = fmt.Sprintf("[Old tool result content cleared to reduce context size. %d estimated tokens omitted, %d characters omitted.]", t.tokens, t.chars)
+		}
 		result[t.msgIdx].Parts[t.partIdx] = tr
 	}
 

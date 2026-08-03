@@ -244,7 +244,11 @@ type (
 
 // UI represents the main user interface model.
 type UI struct {
-	com             *common.Common
+	com *common.Common
+	// paletteApplied records that a palette was chosen for this run, so the
+	// first BackgroundColorMsg still applies even when the detected palette
+	// happens to match the startup default.
+	paletteApplied  bool
 	session         *session.Session
 	sessionMessages []message.Message
 	sessionMsgIndex map[string]int // Maps message ID to index in sessionMessages for O(1) lookup.
@@ -557,6 +561,10 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 // Init initializes the UI model.
 func (m *UI) Init() tea.Cmd {
 	var cmds []tea.Cmd
+	// Ask the terminal for its background color so an "auto" theme can pick
+	// the matching palette. Terminals that do not answer simply never send a
+	// BackgroundColorMsg and we keep the configured fallback.
+	cmds = append(cmds, tea.RequestBackgroundColor)
 	if m.state == uiOnboarding {
 		if cmd := m.openModelsDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1043,6 +1051,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sendProgressBar = strings.Contains(termVersion, "ghostty")
 		}
 		return m, nil
+	case tea.BackgroundColorMsg:
+		// Only "auto" consults the terminal; an explicit dark/light setting
+		// must not be overridden by detection.
+		if m.resolvedThemeMode() != styles.ThemeAuto {
+			return m, nil
+		}
+		return m, m.applyPalette(styles.PaletteFor(styles.ThemeAuto, msg.IsDark()))
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.updateLayoutAndSize()
@@ -2818,6 +2834,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal dropped.", func(ctx context.Context, sid string) (session.Goal, error) {
 			return m.com.App.GoalRuntime.DropGoal(ctx, sid)
 		}))
+	case dialog.ActionCycleTheme:
+		if cmd := m.cycleTheme(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleNotifications:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
@@ -4240,7 +4261,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		if m.textarea.Focused() {
 			cur := m.textarea.Cursor()
 			cur.X++ // Adjust for app margins
-			cur.Y += m.layout.editor.Min.Y + m.editorTopMarginRows()
+			cur.Y += m.layout.editor.Min.Y + m.editorContentTopOffset()
 			return cur
 		}
 	}
@@ -4681,7 +4702,11 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	}
 
 	// Add app margins
-	appRect, helpRect := layout.SplitVertical(area, layout.Fixed(area.Dy()-helpHeight))
+	var appRect, helpRect image.Rectangle
+	layout.Vertical(
+		layout.Len(area.Dy()-helpHeight),
+		layout.Fill(1),
+	).Split(area).Assign(&appRect, &helpRect)
 	appRect.Min.Y += 1
 	appRect.Max.Y -= 1
 	helpRect.Min.Y -= 1
@@ -4710,7 +4735,11 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 		// ------
 		// help
 
-		headerRect, mainRect := layout.SplitVertical(appRect, layout.Fixed(landingHeaderHeight))
+		var headerRect, mainRect image.Rectangle
+		layout.Vertical(
+			layout.Len(landingHeaderHeight),
+			layout.Fill(1),
+		).Split(appRect).Assign(&headerRect, &mainRect)
 		uiLayout.header = headerRect
 		uiLayout.main = mainRect
 
@@ -4724,8 +4753,16 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 		// editor
 		// ------
 		// help
-		headerRect, mainRect := layout.SplitVertical(appRect, layout.Fixed(landingHeaderHeight))
-		mainRect, editorRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-editorHeight))
+		var headerRect, mainRect image.Rectangle
+		layout.Vertical(
+			layout.Len(landingHeaderHeight),
+			layout.Fill(1),
+		).Split(appRect).Assign(&headerRect, &mainRect)
+		var editorRect image.Rectangle
+		layout.Vertical(
+			layout.Len(mainRect.Dy()-editorHeight),
+			layout.Fill(1),
+		).Split(mainRect).Assign(&mainRect, &editorRect)
 		// Remove extra padding from editor (but keep it for header and main)
 		editorRect.Min.X -= 1
 		editorRect.Max.X += 1
@@ -4750,22 +4787,38 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 			// ------
 			// help
 			const compactHeaderHeight = 1
-			headerRect, mainRect := layout.SplitVertical(appRect, layout.Fixed(compactHeaderHeight))
+			var headerRect, mainRect image.Rectangle
+			layout.Vertical(
+				layout.Len(compactHeaderHeight),
+				layout.Fill(1),
+			).Split(appRect).Assign(&headerRect, &mainRect)
 			detailsHeight := min(sessionDetailsMaxHeight, area.Dy()-1) // One row for the header
-			sessionDetailsArea, _ := layout.SplitVertical(appRect, layout.Fixed(detailsHeight))
+			var sessionDetailsArea image.Rectangle
+			layout.Vertical(
+				layout.Len(detailsHeight),
+				layout.Fill(1),
+			).Split(appRect).Assign(&sessionDetailsArea, new(image.Rectangle))
 			uiLayout.sessionDetails = sessionDetailsArea
 			uiLayout.sessionDetails.Min.Y += compactHeaderHeight // adjust for header
 			// Add one line gap between header and main content
 			mainRect.Min.Y += 1
 			if showEditor {
-				mainRect, editorRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-editorHeight))
+				var editorRect image.Rectangle
+				layout.Vertical(
+					layout.Len(mainRect.Dy()-editorHeight),
+					layout.Fill(1),
+				).Split(mainRect).Assign(&mainRect, &editorRect)
 				uiLayout.editor = editorRect
 				mainRect.Max.X -= 1 // Add padding right
 				uiLayout.header = headerRect
 				pillsHeight := m.pillsAreaHeight()
 				if pillsHeight > 0 {
 					pillsHeight = min(pillsHeight, mainRect.Dy())
-					chatRect, pillsRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-pillsHeight))
+					var chatRect, pillsRect image.Rectangle
+					layout.Vertical(
+						layout.Len(mainRect.Dy()-pillsHeight),
+						layout.Fill(1),
+					).Split(mainRect).Assign(&chatRect, &pillsRect)
 					uiLayout.main = chatRect
 					uiLayout.pills = pillsRect
 				} else {
@@ -4775,12 +4828,20 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 				mainRect.Max.X -= 1 // Add padding right
 				uiLayout.header = headerRect
 				// Reserve one line for the subagent banner at the bottom.
-				mainRect, bannerRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-1))
+				var bannerRect image.Rectangle
+				layout.Vertical(
+					layout.Len(mainRect.Dy()-1),
+					layout.Fill(1),
+				).Split(mainRect).Assign(&mainRect, &bannerRect)
 				uiLayout.editor = bannerRect // reuse editor slot for banner
 				pillsHeight := m.pillsAreaHeight()
 				if pillsHeight > 0 {
 					pillsHeight = min(pillsHeight, mainRect.Dy())
-					chatRect, pillsRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-pillsHeight))
+					var chatRect, pillsRect image.Rectangle
+					layout.Vertical(
+						layout.Len(mainRect.Dy()-pillsHeight),
+						layout.Fill(1),
+					).Split(mainRect).Assign(&chatRect, &pillsRect)
 					uiLayout.main = chatRect
 					uiLayout.pills = pillsRect
 				} else {
@@ -4799,18 +4860,30 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 			// ----------
 			// help
 
-			mainRect, sideRect := layout.SplitHorizontal(appRect, layout.Fixed(appRect.Dx()-sidebarWidth))
+			var mainRect, sideRect image.Rectangle
+			layout.Horizontal(
+				layout.Len(appRect.Dx()-sidebarWidth),
+				layout.Fill(1),
+			).Split(appRect).Assign(&mainRect, &sideRect)
 			// Add padding left
 			sideRect.Min.X += 1
 			if showEditor {
-				mainRect, editorRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-editorHeight))
+				var editorRect image.Rectangle
+				layout.Vertical(
+					layout.Len(mainRect.Dy()-editorHeight),
+					layout.Fill(1),
+				).Split(mainRect).Assign(&mainRect, &editorRect)
 				uiLayout.editor = editorRect
 				mainRect.Max.X -= 1 // Add padding right
 				uiLayout.sidebar = sideRect
 				pillsHeight := m.pillsAreaHeight()
 				if pillsHeight > 0 {
 					pillsHeight = min(pillsHeight, mainRect.Dy())
-					chatRect, pillsRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-pillsHeight))
+					var chatRect, pillsRect image.Rectangle
+					layout.Vertical(
+						layout.Len(mainRect.Dy()-pillsHeight),
+						layout.Fill(1),
+					).Split(mainRect).Assign(&chatRect, &pillsRect)
 					uiLayout.main = chatRect
 					uiLayout.pills = pillsRect
 				} else {
@@ -4818,14 +4891,22 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 				}
 			} else {
 				// Reserve one line for the subagent banner at the bottom.
-				mainRect, bannerRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-1))
+				var bannerRect image.Rectangle
+				layout.Vertical(
+					layout.Len(mainRect.Dy()-1),
+					layout.Fill(1),
+				).Split(mainRect).Assign(&mainRect, &bannerRect)
 				uiLayout.editor = bannerRect // reuse editor slot for banner
 				mainRect.Max.X -= 1          // Add padding right
 				uiLayout.sidebar = sideRect
 				pillsHeight := m.pillsAreaHeight()
 				if pillsHeight > 0 {
 					pillsHeight = min(pillsHeight, mainRect.Dy())
-					chatRect, pillsRect := layout.SplitVertical(mainRect, layout.Fixed(mainRect.Dy()-pillsHeight))
+					var chatRect, pillsRect image.Rectangle
+					layout.Vertical(
+						layout.Len(mainRect.Dy()-pillsHeight),
+						layout.Fill(1),
+					).Split(mainRect).Assign(&chatRect, &pillsRect)
 					uiLayout.main = chatRect
 					uiLayout.pills = pillsRect
 				} else {
@@ -5088,7 +5169,7 @@ func (m *UI) completionsPosition() image.Point {
 	}
 	return image.Point{
 		X: cur.X + m.layout.editor.Min.X,
-		Y: m.layout.editor.Min.Y + cur.Y,
+		Y: m.layout.editor.Min.Y + m.editorContentTopOffset() + cur.Y,
 	}
 }
 
@@ -5138,6 +5219,15 @@ func (m *UI) hasLiveSessionActivity() bool {
 
 func (m *UI) stopStaleLoadingIndicators() {
 	m.setLoadingStateVisible(m.chat.MessageItems(), false)
+}
+
+// editorContentTopOffset returns how many rows [renderEditorView] stacks above
+// the textarea. Anything positioning against the textarea's own coordinates --
+// the terminal cursor, the completions popup -- must add this, or it lands on
+// the rows above the input. The thinking status line makes this visible: it
+// only exists while the agent is busy, so the offset changes mid-session.
+func (m *UI) editorContentTopOffset() int {
+	return m.editorStatusLineRows() + m.editorTopMarginRows()
 }
 
 func (m *UI) editorTopMarginRows() int {

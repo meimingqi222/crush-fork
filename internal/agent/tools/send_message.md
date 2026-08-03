@@ -1,38 +1,25 @@
 [CRITICAL WARNING]
-Do NOT call this tool unless you have actually spawned background subagents using the `agent` tool first. This tool is ONLY for communicating with running background subagents. It CANNOT be used to communicate with the user, nor can it be used if no subagents are currently running in the background.
+Do NOT call this tool unless you have actually spawned background subagents using the `agent` tool first (`run_in_background: true`). It CANNOT be used to communicate with the user — write your response in the text body instead.
 
-Sends a control message to a running task graph, or queues a follow-up prompt
-for a background agent.
+Sends a control message to a running task graph, or gives a background agent more work.
 
-Use this tool when you need to notify another task (or all tasks) during agent
-delegation, or when you want a background agent to continue working after it
-finishes its current run. If no mailbox_id is provided, the current task graph
-mailbox from context is used automatically.
+A follow-up sent with `agent_id` continues that agent's existing conversation: it keeps every file it read and every conclusion it reached. Refer to its earlier findings directly rather than restating them. This works whether the agent is still running (the prompt is queued) or has already finished (it starts a new turn).
 
 Parameters:
-- agent_id (optional): Background agent ID or name to continue with a follow-up prompt. You can use either the agent ID (e.g., "a-abc123") or a human-readable name (e.g., "researcher-xyz").
-- mailbox_id (optional): Mailbox identifier to deliver messages to. If omitted, defaults to the current task graph mailbox from context.
-- message (required): Message content to enqueue.
+- agent_id (optional): Background agent ID (e.g. "a-abc123") or name (e.g. "researcher-xyz") to continue with a follow-up prompt.
+- mailbox_id (optional): Mailbox identifier to deliver to; defaults to the current task graph mailbox from context.
+- message (required): Content to enqueue.
 - task_id (optional): Target task ID. Omit to broadcast to all tasks in the mailbox.
 
-Targeting rules and precedence:
-- If `agent_id` is provided, the message targets that background agent and `mailbox_id`/`task_id` are ignored.
-- If `agent_id` is omitted, `mailbox_id` + optional `task_id` target task-graph mailbox delivery.
-- If only `mailbox_id` is provided, message is broadcast in that mailbox.
-- If both `mailbox_id` and `task_id` are provided, message is sent only to that task.
-- If neither `agent_id` nor `mailbox_id` is provided, the current delegation mailbox from context is used.
-- If `task_id` is provided while both `agent_id` and `mailbox_id` are omitted, the message targets that task in the context default mailbox.
-
-Examples:
-- Background agent by name: `{ "agent_id": "researcher", "message": "continue investigation" }`
-- Background agent by id: `{ "agent_id": "a-abc123", "message": "run extra tests" }`
-- Mailbox broadcast: `{ "mailbox_id": "mb-1", "message": "sync status" }`
-- Mailbox targeted task: `{ "mailbox_id": "mb-1", "task_id": "task-a", "message": "retry with logs" }`
+Targeting precedence:
+1. `agent_id` set → targets that background agent; `mailbox_id`/`task_id` ignored.
+2. `mailbox_id` + `task_id` → that task in that mailbox.
+3. `mailbox_id` only → broadcast in that mailbox.
+4. Neither `agent_id` nor `mailbox_id` → the current delegation mailbox from context.
+5. `task_id` only → that task in the context default mailbox.
 
 Notes:
-- Agents can be addressed by name or ID. Name-based addressing makes it easier to continue specific agents without tracking random IDs.
-- Prefer `agent_id` for resumable background agents and `mailbox_id` for task graph coordination.
-- Messages are delivered best-effort while the mailbox is active.
-- Unknown mailbox, agent, or task IDs return an error response.
-- If an agent is still running, the message is queued and delivered on its next turn.
-- Attempts to send `agent_id` messages to stopped or non-resumable agents return an error. The subagent should use the `yield` tool to submit its complete result before finishing.
+- Prefer `agent_id` for resumable background agents, `mailbox_id` for task graph coordination.
+- Delivery is best-effort while the mailbox is active; if an agent is still running the message is queued for its next turn.
+- Unknown IDs return an error, as does an agent that was stopped or whose parent session ended. The subagent should use `yield` to submit its complete result before finishing.
+- Continuing one agent beats spawning a fresh one for related work: a new subagent starts from a handoff summary, while a follow-up keeps the original's full context.

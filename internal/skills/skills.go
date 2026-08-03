@@ -314,65 +314,132 @@ func copySkills(in []*Skill) []*Skill {
 }
 
 // ToPromptXML generates XML for injection into the system prompt.
-func ToPromptXML(skills []*Skill) string {
+// Default skills prompt budget, aligned with maka-agent's skills-context.ts:
+// 2% of the model context window, clamped to [4000, 8000] tokens. When the
+// budget is exceeded, remaining skills are omitted and replaced by a single
+// count line so the prompt stays bounded and deterministic.
+const (
+	SkillsPromptMinTokens = 4000
+	SkillsPromptMaxTokens = 8000
+)
+
+// SkillsPromptTokenBudget returns the token budget for the skills catalog
+// given a model context window (2% clamped to [4000, 8000]).
+func SkillsPromptTokenBudget(contextWindow int) int {
+	if contextWindow <= 0 {
+		return SkillsPromptMinTokens
+	}
+	budget := contextWindow * 2 / 100
+	if budget < SkillsPromptMinTokens {
+		return SkillsPromptMinTokens
+	}
+	if budget > SkillsPromptMaxTokens {
+		return SkillsPromptMaxTokens
+	}
+	return budget
+}
+
+// ToPromptXML generates XML for injection into the system prompt. maxTokens
+// bounds the catalog: once the estimated token cost (4 chars/token) exceeds
+// the budget, remaining skills are omitted and their names are listed in a
+// single line so the model can still reference them by name.
+func ToPromptXML(skills []*Skill, maxTokens int) string {
 	if len(skills) == 0 {
 		return ""
 	}
 
 	var sb strings.Builder
 	sb.WriteString("<available_skills>\n")
+	usedTokens := 0
+	var omitted []string
 	for _, s := range skills {
-		sb.WriteString("  <skill>\n")
-		fmt.Fprintf(&sb, "    <name>%s</name>\n", escape(s.Name))
-		fmt.Fprintf(&sb, "    <description>%s</description>\n", escape(s.Description))
-		// Use skill:// virtual URL instead of absolute filesystem path.
-		// This hides the physical location and enables portable skill references.
-		// url.PathEscape encodes spaces and special characters in the skill name
-		// so the resulting URL can be correctly resolved by ResolveSkillURL.
-		fmt.Fprintf(&sb, "    <location>skill://%s</location>\n", escape(url.PathEscape(s.Name)))
-
-		// Write when_to_use if present
-		if s.WhenToUse != "" {
-			fmt.Fprintf(&sb, "    <when_to_use>%s</when_to_use>\n", escape(s.WhenToUse))
+		entry := renderSkillEntry(s)
+		entryTokens := estimateTokenCount(entry)
+		if maxTokens > 0 && usedTokens+entryTokens > maxTokens {
+			omitted = append(omitted, s.Name)
+			continue
 		}
-
-		// Write allowed_tools if present
-		if len(s.AllowedTools) > 0 {
-			sb.WriteString("    <allowed_tools>\n")
-			for _, tool := range s.AllowedTools {
-				fmt.Fprintf(&sb, "      <tool>%s</tool>\n", escape(tool))
-			}
-			sb.WriteString("    </allowed_tools>\n")
-		}
-
-		// Write arguments if present
-		if len(s.Arguments) > 0 {
-			sb.WriteString("    <arguments>\n")
-			for _, arg := range s.Arguments {
-				fmt.Fprintf(&sb, "      <arg>%s</arg>\n", escape(arg))
-			}
-			sb.WriteString("    </arguments>\n")
-		}
-
-		// Write argument_hint if present
-		if s.ArgumentHint != "" {
-			fmt.Fprintf(&sb, "    <argument_hint>%s</argument_hint>\n", escape(s.ArgumentHint))
-		}
-
-		// Write context if present (non-default)
-		if s.Context != "" && s.Context != SkillContextInline {
-			fmt.Fprintf(&sb, "    <context>%s</context>\n", s.Context)
-		}
-
-		// Write model if present
-		if s.Model != "" {
-			fmt.Fprintf(&sb, "    <model>%s</model>\n", escape(s.Model))
-		}
-
-		sb.WriteString("  </skill>\n")
+		sb.WriteString(entry)
+		usedTokens += entryTokens
 	}
 	sb.WriteString("</available_skills>")
+	if len(omitted) > 0 {
+		fmt.Fprintf(&sb, "\n<!-- %d additional skill(s) omitted due to the catalog budget: %s -->",
+			len(omitted), strings.Join(omitted, ", "))
+	}
 	return sb.String()
+}
+
+func renderSkillEntry(s *Skill) string {
+	var sb strings.Builder
+	sb.WriteString("  <skill>\n")
+	fmt.Fprintf(&sb, "    <name>%s</name>\n", escape(s.Name))
+	fmt.Fprintf(&sb, "    <description>%s</description>\n", escape(s.Description))
+	// Use skill:// virtual URL instead of absolute filesystem path.
+	// This hides the physical location and enables portable skill references.
+	// url.PathEscape encodes spaces and special characters in the skill name
+	// so the resulting URL can be correctly resolved by ResolveSkillURL.
+	fmt.Fprintf(&sb, "    <location>skill://%s</location>\n", escape(url.PathEscape(s.Name)))
+
+	// Write when_to_use if present
+	if s.WhenToUse != "" {
+		fmt.Fprintf(&sb, "    <when_to_use>%s</when_to_use>\n", escape(s.WhenToUse))
+	}
+
+	// Write allowed_tools if present
+	if len(s.AllowedTools) > 0 {
+		sb.WriteString("    <allowed_tools>\n")
+		for _, tool := range s.AllowedTools {
+			fmt.Fprintf(&sb, "      <tool>%s</tool>\n", escape(tool))
+		}
+		sb.WriteString("    </allowed_tools>\n")
+	}
+
+	// Write arguments if present
+	if len(s.Arguments) > 0 {
+		sb.WriteString("    <arguments>\n")
+		for _, arg := range s.Arguments {
+			fmt.Fprintf(&sb, "      <arg>%s</arg>\n", escape(arg))
+		}
+		sb.WriteString("    </arguments>\n")
+	}
+
+	// Write argument_hint if present
+	if s.ArgumentHint != "" {
+		fmt.Fprintf(&sb, "    <argument_hint>%s</argument_hint>\n", escape(s.ArgumentHint))
+	}
+
+	// Write context if present (non-default)
+	if s.Context != "" && s.Context != SkillContextInline {
+		fmt.Fprintf(&sb, "    <context>%s</context>\n", s.Context)
+	}
+
+	// Write model if present
+	if s.Model != "" {
+		fmt.Fprintf(&sb, "    <model>%s</model>\n", escape(s.Model))
+	}
+
+	sb.WriteString("  </skill>\n")
+	return sb.String()
+}
+
+func estimateTokenCount(s string) int {
+	// ASCII-heavy content is ~4 chars/token; non-ASCII runes count at least
+	// one token each, matching the agent's estimateTextTokens heuristic.
+	asciiBytes := 0
+	nonASCII := 0
+	for _, r := range s {
+		if r < 0x80 {
+			asciiBytes++
+		} else {
+			nonASCII++
+		}
+	}
+	tokens := asciiBytes/4 + nonASCII
+	if tokens == 0 && s != "" {
+		tokens = 1
+	}
+	return tokens
 }
 
 func escape(s string) string {

@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"image"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -271,7 +272,11 @@ func (m *UI) renderSidebarContent(width, height int) string {
 		blocks...,
 	)
 
-	_, remainingHeightArea := layout.SplitVertical(m.layout.sidebar, layout.Fixed(lipgloss.Height(sidebarHeader)))
+	var remainingHeightArea image.Rectangle
+	layout.Vertical(
+		layout.Len(lipgloss.Height(sidebarHeader)),
+		layout.Fill(1),
+	).Split(m.layout.sidebar).Assign(new(image.Rectangle), &remainingHeightArea)
 	remainingHeight := remainingHeightArea.Dy() - 14
 	maxFiles, maxLSPs, maxMCPs, maxSkills, maxTimeline := getDynamicHeightLimits(remainingHeight)
 

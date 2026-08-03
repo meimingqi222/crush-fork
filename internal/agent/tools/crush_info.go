@@ -2,14 +2,12 @@ package tools
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -18,21 +16,6 @@ import (
 )
 
 const CrushInfoToolName = "crush_info"
-
-//go:embed crush_info.md
-var crushInfoDescription []byte
-
-type CrushInfoParams struct{}
-
-func NewCrushInfoTool(cfg *config.ConfigStore, lspManager *lsp.Manager, memEng *engine.Engine) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
-		CrushInfoToolName,
-		string(crushInfoDescription),
-		func(ctx context.Context, _ CrushInfoParams, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			return fantasy.NewTextResponse(buildCrushInfo(ctx, cfg, lspManager, memEng)), nil
-		},
-	)
-}
 
 func buildCrushInfo(ctx context.Context, cfg *config.ConfigStore, lspManager *lsp.Manager, memEng *engine.Engine) string {
 	if cfg == nil {

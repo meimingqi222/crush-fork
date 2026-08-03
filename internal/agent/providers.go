@@ -31,7 +31,7 @@ import (
 	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/fantasy/providers/openrouter"
 	"charm.land/fantasy/providers/vercel"
-	openaisdk "github.com/charmbracelet/openai-go/option"
+	openaisdk "github.com/openai/openai-go/v3/option"
 	"github.com/qjebbs/go-jsons"
 )
 
@@ -511,6 +511,8 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, copilotService, useCopilotClient, isSubAgent bool, providerCfg config.ProviderConfig) (fantasy.Provider, error) {
 	opts := []openai.Option{
 		openai.WithAPIKey(apiKey),
+		// OpenAI providers always use the Responses API. Providers that only
+		// support chat completions should use type "openai-compat" instead.
 		openai.WithUseResponsesAPI(),
 	}
 

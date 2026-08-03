@@ -498,45 +498,102 @@ func (c *coordinator) runBackgroundTask(ctx context.Context, params subagentBatc
 		description = params.Tasks[0].Description
 	}
 
-	agentID := c.backgroundAgents.Register(description)
-
-	// Create a cancellable context for the background task. Detach from
-	// parent cancellation so the task survives parent context termination,
-	// but allow Cancel(agentID, reason) to signal the goroutine.
-	bgCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	// Values (subagent runtime, config) must survive the spawning turn, so
+	// detach from the parent's cancellation. processQueuedCommands supplies a
+	// fresh cancellable context per command for Cancel(agentID) support; the
+	// runner below merges the two.
+	baseCtx := context.WithoutCancel(ctx)
 	if runtime, ok := subagentRuntimeFromContext(ctx); ok {
-		bgCtx = withSubagentRuntimeContext(bgCtx, runtime)
+		baseCtx = withSubagentRuntimeContext(baseCtx, runtime)
 	}
-	c.backgroundAgents.AttachCancel(agentID, cancel)
 
-	// Launch the task in a background goroutine.
-	go func() {
+	// childSessionID is empty for the first command and set afterwards, which
+	// is what turns a follow-up into a continuation: runSubAgentDirect reuses
+	// that session and skips the handoff prefix, so the subagent keeps its
+	// full history instead of being re-seeded with a summary.
+	// agentID is assigned after RegisterNamed but before the first Enqueue.
+	// The command loop blocks on an empty channel until then, so the runner
+	// never observes it unset; the mutex is for visibility, not ordering.
+	var (
+		mu             sync.Mutex
+		childSessionID string
+		agentID        string
+	)
+
+	runner := func(cmdCtx context.Context, command backgroundAgentCommand) backgroundAgentRunResult {
+		mu.Lock()
+		existing := childSessionID
+		id := agentID
+		mu.Unlock()
+
+		runCtx, cancel := mergeCancel(baseCtx, cmdCtx)
 		defer cancel()
-		result, err := c.runSubagents(bgCtx, params)
-		if err != nil {
-			slog.Error("Background agent failed", "agent_id", agentID, "error", err)
-			c.backgroundAgents.Fail(agentID, err.Error())
-			return
+
+		runParams := params
+		runParams.ExistingSessionID = existing
+		if existing != "" {
+			runParams.Tasks = followUpTasks(params.Tasks, command.Prompt)
 		}
+
+		result, err := c.runSubagents(runCtx, runParams)
+		if err != nil {
+			slog.Error("Background agent failed", "agent_id_desc", description, "error", err)
+			return backgroundAgentRunResult{
+				ChildSessionID: existing,
+				Status:         backgroundAgentStatusFailed,
+				Content:        err.Error(),
+			}
+		}
+
 		content := result.Content
 		if content == "" {
 			content = "Background agent completed with no output."
 		}
 
-		// Extract child session ID from metadata before publishing completion event.
-		var childSessionID string
+		resolved := existing
 		if result.Metadata != "" {
 			if sub, ok := message.ParseToolResultSubtaskResult(result.Metadata); ok && sub.ChildSessionID != "" {
-				childSessionID = sub.ChildSessionID
-				c.backgroundAgents.SetChildSession(agentID, childSessionID)
+				resolved = sub.ChildSessionID
 			}
-			if yield, ok := message.ParseToolResultYield(result.Metadata); ok {
-				c.backgroundAgents.UpdateArtifacts(agentID, yield.Data, nil, nil)
+			if yield, ok := message.ParseToolResultYield(result.Metadata); ok && id != "" {
+				c.backgroundAgents.UpdateArtifacts(id, yield.Data, nil, nil)
 			}
 		}
+		if resolved != "" {
+			mu.Lock()
+			childSessionID = resolved
+			mu.Unlock()
+		}
 
-		c.backgroundAgents.Complete(agentID, content)
-	}()
+		return backgroundAgentRunResult{
+			ChildSessionID: resolved,
+			Status:         backgroundAgentStatusCompleted,
+			Content:        content,
+		}
+	}
+
+	subagentType := ""
+	if len(params.Tasks) == 1 {
+		subagentType = params.Tasks[0].SubagentType
+	}
+
+	// RegisterNamed with a non-nil runner starts the command loop, which is
+	// what makes send_message(agent_id) follow-ups work. Register() passes a
+	// nil runner and produces an agent that rejects every follow-up.
+	registeredID := c.backgroundAgents.RegisterNamed("", subagentType, description, runner)
+	mu.Lock()
+	agentID = registeredID
+	mu.Unlock()
+
+	if _, err := c.backgroundAgents.Enqueue(registeredID, backgroundAgentCommand{
+		Prompt:         initialBackgroundPrompt(params.Tasks),
+		SessionID:      params.SessionID,
+		AgentMessageID: params.AgentMessageID,
+		ToolCallID:     params.ToolCallID,
+	}); err != nil {
+		c.backgroundAgents.Fail(registeredID, err.Error())
+		return fantasy.ToolResponse{}, fmt.Errorf("start background agent: %w", err)
+	}
 
 	return fantasy.NewTextResponse(fmt.Sprintf(
 		`Background agent launched.
@@ -547,7 +604,54 @@ Description: %s
 The agent is now running in the background. To retrieve the result later:
 - Use the yield tool from the subagent to submit the complete result
 
+To give it more work once it finishes, send a follow-up prompt with
+send_message(agent_id: %q, message: "..."). The agent keeps its full
+conversation history, so refer to its earlier findings directly instead of
+restating them.
+
 You can continue with other work while the agent runs.`,
-		agentID, description,
+		registeredID, description, registeredID,
 	)), nil
+}
+
+// mergeCancel returns a context carrying values from base that is cancelled
+// when either base or trigger is cancelled. processQueuedCommands owns the
+// per-command cancellation while the spawning turn owns the values, and a
+// background agent needs both.
+func mergeCancel(base, trigger context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(base)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-trigger.Done():
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		close(stop)
+		cancel()
+	}
+}
+
+// initialBackgroundPrompt describes the batch for the first command. The task
+// assignments themselves travel in params.Tasks; this is only what the command
+// queue records.
+func initialBackgroundPrompt(tasks []subagentTask) string {
+	if len(tasks) == 1 {
+		return tasks[0].Assignment
+	}
+	return fmt.Sprintf("%d background tasks", len(tasks))
+}
+
+// followUpTasks rewrites a single-task batch to carry the follow-up prompt,
+// keeping the original subagent type, role and isolation so the continuation
+// runs as the same specialist in the same workspace.
+func followUpTasks(tasks []subagentTask, prompt string) []subagentTask {
+	if len(tasks) != 1 {
+		return tasks
+	}
+	next := tasks[0]
+	next.Assignment = prompt
+	return []subagentTask{next}
 }

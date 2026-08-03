@@ -11,17 +11,18 @@ import (
 	"io"
 	"maps"
 	"math"
+	"strconv"
 	"strings"
 
 	"charm.land/fantasy"
 	"charm.land/fantasy/object"
 	"charm.land/fantasy/providers/internal/httpheaders"
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/bedrock"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/anthropics/anthropic-sdk-go/packages/param"
-	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/charmbracelet/anthropic-sdk-go"
+	"github.com/charmbracelet/anthropic-sdk-go/bedrock"
+	"github.com/charmbracelet/anthropic-sdk-go/option"
+	"github.com/charmbracelet/anthropic-sdk-go/packages/param"
+	"github.com/charmbracelet/anthropic-sdk-go/vertex"
 	"golang.org/x/oauth2/google"
 )
 
@@ -38,27 +39,62 @@ func betaRequestOptions(flags []string) []option.RequestOption {
 	return opts
 }
 
+func thinkingDisplay(providerOptions *ProviderOptions, modelID string) (ThinkingDisplay, bool) {
+	if providerOptions != nil && providerOptions.ThinkingDisplay != nil && *providerOptions.ThinkingDisplay != "" {
+		return *providerOptions.ThinkingDisplay, true
+	}
+	if defaultsToOmittedThinkingDisplay(modelID) {
+		return ThinkingDisplaySummarized, true
+	}
+	return "", false
+}
+
+func defaultsToAdaptiveThinking(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "claude-mythos-preview")
+}
+
+func requiresAdaptiveThinking(model string) bool {
+	return defaultsToAdaptiveThinking(model) || defaultsToOmittedOpusThinkingDisplay(model)
+}
+
+func setThinkingDisplay(param interface{ SetExtraFields(map[string]any) }, display ThinkingDisplay) {
+	param.SetExtraFields(map[string]any{"display": string(display)})
+}
+
+func defaultsToOmittedThinkingDisplay(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return defaultsToAdaptiveThinking(model) || defaultsToOmittedOpusThinkingDisplay(model)
+}
+
+func defaultsToOmittedOpusThinkingDisplay(model string) bool {
+	_, suffix, ok := strings.Cut(model, "claude-opus-4-")
+	if !ok {
+		return false
+	}
+
+	versionEnd := 0
+	for versionEnd < len(suffix) && suffix[versionEnd] >= '0' && suffix[versionEnd] <= '9' {
+		versionEnd++
+	}
+	if versionEnd == 0 || versionEnd > 2 {
+		return false
+	}
+	minor, err := strconv.Atoi(suffix[:versionEnd])
+	return err == nil && minor >= 7
+}
+
 // buildRequestOptions constructs the common request options shared
 // by Generate and Stream: user-agent, raw tool injection, and any
 // beta API flags.
-const contextManagementBetaFlag = "context-management-2025-06-27"
+func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlags []string) []option.RequestOption {
+	providerOptions := &ProviderOptions{}
+	if v, ok := call.ProviderOptions[Name]; ok {
+		providerOptions, _ = v.(*ProviderOptions)
+	}
 
-// thinkingContextManagementReqOpt preserves replayed thinking blocks across turns
-// when extended thinking is enabled. Without this directive, Anthropic may strip
-// thinking blocks from history and invalidate the KV cache prefix each turn.
-func thinkingContextManagementReqOpt() option.RequestOption {
-	return option.WithJSONSet("context_management", map[string]any{
-		"edits": []map[string]any{
-			{
-				"type": "clear_thinking_20251015",
-				"keep": map[string]string{"type": "all"},
-			},
-		},
-	})
-}
-
-func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlags []string, extraReqOpts ...option.RequestOption) []option.RequestOption {
 	reqOpts := callUARequestOptions(call)
+	reqOpts = append(reqOpts, callHeadersRequestOptions(call)...)
 	if len(rawTools) > 0 {
 		// Tools are injected as raw JSON rather than via params.Tools
 		// because the SDK doesn't model beta tool types (e.g. computer
@@ -66,10 +102,12 @@ func buildRequestOptions(call fantasy.Call, rawTools []json.RawMessage, betaFlag
 		// this will need updating.
 		reqOpts = append(reqOpts, option.WithJSONSet("tools", rawTools))
 	}
+	for k, v := range providerOptions.ExtraBody {
+		reqOpts = append(reqOpts, option.WithJSONSet(k, v))
+	}
 	if len(betaFlags) > 0 {
 		reqOpts = append(reqOpts, betaRequestOptions(betaFlags)...)
 	}
-	reqOpts = append(reqOpts, extraReqOpts...)
 	return reqOpts
 }
 
@@ -94,7 +132,8 @@ type options struct {
 	vertexLocation string
 	skipAuth       bool
 
-	useBedrock bool
+	useBedrock    bool
+	bedrockRegion string
 
 	objectMode fantasy.ObjectMode
 }
@@ -159,6 +198,13 @@ func WithBedrock() Option {
 	}
 }
 
+// WithBedrockRegion sets the AWS region for the Bedrock provider.
+func WithBedrockRegion(region string) Option {
+	return func(o *options) {
+		o.bedrockRegion = region
+	}
+}
+
 // WithName sets the name for the Anthropic provider.
 func WithName(name string) Option {
 	return func(o *options) {
@@ -214,6 +260,9 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 	for key, value := range resolved {
 		clientOptions = append(clientOptions, option.WithHeader(key, value))
 	}
+	if a.options.client != nil {
+		clientOptions = append(clientOptions, option.WithHTTPClient(a.options.client))
+	}
 	if a.options.vertexProject != "" && a.options.vertexLocation != "" {
 		var credentials *google.Credentials
 		if a.options.skipAuth {
@@ -236,23 +285,15 @@ func (a *provider) LanguageModel(ctx context.Context, modelID string) (fantasy.L
 			),
 		)
 	}
-	// Apply an explicitly supplied client after platform authentication
-	// options. Vertex may install its own authenticated HTTP client, but callers
-	// using WithHTTPClient (including offline VCR tests) expect their transport
-	// to remain authoritative.
-	if a.options.client != nil {
-		clientOptions = append(clientOptions, option.WithHTTPClient(a.options.client))
-	}
 	if a.options.useBedrock {
-		modelID = bedrockPrefixModelWithRegion(modelID)
-
 		if a.options.skipAuth || a.options.apiKey != "" {
 			clientOptions = append(
 				clientOptions,
-				bedrock.WithConfig(bedrockBasicAuthConfig(a.options.apiKey)),
+				bedrock.WithConfig(bedrockBasicAuthConfig(a.options.apiKey, a.options.bedrockRegion)),
 			)
 		} else {
 			if cfg, err := config.LoadDefaultConfig(ctx); err == nil {
+				cfg.Region = cmp.Or(a.options.bedrockRegion, cfg.Region)
 				clientOptions = append(
 					clientOptions,
 					bedrock.WithConfig(cfg),
@@ -293,7 +334,6 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 	rawTools []json.RawMessage,
 	warnings []fantasy.CallWarning,
 	betaFlags []string,
-	extraReqOpts []option.RequestOption,
 	err error,
 ) {
 	params = &anthropic.MessageNewParams{}
@@ -301,7 +341,7 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 	if v, ok := call.ProviderOptions[Name]; ok {
 		providerOptions, ok = v.(*ProviderOptions)
 		if !ok {
-			return nil, nil, nil, nil, nil, &fantasy.Error{Title: "invalid argument", Message: "anthropic provider options should be *anthropic.ProviderOptions"}
+			return nil, nil, nil, nil, &fantasy.Error{Title: "invalid argument", Message: "anthropic provider options should be *anthropic.ProviderOptions"}
 		}
 	}
 	sendReasoning := true
@@ -348,22 +388,27 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffort(effort),
 		}
-		adaptive := anthropic.ThinkingConfigAdaptiveParam{}
-		if providerOptions.ThinkingDisplay != "" {
-			adaptive.Display = anthropic.ThinkingConfigAdaptiveDisplay(providerOptions.ThinkingDisplay)
+		adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+			setThinkingDisplay(&adaptive, display)
 		}
 		params.Thinking.OfAdaptive = &adaptive
 	case providerOptions.Thinking != nil:
 		if providerOptions.Thinking.BudgetTokens == 0 {
-			return nil, nil, nil, nil, nil, &fantasy.Error{Title: "no budget", Message: "thinking requires budget"}
+			return nil, nil, nil, nil, &fantasy.Error{Title: "no budget", Message: "thinking requires budget"}
 		}
-		enabled := anthropic.ThinkingConfigEnabledParam{
-			BudgetTokens: providerOptions.Thinking.BudgetTokens,
+		if requiresAdaptiveThinking(a.modelID) {
+			adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+			if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+				setThinkingDisplay(&adaptive, display)
+			}
+			params.Thinking.OfAdaptive = &adaptive
+		} else {
+			params.Thinking = anthropic.ThinkingConfigParamOfEnabled(providerOptions.Thinking.BudgetTokens)
+			if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+				setThinkingDisplay(params.Thinking.OfEnabled, display)
+			}
 		}
-		if providerOptions.Thinking.Display != "" {
-			enabled.Display = anthropic.ThinkingConfigEnabledDisplay(providerOptions.Thinking.Display)
-		}
-		params.Thinking = anthropic.ThinkingConfigParamUnion{OfEnabled: &enabled}
 		if call.Temperature != nil {
 			params.Temperature = param.Opt[float64]{}
 			warnings = append(warnings, fantasy.CallWarning{
@@ -388,6 +433,12 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 				Details: "TopK is not supported when thinking is enabled",
 			})
 		}
+	case defaultsToAdaptiveThinking(a.modelID):
+		adaptive := anthropic.NewThinkingConfigAdaptiveParam()
+		if display, ok := thinkingDisplay(providerOptions, a.modelID); ok {
+			setThinkingDisplay(&adaptive, display)
+		}
+		params.Thinking.OfAdaptive = &adaptive
 	}
 
 	if len(call.Tools) > 0 {
@@ -404,12 +455,7 @@ func (a languageModel) prepareParams(call fantasy.Call) (
 		warnings = append(warnings, toolWarnings...)
 	}
 
-	if providerOptions.Thinking != nil || providerOptions.Effort != nil {
-		betaFlags = append(betaFlags, contextManagementBetaFlag)
-		extraReqOpts = append(extraReqOpts, thinkingContextManagementReqOpt())
-	}
-
-	return params, rawTools, warnings, betaFlags, extraReqOpts, nil
+	return params, rawTools, warnings, betaFlags, nil
 }
 
 func (a *provider) Name() string {
@@ -434,6 +480,21 @@ func GetReasoningMetadata(providerOptions fantasy.ProviderOptions) *ReasoningOpt
 		}
 	}
 	return nil
+}
+
+func reasoningProviderMetadata(signature, redactedData string) fantasy.ProviderMetadata {
+	switch {
+	case signature != "":
+		return fantasy.ProviderMetadata{
+			Name: &ReasoningOptionMetadata{Signature: signature},
+		}
+	case redactedData != "":
+		return fantasy.ProviderMetadata{
+			Name: &ReasoningOptionMetadata{RedactedData: redactedData},
+		}
+	default:
+		return nil
+	}
 }
 
 type messageBlock struct {
@@ -880,6 +941,7 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 								docBlock := anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{
 									Data: base64Encoded,
 								})
+								docBlock.OfDocument.Title = anthropic.String(sanitizeAnthropicDocumentTitle(file.Filename))
 								if cacheControl != nil {
 									docBlock.OfDocument.CacheControl = anthropic.NewCacheControlEphemeralParam()
 								}
@@ -888,10 +950,16 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 								documentBlock := anthropic.NewDocumentBlock(anthropic.PlainTextSourceParam{
 									Data: string(file.Data),
 								})
+								documentBlock.OfDocument.Title = anthropic.String(sanitizeAnthropicDocumentTitle(file.Filename))
 								if cacheControl != nil {
 									documentBlock.OfDocument.CacheControl = anthropic.NewCacheControlEphemeralParam()
 								}
 								anthropicContent = append(anthropicContent, documentBlock)
+							default:
+								warnings = append(warnings, fantasy.CallWarning{
+									Type:    fantasy.CallWarningTypeOther,
+									Message: fmt.Sprintf("file part media type %s not supported", file.MediaType),
+								})
 							}
 						}
 					}
@@ -1063,8 +1131,9 @@ func toPrompt(prompt fantasy.Prompt, sendReasoningData bool) ([]anthropic.TextBl
 							continue
 						}
 						if result.ProviderExecuted {
-							// Reconstruct web_search_tool_result block
-							// with encrypted_content for round-tripping.
+							// Reconstruct web_search_tool_result blocks,
+							// including encrypted content and errors, for
+							// round-tripping.
 							searchMeta := &WebSearchResultMetadata{}
 							if webMeta, ok := result.ProviderOptions[Name]; ok {
 								if typed, ok := webMeta.(*WebSearchResultMetadata); ok {
@@ -1160,24 +1229,37 @@ func decodeToolCallInputAny(toolCall fantasy.ToolCallPart) (any, *fantasy.CallWa
 // buildWebSearchToolResultBlock constructs an Anthropic
 // web_search_tool_result content block from structured metadata.
 func buildWebSearchToolResultBlock(toolCallID string, searchMeta *WebSearchResultMetadata) anthropic.ContentBlockParamUnion {
-	resultBlocks := make([]anthropic.WebSearchResultBlockParam, 0, len(searchMeta.Results))
-	for _, r := range searchMeta.Results {
-		block := anthropic.WebSearchResultBlockParam{
-			URL:              r.URL,
-			Title:            r.Title,
-			EncryptedContent: r.EncryptedContent,
+	var content anthropic.WebSearchToolResultBlockParamContentUnion
+	switch {
+	case searchMeta != nil && len(searchMeta.Results) > 0:
+		resultBlocks := make([]anthropic.WebSearchResultBlockParam, 0, len(searchMeta.Results))
+		for _, r := range searchMeta.Results {
+			block := anthropic.WebSearchResultBlockParam{
+				URL:              r.URL,
+				Title:            r.Title,
+				EncryptedContent: r.EncryptedContent,
+			}
+			if r.PageAge != "" {
+				block.PageAge = param.NewOpt(r.PageAge)
+			}
+			resultBlocks = append(resultBlocks, block)
 		}
-		if r.PageAge != "" {
-			block.PageAge = param.NewOpt(r.PageAge)
+		content = anthropic.WebSearchToolResultBlockParamContentUnion{
+			OfWebSearchToolResultBlockItem: resultBlocks,
 		}
-		resultBlocks = append(resultBlocks, block)
+	case searchMeta != nil && searchMeta.ErrorCode != "":
+		content = anthropic.NewWebSearchToolRequestError(
+			anthropic.WebSearchToolResultErrorCode(searchMeta.ErrorCode),
+		)
+	default:
+		content = anthropic.WebSearchToolResultBlockParamContentUnion{
+			OfWebSearchToolResultBlockItem: []anthropic.WebSearchResultBlockParam{},
+		}
 	}
 	return anthropic.ContentBlockParamUnion{
 		OfWebSearchToolResult: &anthropic.WebSearchToolResultBlockParam{
 			ToolUseID: toolCallID,
-			Content: anthropic.WebSearchToolResultBlockParamContentUnion{
-				OfWebSearchToolResultBlockItem: resultBlocks,
-			},
+			Content:   content,
 		},
 	}
 }
@@ -1186,10 +1268,15 @@ func mapFinishReason(finishReason string) fantasy.FinishReason {
 	switch finishReason {
 	case "end_turn", "pause_turn", "stop_sequence":
 		return fantasy.FinishReasonStop
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return fantasy.FinishReasonLength
 	case "tool_use":
 		return fantasy.FinishReasonToolCalls
+	case "refusal", "content_filtered", "guardrail_intervened":
+		// "refusal" is the native Anthropic safety stop. Bedrock
+		// reports guardrail / content-filter blocks with its own
+		// stop reasons instead, so map those here too.
+		return fantasy.FinishReasonContentFilter
 	default:
 		return fantasy.FinishReasonUnknown
 	}
@@ -1197,11 +1284,11 @@ func mapFinishReason(finishReason string) fantasy.FinishReason {
 
 // Generate implements fantasy.LanguageModel.
 func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
-	params, rawTools, warnings, betaFlags, extraReqOpts, err := a.prepareParams(call)
+	params, rawTools, warnings, betaFlags, err := a.prepareParams(call)
 	if err != nil {
 		return nil, err
 	}
-	reqOpts := buildRequestOptions(call, rawTools, betaFlags, extraReqOpts...)
+	reqOpts := buildRequestOptions(call, rawTools, betaFlags)
 
 	response, err := a.client.Messages.New(ctx, *params, reqOpts...)
 	if err != nil {
@@ -1307,6 +1394,12 @@ func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 						Results: metadataResults,
 					},
 				}
+			} else if webSearchResult.Content.ErrorCode != "" {
+				toolResult.ProviderMetadata = fantasy.ProviderMetadata{
+					Name: &WebSearchResultMetadata{
+						ErrorCode: string(webSearchResult.Content.ErrorCode),
+					},
+				}
 			}
 			content = append(content, toolResult)
 		}
@@ -1329,12 +1422,12 @@ func (a languageModel) Generate(ctx context.Context, call fantasy.Call) (*fantas
 
 // Stream implements fantasy.LanguageModel.
 func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-	params, rawTools, warnings, betaFlags, extraReqOpts, err := a.prepareParams(call)
+	params, rawTools, warnings, betaFlags, err := a.prepareParams(call)
 	if err != nil {
 		return nil, err
 	}
 
-	reqOpts := buildRequestOptions(call, rawTools, betaFlags, extraReqOpts...)
+	reqOpts := buildRequestOptions(call, rawTools, betaFlags)
 
 	stream := a.client.Messages.NewStreaming(ctx, *params, reqOpts...)
 	acc := anthropic.Message{}
@@ -1347,6 +1440,8 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 				return
 			}
 		}
+
+		sawMessageStop := false
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -1371,13 +1466,9 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				case "redacted_thinking":
 					if !yield(fantasy.StreamPart{
-						Type: fantasy.StreamPartTypeReasoningStart,
-						ID:   fmt.Sprintf("%d", chunk.Index),
-						ProviderMetadata: fantasy.ProviderMetadata{
-							Name: &ReasoningOptionMetadata{
-								RedactedData: chunk.ContentBlock.Data,
-							},
-						},
+						Type:             fantasy.StreamPartTypeReasoningStart,
+						ID:               fmt.Sprintf("%d", chunk.Index),
+						ProviderMetadata: reasoningProviderMetadata("", chunk.ContentBlock.Data),
 					}) {
 						return
 					}
@@ -1416,8 +1507,17 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				case "thinking":
 					if !yield(fantasy.StreamPart{
-						Type: fantasy.StreamPartTypeReasoningEnd,
-						ID:   fmt.Sprintf("%d", chunk.Index),
+						Type:             fantasy.StreamPartTypeReasoningEnd,
+						ID:               fmt.Sprintf("%d", chunk.Index),
+						ProviderMetadata: reasoningProviderMetadata(contentBlock.Signature, ""),
+					}) {
+						return
+					}
+				case "redacted_thinking":
+					if !yield(fantasy.StreamPart{
+						Type:             fantasy.StreamPartTypeReasoningEnd,
+						ID:               fmt.Sprintf("%d", chunk.Index),
+						ProviderMetadata: reasoningProviderMetadata("", contentBlock.Data),
 					}) {
 						return
 					}
@@ -1487,6 +1587,12 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 								Results: metadataResults,
 							},
 						}
+					} else if contentBlock.Content.ErrorCode != "" {
+						providerMeta = fantasy.ProviderMetadata{
+							Name: &WebSearchResultMetadata{
+								ErrorCode: string(contentBlock.Content.ErrorCode),
+							},
+						}
 					}
 					if !yield(fantasy.StreamPart{
 						Type:             fantasy.StreamPartTypeToolResult,
@@ -1542,32 +1648,47 @@ func (a languageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.S
 					}
 				}
 			case "message_stop":
+				sawMessageStop = true
 			}
 		}
 
 		err := stream.Err()
-		if err == nil || errors.Is(err, io.EOF) {
-			yield(fantasy.StreamPart{
-				Type:         fantasy.StreamPartTypeFinish,
-				ID:           acc.ID,
-				FinishReason: mapFinishReason(string(acc.StopReason)),
-				Usage: fantasy.Usage{
-					InputTokens:         acc.Usage.InputTokens,
-					OutputTokens:        acc.Usage.OutputTokens,
-					TotalTokens:         acc.Usage.InputTokens + acc.Usage.OutputTokens,
-					CacheCreationTokens: acc.Usage.CacheCreationInputTokens,
-					CacheReadTokens:     acc.Usage.CacheReadInputTokens,
-				},
-				ProviderMetadata: fantasy.ProviderMetadata{},
-			})
-			return
-		} else { //nolint: revive
+		if err != nil && !errors.Is(err, io.EOF) {
 			yield(fantasy.StreamPart{
 				Type:  fantasy.StreamPartTypeError,
 				Error: toProviderErr(err),
 			})
 			return
 		}
+
+		// Anthropic's SSE protocol reports the stop_reason in message_delta
+		// and then terminates the message with message_stop. Require both so
+		// a socket close after only one of those signals is retried.
+		if !sawMessageStop || acc.StopReason == "" {
+			err := ctx.Err()
+			if err == nil {
+				err = fantasy.NewIncompleteStreamError()
+			}
+			yield(fantasy.StreamPart{
+				Type:  fantasy.StreamPartTypeError,
+				Error: err,
+			})
+			return
+		}
+
+		yield(fantasy.StreamPart{
+			Type:         fantasy.StreamPartTypeFinish,
+			ID:           acc.ID,
+			FinishReason: mapFinishReason(string(acc.StopReason)),
+			Usage: fantasy.Usage{
+				InputTokens:         acc.Usage.InputTokens,
+				OutputTokens:        acc.Usage.OutputTokens,
+				TotalTokens:         acc.Usage.InputTokens + acc.Usage.OutputTokens,
+				CacheCreationTokens: acc.Usage.CacheCreationInputTokens,
+				CacheReadTokens:     acc.Usage.CacheReadInputTokens,
+			},
+			ProviderMetadata: fantasy.ProviderMetadata{},
+		})
 	}, nil
 }
 

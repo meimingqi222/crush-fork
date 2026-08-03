@@ -823,6 +823,9 @@ type Options struct {
 	DisableNotifications       bool          `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
 	ResponsesChaining          bool          `json:"responses_chaining,omitempty" jsonschema:"description=Enable OpenAI Responses API server-side conversation chaining (previous_response_id) for providers that support store=true (xAI Grok via copilot-api, OpenAI o-series). Sends only incremental input per step instead of replaying full history. Experimental; defaults to false.,default=false"`
 	Recap                      *RecapConfig  `json:"recap,omitempty" jsonschema:"description=Idle recap configuration"`
+	ContextFileMaxChars        *int          `json:"context_file_max_chars,omitempty" jsonschema:"description=Maximum characters (runes) per context file (AGENTS.md/CLAUDE.md/etc.) injected into the system prompt; longer files are truncated with a marker. 0 disables the per-file cap; unset defaults to 6000."`
+	ContextFilesMaxTotalChars  *int          `json:"context_files_max_total_chars,omitempty" jsonschema:"description=Maximum total characters (runes) across all context files injected into the system prompt; once exhausted, remaining files are replaced by a marker. 0 disables the aggregate cap; unset defaults to 14000."`
+	Theme                      string        `json:"theme,omitempty" jsonschema:"description=UI color theme. auto follows the terminal background color and falls back to dark when the terminal does not report one,enum=auto,enum=dark,enum=light,default=auto"`
 }
 
 // RecapConfig controls the idle-recap feature: after the user has been away

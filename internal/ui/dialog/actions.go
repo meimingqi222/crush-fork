@@ -46,14 +46,14 @@ type ActionSelectModel struct {
 
 // Messages for commands
 type (
-	ActionNewSession                  struct{}
+	ActionNewSession struct{}
 	// ActionForkSession starts a new session seeded with messages up to and
 	// including the turn ending at the given message ID.
 	ActionForkSession struct {
 		SessionID string
 		MessageID string
 	}
-	ActionToggleHelp struct{}
+	ActionToggleHelp                  struct{}
 	ActionToggleCompactMode           struct{}
 	ActionToggleThinking              struct{}
 	ActionTogglePills                 struct{}
@@ -62,6 +62,7 @@ type (
 	ActionExternalEditor              struct{}
 	ActionToggleNotifications         struct{}
 	ActionToggleTransparentBackground struct{}
+	ActionCycleTheme                  struct{}
 	ActionToggleAutoMode              struct {
 		SessionID string
 		NextMode  session.PermissionMode

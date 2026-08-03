@@ -164,7 +164,7 @@ func TestAnthropicWebSearch(t *testing.T) {
 	webSearchTool := anthropic.WebSearchTool(nil)
 
 	t.Run("generate", func(t *testing.T) {
-		r := newVCRRecorder(t)
+		r := vcr.NewRecorder(t)
 
 		lm, err := anthropicBuilder(model)(t, r)
 		require.NoError(t, err)
@@ -208,7 +208,7 @@ func TestAnthropicWebSearch(t *testing.T) {
 	})
 
 	t.Run("stream", func(t *testing.T) {
-		r := newVCRRecorder(t)
+		r := vcr.NewRecorder(t)
 
 		lm, err := anthropicBuilder(model)(t, r)
 		require.NoError(t, err)
@@ -293,7 +293,7 @@ func TestAnthropicComputerUse(t *testing.T) {
 	for _, m := range computerUseModels {
 		t.Run(m.name, func(t *testing.T) {
 			t.Run("computer use", func(t *testing.T) {
-				r := newVCRRecorder(t)
+				r := vcr.NewRecorder(t)
 
 				model, err := anthropicBuilder(m.model)(t, r)
 				require.NoError(t, err)
@@ -356,7 +356,7 @@ func TestAnthropicComputerUse(t *testing.T) {
 			})
 
 			t.Run("computer use streaming", func(t *testing.T) {
-				r := newVCRRecorder(t)
+				r := vcr.NewRecorder(t)
 
 				model, err := anthropicBuilder(m.model)(t, r)
 				require.NoError(t, err)

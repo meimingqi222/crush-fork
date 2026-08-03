@@ -51,16 +51,18 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		registered = append(registered, registeredTool{tool: tool, metadata: entry.Metadata})
 	}
 
+	isSubagent := config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent
+
 	allowAgentTool := slices.Contains(agent.AllowedTools, AgentToolName)
 	if runtime, ok := subagentRuntimeFromContext(ctx); ok && runtime.Permissions.CanSpawn {
 		allowAgentTool = true
 	}
-	if allowAgentTool && (config.NormalizeAgentMode(agent.Mode) != config.AgentModeSubagent || subagentCanSpawn(ctx)) {
+	if allowAgentTool && (!isSubagent || subagentCanSpawn(ctx)) {
 		agentTool, err := c.agentTool(ctx)
 		if err != nil {
 			return nil, err
 		}
-		register(agentTool, "builtin", builtinToolMetadata(AgentToolName))
+		register(agentTool, "builtin", builtinToolMetadataForAgent(AgentToolName, isSubagent, mode))
 	}
 
 	if slices.Contains(agent.AllowedTools, agenttools.AgenticFetchToolName) {
@@ -120,7 +122,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 
 	builtin := []fantasy.AgentTool{
 		agenttools.NewRequestUserInputTool(c.userInput),
-		agenttools.NewResolveTool(c.sessions),
 		agenttools.NewBashToolWithSessions(c.sessions, c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelName, c.hookManager, bashOpts),
 		agenttools.NewJobTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
@@ -135,8 +136,13 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	}
+	// resolve only works in plan mode -- resolve.go rejects the call with an
+	// error in every other mode. Registering it unconditionally spent a tool
+	// slot and a decision point on a tool the model could never use.
+	if mode == session.CollaborationModePlan {
+		builtin = append(builtin, agenttools.NewResolveTool(c.sessions))
+	}
 	builtin = append(builtin, c.memoryTools()...)
-	isSubagent := config.NormalizeAgentMode(agent.Mode) == config.AgentModeSubagent
 	if isSubagent || allowAgentTool {
 		builtin = append(builtin,
 			agenttools.NewSendMessageTool(c.mailbox),
@@ -151,7 +157,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		builtin = append(builtin, agenttools.NewYieldTool(c.messages, yieldOpts...))
 	}
 	for _, tool := range builtin {
-		register(tool, "builtin", builtinToolMetadata(tool.Info().Name))
+		register(tool, "builtin", builtinToolMetadataForAgent(tool.Info().Name, isSubagent, mode))
 	}
 
 	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {

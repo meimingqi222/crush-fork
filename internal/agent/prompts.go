@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
@@ -57,7 +58,7 @@ func coderPromptForAgent(agentCfg config.Agent, opts ...prompt.Option) (*prompt.
 }
 
 func promptOptionsForAgent(agentCfg config.Agent, opts ...prompt.Option) []prompt.Option {
-	merged := make([]prompt.Option, 0, len(opts)+2)
+	merged := make([]prompt.Option, 0, len(opts)+3)
 	merged = append(merged, opts...)
 	if len(agentCfg.ContextPaths) > 0 {
 		merged = append(merged, prompt.WithContextPathsOverride(agentCfg.ContextPaths))
@@ -65,6 +66,7 @@ func promptOptionsForAgent(agentCfg config.Agent, opts ...prompt.Option) []promp
 	if agentCfg.OmitContextFiles {
 		merged = append(merged, prompt.WithOmitProjectContextFiles(true), prompt.WithDisableGlobalContextFile(true))
 	}
+	merged = append(merged, prompt.WithHasBashTool(slices.Contains(agentCfg.AllowedTools, agenttools.BashToolName)))
 	return merged
 }
 

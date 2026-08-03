@@ -304,7 +304,7 @@ func TestToPromptXML(t *testing.T) {
 		{Name: "data-analysis", Description: "Analyzes datasets & charts.", SkillFilePath: "/skills/data-analysis/SKILL.md"},
 	}
 
-	xml := ToPromptXML(skills)
+	xml := ToPromptXML(skills, 100_000)
 
 	require.Contains(t, xml, "<available_skills>")
 	require.Contains(t, xml, "<name>pdf-processing</name>")
@@ -314,8 +314,8 @@ func TestToPromptXML(t *testing.T) {
 
 func TestToPromptXMLEmpty(t *testing.T) {
 	t.Parallel()
-	require.Empty(t, ToPromptXML(nil))
-	require.Empty(t, ToPromptXML([]*Skill{}))
+	require.Empty(t, ToPromptXML(nil, 100_000))
+	require.Empty(t, ToPromptXML([]*Skill{}, 100_000))
 }
 
 func TestToPromptXMLExtended(t *testing.T) {
@@ -334,7 +334,7 @@ func TestToPromptXMLExtended(t *testing.T) {
 		},
 	}
 
-	xml := ToPromptXML(skills)
+	xml := ToPromptXML(skills, 100_000)
 
 	require.Contains(t, xml, "<name>cherry-pick-pr</name>")
 	require.Contains(t, xml, "<when_to_use>")
@@ -345,6 +345,23 @@ func TestToPromptXMLExtended(t *testing.T) {
 	require.Contains(t, xml, "<argument_hint>")
 	require.Contains(t, xml, "<model>opus</model>")
 	require.Contains(t, xml, "<context>fork</context>")
+}
+
+func TestToPromptXMLBudgetTruncates(t *testing.T) {
+	t.Parallel()
+
+	skills := []*Skill{
+		{Name: "one", Description: "First skill with a fairly long description to consume budget.", SkillFilePath: "/s1/SKILL.md"},
+		{Name: "two", Description: "Second skill that should be omitted under a tiny budget.", SkillFilePath: "/s2/SKILL.md"},
+	}
+
+	// A budget that fits the first entry but not both.
+	xml := ToPromptXML(skills, 80)
+
+	require.Contains(t, xml, "<name>one</name>")
+	require.NotContains(t, xml, "<name>two</name>")
+	require.Contains(t, xml, "omitted")
+	require.Contains(t, xml, "two")
 }
 
 func TestSubstituteArguments(t *testing.T) {

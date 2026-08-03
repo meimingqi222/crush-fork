@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -171,15 +170,6 @@ func TestCrushInfo_NoSecretsLeak(t *testing.T) {
 	require.NotContains(t, output, "sk-super-secret-key-12345")
 	require.NotContains(t, output, "secret-key")
 	require.Contains(t, output, "openai = enabled (1 models)")
-}
-
-func TestCrushInfoToolRun(t *testing.T) {
-	store := loadCrushInfoTestStore(t)
-	tool := NewCrushInfoTool(store, nil, nil)
-	resp, err := tool.Run(context.Background(), fantasy.ToolCall{ID: "call-1", Name: CrushInfoToolName, Input: "{}"})
-	require.NoError(t, err)
-	require.False(t, resp.IsError)
-	require.Contains(t, resp.Content, "[options]")
 }
 
 func TestCrushInfo_PathsSection(t *testing.T) {

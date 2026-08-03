@@ -478,74 +478,6 @@ func TestAgent_Generate_MultipleSteps(t *testing.T) {
 	require.Len(t, toolResults, 0)
 }
 
-func TestAgent_Generate_RegularToolRunErrorContinuesLoop(t *testing.T) {
-	t.Parallel()
-
-	tool := &mockTool{
-		name:        "flaky_tool",
-		description: "Fails during execution",
-		parameters:  map[string]any{},
-		executeFunc: func(ctx context.Context, call ToolCall) (ToolResponse, error) {
-			return ToolResponse{}, errors.New("tool process crashed")
-		},
-	}
-
-	callCount := 0
-	model := &mockLanguageModel{
-		generateFunc: func(ctx context.Context, call Call) (*Response, error) {
-			callCount++
-			switch callCount {
-			case 1:
-				return &Response{
-					Content: []Content{
-						ToolCallContent{
-							ToolCallID: "call-1",
-							ToolName:   "flaky_tool",
-							Input:      `{}`,
-						},
-					},
-					Usage:        Usage{TotalTokens: 10},
-					FinishReason: FinishReasonToolCalls,
-				}, nil
-			case 2:
-				require.Len(t, call.Prompt, 3)
-				require.Equal(t, MessageRoleTool, call.Prompt[2].Role)
-				toolResultPart, ok := call.Prompt[2].Content[0].(ToolResultPart)
-				require.True(t, ok)
-				errorResult, ok := toolResultPart.Output.(ToolResultOutputContentError)
-				require.True(t, ok)
-				require.EqualError(t, errorResult.Error, "tool process crashed")
-
-				return &Response{
-					Content:      []Content{TextContent{Text: "recovered"}},
-					Usage:        Usage{TotalTokens: 5},
-					FinishReason: FinishReasonStop,
-				}, nil
-			default:
-				t.Fatalf("Unexpected call count: %d", callCount)
-				return nil, nil
-			}
-		},
-	}
-
-	agent := NewAgent(model, WithTools(tool), WithStopConditions(StepCountIs(3)))
-	result, err := agent.Generate(context.Background(), AgentCall{
-		Prompt: "use the flaky tool",
-	})
-
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(t, 2, callCount)
-	require.Len(t, result.Steps, 2)
-	require.Equal(t, "recovered", result.Response.Content.Text())
-
-	toolResults := result.Steps[0].Content.ToolResults()
-	require.Len(t, toolResults, 1)
-	errorResult, ok := toolResults[0].Result.(ToolResultOutputContentError)
-	require.True(t, ok)
-	require.EqualError(t, errorResult.Error, "tool process crashed")
-}
-
 // Test basic text generation
 func TestAgent_Generate_BasicText(t *testing.T) {
 	t.Parallel()
@@ -916,6 +848,167 @@ func TestResponseContent_Getters_MultipleItems(t *testing.T) {
 	require.Len(t, files, 2)
 	require.Equal(t, "text/plain", files[0].MediaType)
 	require.Equal(t, "image/png", files[1].MediaType)
+}
+
+func TestHasNonBlankText(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single text block", func(t *testing.T) {
+		content := ResponseContent{TextContent{Text: "hello"}}
+		require.True(t, hasNonBlankText(content))
+	})
+
+	t.Run("text among tool calls", func(t *testing.T) {
+		content := ResponseContent{
+			TextContent{Text: "preamble"},
+			ToolCallContent{ToolCallID: "c1", ToolName: "t", Input: "{}"},
+			TextContent{Text: "final answer"},
+		}
+		require.True(t, hasNonBlankText(content))
+	})
+
+	t.Run("whitespace-only is blank", func(t *testing.T) {
+		content := ResponseContent{
+			TextContent{Text: "   "},
+		}
+		require.False(t, hasNonBlankText(content))
+	})
+
+	t.Run("mixed whitespace and real text", func(t *testing.T) {
+		content := ResponseContent{
+			TextContent{Text: "   "},
+			TextContent{Text: "real"},
+		}
+		require.True(t, hasNonBlankText(content))
+	})
+
+	t.Run("empty content", func(t *testing.T) {
+		require.False(t, hasNonBlankText(ResponseContent{}))
+	})
+
+	t.Run("no text blocks", func(t *testing.T) {
+		content := ResponseContent{
+			ToolCallContent{ToolCallID: "c1", ToolName: "t", Input: "{}"},
+		}
+		require.False(t, hasNonBlankText(content))
+	})
+}
+
+func TestFinalResponse(t *testing.T) {
+	t.Parallel()
+
+	t.Run("last step has text", func(t *testing.T) {
+		steps := []StepResult{
+			{Response: Response{Content: ResponseContent{TextContent{Text: "earlier"}}}},
+			{Response: Response{Content: ResponseContent{TextContent{Text: "final"}}}},
+		}
+		resp := finalResponse(steps)
+		require.Equal(t, "final", resp.Content.Text())
+	})
+
+	t.Run("last step tool-only falls back to earlier text", func(t *testing.T) {
+		steps := []StepResult{
+			{Response: Response{Content: ResponseContent{TextContent{Text: "has text"}}}},
+			{Response: Response{Content: ResponseContent{
+				ToolCallContent{ToolCallID: "c1", ToolName: "t", Input: "{}"},
+			}}},
+		}
+		resp := finalResponse(steps)
+		require.Equal(t, "has text", resp.Content.Text())
+	})
+
+	t.Run("all steps tool-only returns last", func(t *testing.T) {
+		steps := []StepResult{
+			{Response: Response{Content: ResponseContent{
+				ToolCallContent{ToolCallID: "c1", ToolName: "t1", Input: "{}"},
+			}}},
+			{Response: Response{Content: ResponseContent{
+				ToolCallContent{ToolCallID: "c2", ToolName: "t2", Input: "{}"},
+			}}},
+		}
+		resp := finalResponse(steps)
+		toolCalls := resp.Content.ToolCalls()
+		require.Len(t, toolCalls, 1)
+		require.Equal(t, "c2", toolCalls[0].ToolCallID)
+	})
+
+	t.Run("empty steps", func(t *testing.T) {
+		resp := finalResponse(nil)
+		require.Equal(t, "", resp.Content.Text())
+	})
+
+	t.Run("single step with text", func(t *testing.T) {
+		steps := []StepResult{
+			{Response: Response{Content: ResponseContent{TextContent{Text: "only"}}}},
+		}
+		resp := finalResponse(steps)
+		require.Equal(t, "only", resp.Content.Text())
+	})
+
+	t.Run("skips whitespace-only steps", func(t *testing.T) {
+		steps := []StepResult{
+			{Response: Response{Content: ResponseContent{TextContent{Text: "real"}}}},
+			{Response: Response{Content: ResponseContent{TextContent{Text: "   "}}}},
+		}
+		resp := finalResponse(steps)
+		require.Equal(t, "real", resp.Content.Text())
+	})
+}
+
+func TestAgent_Generate_ToolOnlyFinalStep_PreservesEarlierText(t *testing.T) {
+	t.Parallel()
+
+	type TestInput struct {
+		Value string `json:"value" description:"Test value"`
+	}
+
+	tool := NewAgentTool(
+		"mytool",
+		"A test tool",
+		func(ctx context.Context, input TestInput, _ ToolCall) (ToolResponse, error) {
+			return ToolResponse{Content: "done", IsError: false}, nil
+		},
+	)
+
+	callCount := 0
+	model := &mockLanguageModel{
+		generateFunc: func(ctx context.Context, call Call) (*Response, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				// First step: text + tool call (model explains then acts).
+				return &Response{
+					Content: []Content{
+						TextContent{Text: "Let me check that."},
+						ToolCallContent{
+							ToolCallID: "call-1",
+							ToolName:   "mytool",
+							Input:      `{"value":"x"}`,
+						},
+					},
+					FinishReason: FinishReasonToolCalls,
+				}, nil
+			case 2:
+				// Second step: tool result only, no text. Model stops here.
+				return &Response{
+					Content:      []Content{},
+					FinishReason: FinishReasonStop,
+				}, nil
+			default:
+				t.Fatalf("unexpected call count: %d", callCount)
+				return nil, nil
+			}
+		},
+	}
+
+	agent := NewAgent(model, WithTools(tool))
+	result, err := agent.Generate(context.Background(), AgentCall{Prompt: "test"})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Steps, 2)
+
+	// Response should carry text from step 1 even though step 2 is empty.
+	require.Equal(t, "Let me check that.", result.Response.Content.Text())
 }
 
 func TestStopConditions(t *testing.T) {
@@ -1540,13 +1633,11 @@ func TestToolCallRepair(t *testing.T) {
 		require.NotNil(t, result)
 		require.Len(t, result.Steps, 1) // Only one step
 
-		// Check that tool call was marked as invalid. Default repair does not
-		// fabricate missing required fields — it leaves them invalid so the
-		// model receives the error and retries.
+		// Check that tool call was marked as invalid
 		toolCalls := result.Steps[0].Content.ToolCalls()
 		require.Len(t, toolCalls, 1)
 		require.True(t, toolCalls[0].Invalid) // Should be invalid
-		require.Contains(t, toolCalls[0].ValidationError.Error(), "validation failed for tool")
+		require.Contains(t, toolCalls[0].ValidationError.Error(), "validation failed for tool \"test_tool\"")
 	})
 
 	t.Run("Invalid tool call with successful repair", func(t *testing.T) {
@@ -1604,95 +1695,6 @@ func TestToolCallRepair(t *testing.T) {
 		require.Equal(t, `{"value": "repaired"}`, toolCalls[0].Input) // Should have repaired input
 	})
 
-	t.Run("Default repair coerces string-encoded number", func(t *testing.T) {
-		t.Parallel()
-		model := &mockLanguageModel{
-			generateFunc: func(ctx context.Context, call Call) (*Response, error) {
-				return &Response{
-					Content: ResponseContent{
-						TextContent{Text: "Response"},
-						ToolCallContent{
-							ToolCallID: "call1",
-							ToolName:   "test_tool",
-							Input:      `{"count": "42"}`,
-						},
-					},
-					Usage:        Usage{TotalTokens: 10},
-					FinishReason: FinishReasonStop,
-				}, nil
-			},
-		}
-
-		tool := &mockTool{
-			name:        "test_tool",
-			description: "Test tool",
-			parameters: map[string]any{
-				"count": map[string]any{"type": "integer"},
-			},
-			required: []string{"count"},
-		}
-
-		agent := NewAgent(model, WithTools(tool), WithStopConditions(StepCountIs(2)))
-
-		result, err := agent.Generate(context.Background(), AgentCall{
-			Prompt: "test prompt",
-		})
-
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.Len(t, result.Steps, 1)
-
-		toolCalls := result.Steps[0].Content.ToolCalls()
-		require.Len(t, toolCalls, 1)
-		require.False(t, toolCalls[0].Invalid)
-		require.Contains(t, toolCalls[0].Input, `"count":42`)
-	})
-
-	t.Run("Default repair leaves missing required fields invalid", func(t *testing.T) {
-		t.Parallel()
-		model := &mockLanguageModel{
-			generateFunc: func(ctx context.Context, call Call) (*Response, error) {
-				return &Response{
-					Content: ResponseContent{
-						TextContent{Text: "Response"},
-						ToolCallContent{
-							ToolCallID: "call1",
-							ToolName:   "test_tool",
-							Input:      `{"description": "test"}`,
-						},
-					},
-					Usage:        Usage{TotalTokens: 10},
-					FinishReason: FinishReasonStop,
-				}, nil
-			},
-		}
-
-		tool := &mockTool{
-			name:        "test_tool",
-			description: "Test tool",
-			parameters: map[string]any{
-				"command":     map[string]any{"type": "string", "description": "The command to execute"},
-				"description": map[string]any{"type": "string"},
-			},
-			required: []string{"command"},
-		}
-
-		agent := NewAgent(model, WithTools(tool), WithStopConditions(StepCountIs(2)))
-
-		result, err := agent.Generate(context.Background(), AgentCall{
-			Prompt: "test prompt",
-		})
-
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.Len(t, result.Steps, 1)
-
-		toolCalls := result.Steps[0].Content.ToolCalls()
-		require.Len(t, toolCalls, 1)
-		require.True(t, toolCalls[0].Invalid)
-		require.Contains(t, toolCalls[0].ValidationError.Error(), "Received arguments:")
-	})
-
 	t.Run("Invalid tool call with failed repair", func(t *testing.T) {
 		t.Parallel()
 		model := &mockLanguageModel{
@@ -1736,12 +1738,11 @@ func TestToolCallRepair(t *testing.T) {
 		require.NotNil(t, result)
 		require.Len(t, result.Steps, 1) // Only one step
 
-		// Check that tool call was marked as invalid since custom repair failed
-		// and default repair does not inject missing required fields.
+		// Check that tool call was marked as invalid since repair failed
 		toolCalls := result.Steps[0].Content.ToolCalls()
 		require.Len(t, toolCalls, 1)
 		require.True(t, toolCalls[0].Invalid) // Should be invalid
-		require.Contains(t, toolCalls[0].ValidationError.Error(), "validation failed for tool")
+		require.Contains(t, toolCalls[0].ValidationError.Error(), "validation failed for tool \"test_tool\"")
 	})
 
 	t.Run("Nonexistent tool call", func(t *testing.T) {
@@ -1825,81 +1826,6 @@ func TestToolCallRepair(t *testing.T) {
 		require.Len(t, toolCalls, 1)
 		require.True(t, toolCalls[0].Invalid) // Should be invalid
 		require.Contains(t, toolCalls[0].ValidationError.Error(), "invalid JSON input")
-	})
-
-	// Regression test: a repair function registered at the agent-settings
-	// level (via WithRepairToolCall, with no per-call RepairToolCall set on
-	// AgentStreamCall) must still be invoked on the Stream path. This
-	// guards against prepareCall's settings fallback being dropped before
-	// reaching processStepStream.
-	t.Run("Settings-level repair function is invoked on the Stream path", func(t *testing.T) {
-		t.Parallel()
-
-		var executed bool
-		tool := &mockTool{
-			name:        "grep",
-			description: "Search tool",
-			parameters: map[string]any{
-				"pattern": map[string]any{"type": "string"},
-			},
-			required: []string{"pattern"},
-			executeFunc: func(ctx context.Context, call ToolCall) (ToolResponse, error) {
-				executed = true
-				return ToolResponse{Content: "matched", IsError: false}, nil
-			},
-		}
-
-		model := &mockLanguageModel{
-			streamFunc: func(ctx context.Context, call Call) (StreamResponse, error) {
-				return func(yield func(StreamPart) bool) {
-					if !yield(StreamPart{
-						Type:          StreamPartTypeToolCall,
-						ID:            "call-1",
-						ToolCallName:  "Grep", // Misnamed like Claude Code's tool.
-						ToolCallInput: `{"pattern":"foo"}`,
-					}) {
-						return
-					}
-					yield(StreamPart{
-						Type:         StreamPartTypeFinish,
-						FinishReason: FinishReasonStop,
-						Usage:        Usage{TotalTokens: 10},
-					})
-				}, nil
-			},
-		}
-
-		repairFunc := func(ctx context.Context, options ToolCallRepairOptions) (*ToolCallContent, error) {
-			repaired := options.OriginalToolCall
-			repaired.ToolName = "grep"
-			return &repaired, nil
-		}
-
-		agent := NewAgent(model, WithTools(tool), WithRepairToolCall(repairFunc), WithStopConditions(StepCountIs(2)))
-
-		// Note: RepairToolCall is intentionally left unset on
-		// AgentStreamCall so only the settings-level fallback applies.
-		result, err := agent.Stream(context.Background(), AgentStreamCall{
-			Prompt: "test prompt",
-		})
-
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		require.True(t, executed, "expected the repaired \"grep\" tool to be executed")
-
-		toolCalls := result.Steps[0].Content.ToolCalls()
-		require.Len(t, toolCalls, 1)
-		require.False(t, toolCalls[0].Invalid, "expected the misnamed tool call to be repaired, not marked invalid")
-		require.Equal(t, "grep", toolCalls[0].ToolName)
-
-		var toolResults []ToolResultContent
-		for _, c := range result.Steps[0].Content {
-			if tr, ok := AsContentType[ToolResultContent](c); ok {
-				toolResults = append(toolResults, tr)
-			}
-		}
-		require.Len(t, toolResults, 1)
-		require.Equal(t, "call-1", toolResults[0].ToolCallID)
 	})
 }
 
@@ -2162,8 +2088,9 @@ func TestToResponseMessages_ProviderExecutedRouting(t *testing.T) {
 		},
 		// Regular tool result.
 		&ToolResultContent{
-			ToolCallID: "toolu_02",
-			Result:     ToolResultOutputContentText{Text: "2"},
+			ToolCallID:     "toolu_02",
+			Result:         ToolResultOutputContentText{Text: "2"},
+			ClientMetadata: `{"precision":"high"}`,
 		},
 		// Some trailing text.
 		&TextContent{Text: "Done."},
@@ -2211,9 +2138,11 @@ func TestToResponseMessages_ProviderExecutedRouting(t *testing.T) {
 	require.Equal(t, MessageRoleTool, toolMsg.Role)
 	require.Len(t, toolMsg.Content, 1)
 
+	// Verify regular tool result is in tool message and client metadata survived.
 	tr2, ok := AsMessagePart[ToolResultPart](toolMsg.Content[0])
 	require.True(t, ok)
 	require.Equal(t, "toolu_02", tr2.ToolCallID)
+	require.Equal(t, `{"precision":"high"}`, tr2.ClientMetadata)
 	require.False(t, tr2.ProviderExecuted)
 }
 
@@ -2801,4 +2730,113 @@ func TestAgent_Generate_StopTurn_NotSet(t *testing.T) {
 	toolResults := result.Steps[0].Content.ToolResults()
 	require.Len(t, toolResults, 1)
 	require.False(t, toolResults[0].StopTurn)
+}
+
+func TestAgent_Generate_ToolPanicBecomesFailedResult(t *testing.T) {
+	t.Parallel()
+
+	type PanicInput struct {
+		Value string `json:"value" description:"Test value"`
+	}
+
+	panickingTool := NewAgentTool(
+		"panicking_tool",
+		"A tool that always panics",
+		func(ctx context.Context, input PanicInput, _ ToolCall) (ToolResponse, error) {
+			panic("nil pointer in tool implementation")
+		},
+	)
+
+	model := &mockLanguageModel{
+		generateFunc: func(ctx context.Context, call Call) (*Response, error) {
+			return &Response{
+				Content: []Content{
+					ToolCallContent{
+						ToolCallID: "call-panic",
+						ToolName:   "panicking_tool",
+						Input:      `{"value":"boom"}`,
+					},
+				},
+				Usage:        Usage{InputTokens: 3, OutputTokens: 10, TotalTokens: 13},
+				FinishReason: FinishReasonStop,
+			}, nil
+		},
+	}
+
+	agent := NewAgent(model, WithTools(panickingTool))
+	result, err := agent.Generate(context.Background(), AgentCall{
+		Prompt: "test-input",
+	})
+
+	// The process must survive the panic and surface it as a failed tool
+	// result instead.
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	var toolResults []ToolResultContent
+	for _, content := range result.Response.Content {
+		if toolResult, ok := AsContentType[ToolResultContent](content); ok {
+			toolResults = append(toolResults, toolResult)
+		}
+	}
+	require.Len(t, toolResults, 1)
+	require.Equal(t, "call-panic", toolResults[0].ToolCallID)
+
+	errResult, ok := toolResults[0].Result.(ToolResultOutputContentError)
+	require.True(t, ok, "expected error result, got %T", toolResults[0].Result)
+	require.ErrorContains(t, errResult.Error, "panicking_tool")
+	require.ErrorContains(t, errResult.Error, "nil pointer in tool implementation")
+}
+
+func TestAgent_Generate_ParallelToolPanicBecomesFailedResult(t *testing.T) {
+	t.Parallel()
+
+	type PanicInput struct {
+		Value string `json:"value" description:"Test value"`
+	}
+
+	panickingTool := NewParallelAgentTool(
+		"panicking_parallel_tool",
+		"A parallel tool that always panics",
+		func(ctx context.Context, input PanicInput, _ ToolCall) (ToolResponse, error) {
+			panic("parallel boom")
+		},
+	)
+
+	model := &mockLanguageModel{
+		generateFunc: func(ctx context.Context, call Call) (*Response, error) {
+			return &Response{
+				Content: []Content{
+					ToolCallContent{
+						ToolCallID: "call-parallel-panic",
+						ToolName:   "panicking_parallel_tool",
+						Input:      `{"value":"boom"}`,
+					},
+				},
+				Usage:        Usage{InputTokens: 3, OutputTokens: 10, TotalTokens: 13},
+				FinishReason: FinishReasonStop,
+			}, nil
+		},
+	}
+
+	agent := NewAgent(model, WithTools(panickingTool))
+	result, err := agent.Generate(context.Background(), AgentCall{
+		Prompt: "test-input",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	var toolResults []ToolResultContent
+	for _, content := range result.Response.Content {
+		if toolResult, ok := AsContentType[ToolResultContent](content); ok {
+			toolResults = append(toolResults, toolResult)
+		}
+	}
+	require.Len(t, toolResults, 1)
+
+	errResult, ok := toolResults[0].Result.(ToolResultOutputContentError)
+	require.True(t, ok, "expected error result, got %T", toolResults[0].Result)
+	require.ErrorContains(t, errResult.Error, "panicking_parallel_tool")
+	require.ErrorContains(t, errResult.Error, "parallel boom")
 }

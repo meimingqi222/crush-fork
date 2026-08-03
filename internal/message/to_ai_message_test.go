@@ -131,6 +131,21 @@ func TestToAIMessage_DropsTextualToolCallProtocolOnlyReasoning(t *testing.T) {
 	require.Empty(t, msg.ToAIMessage())
 }
 
+func TestToAIMessage_DropsDSMLToolCallProtocolOnlyReasoning(t *testing.T) {
+	t.Parallel()
+
+	msg := Message{
+		Role: Assistant,
+		Parts: []ContentPart{
+			ReasoningContent{
+				Thinking: `<｜DSML｜tool_calls><｜DSML｜invoke name="read"><｜DSML｜parameter name="path" string="true">main.go</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`,
+			},
+		},
+	}
+
+	require.Empty(t, msg.ToAIMessage())
+}
+
 // TestToAIMessage_ReasoningBeforeText verifies that the reasoning (thinking)
 // block appears before the text block in the assistant message parts.  Kimi
 // (and Anthropic) require this ordering; sending text first causes a 400 error.

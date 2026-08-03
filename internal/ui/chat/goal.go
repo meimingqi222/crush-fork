@@ -33,7 +33,7 @@ type GoalToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (r *GoalToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 
 	if opts.IsPending() {
 		return pendingTool(sty, "Goal", opts.Anim, opts.Compact)

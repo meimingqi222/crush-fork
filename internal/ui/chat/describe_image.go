@@ -54,7 +54,7 @@ type DescribeImageToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
 func (d *DescribeImageToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
+	cappedWidth := toolMessageWidth(width)
 	if opts.IsPending() {
 		return pendingDescribeImageTool(sty, opts)
 	}

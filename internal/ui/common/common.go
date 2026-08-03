@@ -37,8 +37,18 @@ func (c *Common) Store() *config.ConfigStore {
 }
 
 // DefaultCommon returns the default common UI configurations.
+//
+// An explicit dark/light theme takes effect immediately. "auto" starts on the
+// dark palette and switches once the terminal answers the background-color
+// query, so terminals that never answer keep the historical appearance.
 func DefaultCommon(app *app.App) *Common {
-	s := styles.DefaultStyles()
+	mode := styles.ThemeAuto
+	if app != nil {
+		if cfg := app.Config(); cfg != nil && cfg.Options != nil {
+			mode = styles.ParseThemeMode(cfg.Options.Theme)
+		}
+	}
+	s := styles.New(styles.PaletteFor(mode, true))
 	return &Common{
 		App:    app,
 		Styles: &s,

@@ -263,6 +263,7 @@ func (a *sessionAgent) estimateNextStepPromptTokens(ctx context.Context, session
 		SystemPrompt:   systemPrompt,
 		PromptPrefix:   promptPrefix,
 		PermissionMode: currentSession.PermissionMode,
+		Tools:          tools,
 	})
 	if err != nil {
 		return 0, false, err

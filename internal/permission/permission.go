@@ -212,13 +212,20 @@ type DenialQueueEntry struct {
 	Retryable bool
 }
 
+// PermissionKey is a composite key for session permission lookups.
+type PermissionKey struct {
+	SessionID string
+	ToolName  string
+	Action    string
+	Path      string
+}
+
 type permissionService struct {
 	*pubsub.Broker[PermissionRequest]
 
 	notificationBroker    *pubsub.Broker[PermissionNotification]
 	workingDir            string
-	sessionPermissions    []PermissionRequest
-	sessionPermissionsMu  sync.RWMutex
+	sessionPermissions    *csync.Map[PermissionKey, bool]
 	pendingRequests       *csync.Map[string, chan bool]
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
@@ -246,9 +253,12 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) {
 		respCh <- true
 	}
 
-	s.sessionPermissionsMu.Lock()
-	s.sessionPermissions = append(s.sessionPermissions, permission)
-	s.sessionPermissionsMu.Unlock()
+	s.sessionPermissions.Set(PermissionKey{
+		SessionID: permission.SessionID,
+		ToolName:  permission.ToolName,
+		Action:    permission.Action,
+		Path:      permission.Path,
+	}, true)
 
 	s.activeRequestMu.Lock()
 	if s.activeRequest != nil && s.activeRequest.ID == permission.ID {
@@ -258,28 +268,21 @@ func (s *permissionService) GrantPersistent(permission PermissionRequest) {
 }
 
 func (s *permissionService) HasPersistentPermission(permission PermissionRequest) bool {
-	s.sessionPermissionsMu.RLock()
-	defer s.sessionPermissionsMu.RUnlock()
-
-	for _, p := range s.sessionPermissions {
-		if matchesPersistentPermission(p, permission) {
-			return true
-		}
-	}
-	return false
+	_, ok := s.sessionPermissions.Get(PermissionKey{
+		SessionID: permission.SessionID,
+		ToolName:  permission.ToolName,
+		Action:    permission.Action,
+		Path:      permission.Path,
+	})
+	return ok
 }
 
 func (s *permissionService) ClearPersistentPermissions(sessionID string) {
-	s.sessionPermissionsMu.Lock()
-	defer s.sessionPermissionsMu.Unlock()
-
-	filtered := s.sessionPermissions[:0]
-	for _, p := range s.sessionPermissions {
-		if p.SessionID != sessionID {
-			filtered = append(filtered, p)
+	for key := range s.sessionPermissions.Seq2() {
+		if key.SessionID == sessionID {
+			s.sessionPermissions.Del(key)
 		}
 	}
-	s.sessionPermissions = filtered
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) {
@@ -354,11 +357,13 @@ func (s *permissionService) EvaluateRequest(_ context.Context, opts CreatePermis
 }
 
 func (s *permissionService) Prompt(ctx context.Context, permission PermissionRequest) (bool, error) {
+	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
+
+	// tell the UI that a permission was requested
 	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 		ToolCallID: permission.ToolCallID,
 	})
-	s.requestMu.Lock()
-	defer s.requestMu.Unlock()
 
 	s.activeRequestMu.Lock()
 	s.activeRequest = &permission
@@ -553,7 +558,7 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		Broker:              pubsub.NewBroker[PermissionRequest](),
 		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
 		workingDir:          workingDir,
-		sessionPermissions:  make([]PermissionRequest, 0),
+		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
 		autoApproveSessions: make(map[string]bool),
 		skip:                skip,
 		allowedTools:        allowedTools,

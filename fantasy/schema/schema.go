@@ -83,15 +83,6 @@ func generateSchemaRecursive(t reflect.Type, visited map[reflect.Type]bool) Sche
 		t = t.Elem()
 	}
 
-	// json.RawMessage ([]byte with json marshaling) represents arbitrary JSON.
-	// Without this special case, the schema generator treats []byte as an array
-	// of integers (uint8), which causes tool validation to reject object/array
-	// payloads. Return an empty schema (no type constraint) so any JSON value
-	// is accepted.
-	if t == reflect.TypeOf(json.RawMessage(nil)) {
-		return Schema{}
-	}
-
 	if visited[t] {
 		return Schema{Type: "object"}
 	}

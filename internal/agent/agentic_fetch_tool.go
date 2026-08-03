@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"charm.land/fantasy"
@@ -100,7 +101,9 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
 			}
 
-			tmpDir, err := os.MkdirTemp(c.cfg.Config().Options.DataDirectory, "crush-fetch-*")
+			dataDirectory := c.cfg.Config().Options.DataDirectory
+
+			tmpDir, err := os.MkdirTemp(dataDirectory, "crush-fetch-*")
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to create temporary directory: %s", err)), nil
 			}
@@ -118,17 +121,17 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				hasLargeContent := len(content) > tools.LargeContentThreshold
 
 				if hasLargeContent {
-					tempFile, err := os.CreateTemp(tmpDir, "page-*.md")
-					if err != nil {
-						return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to create temporary file: %s", err)), nil
+					// Save large pages to the persistent fetch directory (not
+					// the scratch tmpDir) so the path given to the model stays
+					// valid after this tool returns and tmpDir is removed.
+					fetchDir := filepath.Join(dataDirectory, "fetch")
+					if err := os.MkdirAll(fetchDir, 0o755); err != nil {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to create fetch directory: %s", err)), nil
 					}
-					tempFilePath := tempFile.Name()
-
-					if _, err := tempFile.WriteString(content); err != nil {
-						tempFile.Close()
+					tempFilePath := filepath.Join(fetchDir, fmt.Sprintf("page-%d.md", time.Now().UnixNano()))
+					if err := os.WriteFile(tempFilePath, []byte(content), 0o644); err != nil {
 						return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to write content to file: %s", err)), nil
 					}
-					tempFile.Close()
 
 					fullPrompt = fmt.Sprintf("%s\n\nThe web page from %s has been saved to: %s\n\nUse the read and grep tools to analyze this file and extract the requested information.", params.Prompt, params.URL, tempFilePath)
 				} else {
@@ -184,6 +187,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				SystemPromptPrefix:   smallProviderCfg.SystemPromptPrefix,
 				SystemPrompt:         systemPrompt,
 				WorkingDir:           tmpDir,
+				DataDirectory:        dataDirectory,
 				IsSubAgent:           true,
 				DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
 				IsYolo:               c.permissions.SkipRequests(),

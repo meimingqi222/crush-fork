@@ -35,15 +35,18 @@ type DiagnosticCounts struct {
 }
 
 const (
-	MethodTextDocumentDefinition     = "textDocument/definition"
-	MethodTextDocumentDeclaration    = "textDocument/declaration"
-	MethodTextDocumentImplementation = "textDocument/implementation"
-	MethodTextDocumentTypeDefinition = "textDocument/typeDefinition"
-	MethodTextDocumentDocumentSymbol = "textDocument/documentSymbol"
-	MethodTextDocumentCodeAction     = "textDocument/codeAction"
-	MethodTextDocumentRename         = "textDocument/rename"
-	MethodTextDocumentFormatting     = "textDocument/formatting"
-	MethodWorkspaceSymbol            = "workspace/symbol"
+	MethodTextDocumentDefinition           = "textDocument/definition"
+	MethodTextDocumentDeclaration          = "textDocument/declaration"
+	MethodTextDocumentImplementation       = "textDocument/implementation"
+	MethodTextDocumentTypeDefinition       = "textDocument/typeDefinition"
+	MethodTextDocumentDocumentSymbol       = "textDocument/documentSymbol"
+	MethodTextDocumentCodeAction           = "textDocument/codeAction"
+	MethodTextDocumentRename               = "textDocument/rename"
+	MethodTextDocumentFormatting           = "textDocument/formatting"
+	MethodTextDocumentPrepareCallHierarchy = "textDocument/prepareCallHierarchy"
+	MethodCallHierarchyIncomingCalls       = "callHierarchy/incomingCalls"
+	MethodCallHierarchyOutgoingCalls       = "callHierarchy/outgoingCalls"
+	MethodWorkspaceSymbol                  = "workspace/symbol"
 )
 
 type Client struct {
@@ -815,6 +818,67 @@ func (c *Client) FindDefinition(ctx context.Context, filepath string, line, char
 		return nil, fmt.Errorf("definition request failed: %w", err)
 	}
 	return locationResults(result.Value), nil
+}
+
+// PrepareCallHierarchy returns call hierarchy items for the symbol at the
+// given position.
+func (c *Client) PrepareCallHierarchy(ctx context.Context, filepath string, line, character int) ([]protocol.CallHierarchyItem, error) {
+	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	params := protocol.CallHierarchyPrepareParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.URIFromPath(filepath)},
+			Position: protocol.Position{
+				Line:      uint32(line - 1),
+				Character: uint32(character - 1),
+			},
+		},
+	}
+
+	client := c.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("LSP client is unavailable")
+	}
+	if caps := client.GetCapabilities(); caps.CallHierarchyProvider == nil {
+		return nil, fmt.Errorf("call hierarchy is not supported by this LSP server")
+	}
+
+	var result []protocol.CallHierarchyItem
+	if err := c.call(ctx, MethodTextDocumentPrepareCallHierarchy, params, &result); err != nil {
+		return nil, fmt.Errorf("prepare call hierarchy failed: %w", err)
+	}
+	return result, nil
+}
+
+// IncomingCalls returns all callers of the given call hierarchy item.
+func (c *Client) IncomingCalls(ctx context.Context, item protocol.CallHierarchyItem) ([]protocol.CallHierarchyIncomingCall, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	params := protocol.CallHierarchyIncomingCallsParams{Item: item}
+	var result []protocol.CallHierarchyIncomingCall
+	if err := c.call(ctx, MethodCallHierarchyIncomingCalls, params, &result); err != nil {
+		return nil, fmt.Errorf("incoming calls failed: %w", err)
+	}
+	return result, nil
+}
+
+// OutgoingCalls returns all callees of the given call hierarchy item.
+func (c *Client) OutgoingCalls(ctx context.Context, item protocol.CallHierarchyItem) ([]protocol.CallHierarchyOutgoingCall, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	params := protocol.CallHierarchyOutgoingCallsParams{Item: item}
+	var result []protocol.CallHierarchyOutgoingCall
+	if err := c.call(ctx, MethodCallHierarchyOutgoingCalls, params, &result); err != nil {
+		return nil, fmt.Errorf("outgoing calls failed: %w", err)
+	}
+	return result, nil
 }
 
 func (c *Client) FindDeclaration(ctx context.Context, filepath string, line, character int) ([]protocol.Location, error) {

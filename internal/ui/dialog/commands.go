@@ -571,6 +571,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	commands = append(commands,
 		NewCommandItem(c.com.Styles, "toggle_help", "Toggle Help", "ctrl+g", ActionToggleHelp{}),
 		NewCommandItem(c.com.Styles, "init", "Initialize Project", "", ActionInitializeProject{}),
+		NewCommandItem(c.com.Styles, "theme", themeCommandLabel(c.com), "", ActionCycleTheme{}),
 	)
 
 	// Memory commands are only shown when a memory backend is configured
@@ -662,4 +663,24 @@ func (a *Commands) StartLoading() tea.Cmd {
 // StopLoading implements [LoadingDialog].
 func (a *Commands) StopLoading() {
 	a.loading = false
+}
+
+// themeCommandLabel shows the active theme so the palette entry reads as a
+// state, not just an action. "auto" also reports what it resolved to, since
+// that is the value users need when a terminal reports its background wrongly.
+func themeCommandLabel(com *common.Common) string {
+	mode := styles.ThemeAuto
+	if com != nil {
+		if cfg := com.Config(); cfg != nil && cfg.Options != nil {
+			mode = styles.ParseThemeMode(cfg.Options.Theme)
+		}
+	}
+	if mode != styles.ThemeAuto {
+		return "Theme: " + string(mode)
+	}
+	resolved := "dark"
+	if com != nil && com.Styles != nil && !com.Styles.Palette.Dark {
+		resolved = "light"
+	}
+	return "Theme: auto (" + resolved + ")"
 }

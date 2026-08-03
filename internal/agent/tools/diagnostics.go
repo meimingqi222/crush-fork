@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,33 +9,19 @@ import (
 	"sync"
 	"time"
 
-	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
+// DiagnosticsParams describes a diagnostics request. It is retained even
+// though the standalone diagnostics tool is unregistered: the UI layer
+// renders historical diagnostics tool messages and needs the type for JSON
+// decoding.
 type DiagnosticsParams struct {
 	FilePath string `json:"file_path,omitempty" description:"The path to the file to get diagnostics for (leave empty for project diagnostics)"`
 }
 
 const DiagnosticsToolName = "lsp_diagnostics"
-
-//go:embed diagnostics.md
-var diagnosticsDescription []byte
-
-func NewDiagnosticsTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
-		DiagnosticsToolName,
-		string(diagnosticsDescription),
-		func(ctx context.Context, params DiagnosticsParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			if lspManager.Clients().Len() == 0 {
-				return fantasy.NewTextErrorResponse("no LSP clients available"), nil
-			}
-			notifyLSPs(ctx, lspManager, params.FilePath)
-			output := getDiagnostics(params.FilePath, lspManager)
-			return fantasy.NewTextResponse(output), nil
-		})
-}
 
 // openInLSPs ensures LSP servers are running and aware of the file, but does
 // not notify changes or wait for fresh diagnostics. Use this for read-only

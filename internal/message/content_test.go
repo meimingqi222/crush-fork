@@ -102,6 +102,23 @@ func TestStripTextualToolCallProtocol(t *testing.T) {
 	require.Equal(t, "before\n\nafter", cleaned)
 }
 
+func TestStripTextualToolCallProtocolDSML(t *testing.T) {
+	t.Parallel()
+
+	for _, separator := range []string{"｜", "|"} {
+		text := "before\n<" + separator + "DSML" + separator + "tool_calls>" +
+			"<" + separator + "DSML" + separator + "invoke name=\"read\">" +
+			"<" + separator + "DSML" + separator + "parameter name=\"path\" string=\"true\">main.go</" + separator + "DSML" + separator + "parameter>" +
+			"</" + separator + "DSML" + separator + "invoke>" +
+			"</" + separator + "DSML" + separator + "tool_calls>\nafter"
+
+		cleaned, changed := StripTextualToolCallProtocol(text)
+
+		require.True(t, changed)
+		require.Equal(t, "before\n\nafter", cleaned)
+	}
+}
+
 func BenchmarkPromptWithTextAttachments(b *testing.B) {
 	cases := []struct {
 		name        string

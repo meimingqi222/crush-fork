@@ -76,7 +76,7 @@ func TestImageUploadAgent(t *testing.T) {
 
 	for _, pair := range pairs {
 		t.Run(pair.name, func(t *testing.T) {
-			r := newVCRRecorder(t)
+			r := vcr.NewRecorder(t)
 
 			lm, err := pair.builder(t, r)
 			require.NoError(t, err)
@@ -122,7 +122,7 @@ func TestImageUploadAgentStreaming(t *testing.T) {
 
 	for _, pair := range pairs {
 		t.Run(pair.name+"-stream", func(t *testing.T) {
-			r := newVCRRecorder(t)
+			r := vcr.NewRecorder(t)
 
 			lm, err := pair.builder(t, r)
 			require.NoError(t, err)

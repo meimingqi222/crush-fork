@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -20,6 +22,12 @@ var (
 	textualToolCallProtocolRegex      = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?<\|tool_call_begin\|>.*?functions\.[a-zA-Z0-9_]+(?::\d+)?`)
 	textualToolCallProtocolBlockRegex = regexp.MustCompile(`(?is)<\|tool_calls_section_begin\|>.*?(?:<\|tool_calls_section_end\|>|$)`)
 	textualToolCallProtocolCallRegex  = regexp.MustCompile(`(?is)<\|tool_call_begin\|>\s*functions\.([a-zA-Z0-9_]+)(?::([0-9]+))?\s*<\|tool_call_argument_begin\|>\s*(.*?)\s*<\|tool_call_end\|>`)
+	dsmlToolCallProtocolRegex         = regexp.MustCompile(`(?is)<[|｜]DSML[|｜]tool_calls\s*>.*?<[|｜]DSML[|｜]invoke\s+[^>]*\bname\s*=\s*"[^"]+"[^>]*>`)
+	dsmlToolCallProtocolBlockRegex    = regexp.MustCompile(`(?is)<[|｜]DSML[|｜]tool_calls\s*>.*?(?:</[|｜]DSML[|｜]tool_calls\s*>|$)`)
+	dsmlToolCallProtocolCallRegex     = regexp.MustCompile(`(?is)<[|｜]DSML[|｜]invoke\s+([^>]*)>(.*?)</[|｜]DSML[|｜]invoke\s*>`)
+	dsmlToolCallParameterRegex        = regexp.MustCompile(`(?is)<[|｜]DSML[|｜]parameter\s+([^>]*)>(.*?)</[|｜]DSML[|｜]parameter\s*>`)
+	dsmlToolCallParameterStartRegex   = regexp.MustCompile(`(?is)<[|｜]DSML[|｜]parameter\b`)
+	dsmlAttributeRegex                = regexp.MustCompile(`(?i)\b([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*"([^"]*)"`)
 )
 
 const (
@@ -45,23 +53,27 @@ func textualToolCallSource(assistant *message.Message) string {
 	}, "\n")
 }
 
+func scopedTextualToolCallID(assistant *message.Message, id string) string {
+	id = sanitizeAnthropicToolCallID(id)
+	if assistant == nil || assistant.ID == "" {
+		return id
+	}
+	scope := sha256.Sum256([]byte(assistant.ID))
+	return fmt.Sprintf("%s_%x", id, scope[:6])
+}
+
 func parseTextualToolCallsFromAssistant(assistant *message.Message) []message.ToolCall {
 	source := textualToolCallSource(assistant)
 	if !hasTextualToolCallProtocol(source) {
 		return nil
 	}
-	matches := textualToolCallProtocolCallRegex.FindAllStringSubmatch(source, -1)
-	if len(matches) == 0 {
-		slog.Warn("Textual tool-call protocol was detected but no complete tool call blocks could be parsed",
-			"message_id", assistant.ID,
-			"model", assistant.Model,
-			"provider", assistant.Provider,
-			"text_preview", previewText(assistant.Content().Text, 500),
-			"reasoning_preview", previewText(assistant.ReasoningContent().Thinking, 500),
-		)
-		return nil
-	}
+	toolCalls := parseHarmonyToolCalls(source, assistant)
+	toolCalls = append(toolCalls, parseDSMLToolCalls(source, assistant)...)
+	return toolCalls
+}
 
+func parseHarmonyToolCalls(source string, assistant *message.Message) []message.ToolCall {
+	matches := textualToolCallProtocolCallRegex.FindAllStringSubmatch(source, -1)
 	seen := make(map[string]struct{}, len(matches))
 	toolCalls := make([]message.ToolCall, 0, len(matches))
 	for _, match := range matches {
@@ -83,7 +95,7 @@ func parseTextualToolCallsFromAssistant(assistant *message.Message) []message.To
 		if index != "" {
 			id += ":" + index
 		}
-		id = sanitizeAnthropicToolCallID(id)
+		id = scopedTextualToolCallID(assistant, id)
 		key := id + "\x00" + name + "\x00" + input
 		if _, ok := seen[key]; ok {
 			continue
@@ -98,6 +110,81 @@ func parseTextualToolCallsFromAssistant(assistant *message.Message) []message.To
 		})
 	}
 	return toolCalls
+}
+
+func parseDSMLToolCalls(source string, assistant *message.Message) []message.ToolCall {
+	matches := dsmlToolCallProtocolCallRegex.FindAllStringSubmatch(source, -1)
+	toolCalls := make([]message.ToolCall, 0, len(matches))
+	seen := make(map[string]struct{}, len(matches))
+	for index, match := range matches {
+		attributes := parseDSMLAttributes(match[1])
+		name := strings.TrimSpace(attributes["name"])
+		if name == "" {
+			continue
+		}
+
+		input := make(map[string]any)
+		valid := true
+		parameters := dsmlToolCallParameterRegex.FindAllStringSubmatch(match[2], -1)
+		if len(parameters) != len(dsmlToolCallParameterStartRegex.FindAllString(match[2], -1)) {
+			continue
+		}
+		if strings.TrimSpace(dsmlToolCallParameterRegex.ReplaceAllString(match[2], "")) != "" {
+			continue
+		}
+		for _, parameter := range parameters {
+			parameterAttributes := parseDSMLAttributes(parameter[1])
+			parameterName := strings.TrimSpace(parameterAttributes["name"])
+			if parameterName == "" {
+				valid = false
+				break
+			}
+			value := strings.TrimSpace(html.UnescapeString(parameter[2]))
+			if strings.EqualFold(parameterAttributes["string"], "true") {
+				input[parameterName] = value
+				continue
+			}
+			var decoded any
+			if json.Unmarshal([]byte(value), &decoded) == nil {
+				input[parameterName] = decoded
+			} else {
+				input[parameterName] = value
+			}
+		}
+		if !valid {
+			continue
+		}
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			slog.Warn("Skipping malformed DSML tool-call block",
+				"message_id", assistant.ID,
+				"tool_name", name,
+				"error", err,
+			)
+			continue
+		}
+		key := name + "\x00" + string(encoded)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		toolCalls = append(toolCalls, message.ToolCall{
+			ID:               scopedTextualToolCallID(assistant, fmt.Sprintf("dsml_%s_%d", name, index)),
+			Name:             name,
+			Input:            string(encoded),
+			ProviderExecuted: false,
+			Finished:         true,
+		})
+	}
+	return toolCalls
+}
+
+func parseDSMLAttributes(source string) map[string]string {
+	attributes := make(map[string]string)
+	for _, match := range dsmlAttributeRegex.FindAllStringSubmatch(source, -1) {
+		attributes[strings.ToLower(match[1])] = html.UnescapeString(match[2])
+	}
+	return attributes
 }
 
 func textualToolCallRecoveryKey(toolCall message.ToolCall) string {
@@ -283,6 +370,9 @@ func hasTextualToolCallProtocol(text string) bool {
 	if text == "" {
 		return false
 	}
+	if dsmlToolCallProtocolRegex.MatchString(text) {
+		return true
+	}
 	hasSectionBegin := strings.Contains(text, "tool_calls_section_begin")
 	hasCallBegin := strings.Contains(text, "tool_call_begin")
 	if !hasSectionBegin || !hasCallBegin {
@@ -313,6 +403,7 @@ func stripTextualToolCallProtocol(text string) (string, bool) {
 		return text, false
 	}
 	cleaned := textualToolCallProtocolBlockRegex.ReplaceAllString(text, "")
+	cleaned = dsmlToolCallProtocolBlockRegex.ReplaceAllString(cleaned, "")
 	cleaned = strings.TrimSpace(cleaned)
 	return cleaned, cleaned != text
 }

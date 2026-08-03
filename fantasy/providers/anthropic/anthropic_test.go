@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/charmbracelet/anthropic-sdk-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -321,6 +322,7 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 				Role: fantasy.MessageRoleUser,
 				Content: []fantasy.MessagePart{
 					fantasy.FilePart{
+						Filename:  "quarterly_report.v1.pdf",
 						Data:      []byte("fake pdf data"),
 						MediaType: "application/pdf",
 					},
@@ -332,10 +334,67 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 
 		require.Empty(t, systemBlocks)
 		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "quarterly report v1 pdf", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
+		require.Empty(t, warnings)
+	})
+
+	t.Run("should fall back to Document title when PDF filename is missing", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.FilePart{
+						Data:      []byte("fake pdf data"),
+						MediaType: "application/pdf",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "Document", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
 		require.Empty(t, warnings)
 	})
 
 	t.Run("should keep user messages with text document content", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.FilePart{
+						Filename:  "notes_v1.md",
+						Data:      []byte("# Hello World\nSome markdown content"),
+						MediaType: "text/markdown",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "notes v1 md", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
+		require.Empty(t, warnings)
+	})
+
+	t.Run("should fall back to Document title when text filename is missing", func(t *testing.T) {
 		t.Parallel()
 
 		prompt := fantasy.Prompt{
@@ -354,7 +413,38 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 
 		require.Empty(t, systemBlocks)
 		require.Len(t, messages, 1)
+		require.Len(t, messages[0].Content, 1)
+		require.NotNil(t, messages[0].Content[0].OfDocument)
+		require.Equal(t, "Document", messages[0].Content[0].OfDocument.Title.Value)
+		require.True(t, messages[0].Content[0].OfDocument.Title.Valid())
 		require.Empty(t, warnings)
+	})
+
+	t.Run("should warn on unsupported file media type while keeping visible content", func(t *testing.T) {
+		t.Parallel()
+
+		prompt := fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "look at this archive"},
+					fantasy.FilePart{
+						Filename:  "logs.zip",
+						Data:      []byte("not supported"),
+						MediaType: "application/zip",
+					},
+				},
+			},
+		}
+
+		systemBlocks, messages, warnings := toPrompt(prompt, true)
+
+		require.Empty(t, systemBlocks)
+		require.Len(t, messages, 1)
+		require.Len(t, warnings, 1)
+		require.Equal(t, fantasy.CallWarningTypeOther, warnings[0].Type)
+		require.Contains(t, warnings[0].Message, "application/zip")
+		require.Contains(t, warnings[0].Message, "not supported")
 	})
 
 	t.Run("should drop user messages without visible content", func(t *testing.T) {
@@ -376,10 +466,13 @@ func TestToPrompt_DropsEmptyMessages(t *testing.T) {
 
 		require.Empty(t, systemBlocks)
 		require.Empty(t, messages)
-		require.Len(t, warnings, 1)
+		require.Len(t, warnings, 2)
 		require.Equal(t, fantasy.CallWarningTypeOther, warnings[0].Type)
-		require.Contains(t, warnings[0].Message, "dropping empty user message")
-		require.Contains(t, warnings[0].Message, "neither user-facing content nor tool results")
+		require.Contains(t, warnings[0].Message, "application/zip")
+		require.Contains(t, warnings[0].Message, "not supported")
+		require.Equal(t, fantasy.CallWarningTypeOther, warnings[1].Type)
+		require.Contains(t, warnings[1].Message, "dropping empty user message")
+		require.Contains(t, warnings[1].Message, "neither user-facing content nor tool results")
 	})
 
 	t.Run("should keep user messages with tool results", func(t *testing.T) {
@@ -519,6 +612,7 @@ func TestParseOptions_Effort(t *testing.T) {
 		"send_reasoning":            true,
 		"thinking":                  map[string]any{"budget_tokens": int64(2048)},
 		"effort":                    "medium",
+		"thinking_display":          "summarized",
 		"disable_parallel_tool_use": true,
 	})
 	require.NoError(t, err)
@@ -528,6 +622,8 @@ func TestParseOptions_Effort(t *testing.T) {
 	require.Equal(t, int64(2048), options.Thinking.BudgetTokens)
 	require.NotNil(t, options.Effort)
 	require.Equal(t, EffortMedium, *options.Effort)
+	require.NotNil(t, options.ThinkingDisplay)
+	require.Equal(t, ThinkingDisplaySummarized, *options.ThinkingDisplay)
 	require.NotNil(t, options.DisableParallelToolUse)
 	require.True(t, *options.DisableParallelToolUse)
 }
@@ -560,6 +656,194 @@ func TestGenerate_SendsOutputConfigEffort(t *testing.T) {
 	require.Equal(t, "POST", call.method)
 	require.Equal(t, "/v1/messages", call.path)
 	requireAnthropicEffort(t, call.body, EffortMedium)
+}
+
+func TestGenerate_SendsThinkingDisplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		model       string
+		options     func() *ProviderOptions
+		wantType    string
+		wantDisplay string
+		wantBudget  int64
+	}{
+		{
+			name:  "explicit display with adaptive thinking",
+			model: "claude-sonnet-4-20250514",
+			options: func() *ProviderOptions {
+				effort := EffortMedium
+				display := ThinkingDisplayOmitted
+				return &ProviderOptions{Effort: &effort, ThinkingDisplay: &display}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "omitted",
+		},
+		{
+			name:  "explicit display with budget thinking",
+			model: "claude-sonnet-4-20250514",
+			options: func() *ProviderOptions {
+				display := ThinkingDisplaySummarized
+				return &ProviderOptions{
+					Thinking:        &ThinkingProviderOption{BudgetTokens: 2048},
+					ThinkingDisplay: &display,
+				}
+			},
+			wantType:    "enabled",
+			wantDisplay: "summarized",
+			wantBudget:  2048,
+		},
+		{
+			name:  "opus models default to summarized display",
+			model: "claude-opus-4-7-20260101",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				return &ProviderOptions{Effort: &effort}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "bedrock opus models default to summarized display",
+			model: "us.anthropic.claude-opus-4-8-20260101-v1:0",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				return &ProviderOptions{Effort: &effort}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "explicit display overrides opus default",
+			model: "claude-opus-4-8-20260101",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				display := ThinkingDisplayOmitted
+				return &ProviderOptions{Effort: &effort, ThinkingDisplay: &display}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "omitted",
+		},
+		{
+			name:  "mythos models default to adaptive thinking",
+			model: "claude-mythos-preview",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "opus models use adaptive thinking when budget thinking configured",
+			model: "claude-opus-4-7",
+			options: func() *ProviderOptions {
+				return &ProviderOptions{Thinking: &ThinkingProviderOption{BudgetTokens: 2048}}
+			},
+			wantType:    "adaptive",
+			wantDisplay: "summarized",
+		},
+		{
+			name:  "older opus models keep provider default",
+			model: "claude-opus-4-6-20260101",
+			options: func() *ProviderOptions {
+				effort := EffortHigh
+				return &ProviderOptions{Effort: &effort}
+			},
+			wantType: "adaptive",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, calls := newAnthropicJSONServer(mockAnthropicGenerateResponse())
+			defer server.Close()
+
+			provider, err := New(
+				WithAPIKey("test-api-key"),
+				WithBaseURL(server.URL),
+			)
+			require.NoError(t, err)
+
+			model, err := provider.LanguageModel(context.Background(), tt.model)
+			require.NoError(t, err)
+
+			_, err = model.Generate(context.Background(), fantasy.Call{
+				Prompt:          testPrompt(),
+				ProviderOptions: NewProviderOptions(tt.options()),
+			})
+			require.NoError(t, err)
+
+			call := awaitAnthropicCall(t, calls)
+			thinking, ok := call.body["thinking"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, tt.wantType, thinking["type"])
+			if tt.wantDisplay == "" {
+				require.NotContains(t, thinking, "display")
+			} else {
+				require.Equal(t, tt.wantDisplay, thinking["display"])
+			}
+			if tt.wantBudget != 0 {
+				require.InDelta(t, tt.wantBudget, thinking["budget_tokens"], 0)
+			}
+		})
+	}
+}
+
+func TestGenerate_DoesNotEnableThinkingForPlainOpus(t *testing.T) {
+	t.Parallel()
+
+	server, calls := newAnthropicJSONServer(mockAnthropicGenerateResponse())
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-opus-4-7")
+	require.NoError(t, err)
+
+	_, err = model.Generate(context.Background(), fantasy.Call{Prompt: testPrompt()})
+	require.NoError(t, err)
+
+	call := awaitAnthropicCall(t, calls)
+	require.NotContains(t, call.body, "thinking")
+}
+
+func TestDefaultsToOmittedThinkingDisplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		model string
+		want  bool
+	}{
+		{name: "opus 4.7 alias", model: "claude-opus-4-7", want: true},
+		{name: "opus 4.7", model: "claude-opus-4-7-20260101", want: true},
+		{name: "opus 4.10", model: "claude-opus-4-10-20260101", want: true},
+		{name: "bedrock opus 4.8 alias", model: "us.anthropic.claude-opus-4-8-v1", want: true},
+		{name: "bedrock opus 4.8", model: "us.anthropic.claude-opus-4-8-20260101-v1:0", want: true},
+		{name: "mythos preview", model: "claude-mythos-preview", want: true},
+		{name: "bedrock mythos preview", model: "anthropic.claude-mythos-preview", want: true},
+		{name: "opus 4.6", model: "claude-opus-4-6-20260101", want: false},
+		{name: "opus 4 date only", model: "claude-opus-4-20250514", want: false},
+		{name: "bedrock opus 4 date only", model: "us.anthropic.claude-opus-4-20250514-v1:0", want: false},
+		{name: "sonnet", model: "claude-sonnet-4-20250514", want: false},
+		{name: "no minor", model: "claude-opus-4", want: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, defaultsToOmittedThinkingDisplay(tt.model))
+		})
+	}
 }
 
 func TestStream_SendsOutputConfigEffort(t *testing.T) {
@@ -597,6 +881,122 @@ func TestStream_SendsOutputConfigEffort(t *testing.T) {
 	require.Equal(t, "POST", call.method)
 	require.Equal(t, "/v1/messages", call.path)
 	requireAnthropicEffort(t, call.body, EffortHigh)
+}
+
+func TestStream_RequiresMessageStopBeforeFinish(t *testing.T) {
+	t.Parallel()
+
+	completeTextStream := []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_complete","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	}
+
+	missingStopReasonStream := append([]string(nil), completeTextStream[:len(completeTextStream)-2]...)
+	missingStopReasonStream = append(missingStopReasonStream, completeTextStream[len(completeTextStream)-1])
+
+	tests := []struct {
+		name           string
+		chunks         []string
+		wantFinish     bool
+		wantRetryable  bool
+		wantErrContain string
+	}{
+		{
+			name:       "complete stream finishes",
+			chunks:     completeTextStream,
+			wantFinish: true,
+		},
+		{
+			name:          "message_stop without stop_reason errors",
+			chunks:        missingStopReasonStream,
+			wantRetryable: true,
+		},
+		{
+			name:          "text stream closed before message_stop errors",
+			chunks:        completeTextStream[:len(completeTextStream)-1],
+			wantRetryable: true,
+		},
+		{
+			// api_error is a temporary provider-side fault, so it is worth
+			// retrying even though it arrived inside a 200 response.
+			name: "provider error event is preserved and retried",
+			chunks: []string{
+				anthropicSSEEvent("error", `{"type":"error","error":{"type":"api_error","message":"stream down"}}`),
+			},
+			wantRetryable: true,
+			wantErrContain: "stream down",
+		},
+		{
+			name: "permanent error event is not retried",
+			chunks: []string{
+				anthropicSSEEvent("error", `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`),
+			},
+			wantErrContain: "bad request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, calls := newAnthropicStreamingServer(tt.chunks)
+			defer server.Close()
+
+			provider, err := New(
+				WithAPIKey("test-api-key"),
+				WithBaseURL(server.URL),
+			)
+			require.NoError(t, err)
+
+			model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+			require.NoError(t, err)
+
+			stream, err := model.Stream(context.Background(), fantasy.Call{Prompt: testPrompt()})
+			require.NoError(t, err)
+
+			parts := collectAnthropicStreamParts(stream)
+			_ = awaitAnthropicCall(t, calls)
+
+			var finishes, errorParts []fantasy.StreamPart
+			for _, part := range parts {
+				switch part.Type {
+				case fantasy.StreamPartTypeFinish:
+					finishes = append(finishes, part)
+				case fantasy.StreamPartTypeError:
+					errorParts = append(errorParts, part)
+				}
+			}
+
+			if tt.wantFinish {
+				require.Len(t, finishes, 1)
+				require.Empty(t, errorParts)
+				return
+			}
+
+			require.Empty(t, finishes)
+			require.Len(t, errorParts, 1)
+			require.Error(t, errorParts[0].Error)
+			if tt.wantErrContain != "" {
+				require.Contains(t, errorParts[0].Error.Error(), tt.wantErrContain)
+			}
+
+			var providerErr *fantasy.ProviderError
+			if tt.wantRetryable {
+				require.ErrorAs(t, errorParts[0].Error, &providerErr)
+				require.True(t, providerErr.IsRetryable())
+			} else {
+				require.NotErrorIs(t, errorParts[0].Error, io.ErrUnexpectedEOF)
+				if errors.As(errorParts[0].Error, &providerErr) {
+					require.False(t, providerErr.IsRetryable())
+					require.NotErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+				}
+			}
+		})
+	}
 }
 
 type anthropicCall struct {
@@ -658,6 +1058,63 @@ func newAnthropicStreamingServer(chunks []string) (*httptest.Server, <-chan anth
 	return server, calls
 }
 
+func anthropicSSEEvent(event, data string) string {
+	return fmt.Sprintf("event: %s\ndata: %s\n\n", event, data)
+}
+
+func collectAnthropicStreamParts(stream fantasy.StreamResponse) []fantasy.StreamPart {
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+	return parts
+}
+
+func streamAnthropicParts(t *testing.T, chunks []string, tools ...fantasy.Tool) []fantasy.StreamPart {
+	t.Helper()
+
+	server, calls := newAnthropicStreamingServer(chunks)
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{
+		Prompt: testPrompt(),
+		Tools:  tools,
+	})
+	require.NoError(t, err)
+
+	parts := collectAnthropicStreamParts(stream)
+	_ = awaitAnthropicCall(t, calls)
+	return parts
+}
+
+func requireReasoningMetadata(t *testing.T, metadata fantasy.ProviderMetadata) *ReasoningOptionMetadata {
+	t.Helper()
+
+	reasoning := GetReasoningMetadata(fantasy.ProviderOptions(metadata))
+	require.NotNil(t, reasoning)
+	return reasoning
+}
+
+func streamPartsByType(parts []fantasy.StreamPart, typ fantasy.StreamPartType) []fantasy.StreamPart {
+	var matches []fantasy.StreamPart
+	for _, part := range parts {
+		if part.Type == typ {
+			matches = append(matches, part)
+		}
+	}
+	return matches
+}
+
 func awaitAnthropicCall(t *testing.T, calls <-chan anthropicCall) anthropicCall {
 	t.Helper()
 
@@ -668,6 +1125,17 @@ func awaitAnthropicCall(t *testing.T, calls <-chan anthropicCall) anthropicCall 
 		t.Fatal("timed out waiting for Anthropic request")
 		return anthropicCall{}
 	}
+}
+
+func requireWebSearchResultMetadata(t *testing.T, metadata fantasy.ProviderMetadata) *WebSearchResultMetadata {
+	t.Helper()
+
+	providerOption, ok := fantasy.ProviderOptions(metadata)[Name]
+	require.True(t, ok, "provider metadata should contain anthropic key")
+	result, ok := providerOption.(*WebSearchResultMetadata)
+	require.True(t, ok, "provider metadata should be *WebSearchResultMetadata")
+	require.NotNil(t, result)
+	return result
 }
 
 func assertNoAnthropicCall(t *testing.T, calls <-chan anthropicCall) {
@@ -784,6 +1252,103 @@ func mockAnthropicWebSearchResponse() map[string]any {
 			},
 		},
 	}
+}
+
+func mockAnthropicWebSearchErrorResponse() map[string]any {
+	return map[string]any{
+		"id":    "msg_01WebSearchError",
+		"type":  "message",
+		"role":  "assistant",
+		"model": "claude-sonnet-4-20250514",
+		"content": []any{
+			map[string]any{
+				"type":   "server_tool_use",
+				"id":     "srvtoolu_err",
+				"name":   "web_search",
+				"input":  map[string]any{"query": "latest AI news"},
+				"caller": map[string]any{"type": "direct"},
+			},
+			map[string]any{
+				"type":        "web_search_tool_result",
+				"tool_use_id": "srvtoolu_err",
+				"caller":      map[string]any{"type": "direct"},
+				"content": map[string]any{
+					"type":       "web_search_tool_result_error",
+					"error_code": "max_uses_exceeded",
+				},
+			},
+			map[string]any{
+				"type": "text",
+				"text": "I was unable to search.",
+			},
+		},
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":                100,
+			"output_tokens":               20,
+			"cache_creation_input_tokens": 0,
+			"cache_read_input_tokens":     0,
+			"server_tool_use": map[string]any{
+				"web_search_requests": 1,
+			},
+		},
+	}
+}
+
+func TestToPrompt_WebSearchProviderExecutedErrorRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	prompt := fantasy.Prompt{
+		{
+			Role: fantasy.MessageRoleUser,
+			Content: []fantasy.MessagePart{
+				fantasy.TextPart{Text: "Search for the latest AI news"},
+			},
+		},
+		{
+			Role: fantasy.MessageRoleAssistant,
+			Content: []fantasy.MessagePart{
+				fantasy.ToolCallPart{
+					ToolCallID:       "srvtoolu_err",
+					ToolName:         "web_search",
+					Input:            `{"query":"latest AI news"}`,
+					ProviderExecuted: true,
+				},
+				fantasy.ToolResultPart{
+					ToolCallID:       "srvtoolu_err",
+					ProviderExecuted: true,
+					ProviderOptions: fantasy.ProviderOptions{
+						Name: &WebSearchResultMetadata{ErrorCode: "max_uses_exceeded"},
+					},
+				},
+				fantasy.TextPart{Text: "I was unable to search."},
+			},
+		},
+	}
+
+	_, messages, warnings := toPrompt(prompt, true)
+	require.Empty(t, warnings)
+	require.Len(t, messages, 2)
+
+	assistantMsg := messages[1]
+	require.Len(t, assistantMsg.Content, 3)
+	require.NotNil(t, assistantMsg.Content[0].OfServerToolUse)
+	require.Equal(t, "srvtoolu_err", assistantMsg.Content[0].OfServerToolUse.ID)
+
+	webResult := assistantMsg.Content[1]
+	require.NotNil(t, webResult.OfWebSearchToolResult)
+	require.Equal(t, "srvtoolu_err", webResult.OfWebSearchToolResult.ToolUseID)
+	require.Nil(t, webResult.OfWebSearchToolResult.Content.OfWebSearchToolResultBlockItem)
+	require.NotNil(t, webResult.OfWebSearchToolResult.Content.OfRequestWebSearchToolResultError)
+	require.Equal(
+		t,
+		anthropic.WebSearchToolResultErrorCodeMaxUsesExceeded,
+		webResult.OfWebSearchToolResult.Content.OfRequestWebSearchToolResultError.ErrorCode,
+	)
+
+	require.NotNil(t, assistantMsg.Content[2].OfText)
+	require.Equal(t, "I was unable to search.", assistantMsg.Content[2].OfText.Text)
 }
 
 func TestToPrompt_WebSearchProviderExecutedToolResults(t *testing.T) {
@@ -959,10 +1524,71 @@ func TestGenerate_WebSearchResponse(t *testing.T) {
 
 	// TextContent with the final answer.
 	require.Len(t, texts, 1)
-	require.Equal(t,
+	require.Equal(
+		t,
 		"Based on recent search results, here is the latest AI news.",
 		texts[0].Text,
 	)
+}
+
+func TestGenerate_WebSearchErrorPreservesErrorCode(t *testing.T) {
+	t.Parallel()
+
+	server, calls := newAnthropicJSONServer(mockAnthropicWebSearchErrorResponse())
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	resp, err := model.Generate(context.Background(), fantasy.Call{
+		Prompt: testPrompt(),
+		Tools: []fantasy.Tool{
+			WebSearchTool(nil),
+		},
+	})
+	require.NoError(t, err)
+
+	call := awaitAnthropicCall(t, calls)
+	require.Equal(t, "POST", call.method)
+	require.Equal(t, "/v1/messages", call.path)
+
+	var (
+		toolCalls   []fantasy.ToolCallContent
+		sources     []fantasy.SourceContent
+		toolResults []fantasy.ToolResultContent
+		texts       []fantasy.TextContent
+	)
+	for _, c := range resp.Content {
+		switch v := c.(type) {
+		case fantasy.ToolCallContent:
+			toolCalls = append(toolCalls, v)
+		case fantasy.SourceContent:
+			sources = append(sources, v)
+		case fantasy.ToolResultContent:
+			toolResults = append(toolResults, v)
+		case fantasy.TextContent:
+			texts = append(texts, v)
+		}
+	}
+
+	require.Len(t, toolCalls, 1)
+	require.True(t, toolCalls[0].ProviderExecuted)
+	require.Equal(t, "srvtoolu_err", toolCalls[0].ToolCallID)
+	require.Empty(t, sources)
+	require.Len(t, toolResults, 1)
+	require.True(t, toolResults[0].ProviderExecuted)
+	require.Equal(t, "srvtoolu_err", toolResults[0].ToolCallID)
+	webMeta := requireWebSearchResultMetadata(t, toolResults[0].ProviderMetadata)
+	require.Equal(t, "max_uses_exceeded", webMeta.ErrorCode)
+	require.Empty(t, webMeta.Results)
+	require.Len(t, texts, 1)
+	require.Equal(t, "I was unable to search.", texts[0].Text)
 }
 
 func TestGenerate_WebSearchToolInRequest(t *testing.T) {
@@ -1434,6 +2060,75 @@ func TestStream_WebSearchResponse(t *testing.T) {
 	// Text block emits a text delta.
 	require.NotEmpty(t, textDeltas, "should have text deltas")
 	require.Equal(t, "Here are the results.", textDeltas[0].Delta)
+}
+
+func TestStream_WebSearchErrorPreservesErrorCode(t *testing.T) {
+	t.Parallel()
+
+	chunks := []string{
+		"event: message_start\n",
+		`data: {"type":"message_start","message":{"id":"msg_01WebSearchError","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":100,"output_tokens":0}}}` + "\n\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_err","name":"web_search","input":{}}}` + "\n\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":0}` + "\n\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_err","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}}` + "\n\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":1}` + "\n\n",
+		"event: message_stop\n",
+		`data: {"type":"message_stop"}` + "\n\n",
+	}
+
+	server, calls := newAnthropicStreamingServer(chunks)
+	defer server.Close()
+
+	provider, err := New(
+		WithAPIKey("test-api-key"),
+		WithBaseURL(server.URL),
+	)
+	require.NoError(t, err)
+
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{
+		Prompt: testPrompt(),
+		Tools: []fantasy.Tool{
+			WebSearchTool(nil),
+		},
+	})
+	require.NoError(t, err)
+
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+
+	_ = awaitAnthropicCall(t, calls)
+
+	var (
+		toolResults []fantasy.StreamPart
+		sourceParts []fantasy.StreamPart
+	)
+	for _, p := range parts {
+		switch p.Type {
+		case fantasy.StreamPartTypeToolResult:
+			toolResults = append(toolResults, p)
+		case fantasy.StreamPartTypeSource:
+			sourceParts = append(sourceParts, p)
+		}
+	}
+
+	require.Len(t, toolResults, 1)
+	require.Empty(t, sourceParts)
+	require.True(t, toolResults[0].ProviderExecuted)
+	require.Equal(t, "srvtoolu_err", toolResults[0].ID)
+	require.Equal(t, "web_search", toolResults[0].ToolCallName)
+	webMeta := requireWebSearchResultMetadata(t, toolResults[0].ProviderMetadata)
+	require.Equal(t, "max_uses_exceeded", webMeta.ErrorCode)
+	require.Empty(t, webMeta.Results)
 }
 
 func TestGenerate_ToolChoiceNone(t *testing.T) {
@@ -1934,6 +2629,126 @@ func TestGenerate_BetaAPI(t *testing.T) {
 	})
 }
 
+func TestStream_RedactedThinkingEmitsStartAndEnd(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_redacted","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"redacted_blob"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	starts := streamPartsByType(parts, fantasy.StreamPartTypeReasoningStart)
+	ends := streamPartsByType(parts, fantasy.StreamPartTypeReasoningEnd)
+	require.Len(t, starts, 1)
+	require.Len(t, ends, 1)
+	require.Equal(t, starts[0].ID, ends[0].ID)
+	require.Equal(t, "redacted_blob", requireReasoningMetadata(t, starts[0].ProviderMetadata).RedactedData)
+	require.Equal(t, "redacted_blob", requireReasoningMetadata(t, ends[0].ProviderMetadata).RedactedData)
+}
+
+func TestStream_ThinkingSignaturePresentOnEnd(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_sig","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first thought"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_123"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	deltas := streamPartsByType(parts, fantasy.StreamPartTypeReasoningDelta)
+	ends := streamPartsByType(parts, fantasy.StreamPartTypeReasoningEnd)
+	require.Len(t, deltas, 2)
+	require.Equal(t, "first thought", deltas[0].Delta)
+	require.Equal(t, "sig_123", requireReasoningMetadata(t, deltas[1].ProviderMetadata).Signature)
+	require.Len(t, ends, 1)
+	require.Equal(t, "sig_123", requireReasoningMetadata(t, ends[0].ProviderMetadata).Signature)
+}
+
+func TestStream_NilMetadataDeltaDoesNotEraseSignatureOnEnd(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_sig_tail","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_tail"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"second"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	deltas := streamPartsByType(parts, fantasy.StreamPartTypeReasoningDelta)
+	ends := streamPartsByType(parts, fantasy.StreamPartTypeReasoningEnd)
+	require.Len(t, deltas, 3)
+	require.Equal(t, "first", deltas[0].Delta)
+	require.Len(t, deltas[0].ProviderMetadata, 0)
+	require.Equal(t, "sig_tail", requireReasoningMetadata(t, deltas[1].ProviderMetadata).Signature)
+	require.Equal(t, "second", deltas[2].Delta)
+	require.Len(t, deltas[2].ProviderMetadata, 0)
+	require.Len(t, ends, 1)
+	require.Equal(t, "sig_tail", requireReasoningMetadata(t, ends[0].ProviderMetadata).Signature)
+}
+
+func TestStream_InterleavedThinkingAndRedactedThinking(t *testing.T) {
+	t.Parallel()
+
+	parts := streamAnthropicParts(t, []string{
+		anthropicSSEEvent("message_start", `{"type":"message_start","message":{"id":"msg_interleaved","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"redacted_0"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"reasoning_1"}}`),
+		anthropicSSEEvent("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig_1"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":1}`),
+		anthropicSSEEvent("content_block_start", `{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","data":"redacted_2"}}`),
+		anthropicSSEEvent("content_block_stop", `{"type":"content_block_stop","index":2}`),
+		anthropicSSEEvent("message_stop", `{"type":"message_stop"}`),
+	})
+
+	var reasoningParts []fantasy.StreamPart
+	for _, part := range parts {
+		switch part.Type {
+		case fantasy.StreamPartTypeReasoningStart, fantasy.StreamPartTypeReasoningDelta, fantasy.StreamPartTypeReasoningEnd:
+			reasoningParts = append(reasoningParts, part)
+		}
+	}
+
+	require.Len(t, reasoningParts, 8)
+	require.Equal(t, fantasy.StreamPartTypeReasoningStart, reasoningParts[0].Type)
+	require.Equal(t, "0", reasoningParts[0].ID)
+	require.Equal(t, "redacted_0", requireReasoningMetadata(t, reasoningParts[0].ProviderMetadata).RedactedData)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningEnd, reasoningParts[1].Type)
+	require.Equal(t, "0", reasoningParts[1].ID)
+	require.Equal(t, "redacted_0", requireReasoningMetadata(t, reasoningParts[1].ProviderMetadata).RedactedData)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningStart, reasoningParts[2].Type)
+	require.Equal(t, "1", reasoningParts[2].ID)
+	require.Len(t, reasoningParts[2].ProviderMetadata, 0)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningDelta, reasoningParts[3].Type)
+	require.Equal(t, "reasoning_1", reasoningParts[3].Delta)
+	require.Equal(t, fantasy.StreamPartTypeReasoningDelta, reasoningParts[4].Type)
+	require.Equal(t, "sig_1", requireReasoningMetadata(t, reasoningParts[4].ProviderMetadata).Signature)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningEnd, reasoningParts[5].Type)
+	require.Equal(t, "1", reasoningParts[5].ID)
+	require.Equal(t, "sig_1", requireReasoningMetadata(t, reasoningParts[5].ProviderMetadata).Signature)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningStart, reasoningParts[6].Type)
+	require.Equal(t, "2", reasoningParts[6].ID)
+	require.Equal(t, "redacted_2", requireReasoningMetadata(t, reasoningParts[6].ProviderMetadata).RedactedData)
+
+	require.Equal(t, fantasy.StreamPartTypeReasoningEnd, reasoningParts[7].Type)
+	require.Equal(t, "2", reasoningParts[7].ID)
+	require.Equal(t, "redacted_2", requireReasoningMetadata(t, reasoningParts[7].ProviderMetadata).RedactedData)
+}
+
 func TestStream_BetaAPI(t *testing.T) {
 	t.Parallel()
 
@@ -2172,7 +2987,8 @@ func TestGenerate_ComputerUseTool(t *testing.T) {
 
 		// Build the next prompt: append the assistant tool-call turn
 		// and the user screenshot-result turn.
-		prompt = append(prompt,
+		prompt = append(
+			prompt,
 			fantasy.Message{
 				Role: fantasy.MessageRoleAssistant,
 				Content: []fantasy.MessagePart{
@@ -2352,7 +3168,8 @@ func TestStream_ComputerUseTool(t *testing.T) {
 		require.NoError(t, err, "turn %d", turn)
 		gotActions = append(gotActions, parsed.Action)
 
-		prompt = append(prompt,
+		prompt = append(
+			prompt,
 			fantasy.Message{
 				Role: fantasy.MessageRoleAssistant,
 				Content: []fantasy.MessagePart{
@@ -2382,5 +3199,73 @@ func TestStream_ComputerUseTool(t *testing.T) {
 	require.Len(t, betaHeaders, len(steps)+1)
 	for i, h := range betaHeaders {
 		require.Contains(t, h, "computer-use-2025-01-24", "request %d", i)
+	}
+}
+
+func TestStream_TruncatedWithoutStopReason(t *testing.T) {
+	t.Parallel()
+
+	// Truncated stream: no terminal message_delta with stop_reason.
+	server, _ := newAnthropicStreamingServer([]string{
+		"event: message_start\n",
+		`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n",
+		"event: content_block_start\n",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n",
+		"event: content_block_delta\n",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n",
+		"event: content_block_stop\n",
+		`data: {"type":"content_block_stop","index":0}` + "\n\n",
+	})
+	defer server.Close()
+
+	provider, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL))
+	require.NoError(t, err)
+	model, err := provider.LanguageModel(context.Background(), "claude-sonnet-4-20250514")
+	require.NoError(t, err)
+
+	stream, err := model.Stream(context.Background(), fantasy.Call{Prompt: testPrompt()})
+	require.NoError(t, err)
+
+	var parts []fantasy.StreamPart
+	stream(func(part fantasy.StreamPart) bool {
+		parts = append(parts, part)
+		return true
+	})
+
+	var errPart *fantasy.StreamPart
+	for i, part := range parts {
+		if part.Type == fantasy.StreamPartTypeError {
+			errPart = &parts[i]
+		}
+		require.NotEqual(t, fantasy.StreamPartTypeFinish, part.Type)
+	}
+	require.NotNil(t, errPart)
+
+	var providerErr *fantasy.ProviderError
+	require.ErrorAs(t, errPart.Error, &providerErr)
+	require.True(t, providerErr.IsRetryable())
+	require.ErrorIs(t, providerErr.Cause, io.ErrUnexpectedEOF)
+}
+
+func TestMapFinishReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		reason   string
+		expected fantasy.FinishReason
+	}{
+		{"end_turn", fantasy.FinishReasonStop},
+		{"pause_turn", fantasy.FinishReasonStop},
+		{"stop_sequence", fantasy.FinishReasonStop},
+		{"max_tokens", fantasy.FinishReasonLength},
+		{"model_context_window_exceeded", fantasy.FinishReasonLength},
+		{"tool_use", fantasy.FinishReasonToolCalls},
+		{"refusal", fantasy.FinishReasonContentFilter},
+		{"", fantasy.FinishReasonUnknown},
+		{"unrecognized_future_reason", fantasy.FinishReasonUnknown},
+	}
+
+	for _, tc := range tests {
+		require.Equal(t, tc.expected, mapFinishReason(tc.reason), "stop_reason %q", tc.reason)
 	}
 }

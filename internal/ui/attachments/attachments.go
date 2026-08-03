@@ -148,3 +148,15 @@ func (r *Renderer) icon(a message.Attachment) lipgloss.Style {
 	}
 	return r.textStyle
 }
+
+// SetStyles replaces the render styles. The UI holds one Renderer for the
+// whole run, so a theme switch has to push new styles in rather than rebuild.
+func (r *Renderer) SetStyles(normalStyle, deletingStyle, imageStyle, textStyle lipgloss.Style) {
+	r.normalStyle = normalStyle
+	r.deletingStyle = deletingStyle
+	r.imageStyle = imageStyle
+	r.textStyle = textStyle
+}
+
+// Renderer returns the attachment renderer so callers can restyle it.
+func (a *Attachments) Renderer() *Renderer { return a.renderer }

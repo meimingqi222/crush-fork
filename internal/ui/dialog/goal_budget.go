@@ -95,8 +95,13 @@ func (g *GoalBudget) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	rc.AddPart("Set a token budget for the current goal. Use off or 0 for unlimited.")
 	rc.AddPart(t.Dialog.InputPrompt.Render(g.input.View()))
 	rc.Help = g.help.View(g)
-	DrawCenterCursor(scr, area, rc.Render(), g.Cursor())
-	return g.Cursor()
+	// DrawCenterCursor translates the cursor into screen coordinates in
+	// place, so the same value must be returned. Calling Cursor() twice
+	// yields a second, dialog-relative cursor that the UI would then treat
+	// as absolute -- parking the terminal caret up in the chat area.
+	cur := g.Cursor()
+	DrawCenterCursor(scr, area, rc.Render(), cur)
+	return cur
 }
 
 func (g *GoalBudget) ShortHelp() []key.Binding {

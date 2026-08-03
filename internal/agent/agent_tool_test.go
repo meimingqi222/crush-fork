@@ -158,33 +158,45 @@ func TestBuildAgentToolDescriptionEmphasizesParallelDelegation(t *testing.T) {
 	coord := &coordinator{cfg: cfg}
 	description := coord.buildAgentToolDescription()
 
-	assert.Contains(t, description, "If 2 or more substantial independent tasks can proceed in parallel")
-	assert.Contains(t, description, "use a single Agent call with the `tasks` array")
+	assert.Contains(t, description, "If 2+ substantial independent tasks can run in parallel")
+	assert.Contains(t, description, "use a single `tasks` array")
 	assert.Contains(t, description, "Prefer early delegation for bounded work")
-	assert.Contains(t, description, "Delegate to the `explore` subagent type only for evidence gathering, not final judgment")
-	assert.Contains(t, description, "Delegate to the `review` subagent type for final code review")
-	assert.Contains(t, description, "Delegate to the `plan` subagent type for architecture planning")
-	assert.Contains(t, description, "Delegate to the `librarian` subagent type for source-verified")
-	assert.Contains(t, description, "All subagent types below are selected via the `subagent_type` parameter")
-	assert.Contains(t, description, "Do not delegate final code review, correctness approval, or bug triage decisions to `explore`")
-	assert.Contains(t, description, "restricted `bash` tool")
-	assert.Contains(t, description, "git diff")
-	assert.Contains(t, description, "Do not claim that you are delegating")
-	assert.Contains(t, description, "make the tool call first rather than narrating a future intention to delegate")
-	assert.Contains(t, description, "Do not use the main thread for broad implementation work just because you already know which files are involved")
-	assert.Contains(t, description, "prefer multiple direct tool calls in one response instead of subagents")
+	assert.Contains(t, description, "**`explore`** — evidence gathering only, not final judgment")
+	assert.Contains(t, description, "**`review`** — final code review")
+	assert.Contains(t, description, "**`plan`** — architecture planning")
+	assert.Contains(t, description, "**`librarian`** — source-verified")
+	assert.Contains(t, description, "All subagent types are selected via the `subagent_type` parameter")
+	assert.Contains(t, description, "never delegate correctness decisions to `explore`")
+	assert.Contains(t, description, "restricted git-inspection bash")
+	assert.Contains(t, description, "evidence gathering")
+	assert.Contains(t, description, "Don't claim you're delegating")
+	assert.Contains(t, description, "Prefer direct tool calls when cheaper")
+	assert.Contains(t, description, "Don't keep broad implementation in the main thread")
+	assert.Contains(t, description, "Direct `read`/`glob`/`grep` calls are always cheaper")
 }
 
 func TestCoderPromptTemplateRequiresOrchestrationFirstDelegation(t *testing.T) {
 	promptText := string(coderPromptTmpl)
 
-	assert.Contains(t, promptText, "The main agent is the orchestrator, not the default worker")
-	assert.Contains(t, promptText, "you MUST prefer a single Agent call with the `tasks` array")
-	assert.Contains(t, promptText, "After delegating independent work, continue on the critical path locally")
-	assert.Contains(t, promptText, "prefer batching direct tool calls in parallel instead of paying subagent overhead")
-	assert.Contains(t, promptText, "Use subagents when each independent workstream is substantial enough")
-	assert.Contains(t, promptText, "Do not merely say that you will use subagents or parallelize work")
-	assert.Contains(t, promptText, "If you describe a plan that depends on subagents but then continue doing the delegated work yourself without calling `agent`, you are behaving incorrectly")
+	// The coder prompt keeps a compact delegation pointer; the full policy
+	// lives in the agent tool description (single source of truth).
+	assert.Contains(t, promptText, "you are the orchestrator, not the default worker")
+	assert.Contains(t, promptText, "`explore` for search, `general` for independent implementation, `review` for review")
+	assert.Contains(t, promptText, "its description carries the full policy")
+
+	// The agent tool is deferred outside Orchestrate mode (see
+	// builtinToolMetadataForAgent), so the prompt must tell the model to
+	// activate it before delegating. Without this the model would try to call
+	// a tool that is not in its toolset and burn a recovery round trip.
+	assert.Contains(t, promptText, "The `agent` tool is deferred")
+	assert.Contains(t, promptText, "select:agent")
+	assert.Contains(t, promptText, "Decide first, activate once, then delegate")
+
+	agentToolText := string(agentToolDescription)
+	assert.Contains(t, agentToolText, "use a single `tasks` array")
+	assert.Contains(t, agentToolText, "Don't claim you're delegating")
+	assert.Contains(t, agentToolText, "Direct `read`/`glob`/`grep` calls are always cheaper")
+	assert.Contains(t, agentToolText, "If 2+ substantial independent tasks can run in parallel")
 }
 
 func TestCoderPromptTemplateRequiresPathGroundingBeforeRead(t *testing.T) {
@@ -319,14 +331,30 @@ func TestBuildToolsAllowsRecursiveAgentToolWhenConfigured(t *testing.T) {
 	)
 	applySubagentRuntimeConfig(&runtime, cfg.Config().EffectiveSubagentRuntime())
 
-	toolSet, err := coord.buildTools(withSubagentRuntimeContext(t.Context(), runtime), agentCfg, session.CollaborationModeDefault)
+	build, err := coord.buildToolsWithContext(withSubagentRuntimeContext(t.Context(), runtime), agentCfg, session.CollaborationModeDefault)
 	require.NoError(t, err)
 
-	var names []string
-	for _, tool := range toolSet {
-		names = append(names, tool.Info().Name)
+	// Recursive spawning stays available, but the agent tool is deferred
+	// outside Orchestrate mode (see builtinToolMetadataForAgent): it is
+	// registered and discoverable through tool_search rather than occupying a
+	// default tool slot. Subagents render coder.md.tpl too, so they get the
+	// same "activate with select:agent" instruction as the primary agent.
+	assert.Contains(t, build.RegisteredToolNames, AgentToolName,
+		"recursive spawning must still register the agent tool")
+
+	var deferredNames []string
+	for _, hint := range build.DeferredHints {
+		deferredNames = append(deferredNames, hint.Name)
 	}
-	assert.Contains(t, names, AgentToolName)
+	assert.Contains(t, deferredNames, AgentToolName,
+		"agent tool must be reachable via tool_search")
+
+	var exposed []string
+	for _, tool := range build.Tools {
+		exposed = append(exposed, tool.Info().Name)
+	}
+	assert.NotContains(t, exposed, AgentToolName,
+		"agent tool should not occupy a default tool slot outside Orchestrate mode")
 }
 
 func TestBuildToolsDoesNotBypassDisabledAgentToolForRecursiveSubagents(t *testing.T) {

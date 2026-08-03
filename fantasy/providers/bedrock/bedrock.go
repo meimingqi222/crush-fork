@@ -4,7 +4,7 @@ package bedrock
 import (
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
-	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/charmbracelet/anthropic-sdk-go/option"
 )
 
 type options struct {
@@ -76,5 +76,12 @@ func WithBaseURL(baseURL string) Option {
 func WithSkipAuth(skipAuth bool) Option {
 	return func(o *options) {
 		o.skipAuth = skipAuth
+	}
+}
+
+// WithRegion sets the AWS region for the Bedrock provider.
+func WithRegion(region string) Option {
+	return func(o *options) {
+		o.anthropicOptions = append(o.anthropicOptions, anthropic.WithBedrockRegion(region))
 	}
 }

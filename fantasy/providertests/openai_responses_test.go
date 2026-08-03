@@ -1,9 +1,6 @@
 package providertests
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 	"testing"
@@ -13,43 +10,6 @@ import (
 	"charm.land/x/vcr"
 	"github.com/stretchr/testify/require"
 )
-
-type openAIResponsesVCRTransport struct {
-	next http.RoundTripper
-}
-
-func (t openAIResponsesVCRTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Body == nil {
-		return t.next.RoundTrip(req)
-	}
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-	_ = req.Body.Close()
-
-	var payload map[string]any
-	if json.Unmarshal(body, &payload) == nil {
-		if input, ok := payload["input"].([]any); ok {
-			filtered := input[:0]
-			for _, item := range input {
-				value, _ := item.(map[string]any)
-				if value["type"] != "reasoning" {
-					filtered = append(filtered, item)
-				}
-			}
-			payload["input"] = filtered
-			if normalized, marshalErr := json.Marshal(payload); marshalErr == nil {
-				body = normalized
-			}
-		}
-	}
-
-	clone := req.Clone(req.Context())
-	clone.Body = io.NopCloser(bytes.NewReader(body))
-	clone.ContentLength = int64(len(body))
-	return t.next.RoundTrip(clone)
-}
 
 func TestOpenAIResponsesCommon(t *testing.T) {
 	var pairs []builderPair
@@ -63,11 +23,7 @@ func openAIReasoningBuilder(model string) builderFunc {
 	return func(t *testing.T, r *vcr.Recorder) (fantasy.LanguageModel, error) {
 		provider, err := openai.New(
 			openai.WithAPIKey(os.Getenv("FANTASY_OPENAI_API_KEY")),
-			// Reasoning items contain opaque encrypted replay state derived from
-			// the cassette response. Provider unit tests verify that this state is
-			// serialized; excluding it from VCR matching keeps these integration
-			// cassettes focused on stable request fields and response parsing.
-			openai.WithHTTPClient(&http.Client{Transport: openAIResponsesVCRTransport{next: r}}),
+			openai.WithHTTPClient(&http.Client{Transport: r}),
 			openai.WithUseResponsesAPI(),
 		)
 		if err != nil {

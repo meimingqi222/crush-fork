@@ -1017,6 +1017,33 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		RefreshCallConfig: func(callCtx context.Context) (sessionAgentRuntimeConfig, error) {
 			return c.refreshSessionAgentRuntimeConfig(callCtx, result, prompt, agent, isSubAgent)
 		},
+		// OnAuthRefresh lets the fantasy layer refresh credentials and retry
+		// the current step (instead of coordinator rerunning the whole Run).
+		// Falls back to the coordinator's post-run 401 handling below when
+		// the refresh itself fails.
+		OnAuthRefresh: func(callCtx context.Context, authErr *fantasy.ProviderError) error {
+			if inferenceProviderCfg.OAuthToken != nil {
+				return c.refreshOAuth2Token(callCtx, inferenceProviderCfg)
+			}
+			if strings.Contains(inferenceProviderCfg.APIKeyTemplate, "$") {
+				return c.refreshApiKeyTemplate(callCtx, inferenceProviderCfg)
+			}
+			return authErr
+		},
+		ModelProvider: func() fantasy.LanguageModel {
+			// Model rebuild happens inside the fantasy retry loop, which does
+			// not pass a context. Bound it with a timeout so provider
+			// construction (which may do OAuth/network work) cannot hang
+			// forever, while keeping it independent of the cancelled run ctx.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if m, _, err := c.buildAgentModels(ctx, isSubAgent); err == nil {
+				if lm := m.Model; lm != nil {
+					return retryableStreamModel{lm}
+				}
+			}
+			return nil
+		},
 		DeferredToolRuntime:  c,
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
@@ -1966,6 +1993,11 @@ type subagentBatchParams struct {
 	Tasks           []subagentTask
 	Context         string
 	RunInBackground bool
+	// ExistingSessionID continues a previous child session instead of
+	// creating a new one, preserving that subagent's full history. Only
+	// meaningful for a single-task batch: a batch fans out to several child
+	// sessions and there is no one session to continue.
+	ExistingSessionID string
 }
 
 // computeBatchIsolationDefault returns "worktree" when the batch contains
@@ -2205,6 +2237,11 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			IrcAgentID:         agentID,
 			AgentID:            agentID,
 			PrecomputedContext: batchContextPrefix,
+		}
+		// Continuing a child session only makes sense for a single task; a
+		// fan-out has no one session to continue.
+		if len(params.Tasks) == 1 {
+			prepared[i].Params.ExistingSessionID = params.ExistingSessionID
 		}
 	}
 

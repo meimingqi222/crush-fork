@@ -48,13 +48,6 @@ func makeLogEntry(level, msg, source string, line int, extra map[string]any) map
 	return entry
 }
 
-func TestNewCrushLogsTool(t *testing.T) {
-	t.Parallel()
-	tool := NewCrushLogsTool("/tmp/test.log")
-	require.NotNil(t, tool)
-	require.Equal(t, CrushLogsToolName, tool.Info().Name)
-}
-
 func TestCrushLogs_HappyPath(t *testing.T) {
 	t.Parallel()
 	entries := []map[string]any{

@@ -600,3 +600,11 @@ func loadMCPResources() []ResourceCompletionValue {
 	}
 	return resources
 }
+
+// SetStyles replaces the render styles. The UI holds one Completions for the
+// whole run, so a theme switch has to push new styles in rather than rebuild.
+func (c *Completions) SetStyles(normalStyle, focusedStyle, matchStyle lipgloss.Style) {
+	c.normalStyle = normalStyle
+	c.focusedStyle = focusedStyle
+	c.matchStyle = matchStyle
+}
