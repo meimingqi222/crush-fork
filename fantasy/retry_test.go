@@ -95,6 +95,34 @@ func TestIsRetryableError(t *testing.T) {
 	})
 }
 
+func TestRetryCallbackAllowsNonProviderErrors(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	opts := RetryOptions{
+		MaxRetries:     1,
+		InitialDelayIn: time.Millisecond,
+		BackoffFactor:  1,
+		OnRetry: func(err *ProviderError, _ time.Duration) {
+			called = true
+			if err != nil {
+				t.Fatalf("expected nil ProviderError for a generic retryable error, got %v", err)
+			}
+		},
+	}
+
+	retryFn := RetryWithExponentialBackoffRespectingRetryHeaders[int](opts)
+	_, err := retryFn(context.Background(), func() (int, error) {
+		return 0, errors.New("stream error: stream ID 1; INTERNAL_ERROR")
+	})
+	if err == nil {
+		t.Fatal("expected retry error, got nil")
+	}
+	if !called {
+		t.Fatal("expected OnRetry callback to run")
+	}
+}
+
 func TestRetryWithExponentialBackoff_ConnectionErrors(t *testing.T) {
 	t.Parallel()
 

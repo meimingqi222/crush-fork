@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/acp"
 	"github.com/charmbracelet/crush/internal/db"
@@ -184,6 +185,36 @@ func TestSessionSummaryTimestampDTOsUseMilliseconds(t *testing.T) {
 	require.Equal(t, int64(1_783_910_123_000), summary.UpdatedAt)
 }
 
+func TestSessionEventBridgeForwardsBrokerTitleUpdates(t *testing.T) {
+	t.Parallel()
+
+	env := newSessionMutationEnvironment(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// The async AI title path writes through session.UpdateTitleAndUsage, which
+	// only publishes to the internal broker. The bridge must relay it to the GUI
+	// hub as session.updated so the renderer's session list learns the title.
+	env.gui.StartSessionEventBridge(ctx, env.sessions)
+
+	require.NoError(t, env.sessions.UpdateTitleAndUsage(t.Context(), env.source.ID, "Generated Title", 10, 20, 0))
+
+	require.Eventually(t, func() bool {
+		events, err := env.hub.ReplayAfter(env.source.ID, 0)
+		if err != nil {
+			return false
+		}
+		for _, event := range events {
+			if event.Kind != sessionevent.KindSessionUpdated {
+				continue
+			}
+			if summary, ok := event.Payload.(sessionevent.SessionSummary); ok && summary.Title == "Generated Title" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 type sessionMutationEnvironment struct {
 	gui       *Service
 	hub       *sessionevent.Hub
@@ -272,6 +303,13 @@ func (r testInferenceResolver) EffectiveInference(ctx context.Context, sessionID
 		result.Temperature = value.Inference.Temperature
 	}
 	return result, nil
+}
+
+func (r testInferenceResolver) DefaultInference(context.Context) (session.EffectiveInference, error) {
+	maxTokens := int64(8192)
+	return session.EffectiveInference{InferenceOverrides: session.InferenceOverrides{
+		Model: "global-model", Provider: "provider", MaxOutputTokens: &maxTokens,
+	}}, nil
 }
 
 func createGUIMessage(t *testing.T, service message.Service, sessionID string, role message.MessageRole, text string) message.Message {

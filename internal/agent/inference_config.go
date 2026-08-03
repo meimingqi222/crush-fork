@@ -16,6 +16,10 @@ import (
 type InferenceResolver interface {
 	ValidateInferenceOverrides(context.Context, string, session.InferenceOverrides) error
 	EffectiveInference(context.Context, string) (session.EffectiveInference, error)
+	// DefaultInference resolves the inference config a brand-new session would
+	// get without any per-session overrides, so callers can preview the workspace
+	// default model before a session exists.
+	DefaultInference(context.Context) (session.EffectiveInference, error)
 }
 
 type (
@@ -76,13 +80,17 @@ func mergeInferenceOverrides(base, override session.InferenceOverrides) session.
 	if override.Think != nil {
 		result.Think = override.Think
 	}
+	if override.ReasoningEffort != nil {
+		result.ReasoningEffort = override.ReasoningEffort
+	}
 	return result
 }
 
 func inferenceOverridesEmpty(value session.InferenceOverrides) bool {
 	return value.Model == "" && value.Provider == "" && value.MaxOutputTokens == nil &&
 		value.Temperature == nil && value.TopP == nil && value.TopK == nil &&
-		value.FrequencyPenalty == nil && value.PresencePenalty == nil && value.Think == nil
+		value.FrequencyPenalty == nil && value.PresencePenalty == nil && value.Think == nil &&
+		value.ReasoningEffort == nil
 }
 
 func (c *coordinator) inferenceOverridesForContext(ctx context.Context) (session.InferenceOverrides, uint64, error) {
@@ -140,6 +148,9 @@ func applyInferenceToSelectedModel(selected *config.SelectedModel, overrides ses
 	if overrides.Think != nil {
 		selected.Think = overrides.Think
 	}
+	if overrides.ReasoningEffort != nil {
+		selected.ReasoningEffort = *overrides.ReasoningEffort
+	}
 }
 
 func validateInferenceValues(value session.InferenceOverrides) error {
@@ -166,6 +177,13 @@ func validateInferenceValues(value session.InferenceOverrides) error {
 			return fmt.Errorf("%s must be between -2 and 2", name)
 		}
 	}
+	if value.ReasoningEffort != nil {
+		switch *value.ReasoningEffort {
+		case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		default:
+			return errors.New("reasoningEffort must be one of none, minimal, low, medium, high, xhigh, max")
+		}
+	}
 	return nil
 }
 
@@ -188,25 +206,53 @@ func (c *coordinator) EffectiveInference(ctx context.Context, sessionID string) 
 	if err != nil {
 		return session.EffectiveInference{}, err
 	}
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
-	if !ok {
-		return session.EffectiveInference{}, errCoderAgentNotConfigured
-	}
-	modelType := agentCfg.Model
-	if modelType == "" {
-		modelType = config.SelectedModelTypeLarge
-	}
-	if sess.CollaborationMode == session.CollaborationModePlan {
-		modelType = config.SelectedModelTypePlan
-	}
-	selected, ok := c.cfg.Config().SelectedModelForType(modelType)
-	if !ok {
-		return session.EffectiveInference{}, fmt.Errorf("model type %q not configured", modelType)
+	selected, err := c.selectedModelForCoder(sess.CollaborationMode == session.CollaborationModePlan)
+	if err != nil {
+		return session.EffectiveInference{}, err
 	}
 	applyInferenceToSelectedModel(&selected, sess.Inference)
 	if err := validateInferenceValues(sess.Inference); err != nil {
 		return session.EffectiveInference{}, err
 	}
+	return c.buildEffectiveInference(selected, sess.InferenceRevision)
+}
+
+// DefaultInference resolves the model a brand-new coder session would use,
+// without any per-session overrides or plan-mode substitution. It lets the GUI
+// show the workspace default model in the composer before a session exists.
+func (c *coordinator) DefaultInference(ctx context.Context) (session.EffectiveInference, error) {
+	selected, err := c.selectedModelForCoder(false)
+	if err != nil {
+		return session.EffectiveInference{}, err
+	}
+	return c.buildEffectiveInference(selected, 0)
+}
+
+// selectedModelForCoder resolves the coder agent's configured SelectedModel,
+// substituting the plan model type when planMode is set.
+func (c *coordinator) selectedModelForCoder(planMode bool) (config.SelectedModel, error) {
+	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
+	if !ok {
+		return config.SelectedModel{}, errCoderAgentNotConfigured
+	}
+	modelType := agentCfg.Model
+	if modelType == "" {
+		modelType = config.SelectedModelTypeLarge
+	}
+	if planMode {
+		modelType = config.SelectedModelTypePlan
+	}
+	selected, ok := c.cfg.Config().SelectedModelForType(modelType)
+	if !ok {
+		return config.SelectedModel{}, fmt.Errorf("model type %q not configured", modelType)
+	}
+	return selected, nil
+}
+
+// buildEffectiveInference projects a resolved SelectedModel into the wire
+// EffectiveInference, filling max output tokens from the model catalog default
+// when the selection does not pin one.
+func (c *coordinator) buildEffectiveInference(selected config.SelectedModel, revision uint64) (session.EffectiveInference, error) {
 	if strings.TrimSpace(selected.Provider) == "" || strings.TrimSpace(selected.Model) == "" {
 		return session.EffectiveInference{}, errors.New("effective model is incomplete")
 	}
@@ -216,6 +262,15 @@ func (c *coordinator) EffectiveInference(ctx context.Context, sessionID string) 
 			maxTokens = model.DefaultMaxTokens
 		}
 	}
+	// Reasoning effort: use the explicit selection, else fall back to the
+	// catalog model's default so the GUI can preselect the real effective tier
+	// before the user overrides it.
+	reasoningEffort := selected.ReasoningEffort
+	if reasoningEffort == "" {
+		if model := c.cfg.Config().GetModel(selected.Provider, selected.Model); model != nil && model.CanReason {
+			reasoningEffort = model.DefaultReasoningEffort
+		}
+	}
 	result := session.EffectiveInference{
 		InferenceOverrides: session.InferenceOverrides{
 			Model: selected.Model, Provider: selected.Provider,
@@ -223,7 +278,10 @@ func (c *coordinator) EffectiveInference(ctx context.Context, sessionID string) 
 			FrequencyPenalty: selected.FrequencyPenalty, PresencePenalty: selected.PresencePenalty,
 			Think: selected.Think,
 		},
-		Revision: sess.InferenceRevision,
+		Revision: revision,
+	}
+	if reasoningEffort != "" {
+		result.ReasoningEffort = &reasoningEffort
 	}
 	if maxTokens > 0 {
 		result.MaxOutputTokens = &maxTokens

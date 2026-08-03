@@ -373,6 +373,10 @@ func (allowInferenceResolver) EffectiveInference(context.Context, string) (sessi
 	return session.EffectiveInference{}, nil
 }
 
+func (allowInferenceResolver) DefaultInference(context.Context) (session.EffectiveInference, error) {
+	return session.EffectiveInference{}, nil
+}
+
 func queuedIDs(queue turn.Queue) []string {
 	ids := make([]string, len(queue.Turns))
 	for index, item := range queue.Turns {

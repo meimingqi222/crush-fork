@@ -81,6 +81,10 @@ crush acp --cwd /path/to/project
 		guiService.SetTurnServices(appInstance.Turns, appInstance.Idempotency)
 		guiService.SetSessionMutationServices(appInstance.GetSessionMutations(), appInstance)
 		guiService.SetInferenceResolver(appInstance.GetInferenceResolver())
+		// Forward async session updates (AI-generated title, usage) from the
+		// internal broker to the GUI event stream so the session list + title
+		// bar update live instead of showing the placeholder title forever.
+		guiService.StartSessionEventBridge(ctx, appInstance.GetSessions())
 		handler.SetExperimentalExtension(guiService)
 		server := acp.NewServer(handler)
 		guiService.SetClientFSCaller(server)

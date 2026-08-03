@@ -71,9 +71,10 @@ func (g *GuidedGoal) HandleMsg(msg tea.Msg) Action {
 }
 
 func (g *GuidedGoal) Cursor() *tea.Cursor {
-	cur := InputCursor(g.com.Styles, g.input.Cursor())
+	cur := InputCursor(g.com.Styles, realTextInputCursor(g.input))
 	if cur != nil {
-		cur.Y += titleContentHeight + 2
+		// The description line sits between the title and the input field.
+		cur.Y += titleContentHeight + 1
 	}
 	return cur
 }

@@ -161,6 +161,12 @@ type (
 		Status    string
 		Mode      session.CollaborationMode
 	}
+	// goalSessionCreatedMsg is sent when a goal dialog is opened without an
+	// active session and a new session has been created on demand.
+	goalSessionCreatedMsg struct {
+		SessionID string
+		DialogID  string
+	}
 	planReviewLoadedMsg struct {
 		SessionID string
 		Plan      string
@@ -820,6 +826,31 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.SessionID != "" && (m.session == nil || m.session.ID != msg.SessionID) {
 			cmds = append(cmds, m.loadSession(msg.SessionID))
 		}
+		m.invalidateSidebarCache()
+
+	case goalSessionCreatedMsg:
+		if msg.SessionID == "" {
+			break
+		}
+		// A new session was created on demand for a goal dialog. Store a
+		// minimal session object so subsequent dialog logic can use the ID,
+		// then load the full session data in the background.
+		m.session = &session.Session{ID: msg.SessionID, Title: "New Session"}
+		if m.forceCompactMode {
+			m.isCompact = true
+		}
+		m.setState(uiChat, m.focus)
+		switch msg.DialogID {
+		case dialog.GoalID:
+			if !m.dialog.ContainsDialog(dialog.GoalID) {
+				m.dialog.OpenDialog(dialog.NewGoal(m.com, msg.SessionID))
+			}
+		case dialog.GuidedGoalID:
+			if !m.dialog.ContainsDialog(dialog.GuidedGoalID) {
+				m.dialog.OpenDialog(dialog.NewGuidedGoal(m.com, msg.SessionID))
+			}
+		}
+		cmds = append(cmds, m.loadSession(msg.SessionID))
 		m.invalidateSidebarCache()
 
 	case planReviewLoadedMsg:
@@ -6017,15 +6048,21 @@ func (m *UI) openForkDialog() tea.Cmd {
 }
 
 func (m *UI) openGoalDialog() tea.Cmd {
-	if m.session == nil {
-		return util.ReportWarn("Create or open a session before setting a goal.")
-	}
 	if m.dialog.ContainsDialog(dialog.GoalID) {
 		m.dialog.BringToFront(dialog.GoalID)
 		return nil
 	}
-	m.dialog.OpenDialog(dialog.NewGoal(m.com, m.session.ID))
-	return nil
+	if m.session != nil {
+		m.dialog.OpenDialog(dialog.NewGoal(m.com, m.session.ID))
+		return nil
+	}
+	return func() tea.Msg {
+		newSession, err := m.com.App.Sessions.Create(context.Background(), "New Session")
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return goalSessionCreatedMsg{SessionID: newSession.ID, DialogID: dialog.GoalID}
+	}
 }
 
 func (m *UI) openGoalStatusDialog() tea.Cmd {
@@ -6053,15 +6090,21 @@ func (m *UI) openGoalBudgetDialog() tea.Cmd {
 }
 
 func (m *UI) openGuidedGoalDialog() tea.Cmd {
-	if m.session == nil {
-		return util.ReportWarn("Create or open a session before starting guided goal setup.")
-	}
 	if m.dialog.ContainsDialog(dialog.GuidedGoalID) {
 		m.dialog.BringToFront(dialog.GuidedGoalID)
 		return nil
 	}
-	m.dialog.OpenDialog(dialog.NewGuidedGoal(m.com, m.session.ID))
-	return nil
+	if m.session != nil {
+		m.dialog.OpenDialog(dialog.NewGuidedGoal(m.com, m.session.ID))
+		return nil
+	}
+	return func() tea.Msg {
+		newSession, err := m.com.App.Sessions.Create(context.Background(), "New Session")
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return goalSessionCreatedMsg{SessionID: newSession.ID, DialogID: dialog.GuidedGoalID}
+	}
 }
 
 // openQuitDialog opens the quit confirmation dialog.

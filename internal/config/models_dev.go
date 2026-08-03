@@ -28,21 +28,32 @@ type ModelsDevProvider struct {
 }
 
 type ModelsDevModel struct {
-	ID               string               `json:"id"`
-	Name             string               `json:"name"`
-	Family           string               `json:"family"`
-	Attachment       bool                 `json:"attachment"`
-	Reasoning        bool                 `json:"reasoning"`
-	ToolCall         bool                 `json:"tool_call"`
-	StructuredOutput bool                 `json:"structured_output"`
-	Temperature      bool                 `json:"temperature"`
-	Knowledge        string               `json:"knowledge"`
-	ReleaseDate      string               `json:"release_date"`
-	LastUpdated      string               `json:"last_updated"`
-	Modalities       *ModelsDevModalities `json:"modalities,omitempty"`
-	OpenWeights      bool                 `json:"open_weights"`
-	Cost             *ModelsDevCost       `json:"cost,omitempty"`
-	Limit            *ModelsDevLimit      `json:"limit,omitempty"`
+	ID               string                     `json:"id"`
+	Name             string                     `json:"name"`
+	Family           string                     `json:"family"`
+	Attachment       bool                       `json:"attachment"`
+	Reasoning        bool                       `json:"reasoning"`
+	ToolCall         bool                       `json:"tool_call"`
+	StructuredOutput bool                       `json:"structured_output"`
+	Temperature      bool                       `json:"temperature"`
+	Knowledge        string                     `json:"knowledge"`
+	ReleaseDate      string                     `json:"release_date"`
+	LastUpdated      string                     `json:"last_updated"`
+	Modalities       *ModelsDevModalities       `json:"modalities,omitempty"`
+	OpenWeights      bool                       `json:"open_weights"`
+	Cost             *ModelsDevCost             `json:"cost,omitempty"`
+	Limit            *ModelsDevLimit            `json:"limit,omitempty"`
+	ReasoningOptions []ModelsDevReasoningOption `json:"reasoning_options,omitempty"`
+}
+
+// ModelsDevReasoningOption describes a reasoning control exposed by a model.
+// Dynamic catalogs such as opencode's models.opencode.ai use this to declare
+// supported reasoning controls instead of requiring clients to hardcode them.
+type ModelsDevReasoningOption struct {
+	Type   string   `json:"type"`
+	Values []string `json:"values,omitempty"`
+	Min    *int64   `json:"min,omitempty"`
+	Max    *int64   `json:"max,omitempty"`
 }
 
 type ModelsDevModalities struct {
@@ -196,6 +207,31 @@ func (m *ModelsDevModel) ToCatwalkModel() catwalk.Model {
 	return model
 }
 
+// reasoningLevelsFromOptions converts models.dev reasoning_options into the
+// catwalk ReasoningLevels slice. Effort options expose their values; toggle and
+// budget_tokens options expose no selectable levels, so the UI falls back to a
+// binary thinking toggle.
+func reasoningLevelsFromOptions(options []ModelsDevReasoningOption) []string {
+	for _, opt := range options {
+		switch opt.Type {
+		case "effort":
+			levels := make([]string, 0, len(opt.Values))
+			for _, v := range opt.Values {
+				if v == "" {
+					continue
+				}
+				levels = append(levels, v)
+			}
+			if len(levels) > 0 {
+				return levels
+			}
+		case "toggle", "budget_tokens":
+			return nil
+		}
+	}
+	return nil
+}
+
 // EnrichModel fills in missing metadata on a catwalk.Model from models.dev data.
 // Only zero-valued fields are overwritten.
 func EnrichModel(model *catwalk.Model, data ModelsDevData) {
@@ -232,6 +268,9 @@ func EnrichModel(model *catwalk.Model, data ModelsDevData) {
 	}
 	if !model.SupportsImages && devModel.Modalities != nil {
 		model.SupportsImages = slices.Contains(devModel.Modalities.Input, "image")
+	}
+	if len(model.ReasoningLevels) == 0 && len(devModel.ReasoningOptions) > 0 {
+		model.ReasoningLevels = reasoningLevelsFromOptions(devModel.ReasoningOptions)
 	}
 }
 

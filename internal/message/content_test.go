@@ -119,6 +119,66 @@ func TestStripTextualToolCallProtocolDSML(t *testing.T) {
 	}
 }
 
+func TestDisplayTextGuidedGoal(t *testing.T) {
+	t.Parallel()
+
+	text := `<guided_goal>
+You are helping the user define an autonomous goal.
+
+Rough goal from the user:
+为啥这个光标问题经常发生？
+
+Rules:
+- Ask questions.
+</guided_goal>`
+
+	visible, changed := DisplayText(text)
+
+	require.True(t, changed)
+	require.Equal(t, "Guided goal:\n为啥这个光标问题经常发生？", visible)
+}
+
+func TestDisplayTextPreservesOrdinaryXML(t *testing.T) {
+	t.Parallel()
+
+	text := "<note>Keep this XML visible.</note>"
+
+	visible, changed := DisplayText(text)
+
+	require.False(t, changed)
+	require.Equal(t, text, visible)
+}
+
+func TestDisplayTextRemovesKnownInternalBlocks(t *testing.T) {
+	t.Parallel()
+
+	text := "Before\n<think>private reasoning</think>\n<system-reminder>memory</system-reminder>\n<system_intent_gate_caveat>policy</system_intent_gate_caveat>\nAfter"
+
+	visible, changed := DisplayText(text)
+
+	require.True(t, changed)
+	require.Equal(t, "Before\n\n\n\nAfter", visible)
+}
+
+func TestDisplayTextUnwrapsTaskNotification(t *testing.T) {
+	t.Parallel()
+
+	text := `<task-notification>
+<task-id>abc123</task-id>
+<status>completed</status>
+<summary>Agent finished</summary>
+<result>Tests passed.</result>
+</task-notification>`
+
+	visible, changed := DisplayText(text)
+
+	require.True(t, changed)
+	require.NotContains(t, visible, "<task-")
+	require.NotContains(t, visible, "<status>")
+	require.Contains(t, visible, "abc123")
+	require.Contains(t, visible, "Tests passed.")
+}
+
 func BenchmarkPromptWithTextAttachments(b *testing.B) {
 	cases := []struct {
 		name        string

@@ -424,13 +424,19 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 
 	// Enrich all provider models with metadata from models.dev.
 	// This fills in missing context window, costs, capabilities, etc.
-	if devData := GetModelsDevData(); len(devData) > 0 {
-		for id, pc := range c.Providers.Seq2() {
-			for i := range pc.Models {
+	devData := GetModelsDevData()
+	for id, pc := range c.Providers.Seq2() {
+		for i := range pc.Models {
+			if len(devData) > 0 {
 				EnrichModel(&pc.Models[i].Model, devData)
 			}
-			c.Providers.Set(id, pc)
+			// Resolve reasoning tiers after capabilities are settled: config or
+			// catwalk levels win, otherwise infer from the model id. Runs
+			// regardless of models.dev availability so canReason models always
+			// expose their tiers to the agent gating and the GUI/TUI selectors.
+			ResolveReasoningLevels(&pc.Models[i].Model)
 		}
+		c.Providers.Set(id, pc)
 	}
 
 	// Drop recent-model entries whose provider or model was removed from

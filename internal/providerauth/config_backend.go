@@ -93,6 +93,10 @@ func projectModels(providerID string, known []catwalk.Provider, configured map[s
 		if model.ID == "" {
 			continue
 		}
+		// Idempotent: config-backed models were already resolved at load time;
+		// this covers the known-catalog branch (providers absent from user
+		// config) so the GUI always receives concrete reasoning tiers.
+		config.ResolveReasoningLevels(&model)
 		result = append(result, Model{
 			ProviderID: providerID, ID: model.ID, Name: model.Name,
 			ContextWindow: model.ContextWindow, MaxOutputTokens: model.DefaultMaxTokens,

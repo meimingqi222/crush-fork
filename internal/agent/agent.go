@@ -1519,7 +1519,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				return flushAssistant()
 			},
 			OnRetry: func(providerErr *fantasy.ProviderError, delay time.Duration) {
-				slog.Info("Retrying after network error", "error", providerErr.Error(), "delay", delay)
+				retryError := "retryable error without provider details"
+				if providerErr != nil {
+					retryError = providerErr.Error()
+				}
+				slog.Info("Retrying after network error", "error", retryError, "delay", delay)
 				if currentAssistant == nil {
 					return
 				}

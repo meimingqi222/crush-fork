@@ -48,6 +48,7 @@ func (m *UserMessageItem) RawRender(width int) string {
 	renderer := common.MarkdownRenderer(m.sty, cappedWidth)
 
 	msgContent := strings.TrimSpace(m.message.Content().Text)
+	msgContent, _ = message.DisplayText(msgContent)
 	result, err := renderer.Render(msgContent)
 	if err != nil {
 		content = msgContent
@@ -101,7 +102,7 @@ func (m *UserMessageItem) renderAttachments(width int) string {
 func (m *UserMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	k := key.String()
 	if k == "c" || k == "y" {
-		text := m.message.Content().Text
+		text, _ := message.DisplayText(m.message.Content().Text)
 		return true, common.CopyToClipboard(text, "Message copied to clipboard")
 	}
 	if k == "enter" && m.hasImageAttachment() {

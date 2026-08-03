@@ -7,12 +7,12 @@ import (
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	agentmcp "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
-	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -25,16 +25,23 @@ const MCPDetailID = "mcp-detail"
 type MCPDetail struct {
 	com    *common.Common
 	help   help.Model
-	list   *list.List
 	name   string
 	state  agentmcp.ClientInfo
 	config config.MCPConfig
+
+	viewport      viewport.Model
+	viewportDirty bool
+	viewportWidth int
 
 	keyMap struct {
 		Back         key.Binding
 		Authenticate key.Binding
 		Reconnect    key.Binding
 		Toggle       key.Binding
+		ScrollUp     key.Binding
+		ScrollDown   key.Binding
+		PageUp       key.Binding
+		PageDown     key.Binding
 	}
 }
 
@@ -53,9 +60,20 @@ func NewMCPDetail(com *common.Common, name string, state agentmcp.ClientInfo, cf
 	helpView.Styles = com.Styles.DialogHelpStyles()
 	d.help = helpView
 
-	d.list = list.NewList()
-	d.list.Focus()
-	d.list.SetSelected(0)
+	vp := viewport.New()
+	vp.KeyMap = viewport.KeyMap{
+		Up:   key.NewBinding(key.WithKeys("up", "k")),
+		Down: key.NewBinding(key.WithKeys("down", "j")),
+		PageUp: key.NewBinding(
+			key.WithKeys("shift+up", "pgup"),
+		),
+		PageDown: key.NewBinding(
+			key.WithKeys("shift+down", "pgdown"),
+		),
+		HalfPageUp:   key.NewBinding(key.WithKeys()),
+		HalfPageDown: key.NewBinding(key.WithKeys()),
+	}
+	d.viewport = vp
 
 	d.keyMap.Back = key.NewBinding(
 		key.WithKeys("esc", "q"),
@@ -73,8 +91,23 @@ func NewMCPDetail(com *common.Common, name string, state agentmcp.ClientInfo, cf
 		key.WithKeys("ctrl+d"),
 		key.WithHelp("ctrl+d", "toggle enable/disable"),
 	)
+	d.keyMap.ScrollUp = key.NewBinding(
+		key.WithKeys("up", "k"),
+		key.WithHelp("↑/k", "scroll up"),
+	)
+	d.keyMap.ScrollDown = key.NewBinding(
+		key.WithKeys("down", "j"),
+		key.WithHelp("↓/j", "scroll down"),
+	)
+	d.keyMap.PageUp = key.NewBinding(
+		key.WithKeys("shift+up", "pgup"),
+		key.WithHelp("shift+↑/pgup", "page up"),
+	)
+	d.keyMap.PageDown = key.NewBinding(
+		key.WithKeys("shift+down", "pgdown"),
+		key.WithHelp("shift+↓/pgdown", "page down"),
+	)
 
-	d.refreshItems()
 	return d
 }
 
@@ -102,6 +135,8 @@ func (d *MCPDetail) HandleMsg(msg tea.Msg) Action {
 			return ActionReconnectMCP{Name: d.name}
 		case key.Matches(msg, d.keyMap.Toggle):
 			return ActionToggleMCP{Name: d.name, Enable: d.config.Disabled}
+		case key.Matches(msg, d.keyMap.ScrollUp, d.keyMap.ScrollDown, d.keyMap.PageUp, d.keyMap.PageDown):
+			d.viewport, _ = d.viewport.Update(msg)
 		}
 	}
 	return nil
@@ -124,17 +159,42 @@ func (d *MCPDetail) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	heightOffset := t.Dialog.Title.GetVerticalFrameSize() + titleContentHeight +
 		t.Dialog.HelpView.GetVerticalFrameSize() +
 		t.Dialog.View.GetVerticalFrameSize()
+	contentHeight := max(0, height-heightOffset)
 
-	d.list.SetSize(innerWidth, height-heightOffset)
 	d.help.SetWidth(innerWidth)
+
+	renderedContent := d.buildContent(t, innerWidth)
+	contentLines := strings.Count(renderedContent, "\n") + 1
+	needsScrollbar := contentLines > contentHeight
+	viewportWidth := innerWidth
+	if needsScrollbar {
+		viewportWidth = max(0, innerWidth-1) // Reserve space for scrollbar.
+	}
+
+	if d.viewport.Width() != viewportWidth {
+		d.viewportDirty = true
+		renderedContent = d.buildContent(t, viewportWidth)
+	}
+
+	d.viewport.SetWidth(viewportWidth)
+	d.viewport.SetHeight(contentHeight)
+	if d.viewportDirty {
+		d.viewport.SetContent(renderedContent)
+		d.viewportWidth = d.viewport.Width()
+		d.viewportDirty = false
+	}
+
+	contentView := d.viewport.View()
+	if needsScrollbar {
+		scrollbar := common.Scrollbar(t, contentHeight, d.viewport.TotalLineCount(), contentHeight, d.viewport.YOffset())
+		if scrollbar != "" {
+			contentView = lipgloss.JoinHorizontal(lipgloss.Top, contentView, scrollbar)
+		}
+	}
 
 	rc := NewRenderContext(t, width)
 	rc.Title = "MCP: " + d.name
-
-	// Build detail content
-	content := d.buildContent(t, innerWidth)
-	rc.AddPart(content)
-	rc.AddPart(t.Dialog.List.Height(d.list.Height()).Render(d.list.Render()))
+	rc.AddPart(contentView)
 	rc.Help = d.help.View(d)
 
 	view := rc.Render()
@@ -150,6 +210,7 @@ func (d *MCPDetail) ShortHelp() []key.Binding {
 		d.keyMap.Authenticate,
 		d.keyMap.Reconnect,
 		d.keyMap.Toggle,
+		d.keyMap.ScrollDown,
 	}
 }
 
@@ -157,6 +218,7 @@ func (d *MCPDetail) ShortHelp() []key.Binding {
 func (d *MCPDetail) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{d.keyMap.Back, d.keyMap.Authenticate, d.keyMap.Reconnect, d.keyMap.Toggle},
+		{d.keyMap.ScrollUp, d.keyMap.ScrollDown, d.keyMap.PageUp, d.keyMap.PageDown},
 	}
 }
 
@@ -312,10 +374,6 @@ func (d *MCPDetail) statusText() string {
 	}
 }
 
-func (d *MCPDetail) refreshItems() {
-	// Detail dialog doesn't have a list to refresh, but we keep this for consistency.
-}
-
 // Name returns the MCP server name shown by this detail dialog.
 func (d *MCPDetail) Name() string {
 	return d.name
@@ -324,9 +382,11 @@ func (d *MCPDetail) Name() string {
 // SetState updates the runtime state shown in the detail dialog.
 func (d *MCPDetail) SetState(state agentmcp.ClientInfo) {
 	d.state = state
+	d.viewportDirty = true
 }
 
 // SetConfig updates the config shown in the detail dialog (e.g. after toggling disabled).
 func (d *MCPDetail) SetConfig(cfg config.MCPConfig) {
 	d.config = cfg
+	d.viewportDirty = true
 }

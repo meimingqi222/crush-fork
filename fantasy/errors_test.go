@@ -7,6 +7,15 @@ import (
 	"golang.org/x/net/http2"
 )
 
+func TestProviderErrorErrorHandlesNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var err *ProviderError
+	if got := err.Error(); got != "<nil>" {
+		t.Fatalf("nil ProviderError.Error() = %q, want %q", got, "<nil>")
+	}
+}
+
 func TestIsTransportError(t *testing.T) {
 	t.Parallel()
 

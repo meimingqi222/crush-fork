@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/crush/internal/acp"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/sessionevent"
 )
@@ -32,6 +33,7 @@ type SessionMutationService interface {
 type InferenceResolver interface {
 	ValidateInferenceOverrides(context.Context, string, session.InferenceOverrides) error
 	EffectiveInference(context.Context, string) (session.EffectiveInference, error)
+	DefaultInference(context.Context) (session.EffectiveInference, error)
 }
 
 type SessionRuntimeCloser interface {
@@ -130,6 +132,7 @@ func (s *Service) registerSessionMutationHandlers() {
 	s.routes["crush/session/pin"] = route{feature: FeatureSessionControl, handler: s.handleSessionPin}
 	s.routes["crush/session/config/get"] = route{feature: FeatureSessionSync, handler: s.handleSessionInferenceGet}
 	s.routes["crush/session/config/update"] = route{feature: FeatureSessionControl, handler: s.handleSessionInferenceUpdate}
+	s.routes["crush/config/inference/default"] = route{feature: FeatureSessionSync, handler: s.handleDefaultInferenceGet}
 }
 
 func (s *Service) handleSessionInferenceGet(ctx context.Context, raw json.RawMessage) (any, *acp.RPCError) {
@@ -150,6 +153,17 @@ func (s *Service) handleSessionInferenceGet(ctx context.Context, raw json.RawMes
 		return nil, rpcErr
 	}
 	return sessionInferenceResult{Revision: current.InferenceRevision, Overrides: current.Inference, Effective: effective}, nil
+}
+
+// handleDefaultInferenceGet returns the workspace default inference config
+// (the model a brand-new session would use) so the GUI can show it in the
+// composer before any session exists. It carries no session-scoped overrides.
+func (s *Service) handleDefaultInferenceGet(ctx context.Context, _ json.RawMessage) (any, *acp.RPCError) {
+	effective, rpcErr := s.resolveDefaultInference(ctx)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	return sessionInferenceResult{Revision: 0, Overrides: session.InferenceOverrides{}, Effective: effective}, nil
 }
 
 func (s *Service) handleSessionInferenceUpdate(ctx context.Context, raw json.RawMessage) (any, *acp.RPCError) {
@@ -375,6 +389,20 @@ func (s *Service) resolveEffectiveInference(ctx context.Context, sessionID strin
 	return value, nil
 }
 
+func (s *Service) resolveDefaultInference(ctx context.Context) (session.EffectiveInference, *acp.RPCError) {
+	s.mu.RLock()
+	resolver := s.inference
+	s.mu.RUnlock()
+	if resolver == nil {
+		return session.EffectiveInference{}, sourceUnavailable("session inference resolver is unavailable")
+	}
+	value, err := resolver.DefaultInference(ctx)
+	if err != nil {
+		return session.EffectiveInference{}, sessionMutationError("", err)
+	}
+	return value, nil
+}
+
 func (s *Service) publishSessionUpdated(updated session.Session) {
 	if s.events == nil {
 		return
@@ -383,6 +411,27 @@ func (s *Service) publishSessionUpdated(updated session.Session) {
 		Kind: sessionevent.KindSessionUpdated, Delivery: sessionevent.DeliveryLatest,
 		CoalesceKey: "session:" + updated.ID, Payload: sessionSummary(updated),
 	})
+}
+
+// StartSessionEventBridge forwards internal session-broker updates to the GUI
+// event hub as session.updated. Only explicit GUI mutations (rename/pin/archive/
+// config) previously reached the renderer via publishSessionUpdated; background
+// changes such as the async AI-generated title (session.UpdateTitleAndUsage) and
+// usage totals went only to the internal broker, so the session list + title
+// bar never learned the real title. Bursts are coalesced by the hub
+// (DeliveryLatest + per-session CoalesceKey), so token-time updates stay cheap.
+func (s *Service) StartSessionEventBridge(ctx context.Context, broker pubsub.Subscriber[session.Session]) {
+	if broker == nil {
+		return
+	}
+	events := broker.Subscribe(ctx)
+	go func() {
+		for event := range events {
+			if event.Type == pubsub.CreatedEvent || event.Type == pubsub.UpdatedEvent {
+				s.publishSessionUpdated(event.Payload)
+			}
+		}
+	}()
 }
 
 func sessionSummary(value session.Session) sessionevent.SessionSummary {

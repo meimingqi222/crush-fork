@@ -60,6 +60,9 @@ type ProviderError struct {
 }
 
 func (m *ProviderError) Error() string {
+	if m == nil {
+		return "<nil>"
+	}
 	if m.Title == "" {
 		return m.Message
 	}

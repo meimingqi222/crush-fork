@@ -459,8 +459,9 @@ func (c *Commands) defaultCommands() []*CommandItem {
 			commands = append(commands, c.goalCommands()...)
 		}
 	} else {
-		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_plan_mode", "Enter Plan Mode", "", ActionTogglePlanMode{NextMode: session.CollaborationModePlan}))
-		commands = append(commands, NewCommandItem(c.com.Styles, "toggle_orchestrate_mode", "Enter Orchestrate Mode", "", ActionToggleOrchestrateMode{NextMode: session.CollaborationModeOrchestrate}))
+		// Goal commands are available before a session exists; selecting one will
+		// create the session on demand so the user can start with an objective.
+		commands = append(commands, c.goalCommands()...)
 	}
 
 	if c.mode != session.CollaborationModePlan {

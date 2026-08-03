@@ -150,3 +150,5 @@ When reviewing code changes, check for pitfalls documented in `docs/pitfalls/`:
 - Scan the changed files for patterns matching known issues
 - Verify API contracts match expected data formats (raw vs encoded)
 - Cross-reference with symptoms described in each pitfall document
+- For internal prompt display, read `docs/pitfalls/internal-prompt-display-leakage.md`
+- For TUI dialog cursor/layout changes, read `docs/pitfalls/tui-dialog-cursor-coordinates.md`

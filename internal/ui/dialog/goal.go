@@ -114,10 +114,13 @@ func (g *Goal) toggleFocus() {
 
 func (g *Goal) Cursor() *tea.Cursor {
 	input := g.objective
-	lineOffset := titleContentHeight + 2
+	// The description line sits between the title and the first input field.
+	lineOffset := titleContentHeight + 1
 	if g.focus == 1 {
 		input = g.budget
-		lineOffset += 2
+		// The objective input block is three lines tall (margin top, content,
+		// margin bottom) before the budget input's top margin.
+		lineOffset += 3
 	}
 	cur := InputCursor(g.com.Styles, input.Cursor())
 	if cur != nil {

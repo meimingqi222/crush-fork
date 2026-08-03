@@ -104,12 +104,18 @@ type AssistantMessageItem struct {
 	viewportWidth  int
 	viewportHeight int
 
-	// Cached stripped content: avoids calling StripTextualToolCallProtocol
-	// (regex) on every render frame.
+	// Cached display content: avoids applying protocol filters on every render
+	// frame.
 	cachedStrippedThinking      string
 	cachedStrippedThinkingInput string
 	cachedStrippedContent       string
 	cachedStrippedContentInput  string
+
+	// Cached main content render: avoids expensive glamour markdown render on
+	// every frame when the content hasn't changed.
+	contentRenderCache   string
+	contentContentHash uint64
+	contentRenderWidth int
 
 	// Cached summary render: avoids expensive glamour markdown render on
 	// every frame when the summary content hasn't changed.
@@ -295,17 +301,17 @@ func (a *AssistantMessageItem) renderThinkingIndicator(width int) string {
 func (a *AssistantMessageItem) renderMessageContent(width int) string {
 	var messageParts []string
 
-	// Use cached stripped content to avoid regex on every frame.
+	// Use cached display content to avoid protocol filtering on every frame.
 	rawThinking := a.message.ReasoningContent().Thinking
 	if rawThinking != a.cachedStrippedThinkingInput {
-		a.cachedStrippedThinking, _ = message.StripTextualToolCallProtocol(rawThinking)
+		a.cachedStrippedThinking, _ = message.DisplayText(rawThinking)
 		a.cachedStrippedThinkingInput = rawThinking
 	}
 	thinking := strings.TrimSpace(a.cachedStrippedThinking)
 
 	rawContent := a.message.Content().Text
 	if rawContent != a.cachedStrippedContentInput {
-		a.cachedStrippedContent, _ = message.StripTextualToolCallProtocol(rawContent)
+		a.cachedStrippedContent, _ = message.DisplayText(rawContent)
 		a.cachedStrippedContentInput = rawContent
 	}
 	content := strings.TrimSpace(a.cachedStrippedContent)
@@ -525,12 +531,29 @@ func (a *AssistantMessageItem) renderSummary(content string, width int) string {
 
 // renderMarkdown renders content as markdown.
 func (a *AssistantMessageItem) renderMarkdown(content string, width int) string {
+	contentHash := xxh3.HashString(content)
+	if a.contentRenderCache != "" && a.contentContentHash == contentHash && a.contentRenderWidth == width {
+		return a.contentRenderCache
+	}
+
 	renderer := common.MarkdownRenderer(a.sty, width)
 	result, err := renderer.Render(content)
 	if err != nil {
-		return content
+		result = content
 	}
-	return strings.TrimSuffix(result, "\n")
+	result = strings.TrimSuffix(result, "\n")
+
+	a.contentRenderCache = result
+	a.contentContentHash = contentHash
+	a.contentRenderWidth = width
+	return result
+}
+
+// invalidateContentRenderCache clears the main content glamour render cache.
+func (a *AssistantMessageItem) invalidateContentRenderCache() {
+	a.contentRenderCache = ""
+	a.contentContentHash = 0
+	a.contentRenderWidth = 0
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {
@@ -559,6 +582,7 @@ func (a *AssistantMessageItem) invalidateCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
 	a.invalidateThinkingCache()
+	a.invalidateContentRenderCache()
 	a.invalidateViewportCache()
 	a.invalidateSummaryCache()
 	a.invalidateStrippedCache()
@@ -574,9 +598,12 @@ func (a *AssistantMessageItem) invalidateCache() {
 func (a *AssistantMessageItem) invalidateContentCache() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
+	a.invalidateContentRenderCache()
 	a.invalidateViewportCache()
 	a.invalidateSummaryCache()
 }
+
+// invalidatePrefixedCache clears the prefixed render cache.
 
 // invalidatePrefixedCache clears the prefixed render cache.
 func (a *AssistantMessageItem) invalidatePrefixedCache() {
@@ -610,7 +637,7 @@ func (a *AssistantMessageItem) invalidateSummaryCache() {
 	a.summaryRenderWidth = 0
 }
 
-// invalidateStrippedCache clears the cached StripTextualToolCallProtocol results.
+// invalidateStrippedCache clears the cached display-filter results.
 func (a *AssistantMessageItem) invalidateStrippedCache() {
 	a.cachedStrippedThinking = ""
 	a.cachedStrippedThinkingInput = ""
@@ -852,7 +879,7 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 // HandleKeyEvent implements KeyEventHandler.
 func (a *AssistantMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	if k := key.String(); k == "c" || k == "y" {
-		text := a.message.Content().Text
+		text, _ := message.DisplayText(a.message.Content().Text)
 		return true, common.CopyToClipboard(text, "Message copied to clipboard")
 	}
 	return false, nil

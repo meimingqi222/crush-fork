@@ -62,6 +62,71 @@ func StripTextualToolCallProtocol(text string) (string, bool) {
 	return cleaned, cleaned != text
 }
 
+var internalDisplayBlockRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)<think>.*?(?:</think>|$)`),
+	regexp.MustCompile(`(?is)<system-reminder>.*?</system-reminder>`),
+	regexp.MustCompile(`(?is)<system_intent_gate_caveat>.*?</system_intent_gate_caveat>`),
+	regexp.MustCompile(`(?is)<hindsight_memories>.*?</hindsight_memories>`),
+	regexp.MustCompile(`(?is)<mental_models>.*?</mental_models>`),
+	regexp.MustCompile(`(?is)<relevant_memories>.*?</relevant_memories>`),
+	regexp.MustCompile(`(?is)<memories>.*?</memories>`),
+}
+
+var (
+	internalTaskNotificationBlockRegex = regexp.MustCompile(`(?is)<task-notification>.*?</task-notification>`)
+	internalTaskNotificationTagRegex   = regexp.MustCompile(`(?i)</?(?:task-notification|task-id|status|summary|result)>`)
+)
+
+// DisplayText returns the display-safe form of a user or assistant text part.
+// It removes only known internal protocols; ordinary user-authored XML or
+// Markdown is left unchanged. Tool messages do not use this function because
+// their renderers own the display of tool calls and results.
+func DisplayText(text string) (string, bool) {
+	cleaned := text
+	if guided, ok := displayGuidedGoalText(cleaned); ok {
+		cleaned = guided
+	}
+	for _, blockRegex := range internalDisplayBlockRegexes {
+		cleaned = blockRegex.ReplaceAllString(cleaned, "")
+	}
+	cleaned, _ = StripTextualToolCallProtocol(cleaned)
+	cleaned = internalTaskNotificationBlockRegex.ReplaceAllStringFunc(cleaned, func(block string) string {
+		return internalTaskNotificationTagRegex.ReplaceAllString(block, "")
+	})
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned, cleaned != text
+}
+
+func displayGuidedGoalText(text string) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	const (
+		openTag    = "<guided_goal>"
+		closeTag   = "</guided_goal>"
+		roughLabel = "\nRough goal from the user:\n"
+		rulesLabel = "\n\nRules:\n"
+	)
+	if !strings.HasPrefix(trimmed, openTag) || !strings.HasSuffix(trimmed, closeTag) {
+		return text, false
+	}
+
+	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, openTag), closeTag))
+	roughStart := strings.Index(body, roughLabel)
+	if roughStart < 0 {
+		return text, false
+	}
+	roughStart += len(roughLabel)
+	rulesStart := strings.LastIndex(body, rulesLabel)
+	if rulesStart < roughStart {
+		return text, false
+	}
+	rough := strings.TrimSpace(body[roughStart:rulesStart])
+	if rough == "" {
+		return text, false
+	}
+
+	return "Guided goal:\n" + rough, true
+}
+
 type ReasoningContent struct {
 	Thinking         string                             `json:"thinking"`
 	Signature        string                             `json:"signature"`

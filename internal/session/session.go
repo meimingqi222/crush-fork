@@ -34,6 +34,11 @@ type InferenceOverrides struct {
 	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty"`
 	PresencePenalty  *float64 `json:"presencePenalty,omitempty"`
 	Think            *bool    `json:"think,omitempty"`
+	// ReasoningEffort pins the reasoning/thinking tier (e.g. low/medium/high/max)
+	// for models that expose graded reasoning. Nil inherits the model/workspace
+	// default; per-model gating against the catalog ReasoningLevels happens at
+	// inference time in agent/providers.go.
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 }
 
 type EffectiveInference struct {
