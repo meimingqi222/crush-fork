@@ -66,7 +66,7 @@ func fitCompactionHistory(messages []message.Message, lowerBound int, maxTokens 
 		return fitCompactionResult{Messages: messages}
 	}
 	if maxTokens <= 0 {
-		return fitCompactionResult{Messages: messages}
+		return fitCompactionResult{EnvelopeOnly: true}
 	}
 	if lowerBound < 0 {
 		lowerBound = 0

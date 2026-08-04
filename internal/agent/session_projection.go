@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/charmbracelet/crush/internal/message"
+import (
+	"log/slog"
+
+	"github.com/charmbracelet/crush/internal/message"
+)
 
 // sessionProjectionMode selects which active-summary-relative view of
 // session history projectSessionMessages returns. See
@@ -14,6 +18,12 @@ const (
 	// prompt enhancement, and recap, preserved byte-for-byte as the
 	// regression floor for those three call sites.
 	summaryOnly sessionProjectionMode = iota
+	// summaryForCompaction returns the active summary, re-roled to user,
+	// followed only by messages physically created after it. Unlike the
+	// main request projection, it deliberately excludes retained pre-summary
+	// work: that work is already represented by the active summary and must
+	// not be summarized again on every compaction epoch.
+	summaryForCompaction
 	// summaryWithRecentWork additionally reinserts the most recent safe
 	// work segment from before the active summary -- the part that
 	// disappeared entirely in the pre-refactor getSessionMessages, since
@@ -56,6 +66,13 @@ type sessionProjectionParams struct {
 // summaryOnly is the preserved old behavior for the other three call sites.
 func projectSessionMessages(p sessionProjectionParams) []message.Message {
 	if p.SummaryMessageID == "" {
+		if p.Mode == summaryForCompaction {
+			// A failed first compaction can leave an unadopted summary in
+			// raw history even though the session has no active summary ID.
+			// It is UI/error state, not conversation evidence for the next
+			// summarizer.
+			return filterSummaryMessages(p.RawMessages)
+		}
 		return p.RawMessages
 	}
 	summaryIdx := activeSummaryIndex(p.RawMessages, p.SummaryMessageID)
@@ -65,6 +82,12 @@ func projectSessionMessages(p sessionProjectionParams) []message.Message {
 
 	if p.Mode == summaryWithRecentWork {
 		return buildRecentWorkProjection(p.RawMessages, summaryIdx, p.Model, p.MaxOutputTokens)
+	}
+	if p.Mode == summaryForCompaction {
+		projected := make([]message.Message, 0, len(p.RawMessages)-summaryIdx)
+		projected = append(projected, copyMessageAsUserRole(p.RawMessages[summaryIdx]))
+		projected = append(projected, filterSummaryMessages(p.RawMessages[summaryIdx+1:])...)
+		return projected
 	}
 	return p.RawMessages[summaryIdx:]
 }
@@ -121,7 +144,20 @@ func buildRecentWorkProjection(raw []message.Message, summaryIdx int, model Mode
 	// physically after the active summary in raw history.
 	tail := filterSummaryMessages(raw[summaryIdx+1:])
 
-	retained := selectRetainedSegment(raw[:summaryIdx], model, maxOutputTokens, activeSummary, tail)
+	retained := selectRetainedSegment(raw[:summaryIdx], model, maxOutputTokens, activeSummary)
+
+	// retained_tokens is the only signal that says whether this refactor is
+	// actually doing anything in production: 0 means the projection has
+	// silently degraded to the pre-refactor summary-only behaviour (budget
+	// too tight, headroom guard tripped, or no safe segment before the
+	// summary). Logged at Debug because getSessionMessages runs on every
+	// request (docs/refactor-compaction-context.md §7).
+	slog.Debug("Built recent-work session projection",
+		"retained_tokens", estimateMessagesTokensForFitting(retained),
+		"retained_messages", len(retained),
+		"pre_summary_messages", summaryIdx,
+		"tail_messages", len(tail),
+	)
 
 	projected := make([]message.Message, 0, 1+len(retained)+len(tail))
 	projected = append(projected, activeSummary)
@@ -130,67 +166,52 @@ func buildRecentWorkProjection(raw []message.Message, summaryIdx int, model Mode
 	return projected
 }
 
-// precedingSummaryLowerBound returns the P1.2 "边界下限" (lower bound) for
-// retained-segment selection within preSummary (raw[:summaryIdx], i.e.
-// everything before the active summary): one past the nearest
-// IsSummaryMessage in preSummary -- adopted or failed, it doesn't matter --
-// or 0 if there is none.
-//
-// This is a bounding use only, per P2.2: content is never read from that
-// message, and it is never treated as "the previous summary" or used to
-// reconstruct a summary chain. Without this bound, once summary messages
-// are filtered out of the candidate pool, the previous epoch's retained
-// work becomes physically adjacent to this epoch's new work, and a
-// selector that walks back to "the most recent user message" can cross
-// into the older, already-summarized epoch when the new work contains no
-// user message of its own (e.g. compaction triggered mid tool-loop).
-func precedingSummaryLowerBound(preSummary []message.Message) int {
-	for i := len(preSummary) - 1; i >= 0; i-- {
-		if preSummary[i].IsSummaryMessage {
-			return i + 1
-		}
-	}
-	return 0
-}
-
 // selectRetainedSegment picks the retained work segment for the main-path
 // projection, applying the P2.3 budget ladder: the full safe segment if it
 // fits both retainBudgetTokens and the post-projection headroom guard,
 // else its bounded representation (P1.4) if that fits, else no retained
 // segment at all -- summary-only degrades gracefully rather than blocking
 // the projection or growing a retry state machine.
-func selectRetainedSegment(preSummary []message.Message, model Model, maxOutputTokens int64, activeSummary message.Message, tail []message.Message) []message.Message {
-	lowerBound := precedingSummaryLowerBound(preSummary)
-	if lowerBound >= len(preSummary) {
+func selectRetainedSegment(preSummary []message.Message, model Model, maxOutputTokens int64, activeSummary message.Message) []message.Message {
+	if len(preSummary) == 0 {
 		return nil
 	}
-	candidates := preSummary[lowerBound:]
 
 	budget := retainBudgetTokens(model)
-	// selectFittingSegment is called with lowerBound 0 against the
-	// already-bounded candidates slice (rather than passing preSummary and
-	// lowerBound directly) so its internal prefixTokens accounting -- meant
-	// for a prefix that is itself part of the output, as in
-	// fitCompactionHistory -- doesn't charge the budget for
-	// preSummary[:lowerBound], which is excluded from the projection
-	// entirely, not retained alongside the segment.
-	seg := selectFittingSegment(candidates, 0, budget)
+	lowerBound := precedingAdoptedSummaryLowerBound(preSummary)
+	// Scope the selector to the current epoch. Passing a sliced candidate
+	// list avoids charging the retain budget for older messages that cannot
+	// appear in the projection.
+	seg := selectFittingSegment(preSummary[lowerBound:], 0, budget)
 
-	if fitsRetainedTiers(seg.Messages, budget, maxOutputTokens, activeSummary, tail, model) {
+	if fitsRetainedTiers(seg.Messages, budget, maxOutputTokens, activeSummary, model) {
 		return seg.Messages
 	}
 	bounded := buildBoundedSegmentRepresentation(seg)
-	if fitsRetainedTiers(bounded, budget, maxOutputTokens, activeSummary, tail, model) {
+	if fitsRetainedTiers(bounded, budget, maxOutputTokens, activeSummary, model) {
 		return bounded
 	}
 	return nil
 }
 
-func fitsRetainedTiers(candidate []message.Message, budget, maxOutputTokens int64, activeSummary message.Message, tail []message.Message, model Model) bool {
+// precedingAdoptedSummaryLowerBound returns one past the latest successful
+// summary in preSummary. Successful summaries delimit compaction epochs;
+// failed or interrupted provisional summaries do not, even though they also
+// have IsSummaryMessage set.
+func precedingAdoptedSummaryLowerBound(preSummary []message.Message) int {
+	for i := len(preSummary) - 1; i >= 0; i-- {
+		if preSummary[i].IsSummaryMessage && preSummary[i].FinishReason() == message.FinishReasonEndTurn {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func fitsRetainedTiers(candidate []message.Message, budget, maxOutputTokens int64, activeSummary message.Message, model Model) bool {
 	if estimateMessagesTokensForFitting(candidate) > budget {
 		return false
 	}
-	return projectionFitsHeadroom(activeSummary, candidate, tail, model, maxOutputTokens)
+	return projectionFitsHeadroom(activeSummary, candidate, model, maxOutputTokens)
 }
 
 // projectionFitsHeadroom implements the P2.3 headroom guard: the assembled
@@ -198,7 +219,19 @@ func fitsRetainedTiers(candidate []message.Message, budget, maxOutputTokens int6
 // auto-summarize trigger threshold (the same UsableInputTokens
 // shouldAutoSummarize compares against), or the very next turn would
 // immediately re-trigger compaction.
-func projectionFitsHeadroom(activeSummary message.Message, retained, tail []message.Message, model Model, maxOutputTokens int64) bool {
+//
+// The live tail is deliberately NOT counted. P2.3 scopes this guard to the
+// *post-compaction* projection -- the moment compaction finishes, when the
+// tail is empty -- and P2.4 requires the retained prefix to be decided by
+// the frozen pre-summary messages so it stays byte-stable for the whole
+// epoch. Including the tail broke both: the tail grows monotonically every
+// turn, so the gate would flip mid-epoch, silently dropping the retained
+// segment and breaking the [system][summary][retained] prompt-cache prefix
+// exactly once per epoch, after which the retained-work benefit was lost
+// until the next compaction. Later tail growth pushing the session back over
+// the trigger is what auto-compaction is for; retainBudgetTokens already
+// caps this segment's contribution.
+func projectionFitsHeadroom(activeSummary message.Message, retained []message.Message, model Model, maxOutputTokens int64) bool {
 	trigger := promptTokenBudgetForModel(model, maxOutputTokens).UsableInputTokens
 	if trigger <= 0 {
 		// Unknown or already-negative usable budget (e.g. a misconfigured
@@ -209,8 +242,7 @@ func projectionFitsHeadroom(activeSummary message.Message, retained, tail []mess
 		return true
 	}
 	total := estimateMessagesTokensForFitting([]message.Message{activeSummary}) +
-		estimateMessagesTokensForFitting(retained) +
-		estimateMessagesTokensForFitting(tail)
+		estimateMessagesTokensForFitting(retained)
 	return total <= trigger*retainHeadroomPercent/100
 }
 

@@ -439,6 +439,133 @@ func TestRunFallbackEstimateIncludesSystemPromptAndUserPrompt(t *testing.T) {
 	require.Equal(t, expected, savedSession.LastPromptTokens)
 }
 
+func TestSummarizeAlwaysInjectsMemoryRescueExactlyOnce(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summary memory rescue")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "Keep the durable finding."}},
+	})
+	require.NoError(t, err)
+
+	var summaryPrompt string
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		onSummary: func(call fantasy.AgentStreamCall) {
+			summaryPrompt = call.Prompt
+		},
+	}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 50_000)
+	concrete := agentUnderTest.(*sessionAgent)
+	hookCalls := 0
+	concrete.memoryEngineHooks = &MemoryEngineHooks{
+		OnBeforeCompaction: func(context.Context, string) string {
+			hookCalls++
+			return "<memory_rescue>durable finding</memory_rescue>"
+		},
+	}
+
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, hookCalls)
+	require.Contains(t, summaryPrompt, "<memory_rescue>durable finding</memory_rescue>")
+}
+
+func TestSummarizeZeroHistoryBudgetSendsEnvelopeOnly(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "zero history budget")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("history ", 100)}},
+	})
+	require.NoError(t, err)
+
+	var summaryHistory []fantasy.Message
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		onSummary: func(call fantasy.AgentStreamCall) {
+			summaryHistory = call.Messages
+		},
+	}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 100)
+
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Empty(t, summaryHistory, "a known zero history budget must not send the full transcript")
+}
+
+func TestSecondSummarizeDoesNotResummarizeRetainedPreSummaryWork(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "rolling summary input")
+	require.NoError(t, err)
+	for _, item := range []struct {
+		role message.MessageRole
+		text string
+	}{
+		{message.User, "already summarized request"},
+		{message.Assistant, "already summarized answer"},
+	} {
+		_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+			Role:  item.role,
+			Parts: []message.ContentPart{message.TextContent{Text: item.text}},
+		})
+		require.NoError(t, err)
+	}
+	previousSummary, err := env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:             message.Assistant,
+		IsSummaryMessage: true,
+		Parts:            []message.ContentPart{message.TextContent{Text: "## Goal\nold goal\n\n## Current State\nold state\n\n## Next Steps\n1. continue"}},
+	})
+	require.NoError(t, err)
+	testSession.SummaryMessageID = previousSummary.ID
+	_, err = env.sessions.Save(t.Context(), testSession)
+	require.NoError(t, err)
+	for _, item := range []struct {
+		role message.MessageRole
+		text string
+	}{
+		{message.User, "new request"},
+		{message.Assistant, "new answer"},
+	} {
+		_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+			Role:  item.role,
+			Parts: []message.ContentPart{message.TextContent{Text: item.text}},
+		})
+		require.NoError(t, err)
+	}
+
+	var historyText strings.Builder
+	fakeAgent := &autoSummarizeTestAgent{
+		t: t,
+		onSummary: func(call fantasy.AgentStreamCall) {
+			for _, msg := range call.Messages {
+				historyText.WriteString(textFromFantasyMessage(msg))
+				historyText.WriteByte('\n')
+			}
+		},
+	}
+	agentUnderTest := newAutoSummarizeTestSessionAgent(t, env, fakeAgent, env.messages, 50_000)
+
+	err = agentUnderTest.Summarize(t.Context(), testSession.ID, nil)
+	require.NoError(t, err)
+	require.Contains(t, historyText.String(), "old goal")
+	require.Contains(t, historyText.String(), "new request")
+	require.Contains(t, historyText.String(), "new answer")
+	require.NotContains(t, historyText.String(), "already summarized request")
+	require.NotContains(t, historyText.String(), "already summarized answer")
+}
+
 // TestSummarizeDoesNotLeakFullSummaryRequestIntoLastPromptTokens replaces the
 // former TestSummarizeFallbackEstimateIncludesFullSummaryRequest, which
 // asserted the old buggy behavior: LastPromptTokens ending up equal to the

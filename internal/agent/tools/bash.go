@@ -14,6 +14,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
@@ -24,7 +25,7 @@ import (
 type BashParams struct {
 	Description         string `json:"description,omitempty" description:"A brief description of what the command does, try to keep it under 30 characters or so"`
 	Command             string `json:"command" description:"The command to execute"`
-	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in (defaults to current directory)"`
+	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in. Relative paths resolve from the current session working directory; defaults to the current session working directory."`
 	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true to run this command in the background. Use the job tool with action=output for snapshots, action=wait to block until it finishes, and action=kill to terminate it."`
 	TimeoutSeconds      *int   `json:"timeout_seconds,omitempty" description:"Maximum time to allow the command to run in the foreground before it is terminated. Defaults to 120 seconds. Set to 0 to disable timeout. Maximum allowed value is 600 seconds."`
 	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Deprecated compatibility field. If provided and timeout_seconds is omitted, its value is interpreted as timeout_seconds."`
@@ -188,7 +189,8 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				}
 			}
 
-			execWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), params.WorkingDir, workingDir)
+			sessionWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
+			execWorkingDir := resolveBashWorkingDir(sessionWorkingDir, params.WorkingDir)
 			fallbackCommand := ""
 			sessionID := GetSessionFromContext(ctx)
 
@@ -219,7 +221,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 							params.Command = cmd
 						}
 						if wd, ok := hookResult.ModifiedInput["working_dir"].(string); ok && wd != "" {
-							execWorkingDir = wd
+							execWorkingDir = resolveBashWorkingDir(sessionWorkingDir, wd)
 						}
 						if hookResult.FallbackOnError {
 							if cmd, ok := hookResult.FallbackInput["command"].(string); ok && cmd != "" && cmd != params.Command {
@@ -336,6 +338,13 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(responseText), metadata), nil
 			}
 		})
+}
+
+func resolveBashWorkingDir(sessionWorkingDir, requestedWorkingDir string) string {
+	if strings.TrimSpace(requestedWorkingDir) == "" {
+		return sessionWorkingDir
+	}
+	return filepathext.SmartJoin(sessionWorkingDir, requestedWorkingDir)
 }
 
 func requestBashPermission(ctx context.Context, permissions permission.Service, sessionID, toolCallID, workingDir string, params BashParams) error {

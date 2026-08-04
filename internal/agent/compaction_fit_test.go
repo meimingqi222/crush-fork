@@ -147,14 +147,14 @@ func TestFitCompactionHistoryFallsBackToEnvelopeOnlyWhenBoundedStillExceedsBudge
 	require.Empty(t, result.Messages)
 }
 
-func TestFitCompactionHistoryZeroBudgetKeepsMessagesUnchanged(t *testing.T) {
+func TestFitCompactionHistoryZeroBudgetUsesEnvelopeOnly(t *testing.T) {
 	t.Parallel()
 
 	messages := []message.Message{textMsg(message.User, "hello")}
 	result := fitCompactionHistory(messages, 0, 0)
-	require.Equal(t, messages, result.Messages)
+	require.Empty(t, result.Messages)
 	require.False(t, result.Bounded)
-	require.False(t, result.EnvelopeOnly)
+	require.True(t, result.EnvelopeOnly)
 }
 
 func TestBoundedSegmentRepresentationPrefersArchiveReferenceOverRetruncating(t *testing.T) {

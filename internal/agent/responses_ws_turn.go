@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +13,24 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/httpext"
 )
+
+// ResponsesWebSocketResetter resets an idle session's pooled Responses
+// WebSocket when the session is resumed from storage.
+type ResponsesWebSocketResetter interface {
+	ResetResponsesWebSocket(sessionID string)
+}
+
+// ResetResponsesWebSocket closes only the session's pooled connection. It
+// deliberately preserves transport fallback state and response chaining so a
+// resumed session can continue normally over a fresh socket.
+func (c *coordinator) ResetResponsesWebSocket(sessionID string) {
+	if c == nil || c.responsesWSPool == nil || sessionID == "" || c.IsSessionBusy(sessionID) {
+		return
+	}
+	if err := c.responsesWSPool.CloseSession(sessionID); err != nil {
+		slog.Warn("Failed to reset Responses WebSocket for resumed session", "error", err, "session_id", sessionID)
+	}
+}
 
 func (c *coordinator) beginResponsesWebSocketTurn(ctx context.Context, sessionID string) (context.Context, func()) {
 	if c == nil || c.responsesWSPool == nil {

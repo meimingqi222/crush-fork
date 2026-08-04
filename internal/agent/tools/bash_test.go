@@ -152,6 +152,49 @@ func TestBashTool_ExplicitBackgroundReturnsShellID(t *testing.T) {
 	require.NoError(t, bgManager.Kill(meta.ShellID))
 }
 
+func TestBashTool_ExplicitWorkingDirOverridesSessionWorkingDir(t *testing.T) {
+	t.Parallel()
+
+	sessionDir := t.TempDir()
+	explicitDir := t.TempDir()
+	tool := newBashToolForTest(t.TempDir())
+	ctx := context.WithValue(context.Background(), WorkingDirContextKey, sessionDir)
+	ctx = context.WithValue(ctx, SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "check explicit cwd",
+		Command:     "pwd",
+		WorkingDir:  explicitDir,
+	})
+
+	require.False(t, resp.IsError)
+	var meta BashResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Equal(t, filepath.Clean(explicitDir), filepath.Clean(meta.WorkingDirectory))
+}
+
+func TestBashTool_RelativeWorkingDirResolvesFromSessionWorkingDir(t *testing.T) {
+	t.Parallel()
+
+	sessionDir := t.TempDir()
+	explicitDir := filepath.Join(sessionDir, "nested")
+	require.NoError(t, os.Mkdir(explicitDir, 0o755))
+	tool := newBashToolForTest(t.TempDir())
+	ctx := context.WithValue(context.Background(), WorkingDirContextKey, sessionDir)
+	ctx = context.WithValue(ctx, SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "check relative cwd",
+		Command:     "pwd",
+		WorkingDir:  "nested",
+	})
+
+	require.False(t, resp.IsError)
+	var meta BashResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Equal(t, filepath.Clean(explicitDir), filepath.Clean(meta.WorkingDirectory))
+}
+
 func TestEffectiveBashTimeout_ExplicitZeroDisablesTimeout(t *testing.T) {
 	timeoutSeconds := 0
 	timeout, notes := effectiveBashTimeout(BashParams{

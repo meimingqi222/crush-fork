@@ -13,6 +13,7 @@ import (
 type memoryPrefetchTwoStepAgent struct {
 	t                 *testing.T
 	afterFirstPrepare func()
+	rebuildEachStep   bool
 	preparedSteps     [][]fantasy.Message
 }
 
@@ -30,7 +31,11 @@ func (a *memoryPrefetchTwoStepAgent) Stream(ctx context.Context, call fantasy.Ag
 		a.afterFirstPrepare = nil
 	}
 
-	_, preparedSecond, err := call.PrepareStep(preparedCtx, fantasy.PrepareStepFunctionOptions{Messages: prepared.Messages})
+	secondMessages := prepared.Messages
+	if a.rebuildEachStep {
+		secondMessages = call.Messages
+	}
+	_, preparedSecond, err := call.PrepareStep(preparedCtx, fantasy.PrepareStepFunctionOptions{Messages: secondMessages})
 	require.NoError(a.t, err)
 	a.preparedSteps = append(a.preparedSteps, append([]fantasy.Message(nil), preparedSecond.Messages...))
 
@@ -141,6 +146,34 @@ func TestRunInjectsSettledMemoryPrefetchOnLaterStep(t *testing.T) {
 
 	require.False(t, hasAutoRecallBlock(fakeAgent.preparedSteps[0], "strict mode"))
 	require.True(t, hasAutoRecallBlock(fakeAgent.preparedSteps[1], "strict mode"))
+}
+
+func TestRunDoesNotReinjectMemoryPrefetchOnEveryToolStep(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	fakeAgent := &memoryPrefetchTwoStepAgent{t: t, rebuildEachStep: true}
+	sessionAgent := newQueuePrepareTestSessionAgent(env, fakeAgent)
+
+	sess, err := env.sessions.Create(t.Context(), "memory prefetch once per run")
+	require.NoError(t, err)
+
+	prefetch := &MemoryPrefetch{}
+	prefetch.Settle("do not repeat this memory")
+
+	result, err := sessionAgent.Run(t.Context(), SessionAgentCall{
+		SessionID:       sess.ID,
+		Prompt:          "run a multi-step task",
+		MaxOutputTokens: 1000,
+		NonInteractive:  true,
+		MemoryPrefetch:  prefetch,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, fakeAgent.preparedSteps, 2)
+
+	require.True(t, hasAutoRecallBlock(fakeAgent.preparedSteps[0], "do not repeat this memory"))
+	require.False(t, hasAutoRecallBlock(fakeAgent.preparedSteps[1], "do not repeat this memory"))
 }
 
 func TestMemoryPrefetchCanBeReusedAcrossRuns(t *testing.T) {

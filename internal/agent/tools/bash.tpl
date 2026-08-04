@@ -18,7 +18,7 @@ Uses the mvdan/sh interpreter (Bash-compatible on all platforms including Window
 </execution_steps>
 
 <usage_notes>
-- Command is required; working_dir is optional (defaults to the current directory).
+- Command is required; working_dir is optional and overrides the current session directory. Relative working_dir paths resolve from the current session directory.
 - Always provide a brief `description` parameter (under 30 chars).
 - Prefer Grep/Glob/Agent tools over `find`/`grep`; use View instead of `cat`/`head`/`tail`/`ls`. If you must search from bash, use `rg` (ripgrep).
 - Chain with `;` or `&&`; avoid newlines except inside quoted strings.

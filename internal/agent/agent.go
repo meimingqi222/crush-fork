@@ -648,7 +648,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	msgs, err := a.getSessionMessages(genCtx, currentSession)
+	msgs, err := a.getSessionMessagesForModel(genCtx, currentSession, largeModel, call.MaxOutputTokens)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
@@ -722,7 +722,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload session after summarization: %w", err)
 			}
-			msgs, err = a.getSessionMessages(genCtx, currentSession)
+			msgs, err = a.getSessionMessagesForModel(genCtx, currentSession, largeModel, call.MaxOutputTokens)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload session messages after summarization: %w", err)
 			}
@@ -870,7 +870,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// handles all memory injection as a trailing System Message.
 		prefetchedRecallInjected := false
 		mentalModelsInjected := false
-		injectedInPrepareStep := false
 		// Snapshot MCP states at the start of this run. If MCP servers
 		// connect/disconnect during the run, we inject a System Message
 		// notification (preserving cache prefix) and invalidate the
@@ -1019,6 +1018,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// recall, MCP change notice, queued prompts, budget steer). Such
 				// steps must replay in full so the injected context is not lost.
 				chainingContextInjected := false
+				// Track injection for this PrepareStep only. Fantasy rebuilds
+				// options.Messages from its original history on every tool step,
+				// so carrying this flag across steps would make the post-transform
+				// repair path append the same recall repeatedly.
+				injectedInPrepareStep := false
 
 				stepRuntimeConfig := runtimeConfig
 				if a.refreshCallConfig != nil {
@@ -2055,7 +2059,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if err != nil {
 					return nil, fmt.Errorf("failed to reload session after textual tool-call recovery: %w", err)
 				}
-				retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+				retryMsgs, getMsgsErr := a.getSessionMessagesForModel(ctx, currentSession, largeModel, call.MaxOutputTokens)
 				if getMsgsErr != nil {
 					return nil, getMsgsErr
 				}
@@ -2100,7 +2104,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			currentStepToolMessageIDs = nil
 			currentStepToolResultChars = 0
 			if completedStepsThisRun > 0 {
-				retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+				retryMsgs, getMsgsErr := a.getSessionMessagesForModel(ctx, currentSession, largeModel, call.MaxOutputTokens)
 				if getMsgsErr != nil {
 					return nil, getMsgsErr
 				}
@@ -2148,7 +2152,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			currentStepToolMessageIDs = nil
 			currentStepToolResultChars = 0
 			if completedStepsThisRun > 0 {
-				retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+				retryMsgs, getMsgsErr := a.getSessionMessagesForModel(ctx, currentSession, largeModel, call.MaxOutputTokens)
 				if getMsgsErr != nil {
 					return nil, getMsgsErr
 				}
@@ -2262,7 +2266,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				// Re-fetch history from DB so the retry includes the
 				// completed steps' messages.
-				retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+				retryMsgs, getMsgsErr := a.getSessionMessagesForModel(ctx, currentSession, largeModel, call.MaxOutputTokens)
 				if getMsgsErr != nil {
 					slog.Warn("Failed to re-fetch messages for retry",
 						"error", getMsgsErr, "session_id", call.SessionID)
@@ -2366,7 +2370,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		currentAssistant = nil
 		currentStepToolMessageIDs = nil
 		if completedStepsThisRun > 0 {
-			retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+			retryMsgs, getMsgsErr := a.getSessionMessagesForModel(ctx, currentSession, largeModel, call.MaxOutputTokens)
 			if getMsgsErr != nil {
 				return nil, getMsgsErr
 			}
@@ -2410,7 +2414,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		currentAssistant = nil
 		currentStepToolMessageIDs = nil
 		if completedStepsThisRun > 0 {
-			retryMsgs, getMsgsErr := a.getSessionMessages(ctx, currentSession)
+			retryMsgs, getMsgsErr := a.getSessionMessagesForModel(ctx, currentSession, largeModel, call.MaxOutputTokens)
 			if getMsgsErr != nil {
 				return nil, getMsgsErr
 			}
@@ -2792,12 +2796,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if compactionTrigger == sessionCompactionTriggerNone {
 			compactionTrigger = sessionCompactionTriggerNormal
 		}
-		if a.memoryEngineHooks != nil && a.memoryEngineHooks.OnBeforeCompaction != nil {
-			rescuePayload := a.memoryEngineHooks.OnBeforeCompaction(context.Background(), call.SessionID)
-			if rescuePayload != "" {
-				genCtx = withCompactionRescue(genCtx, rescuePayload)
-			}
-		}
 		// Mark this end-of-turn Summarize call as an internal compaction
 		// (mirroring the preflight-compaction call above) instead of
 		// deleting the activeRequests entry before calling Summarize.
@@ -3109,10 +3107,18 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	if err != nil {
 		return fmt.Errorf("failed to get session: %w", err)
 	}
+	// Every compaction entry point needs the same durable-memory rescue.
+	// Callers may already attach one; do not invoke the hook twice.
+	if compactionRescueFromContext(ctx) == "" && a.memoryEngineHooks != nil && a.memoryEngineHooks.OnBeforeCompaction != nil {
+		rescue := a.memoryEngineHooks.OnBeforeCompaction(context.WithoutCancel(ctx), sessionID)
+		if rescue != "" {
+			ctx = withCompactionRescue(ctx, rescue)
+		}
+	}
 	if truncErr := a.truncateOversizedToolResults(ctx, sessionID); truncErr != nil {
 		slog.Warn("Failed to truncate oversized tool results before summarization", "error", truncErr, "session_id", sessionID)
 	}
-	msgs, err := a.getSessionMessages(ctx, currentSession)
+	msgs, err := a.getSessionMessagesWithProjection(ctx, currentSession, summaryForCompaction, Model{}, 0)
 	if err != nil {
 		return err
 	}
@@ -3290,48 +3296,64 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// lowerBound keeps the safe-segment selector from reaching back across
 	// the active summary boundary into the previous compaction epoch (P1.2).
 	fitted := transformedMsgs
-	if maxAllowedTokens > 0 {
-		summaryIdx := -1
-		for i, m := range transformedMsgs {
-			if m.IsSummaryMessage {
-				summaryIdx = i
-				break
-			}
-		}
-		lowerBound := 0
-		if summaryIdx >= 0 {
-			lowerBound = summaryIdx + 1
-		}
-
-		fitResult := fitCompactionHistory(transformedMsgs, lowerBound, maxAllowedTokens)
-		fitted = fitResult.Messages
-		switch {
-		case fitResult.EnvelopeOnly:
-			// Even the deterministic bounded representation of the safe
-			// segment exceeded budget: drop all trimmable history,
-			// including the previous summary message, and summarize from
-			// the fixed envelope alone. Returning failure here instead
-			// would mean compaction can never succeed again once a session
-			// reaches this state -- context keeps growing and the session
-			// deadlocks permanently -- so the previous summary's
-			// Goal/Current State/Next Steps are inlined into the anchor in
-			// place of the message that would otherwise have carried them
-			// (docs/refactor-compaction-context.md P1.4, last tier).
-			slog.Warn("Recent work segment exceeded summarization budget even bounded; summarizing from fixed envelope only",
-				"session_id", sessionID, "max_allowed_tokens", maxAllowedTokens)
-			compactionAnchor = buildCompactionAnchor(currentSession, rawMsgs, msgs, previousSummary, true)
-			// maxAllowedTokens above was computed from the pre-inline
-			// (shorter) summaryPromptText and is intentionally not
-			// recomputed here: fitted is already empty in this branch, so
-			// it no longer affects fitting, and the inlined sections are
-			// bounded by compactAnchorText (~4000 runes each), so the
-			// staleness is small and this tier is already near-unreachable.
-			summaryPromptText = buildSessionCompactingPromptWithAnchor(compacting.Context, compacting.Prompt, compactionAnchor)
-		case fitResult.Bounded:
-			slog.Info("Recent work segment exceeded summarization budget; using a bounded representation",
-				"session_id", sessionID, "max_allowed_tokens", maxAllowedTokens)
+	summaryIdx := -1
+	for i, m := range transformedMsgs {
+		if m.IsSummaryMessage {
+			summaryIdx = i
+			break
 		}
 	}
+	lowerBound := 0
+	if summaryIdx >= 0 {
+		lowerBound = summaryIdx + 1
+	}
+
+	fitResult := fitCompactionHistory(transformedMsgs, lowerBound, maxAllowedTokens)
+	fitted = fitResult.Messages
+	switch {
+	case fitResult.EnvelopeOnly:
+		// Even the deterministic bounded representation of the safe
+		// segment exceeded budget: drop all trimmable history,
+		// including the previous summary message, and summarize from
+		// the fixed envelope alone. Returning failure here instead
+		// would mean compaction can never succeed again once a session
+		// reaches this state -- context keeps growing and the session
+		// deadlocks permanently -- so the previous summary's
+		// Goal/Current State/Next Steps are inlined into the anchor in
+		// place of the message that would otherwise have carried them
+		// (docs/refactor-compaction-context.md P1.4, last tier).
+		slog.Warn("Recent work segment exceeded summarization budget even bounded; summarizing from fixed envelope only",
+			"session_id", sessionID, "max_allowed_tokens", maxAllowedTokens)
+		compactionAnchor = buildCompactionAnchor(currentSession, rawMsgs, msgs, previousSummary, true)
+		// maxAllowedTokens above was computed from the pre-inline
+		// (shorter) summaryPromptText and is intentionally not
+		// recomputed here: fitted is already empty in this branch, so
+		// it no longer affects fitting, and the inlined sections are
+		// bounded by compactAnchorText (~4000 runes each), so the
+		// staleness is small and this tier is already near-unreachable.
+		summaryPromptText = buildSessionCompactingPromptWithAnchor(compacting.Context, compacting.Prompt, compactionAnchor)
+	case fitResult.Bounded:
+		slog.Info("Recent work segment exceeded summarization budget; using a bounded representation",
+			"session_id", sessionID, "max_allowed_tokens", maxAllowedTokens)
+	}
+
+	// Compaction diagnostics (docs/refactor-compaction-context.md §7).
+	// goal_source is resolved through the same pure function the anchor
+	// itself uses, so the logged value always matches the anchor text.
+	// history_fitted distinguishes "everything fit" from "history was
+	// trimmed", which is what separates a cheap compaction from one that
+	// actually discarded turns.
+	_, goalSource := compactionGoalAndSource(currentSession, rawMsgs, previousSummary)
+	slog.Info("Compaction input prepared",
+		"session_id", sessionID,
+		"goal_source", goalSource,
+		"history_fitted", len(fitted) != len(transformedMsgs),
+		"bounded_segment", fitResult.Bounded,
+		"envelope_only", fitResult.EnvelopeOnly,
+		"messages_before", len(transformedMsgs),
+		"messages_after", len(fitted),
+		"max_allowed_tokens", maxAllowedTokens,
+	)
 	aiMsgs, _ := a.preparePrompt(fitted)
 	// Textualize native tool-call/tool-result parts before sending the
 	// history to the summary model. The summarize request carries no tool
@@ -4175,6 +4197,14 @@ func appendToolResultsForAssistant(
 }
 
 func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.Session) ([]message.Message, error) {
+	return a.getSessionMessagesForModel(ctx, session, a.largeModel.Get(), 0)
+}
+
+func (a *sessionAgent) getSessionMessagesForModel(ctx context.Context, session session.Session, model Model, maxOutputTokens int64) ([]message.Message, error) {
+	return a.getSessionMessagesWithProjection(ctx, session, summaryWithRecentWork, model, maxOutputTokens)
+}
+
+func (a *sessionAgent) getSessionMessagesWithProjection(ctx context.Context, session session.Session, mode sessionProjectionMode, model Model, maxOutputTokens int64) ([]message.Message, error) {
 	start := time.Now()
 	msgs, err := a.messages.List(ctx, session.ID)
 	if err != nil {
@@ -4185,8 +4215,9 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 	msgs = projectSessionMessages(sessionProjectionParams{
 		RawMessages:      msgs,
 		SummaryMessageID: session.SummaryMessageID,
-		Mode:             summaryWithRecentWork,
-		Model:            a.largeModel.Get(),
+		Mode:             mode,
+		Model:            model,
+		MaxOutputTokens:  maxOutputTokens,
 	})
 	return filterAutoModePromptMessages(msgs, session.PermissionMode), nil
 }

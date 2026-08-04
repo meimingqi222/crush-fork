@@ -87,6 +87,63 @@ func TestProjectSessionMessagesSummaryOnlyMatchesPreChangeBehavior(t *testing.T)
 	require.Equal(t, message.Assistant, got[0].Role, "summaryOnly must not rewrite role")
 }
 
+func TestProjectSessionMessagesForCompactionExcludesRetainedPreSummaryWork(t *testing.T) {
+	t.Parallel()
+
+	summaryMsg := message.Message{
+		ID:               "sum1",
+		Role:             message.Assistant,
+		IsSummaryMessage: true,
+		Parts:            []message.ContentPart{message.TextContent{Text: "## Goal\nDo the thing."}},
+	}
+	provisional := message.Message{ID: "failed", Role: message.Assistant, IsSummaryMessage: true}
+	raw := []message.Message{
+		textMsg(message.User, "already summarized request"),
+		textMsg(message.Assistant, "already summarized answer"),
+		summaryMsg,
+		textMsg(message.User, "new request"),
+		provisional,
+		textMsg(message.Assistant, "new answer"),
+	}
+
+	got := projectSessionMessages(sessionProjectionParams{
+		RawMessages:      raw,
+		SummaryMessageID: "sum1",
+		Mode:             summaryForCompaction,
+	})
+
+	require.Len(t, got, 3)
+	require.Equal(t, message.User, got[0].Role)
+	require.Equal(t, "## Goal\nDo the thing.", got[0].Content().Text)
+	require.Equal(t, "new request", got[1].Content().Text)
+	require.Equal(t, "new answer", got[2].Content().Text)
+	for _, msg := range got {
+		require.NotEqual(t, "already summarized request", msg.Content().Text)
+		require.NotEqual(t, "already summarized answer", msg.Content().Text)
+		require.NotEqual(t, "failed", msg.ID)
+	}
+}
+
+func TestProjectSessionMessagesForFirstCompactionDropsFailedProvisionalSummary(t *testing.T) {
+	t.Parallel()
+
+	failedSummary := message.Message{ID: "failed", Role: message.Assistant, IsSummaryMessage: true}
+	raw := []message.Message{
+		textMsg(message.User, "request"),
+		failedSummary,
+		textMsg(message.Assistant, "answer"),
+	}
+
+	got := projectSessionMessages(sessionProjectionParams{
+		RawMessages: raw,
+		Mode:        summaryForCompaction,
+	})
+
+	require.Len(t, got, 2)
+	require.Equal(t, "request", got[0].Content().Text)
+	require.Equal(t, "answer", got[1].Content().Text)
+}
+
 // TestProjectSessionMessagesRecentWorkOrdersSummaryRetainedTail covers the
 // first compaction: no preceding summary exists, so the retained segment's
 // lower bound is 0 and the whole pre-summary history is eligible.
@@ -152,7 +209,10 @@ func TestProjectSessionMessagesRecentWorkSecondCompactionPicksNewestSegment(t *t
 		ID:               "sum1",
 		Role:             message.Assistant,
 		IsSummaryMessage: true,
-		Parts:            []message.ContentPart{message.TextContent{Text: "## Goal\nepoch0 summary"}},
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "## Goal\nepoch0 summary"},
+			message.Finish{Reason: message.FinishReasonEndTurn},
+		},
 	}
 	epoch1 := []message.Message{
 		textMsg(message.User, "epoch1 request"),
@@ -194,9 +254,15 @@ func TestProjectSessionMessagesRecentWorkThirdCompactionPicksNewestSegment(t *te
 	t.Parallel()
 
 	epoch0 := []message.Message{textMsg(message.User, "epoch0 request")}
-	summary1 := message.Message{ID: "sum1", Role: message.Assistant, IsSummaryMessage: true, Parts: []message.ContentPart{message.TextContent{Text: "s1"}}}
+	summary1 := message.Message{ID: "sum1", Role: message.Assistant, IsSummaryMessage: true, Parts: []message.ContentPart{
+		message.TextContent{Text: "s1"},
+		message.Finish{Reason: message.FinishReasonEndTurn},
+	}}
 	epoch1 := []message.Message{textMsg(message.User, "epoch1 request")}
-	summary2 := message.Message{ID: "sum2", Role: message.Assistant, IsSummaryMessage: true, Parts: []message.ContentPart{message.TextContent{Text: "s2"}}}
+	summary2 := message.Message{ID: "sum2", Role: message.Assistant, IsSummaryMessage: true, Parts: []message.ContentPart{
+		message.TextContent{Text: "s2"},
+		message.Finish{Reason: message.FinishReasonEndTurn},
+	}}
 	epoch2 := []message.Message{
 		textMsg(message.User, "epoch2 request"),
 		textMsg(message.Assistant, "epoch2 answer"),
@@ -268,16 +334,11 @@ func TestProjectSessionMessagesRecentWorkExcludesProvisionalSummaries(t *testing
 		}
 		require.False(t, msg.IsSummaryMessage, "no provisional/failed summary may appear in the projection except the active one")
 	}
-	// The failed summary itself also acts as a P1.2 lower bound ("adopted
-	// or failed, doesn't matter"): everything before it (here, "current
-	// request") is excluded from the candidate pool too, not just filtered
-	// out of the final segment. Only "current answer", which comes after
-	// the failed summary, survives as retained content.
-	require.Len(t, got, 2)
-	require.Equal(t, "current answer", got[1].Content().Text)
-	for _, msg := range got {
-		require.NotEqual(t, "current request", msg.Content().Text)
-	}
+	// A failed summary is filtered as content but is not an adopted boundary;
+	// the genuine request and answer around it remain one retained segment.
+	require.Len(t, got, 3)
+	require.Equal(t, "current request", got[1].Content().Text)
+	require.Equal(t, "current answer", got[2].Content().Text)
 }
 
 // TestProjectSessionMessagesRecentWorkNeverSplitsToolPair mirrors
@@ -388,7 +449,12 @@ func TestProjectSessionMessagesRecentWorkFallsBackToSummaryOnlyWhenHeadroomInsuf
 	}
 	raw := append(append(append([]message.Message{}, preSummary...), summaryMsg), tail...)
 
-	sTokens := estimateMessagesTokensForFitting(append([]message.Message{summaryMsg}, tail...))
+	// The headroom guard is sized from frozen data only -- the active
+	// summary plus the retained candidate -- never the live tail (P2.3
+	// scopes it to the post-compaction projection, P2.4 requires the
+	// decision to be epoch-stable). A tail is still present below to prove
+	// it no longer influences the outcome either way.
+	sTokens := estimateMessagesTokensForFitting([]message.Message{summaryMsg})
 	segFloor := selectRecentWorkSegment(preSummary, 0)
 	rTokens := estimateMessagesTokensForFitting(segFloor.Messages)
 	boundedTokens := estimateMessagesTokensForFitting(buildBoundedSegmentRepresentation(segFloor))
@@ -462,4 +528,57 @@ func TestProjectSessionMessagesRecentWorkStablePrefixAcrossGrowingTail(t *testin
 	require.GreaterOrEqual(t, len(secondCall), stablePrefixLen)
 	require.Equal(t, firstCall[:stablePrefixLen], secondCall[:stablePrefixLen],
 		"the [summary + retained] prefix must stay byte-identical across calls within the same epoch as the tail grows, or prompt caching breaks every turn")
+}
+
+// TestProjectSessionMessagesRetainedSegmentSurvivesTailGrowth pins the P2.4
+// invariant that the retained prefix is decided by the frozen pre-summary
+// messages alone. The headroom guard (P2.3) originally counted the live tail,
+// which grows monotonically within an epoch: once it pushed the total past
+// the 80% threshold the retained segment silently vanished, breaking the
+// [system][summary][retained] prompt-cache prefix mid-epoch and losing the
+// retained-work benefit for the rest of that epoch. A tail large enough to
+// have tripped the old gate must not change the prefix.
+func TestProjectSessionMessagesRetainedSegmentSurvivesTailGrowth(t *testing.T) {
+	t.Parallel()
+
+	// Small enough that the headroom guard is live rather than vacuous.
+	model := modelWithContextWindow(80_000)
+
+	summaryMsg := message.Message{
+		ID:               "sum1",
+		Role:             message.Assistant,
+		IsSummaryMessage: true,
+		Parts:            []message.ContentPart{message.TextContent{Text: "## Goal\nrecover"}},
+	}
+	preSummary := []message.Message{
+		textMsg(message.User, "epoch request"),
+		textMsg(message.Assistant, "epoch answer"),
+	}
+	baseRaw := append(append([]message.Message{}, preSummary...), summaryMsg)
+
+	project := func(tail []message.Message) []message.Message {
+		return projectSessionMessages(sessionProjectionParams{
+			RawMessages:      append(append([]message.Message{}, baseRaw...), tail...),
+			SummaryMessageID: "sum1",
+			Mode:             summaryWithRecentWork,
+			Model:            model,
+		})
+	}
+
+	stablePrefixLen := 1 + len(preSummary) // summary + retained segment.
+
+	empty := project(nil)
+	require.Len(t, empty, stablePrefixLen, "retained segment must be present with an empty tail")
+
+	// A tail far larger than the headroom threshold would have allowed when
+	// the guard still counted it.
+	var hugeTail []message.Message
+	for i := range 40 {
+		hugeTail = append(hugeTail, textMsg(message.User, strings.Repeat("tail filler ", 400)+string(rune('a'+i%26))))
+	}
+	grown := project(hugeTail)
+
+	require.Equal(t, empty[:stablePrefixLen], grown[:stablePrefixLen],
+		"prefix must stay byte-identical as the tail grows past the old headroom threshold")
+	require.Len(t, grown, stablePrefixLen+len(hugeTail))
 }

@@ -121,6 +121,14 @@ func (m *UI) loadSessionWithSelection(sessionID string, selectedMessageID string
 		if err != nil {
 			return util.ReportError(err)
 		}
+		// A Responses WebSocket can be closed remotely while this session is
+		// inactive but remain in the local pool. Reset only the pooled socket
+		// at the resume boundary so the first prompt does not discover the
+		// stale connection. Provider fallback and response-chain state remain
+		// intact.
+		if resetter, ok := m.com.App.AgentCoordinator.(agent.ResponsesWebSocketResetter); ok {
+			resetter.ResetResponsesWebSocket(sessionID)
+		}
 
 		// Pause an active goal when the session is resumed from storage. The
 		// preserve flag is left false for normal UI loads; automatic goal

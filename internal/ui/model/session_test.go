@@ -204,6 +204,29 @@ func TestOpenParentSessionSelectsOriginatingTool(t *testing.T) {
 	require.Equal(t, "call-general", msg.selectedMessageID)
 }
 
+type responsesWebSocketResetTracker struct {
+	agent.Coordinator
+	sessionIDs []string
+}
+
+func (c *responsesWebSocketResetTracker) ResetResponsesWebSocket(sessionID string) {
+	c.sessionIDs = append(c.sessionIDs, sessionID)
+}
+
+func TestLoadSessionResetsResponsesWebSocket(t *testing.T) {
+	t.Parallel()
+
+	ui, parent, _, _, _, _ := testSessionUI(t)
+	tracker := &responsesWebSocketResetTracker{}
+	ui.com.App.AgentCoordinator = tracker
+
+	cmd := ui.loadSession(parent.ID)
+	require.NotNil(t, cmd)
+	_, ok := cmd().(loadSessionMsg)
+	require.True(t, ok)
+	require.Equal(t, []string{parent.ID}, tracker.sessionIDs)
+}
+
 func TestCycleSiblingChildSessionStopsAtBounds(t *testing.T) {
 	t.Parallel()
 
