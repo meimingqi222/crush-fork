@@ -4,12 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"sync"
-	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
@@ -63,7 +63,7 @@ func (p *ResponsesWebSocketPool) acquireConn(
 	ctx context.Context,
 	wsURL url.URL,
 	headers http.Header,
-	preferHTTP *atomic.Bool,
+	preferHTTP bool,
 ) (*pooledWebSocketConn, bool, error) {
 	if p == nil {
 		conn, _, err := dialResponsesWebSocket(ctx, wsURL, headers, "")
@@ -77,7 +77,7 @@ func (p *ResponsesWebSocketPool) acquireConn(
 	key := providerSessionKey(wsURL, headers, sessionID)
 
 	p.mu.Lock()
-	if preferHTTP != nil && preferHTTP.Load() {
+	if preferHTTP {
 		p.mu.Unlock()
 		return nil, false, errWebSocketDisabled
 	}
@@ -118,6 +118,42 @@ func (p *ResponsesWebSocketPool) invalidate(wsURL url.URL, headers http.Header, 
 		}
 		delete(p.conns, key)
 	}
+}
+
+// CloseSession closes and removes every pooled connection owned by sessionID.
+// It is safe to call repeatedly and does not affect other sessions.
+func (p *ResponsesWebSocketPool) CloseSession(sessionID string) error {
+	if p == nil || sessionID == "" {
+		return nil
+	}
+	p.mu.Lock()
+	var entries []*pooledWebSocketConn
+	for key, entry := range p.conns {
+		if entry != nil && entry.sessionID == sessionID {
+			entries = append(entries, entry)
+			delete(p.conns, key)
+		}
+	}
+	p.mu.Unlock()
+
+	var errs []error
+	for _, entry := range entries {
+		if entry.conn != nil {
+			if err := entry.conn.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		entry.turnMu.Lock()
+		entry.turnState = ""
+		entry.turnMu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// ClearSession releases all pooled resources for sessionID. Close errors are
+// intentionally ignored for cleanup paths that cannot return an error.
+func (p *ResponsesWebSocketPool) ClearSession(sessionID string) {
+	_ = p.CloseSession(sessionID)
 }
 
 func (entry *pooledWebSocketConn) setTurnState(value string) {

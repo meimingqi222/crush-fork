@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,6 +27,88 @@ func buildLeakedToolCallText(pathValue string) string {
 	b.WriteString(close_ + "invoke>\n")
 	b.WriteString(open + pipe + "DSML" + pipe + "tool_calls end" + pipe + ">")
 	return b.String()
+}
+
+func TestSessionSummaryRequiresContinuationSections(t *testing.T) {
+	t.Parallel()
+
+	const goal = "## Goal\nwork"
+	const currentState = "## Current State\nactive"
+	const nextSteps = "## Next Steps\n1. test"
+
+	all := strings.Join([]string{goal, currentState, nextSteps}, "\n\n")
+	require.False(t, isInvalidSessionSummaryText(all), "all three required sections present must be valid")
+
+	missingGoal := strings.Join([]string{currentState, nextSteps}, "\n\n")
+	require.True(t, isInvalidSessionSummaryText(missingGoal), "missing ## Goal must be invalid")
+
+	missingCurrentState := strings.Join([]string{goal, nextSteps}, "\n\n")
+	require.True(t, isInvalidSessionSummaryText(missingCurrentState), "missing ## Current State must be invalid")
+
+	missingNextSteps := strings.Join([]string{goal, currentState}, "\n\n")
+	require.True(t, isInvalidSessionSummaryText(missingNextSteps), "missing ## Next Steps must be invalid")
+
+	require.True(t, isInvalidSessionSummaryText("A local implementation detail without any required section"))
+}
+
+// TestSummarizeSchemaRetryExhaustionDoesNotOverwriteExistingSummaryPointer
+// covers the same content-retry path as
+// TestSummarizeExhaustsToolCallMarkupRetriesAndFails (auto_summarize_test.go)
+// but for the schema-validation branch (missing required sections) and,
+// critically, starts from a session that already has an active summary. Per
+// docs/refactor-compaction-context.md P3 / §3.3, a retry-exhausted
+// compaction must leave the old SummaryMessageID (and therefore the old
+// projection) untouched rather than clearing it -- clearing it would make a
+// session that has successfully compacted before regress to appearing
+// never-compacted.
+func TestSummarizeSchemaRetryExhaustionDoesNotOverwriteExistingSummaryPointer(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+
+	env := testEnv(t)
+	testSession, err := env.sessions.Create(t.Context(), "summarize schema retry exhausted keeps old pointer")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("x", 4000)}},
+	})
+	require.NoError(t, err)
+
+	const wellFormedSummary = "## Goal\nDo the thing.\n\n## Current State\nIn progress.\n\n## Next Steps\n1. Keep going."
+	firstAgent := &autoSummarizeTestAgent{t: t, summaryTexts: []string{wellFormedSummary}}
+	firstSessionAgent := newAutoSummarizeTestSessionAgent(t, env, firstAgent, env.messages, 10000)
+
+	require.NoError(t, firstSessionAgent.Summarize(t.Context(), testSession.ID, nil))
+
+	sessionAfterFirst, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, sessionAfterFirst.SummaryMessageID)
+	originalSummaryMessageID := sessionAfterFirst.SummaryMessageID
+
+	// New work after the first (successful) compaction, so the second
+	// Summarize call has something to summarize.
+	_, err = env.messages.Create(t.Context(), testSession.ID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("y", 4000)}},
+	})
+	require.NoError(t, err)
+
+	const missingSections = "Just some prose with no structured sections at all."
+	secondAgent := &autoSummarizeTestAgent{
+		t:            t,
+		summaryTexts: []string{missingSections, missingSections, missingSections},
+	}
+	secondSessionAgent := newAutoSummarizeTestSessionAgent(t, env, secondAgent, env.messages, 10000)
+
+	err = secondSessionAgent.Summarize(t.Context(), testSession.ID, nil)
+	require.Error(t, err)
+	require.Equal(t, maxSummaryContentRetries+1, secondAgent.summaryCalls)
+
+	sessionAfterSecond, err := env.sessions.Get(t.Context(), testSession.ID)
+	require.NoError(t, err)
+	require.Equal(t, originalSummaryMessageID, sessionAfterSecond.SummaryMessageID,
+		"a retry-exhausted compaction must not overwrite the previously active summary pointer")
 }
 
 func TestIsInvalidSummaryText(t *testing.T) {

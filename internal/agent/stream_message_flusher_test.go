@@ -40,8 +40,9 @@ func TestStreamMessageFlusherCoalescesFlushes(t *testing.T) {
 	f.MarkDirty()
 	f.MarkDirty()
 	f.MarkDirty()
-	time.Sleep(streamMessageFlushInterval + 50*time.Millisecond)
-	require.GreaterOrEqual(t, int(flushes.Load()), 1)
+	require.Eventually(t, func() bool {
+		return flushes.Load() >= 1
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestStreamMessageFlusherFlushNow(t *testing.T) {

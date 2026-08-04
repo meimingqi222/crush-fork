@@ -16,6 +16,21 @@ func writeCtxFile(t *testing.T, dir, name, content string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
 }
 
+func TestPromptExplicitlyGroundsWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store, err := config.Init(dir, "", false)
+	require.NoError(t, err)
+	prompt, err := NewPrompt("test", "<workspace_context>{{.WorkingDir}}</workspace_context> Do not prefix the current directory name again.", WithWorkingDir(dir))
+	require.NoError(t, err)
+
+	output, err := prompt.Build(t.Context(), "test-provider", "test-model", store)
+	require.NoError(t, err)
+	require.Contains(t, output, filepath.ToSlash(dir))
+	require.Contains(t, output, "Do not prefix the current directory name again")
+}
+
 // TestBudgetSharedWhenPathsProcessedSequentially verifies the aggregate
 // budget is shared across context paths: one budget consumed by the first
 // path must affect the second path, producing a marker instead of a second

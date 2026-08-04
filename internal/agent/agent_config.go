@@ -13,7 +13,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
-	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/stringext"
 )
@@ -118,9 +117,9 @@ func (a *sessionAgent) invalidateEnhancedSystemPrompt() {
 }
 
 // buildEnhancedSystemPrompt appends dynamic-but-stable-per-session parts
-// (MCP instructions, mental models, vision note) to the base system prompt
-// and caches the result. Subsequent calls return the cached value, keeping
-// the prompt prefix identical across turns for prompt caching.
+// (MCP instructions and the vision note) to the base system prompt and caches
+// the result. Dynamic memory is injected into the prepared message tail so
+// it does not change the stable prompt prefix.
 func (a *sessionAgent) buildEnhancedSystemPrompt(ctx context.Context, basePrompt string, largeModel Model, contextSig string) string {
 	a.enhancedPromptMu.Lock()
 	defer a.enhancedPromptMu.Unlock()
@@ -159,20 +158,6 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(ctx context.Context, basePrompt
 		enhanced += "\n\n<mcp-instructions>\n" + s + "\n</mcp-instructions>"
 	}
 
-	// Mental-models snippets are backend-specific (currently hindsight only).
-	// Gating on the MentalModelsProvider interface, rather than a backend
-	// name string, means this stays correct automatically as backends gain
-	// or lose the capability.
-	if a.memoryEngineEnabled {
-		if retriever := a.memoryEngineRetriever; retriever != nil {
-			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
-				if snippet := hr.MentalModelsSnippet(); snippet != "" {
-					enhanced += "\n\n" + snippet
-				}
-			}
-		}
-	}
-
 	if !largeModel.CatwalkCfg.SupportsImages && a.visionService != nil && a.visionService.IsAvailable() {
 		enhanced += "\n\n" + describeImageToolSystemPromptNote()
 	}
@@ -185,21 +170,12 @@ func (a *sessionAgent) buildEnhancedSystemPrompt(ctx context.Context, basePrompt
 	// causing the instructions hash to vary across Run() calls.
 	baseLen := len(basePrompt)
 	mcpLen := instructions.Len()
-	mmLen := 0
-	if a.memoryEngineEnabled {
-		if retriever := a.memoryEngineRetriever; retriever != nil {
-			if hr, ok := retriever.(engine.MentalModelsProvider); ok {
-				mmLen = len(hr.MentalModelsSnippet())
-			}
-		}
-	}
 	h := sha256.Sum256([]byte(enhanced))
 	slog.Info("[CACHE-DIAG] enhancedSystemPrompt rebuilt",
 		"hash", hex.EncodeToString(h[:8]),
 		"total_len", len(enhanced),
 		"base_len", baseLen,
 		"mcp_len", mcpLen,
-		"mental_models_len", mmLen,
 		"mcp_servers_connected", len(mcpNames),
 	)
 

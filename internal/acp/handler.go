@@ -731,42 +731,8 @@ func (h *Handler) handleMessageEvent(msg message.Message, parentSessionID string
 				readBytes[key] = 1
 				send(h.sessionUpdateFromToolResult(tr, msg.SessionID, parentSessionID, prefixCache))
 			}
-			// Bridge todos tool results to ACP plan updates so IDEs that
-			// render agent plans stay in sync with crush's todo state.
-			// Best-effort: failures to parse must not disturb the normal
-			// tool-call updates.
-			if tr.Name == agenttools.TodosToolName {
-				if update, ok := planUpdateFromTodosResult(tr); ok {
-					send(update)
-				}
-			}
 		}
 	}
-}
-
-// planUpdateFromTodosResult translates a todos tool result's metadata into an
-// ACP SessionUpdatePlan notification. Returns ok=false when the metadata is
-// absent or has no todo entries.
-func planUpdateFromTodosResult(tr message.ToolResult) (SessionUpdate, bool) {
-	if strings.TrimSpace(tr.Metadata) == "" {
-		return SessionUpdate{}, false
-	}
-	var meta agenttools.TodosResponseMetadata
-	if err := json.Unmarshal([]byte(tr.Metadata), &meta); err != nil {
-		return SessionUpdate{}, false
-	}
-	entries := make([]PlanEntry, 0, len(meta.Todos))
-	for _, todo := range meta.Todos {
-		entries = append(entries, PlanEntry{
-			Content:  todo.Content,
-			Priority: "medium",
-			Status:   string(todo.Status),
-		})
-	}
-	return SessionUpdate{
-		SessionUpdate: SessionUpdatePlan,
-		Entries:       &entries,
-	}, true
 }
 
 func (h *Handler) buildToolCallUpdate(tc message.ToolCall, sessionID, parentSessionID string, prefixCache map[string]string) (SessionUpdate, any) {

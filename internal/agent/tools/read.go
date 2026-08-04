@@ -158,7 +158,9 @@ func NewReadTool(
 				sel = resolvedSel
 			}
 
-			// Handle file path.
+			// Handle file path. Normalize Windows separators so paths copied
+			// from cross-platform tool output resolve on the host platform.
+			params.Path = strings.ReplaceAll(params.Path, "\\\\", "/")
 			return handleFileRead(ctx, params, sel, call, lspManager, permissions, filetracker, workingDir, lsConfig, skillsPaths...)
 		})
 }
@@ -512,6 +514,9 @@ func handleFileRead(
 		}
 		meta := ReadResponseMetadata{Path: filePath, Content: out, IsDirectory: true}
 		meta.applyRecovery(recovery)
+		if notice := recovery.notice(absWorkingDir); notice != "" {
+			out = notice + "\n\n" + out
+		}
 		return fantasy.WithResponseMetadata(
 			fantasy.NewTextResponse(out),
 			meta,
@@ -666,6 +671,9 @@ func handleFileRead(
 		meta.TotalLines = readResult.Total
 	}
 	meta.applyRecovery(recovery)
+	if notice := recovery.notice(absWorkingDir); notice != "" {
+		output = notice + "\n\n" + output
+	}
 	if isSkillFile {
 		if skill, err := skills.Parse(filePath); err == nil {
 			meta.ResourceType = ReadResourceSkill
@@ -760,6 +768,20 @@ type readPathRecovery struct {
 	FilePath       string
 	RecoveredBy    string
 	RecoveryAction string
+	RequestedPath  string
+}
+
+func (recovery readPathRecovery) notice(absWorkingDir string) string {
+	if recovery.RecoveredBy != "unique_suffix_recovery" || recovery.RequestedPath == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(absWorkingDir, recovery.FilePath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		rel = filepath.ToSlash(recovery.FilePath)
+	} else {
+		rel = filepath.ToSlash(rel)
+	}
+	return fmt.Sprintf("[Path %q not found; resolved to %q via suffix match]", recovery.RequestedPath, rel)
 }
 
 func (metadata *ReadResponseMetadata) applyRecovery(recovery readPathRecovery) {
@@ -821,6 +843,7 @@ func recoverMissingReadPath(absWorkingDir, requestedRelPath string) (readPathRec
 			FilePath:       suffixMatches[0],
 			RecoveredBy:    "unique_suffix_recovery",
 			RecoveryAction: fmt.Sprintf("Recovered missing read path %q to unique workspace match %q.", requestedRelPath, suffixMatches[0]),
+			RequestedPath:  filepath.ToSlash(requestedRelPath),
 		}, true
 	}
 	if len(suffixMatches) == 0 && len(extensionMatches) == 1 {

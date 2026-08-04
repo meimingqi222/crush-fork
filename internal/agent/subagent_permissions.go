@@ -109,7 +109,6 @@ func readOnlyDeniedToolNames() []string {
 		agenttools.EditToolName,
 		agenttools.WriteToolName,
 		agenttools.RetainToolName,
-		agenttools.TodosToolName,
 		agenttools.SendMessageToolName,
 		agenttools.TaskStopToolName,
 		agenttools.LSPToolName,

@@ -94,7 +94,6 @@ func TestDeferredSetMatchesExpectation(t *testing.T) {
 		tools.GrepToolName,
 		tools.GlobToolName,
 		tools.BashToolName,
-		tools.TodosToolName,
 		tools.RecallToolName,
 		tools.RetainToolName,
 		tools.LSPToolName,

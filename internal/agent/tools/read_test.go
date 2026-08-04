@@ -73,11 +73,30 @@ func TestReadToolRecoversUniqueSuffixMatch(t *testing.T) {
 
 	resp := runReadToolForTest(t, tool, ctx, ReadParams{Path: "dialog/render.go"})
 	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "[Path \"dialog/render.go\" not found; resolved to \"internal/ui/dialog/render.go\" via suffix match]")
 	require.Contains(t, resp.Content, "package dialog")
 
 	meta := parseReadMetadata(t, resp)
 	require.Equal(t, "unique_suffix_recovery", meta.RecoveredBy)
 	require.Contains(t, meta.RecoveryAction, "Recovered missing read path")
+	require.Equal(t, []string{actualPath}, tracker.reads)
+}
+
+func TestReadToolRecoversUniqueSuffixMatchWithWindowsSeparators(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	actualPath := filepath.Join(workingDir, "internal", "ui", "dialog", "render.go")
+	require.NoError(t, os.MkdirAll(filepath.Dir(actualPath), 0o755))
+	require.NoError(t, os.WriteFile(actualPath, []byte("package dialog\\n"), 0o644))
+
+	tracker := &readToolFileTracker{}
+	tool := newReadToolForTest(workingDir, tracker)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
+
+	resp := runReadToolForTest(t, tool, ctx, ReadParams{Path: `dialog\\render.go`})
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "package dialog")
 	require.Equal(t, []string{actualPath}, tracker.reads)
 }
 

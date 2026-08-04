@@ -60,9 +60,12 @@ When path is a directory:
 </limitations>
 
 <tips>
+- Relative paths resolve from the current session working directory, not from a repository name prefix.
 - Use with Glob to find files first
 - For code exploration: Grep to find relevant files, then read to examine
 - Do not use read to probe guessed paths. First ground uncertain paths with Glob, Grep, a directory read, or a path returned by another tool.
+- If a missing path has exactly one matching suffix inside the working directory, read may recover it and will report the original and resolved paths explicitly.
+- Multiple matching suffixes are never guessed; follow the returned glob, parent-directory, or grep suggestion before retrying read.
 - When a file is not found, follow the returned glob, parent-directory, or grep suggestion before retrying read.
 - When output says `Use path="file:N" to continue`, pass that exact path in the next read call. Do not reuse a continuation path for a different file.
 - For line-addressable edits: read with a line selector (e.g. `path="file.ts:50-100"`) to get LINE#HASH anchors, then use edit with operations[].

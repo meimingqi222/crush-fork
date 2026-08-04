@@ -341,17 +341,25 @@ func filterImageFilesForModel(files []fantasy.FilePart, model Model) []fantasy.F
 	return filtered
 }
 
-func buildSessionCompactingPrompt(todos []session.Todo, extraContext []string, promptOverride string) string {
-	base := buildSummaryPrompt(todos)
+func buildSessionCompactingPrompt(extraContext []string, promptOverride string) string {
+	return buildSessionCompactingPromptWithAnchor(extraContext, promptOverride, "")
+}
+
+func buildSessionCompactingPromptWithAnchor(extraContext []string, promptOverride, anchor string) string {
+	base := buildSummaryPrompt()
 	if promptOverride != "" {
 		base = promptOverride
 	}
-	if len(extraContext) == 0 {
-		return base
-	}
-
 	var sb strings.Builder
 	sb.WriteString(base)
+	if anchor != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(anchor)
+	}
+	if len(extraContext) == 0 {
+		return sb.String()
+	}
+
 	sb.WriteString("\n\n## Additional Context\n\n")
 	for _, item := range extraContext {
 		fmt.Fprintf(&sb, "- %s\n", item)

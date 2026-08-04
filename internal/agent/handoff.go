@@ -56,23 +56,15 @@ func (c *coordinator) GenerateHandoff(ctx context.Context, sourceSessionID, goal
 	// history. Without this, sessions that went through morph-compact or
 	// built-in summarization would feed the entire pre-summary transcript
 	// to the background model, easily exceeding its context window.
-	if currentSession.SummaryMessageID != "" {
-		summaryMsgIndex := -1
-		for i, msg := range msgs {
-			if msg.ID == currentSession.SummaryMessageID {
-				summaryMsgIndex = i
-				break
-			}
-		}
-		if summaryMsgIndex != -1 {
-			slog.Debug("Handoff: truncating messages to summary point",
-				"session_id", sourceSessionID,
-				"summary_message_id", currentSession.SummaryMessageID,
-				"original_count", len(msgs),
-				"new_count", len(msgs)-summaryMsgIndex)
-			msgs = msgs[summaryMsgIndex:]
-		}
-	}
+	// summaryOnly here keeps handoff's existing compact semantics --
+	// summary-and-after only, no retained recent-work segment -- via the
+	// same boundary lookup every other call site now shares
+	// (docs/refactor-compaction-context.md P2.4).
+	msgs = projectSessionMessages(sessionProjectionParams{
+		RawMessages:      msgs,
+		SummaryMessageID: currentSession.SummaryMessageID,
+		Mode:             summaryOnly,
+	})
 
 	candidateFiles, err := c.collectHandoffCandidateFiles(ctx, sourceSessionID)
 	if err != nil {

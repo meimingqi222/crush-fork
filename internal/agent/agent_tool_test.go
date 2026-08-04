@@ -516,7 +516,6 @@ func TestDeriveSubagentPermissionsReadOnlyDeniesStateMutatingTools(t *testing.T)
 	assert.NotContains(t, allowed, tools.EditToolName)
 	assert.NotContains(t, allowed, tools.WriteToolName)
 	assert.NotContains(t, allowed, tools.RetainToolName)
-	assert.NotContains(t, allowed, tools.TodosToolName)
 	assert.NotContains(t, allowed, tools.SendMessageToolName)
 	assert.NotContains(t, allowed, tools.TaskStopToolName)
 	assert.NotContains(t, allowed, tools.LSPToolName)
@@ -528,7 +527,6 @@ func TestDeriveSubagentPermissionsReadOnlyDeniesStateMutatingTools(t *testing.T)
 	assert.Contains(t, denied, tools.EditToolName)
 	assert.Contains(t, denied, tools.WriteToolName)
 	assert.Contains(t, denied, tools.RetainToolName)
-	assert.Contains(t, denied, tools.TodosToolName)
 	assert.Contains(t, denied, tools.SendMessageToolName)
 	assert.Contains(t, denied, tools.TaskStopToolName)
 	assert.Contains(t, denied, tools.LSPToolName)
@@ -699,33 +697,6 @@ func TestBuildToolsHonorsDisabledToolsInDefaultMode(t *testing.T) {
 	assert.NotContains(t, defaultNames, "bash")
 	assert.NotContains(t, defaultNames, "read")
 	assert.Contains(t, defaultNames, "write")
-}
-
-func TestBuildToolsForDefaultModeIncludesTodos(t *testing.T) {
-	env := testEnv(t)
-	cfg, err := config.Init(env.workingDir, "", false)
-	require.NoError(t, err)
-
-	coord := &coordinator{
-		cfg:         cfg,
-		sessions:    env.sessions,
-		messages:    env.messages,
-		permissions: env.permissions,
-		userInput:   nil,
-		history:     env.history,
-		filetracker: *env.filetracker,
-		lspManager:  lsp.NewManager(cfg),
-	}
-
-	defaultTools, err := coord.buildTools(t.Context(), cfg.Config().Agents[config.AgentCoder], session.CollaborationModeDefault)
-	require.NoError(t, err)
-
-	defaultNames := make([]string, 0, len(defaultTools))
-	for _, tool := range defaultTools {
-		defaultNames = append(defaultNames, tool.Info().Name)
-	}
-
-	assert.Contains(t, defaultNames, tools.TodosToolName)
 }
 
 func runAgentToolForTest(t *testing.T, tool fantasy.AgentTool, params AgentParams) (fantasy.ToolResponse, error) {

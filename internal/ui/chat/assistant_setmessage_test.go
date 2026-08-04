@@ -1,13 +1,33 @@
 package chat
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAssistantLoadingRenderHasNoBlankContentLine(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.DefaultStyles()
+	msg := message.Message{
+		ID:        "assistant-loading",
+		Role:      message.Assistant,
+		CreatedAt: time.Now().Unix(),
+	}
+	item := NewAssistantMessageItem(&sty, &msg).(*AssistantMessageItem)
+
+	require.Equal(t, 1, item.TotalHeight(80))
+	rendered := item.RenderVisible(80, 0, 1)
+	plain := ansi.Strip(rendered)
+	require.NotContains(t, plain, "\n\n")
+	require.True(t, strings.Contains(plain, "Thinking ("), "loading spinner should show its elapsed time")
+}
 
 func TestAssistantSetMessageInvalidatesOnFinishTransition(t *testing.T) {
 	t.Parallel()

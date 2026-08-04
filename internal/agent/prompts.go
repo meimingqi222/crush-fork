@@ -99,6 +99,11 @@ func reviewPrompt(agentCfg config.Agent, opts ...prompt.Option) (*prompt.Prompt,
 
 const reviewPromptTemplate = `You are a read-only code review subagent.
 
+<workspace_context>
+The current working directory is {{.WorkingDir}}.
+Resolve relative paths and commands from this directory; do not prefix a path with the current directory name again. Ground uncertain paths with Glob, directory listing, or tool output before reading them.
+</workspace_context>
+
 <role>
 Act as the final code-review specialist for the delegated scope: inspect diffs,
 nearby implementation, tests, and relevant contracts, then report only concrete

@@ -199,6 +199,65 @@ func TestOpenAIResponsesWebSocketFallbackAfterDialFailure(t *testing.T) {
 	require.Equal(t, int32(2), httpHits.Load())
 }
 
+// A chained request that carries previous_response_id must not silently fall
+// back to plain HTTP after the WebSocket transport has already failed: the
+// server-side chain state is not reachable over a fresh HTTP request, so the
+// request must be rejected with a full-replay error instead.
+func TestOpenAIResponsesWebSocketRejectsChainedRequestOnHTTPFallback(t *testing.T) {
+	t.Parallel()
+
+	httpHits := atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "websocket" {
+			http.Error(w, "websocket unavailable", http.StatusBadRequest)
+			return
+		}
+		httpHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	opts := ResponsesWebSocketOptions{
+		Enabled:  true,
+		Fallback: ResponsesWebSocketFallbackSession,
+	}
+	client := WrapOpenAIResponsesWebSocketHTTPClient(srv.Client(), NewResponsesWebSocketPool(), opts, nil)
+
+	// First request without previous_response_id: WS fails, session marks
+	// preferHTTP, and the request falls back to HTTP cleanly.
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5","stream":true,"input":[]}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, int32(1), httpHits.Load())
+
+	// Chained request while preferHTTP is set: must be rejected, never sent to
+	// the HTTP fallback with a dangling previous_response_id.
+	chained := `{"model":"gpt-5","stream":true,"previous_response_id":"resp_123","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`
+	req, err = http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/responses", strings.NewReader(chained))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	_, err = client.Do(req)
+	require.ErrorIs(t, err, ErrResponsesReplayRequired)
+	require.Equal(t, int32(1), httpHits.Load(), "chained request must not reach the HTTP fallback")
+}
+
+// hasPreviousResponseID must only match a non-empty previous_response_id value.
+func TestHasPreviousResponseID(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, hasPreviousResponseID(nil))
+	require.False(t, hasPreviousResponseID(map[string]any{}))
+	require.False(t, hasPreviousResponseID(map[string]any{"previous_response_id": ""}))
+	require.False(t, hasPreviousResponseID(map[string]any{"previous_response_id": "  "}))
+	require.False(t, hasPreviousResponseID(map[string]any{"previous_response_id": 123}))
+	require.True(t, hasPreviousResponseID(map[string]any{"previous_response_id": "resp_123"}))
+}
+
 func TestResponsesWebSocketPoolTurnState(t *testing.T) {
 	t.Parallel()
 

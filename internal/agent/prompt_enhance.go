@@ -152,13 +152,12 @@ func (c *coordinator) loadEnhancePromptHistory(ctx context.Context, sessionID st
 		return nil
 	}
 
-	if sess, sessErr := c.sessions.Get(ctx, sessionID); sessErr == nil && sess.SummaryMessageID != "" {
-		for i, m := range msgs {
-			if m.ID == sess.SummaryMessageID {
-				msgs = msgs[i:]
-				break
-			}
-		}
+	if sess, sessErr := c.sessions.Get(ctx, sessionID); sessErr == nil {
+		msgs = projectSessionMessages(sessionProjectionParams{
+			RawMessages:      msgs,
+			SummaryMessageID: sess.SummaryMessageID,
+			Mode:             summaryOnly,
+		})
 	}
 
 	history := make([]fantasy.Message, 0, len(msgs))

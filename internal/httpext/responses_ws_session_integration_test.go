@@ -138,5 +138,5 @@ func TestResponsesWebSocketPreferHTTPSharedAcrossWrappedClients(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	require.Equal(t, int32(2), httpHits.Load())
-	require.True(t, session.PreferHTTP().Load())
+	require.True(t, session.PreferHTTP(""))
 }

@@ -42,6 +42,7 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/hooks"
+	"github.com/charmbracelet/crush/internal/httpext"
 	"github.com/charmbracelet/crush/internal/memory/engine"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -549,6 +550,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}
 
+	// Clear stale todos from the removed LLM todo tool at the start of a
+	// user-initiated run. session.Todos is now runtime-only state written by
+	// the subagent bridge (syncTodos); old persisted values would freeze the
+	// UI spinner forever. Sub-agent runs and tool-call continuations are
+	// exempt so the bridge's live progress is not wiped.
+	if isUserInitiatedRequest && firstRequestStep {
+		if sess, err := a.sessions.Get(genCtx, call.SessionID); err == nil && len(sess.Todos) > 0 {
+			sess.Todos = nil
+			if _, err := a.sessions.Save(genCtx, sess); err != nil {
+				slog.Warn("Failed to clear stale todos", "error", err, "session_id", call.SessionID)
+			}
+		}
+	}
+
 	runtimeConfig, err := a.refreshCallConfigIfNeeded(genCtx, &call)
 	if err != nil {
 		return nil, err
@@ -854,6 +869,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// Always start with prefetchedRecallInjected=false so PrepareStep
 		// handles all memory injection as a trailing System Message.
 		prefetchedRecallInjected := false
+		mentalModelsInjected := false
 		injectedInPrepareStep := false
 		// Snapshot MCP states at the start of this run. If MCP servers
 		// connect/disconnect during the run, we inject a System Message
@@ -916,8 +932,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if stripRedactedThinking {
 			initialMessages, _ = stripRedactedThinkingParts(initialMessages)
 		}
-		// Memories and mental models are now injected into systemPrompt at start,
-		// or as a System Message in PrepareStep when asynchronously settled.
+		// Memory recall and mental models are injected as trailing System Messages
+		// during PrepareStep so the stable system prompt prefix remains cacheable.
 
 		var stepMessages []fantasy.Message
 		// chainingBaseOptions is the provider options applied to every step of
@@ -963,10 +979,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			return streamFlusher.FlushNow()
 		}
 		result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
-			Prompt:           userPrompt,
-			Files:            requestState.Files,
-			Messages:         initialMessages,
-			ProviderOptions:  chainingBaseOptions,
+			Prompt:          userPrompt,
+			Files:           requestState.Files,
+			Messages:        initialMessages,
+			ProviderOptions: chainingBaseOptions,
+			ReplayRequired: func(err error) bool {
+				if errors.Is(err, httpext.ErrResponsesReplayRequired) || fantasy.IsPreviousResponseNotFoundError(err) {
+					if a.responsesChaining {
+						a.lastResponseID.Del(call.SessionID)
+					}
+					slog.Warn("Responses full replay required", "error", err, "session_id", call.SessionID)
+					return true
+				}
+				return false
+			},
 			MaxOutputTokens:  maxOutputTokens,
 			TopP:             call.TopP,
 			Temperature:      call.Temperature,
@@ -1061,6 +1087,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					} else if !prefetchNotReadyLogged {
 						prefetchNotReadyLogged = true
 						slog.Debug("[PERF] sessionAgent: memory prefetch not ready, will retry on next step", "session_id", call.SessionID)
+					}
+				}
+
+				if !a.isSubAgent && (options.Replay || !mentalModelsInjected) && a.memoryEngineEnabled {
+					if retriever := a.memoryEngineRetriever; retriever != nil {
+						if provider, ok := retriever.(engine.MentalModelsProvider); ok {
+							if snippet := provider.MentalModelsSnippet(); snippet != "" {
+								prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(FormatAutoRecallMessage(snippet)))
+								mentalModelsInjected = true
+								chainingContextInjected = true
+								slog.Debug("Injected Hindsight mental models into prepared messages", "session_id", call.SessionID)
+							}
+						}
 					}
 				}
 
@@ -1414,7 +1453,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				// the full replayed transcript with just the incremental turn and a
 				// previous_response_id. Applied last so the token estimate above still
 				// reflects the true (server-side) context size. Off by default.
-				if a.responsesChaining {
+				if a.responsesChaining && !options.Replay {
 					if a.applyResponsesChaining(&prepared, responsesChainingInput{
 						sessionID:       call.SessionID,
 						baseOptions:     chainingBaseOptions,
@@ -3151,24 +3190,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			"error", err, "session_id", sessionID)
 		transformedMsgs = msgs
 	}
-	aiMsgs, _ := a.preparePrompt(transformedMsgs)
-	// Textualize native tool-call/tool-result parts before sending the
-	// history to the summary model. The summarize request carries no tool
-	// definitions (the agent below is built without WithTools) and forces
-	// ToolChoiceNone, but native tool_calls parts left in the history are
-	// still rendered by the provider's server-side chat template in the
-	// model's native tool-call syntax (e.g. DeepSeek DSML) — and a weak
-	// summary model presented with a prompt full of such traces tends to
-	// continue the pattern and emit tool-call markup instead of a prose
-	// summary (the DSML garbage-summary incident). Flattening removes the
-	// inducement at the source; isInvalidSummaryText below remains as the
-	// safety net.
-	aiMsgs = flattenToolCallsForSummary(aiMsgs)
 	// preCompactionTokens is the estimated prompt size just before
-	// compaction. Compared against the post-compaction baseline below, this
-	// yields the number of tokens compaction actually discarded, used to
-	// gate session working-memory generation (see enableSessionMemory /
-	// workingMemoryMinDiscardedTokens).
+	// compaction, measured on msgs -- the pre-fitting projection -- not on
+	// whatever fitCompactionHistory below decides to keep. Compared against
+	// the post-compaction baseline below, this yields the number of tokens
+	// compaction actually discarded, used to gate session working-memory
+	// generation (see enableSessionMemory / workingMemoryMinDiscardedTokens).
 	preCompactionTokens := a.estimatePromptForMessages(msgs)
 	compactUsage := usageSnapshotFromMessages(msgs, preCompactionTokens)
 	compacting, err := a.plugins().TriggerSessionCompacting(ctx, plugin.SessionCompactingInput{
@@ -3186,6 +3213,30 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		fileContext := a.buildRecentFileContext(ctx, sessionID, int64(summaryModel.CatwalkCfg.ContextWindow))
 		compacting.Context = append(compacting.Context, fileContext...)
 	}
+
+	// See previousSummaryText for why this must match SummaryMessageID
+	// exactly instead of scanning msgs for the last IsSummaryMessage
+	// (docs/refactor-compaction-context.md P0.1).
+	previousSummary := previousSummaryText(currentSession.SummaryMessageID, msgs)
+
+	// buildCompactionAnchor needs the raw, unsliced session history to
+	// recover the original user goal: getSessionMessages already sliced msgs
+	// to start at the active summary boundary, so the earliest user message
+	// may not be reachable from msgs at all. This read is for goal
+	// derivation only -- the summarization history sent to the model
+	// continues to use transformedMsgs/aiMsgs elsewhere in this function.
+	rawMsgs, rawErr := a.messages.List(ctx, sessionID)
+	if rawErr != nil {
+		slog.Warn("Failed to load raw session history for compaction anchor goal derivation", "error", rawErr, "session_id", sessionID)
+		rawMsgs = nil
+	}
+	// buildCompactionAnchor's "Current/latest user request" line is derived
+	// from msgs (the pre-fit projection), not from whatever
+	// fitCompactionHistory below keeps: fitting can drop the message
+	// carrying the latest request out of an oversized history, but the
+	// anchor must still report it accurately
+	// (docs/refactor-compaction-context.md P1.1).
+	compactionAnchor := buildCompactionAnchor(currentSession, rawMsgs, msgs, previousSummary, false)
 
 	// Inject memory rescue (top durable events from MemoryEngine) when the
 	// caller attached one via withCompactionRescue. The rescue block must
@@ -3217,7 +3268,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
-	summaryPromptText := buildSessionCompactingPrompt(currentSession.Todos, compacting.Context, compacting.Prompt)
+	summaryPromptText := buildSessionCompactingPromptWithAnchor(compacting.Context, compacting.Prompt, compactionAnchor)
 
 	// Check whether history alone would leave enough room for the summary
 	// prompt, system prompt, and output reserve. This uses the same effective
@@ -3230,17 +3281,70 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		string(summaryPrompt),
 		systemPromptPrefix,
 	)
+
+	// Fit the trimmable history to maxAllowedTokens while message structure
+	// (tool call/result pairing, IsSummaryMessage) is still intact --
+	// selecting whole messages, never deleting from the head of a
+	// fantasy.Message slice after tool calls/results have already been
+	// flattened to plain text (docs/refactor-compaction-context.md P1.1).
+	// lowerBound keeps the safe-segment selector from reaching back across
+	// the active summary boundary into the previous compaction epoch (P1.2).
+	fitted := transformedMsgs
 	if maxAllowedTokens > 0 {
-		estimatedTokens := estimatePromptTokens(aiMsgs, nil)
-		if estimatedTokens > maxAllowedTokens {
-			slog.Warn("Messages exceed context window, truncating before summarization",
-				"estimated_tokens", estimatedTokens,
-				"max_allowed", maxAllowedTokens,
-				"context_window", contextWindow,
-				"session_id", sessionID)
-			aiMsgs = truncateMessagesToFit(aiMsgs, maxAllowedTokens)
+		summaryIdx := -1
+		for i, m := range transformedMsgs {
+			if m.IsSummaryMessage {
+				summaryIdx = i
+				break
+			}
+		}
+		lowerBound := 0
+		if summaryIdx >= 0 {
+			lowerBound = summaryIdx + 1
+		}
+
+		fitResult := fitCompactionHistory(transformedMsgs, lowerBound, maxAllowedTokens)
+		fitted = fitResult.Messages
+		switch {
+		case fitResult.EnvelopeOnly:
+			// Even the deterministic bounded representation of the safe
+			// segment exceeded budget: drop all trimmable history,
+			// including the previous summary message, and summarize from
+			// the fixed envelope alone. Returning failure here instead
+			// would mean compaction can never succeed again once a session
+			// reaches this state -- context keeps growing and the session
+			// deadlocks permanently -- so the previous summary's
+			// Goal/Current State/Next Steps are inlined into the anchor in
+			// place of the message that would otherwise have carried them
+			// (docs/refactor-compaction-context.md P1.4, last tier).
+			slog.Warn("Recent work segment exceeded summarization budget even bounded; summarizing from fixed envelope only",
+				"session_id", sessionID, "max_allowed_tokens", maxAllowedTokens)
+			compactionAnchor = buildCompactionAnchor(currentSession, rawMsgs, msgs, previousSummary, true)
+			// maxAllowedTokens above was computed from the pre-inline
+			// (shorter) summaryPromptText and is intentionally not
+			// recomputed here: fitted is already empty in this branch, so
+			// it no longer affects fitting, and the inlined sections are
+			// bounded by compactAnchorText (~4000 runes each), so the
+			// staleness is small and this tier is already near-unreachable.
+			summaryPromptText = buildSessionCompactingPromptWithAnchor(compacting.Context, compacting.Prompt, compactionAnchor)
+		case fitResult.Bounded:
+			slog.Info("Recent work segment exceeded summarization budget; using a bounded representation",
+				"session_id", sessionID, "max_allowed_tokens", maxAllowedTokens)
 		}
 	}
+	aiMsgs, _ := a.preparePrompt(fitted)
+	// Textualize native tool-call/tool-result parts before sending the
+	// history to the summary model. The summarize request carries no tool
+	// definitions (the agent below is built without WithTools) and forces
+	// ToolChoiceNone, but native tool_calls parts left in the history are
+	// still rendered by the provider's server-side chat template in the
+	// model's native tool-call syntax (e.g. DeepSeek DSML) — and a weak
+	// summary model presented with a prompt full of such traces tends to
+	// continue the pattern and emit tool-call markup instead of a prose
+	// summary (the DSML garbage-summary incident). Flattening removes the
+	// inducement at the source; isInvalidSummaryText below remains as the
+	// safety net.
+	aiMsgs = flattenToolCallsForSummary(aiMsgs)
 
 	summarizeEstimatedPromptTokens := a.estimateSessionPromptTokens(
 		aiMsgs,
@@ -3330,10 +3434,10 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			// instead of producing a real summary. ToolChoiceNone alone
 			// can't stop this, so validate the accumulated, already
 			// think-stripped text before accepting it as a summary.
-			if isInvalidSummaryText(summaryMessage.Content().Text) {
+			if isInvalidSessionSummaryText(summaryMessage.Content().Text) {
 				if summaryContentRetry < maxSummaryContentRetries {
 					summaryContentRetry++
-					slog.Warn("Retrying summarization: model produced tool-call markup instead of a summary",
+					slog.Warn("Retrying summarization: model produced invalid structured summary",
 						"session_id", sessionID,
 						"model", summaryModel.ModelCfg.Model,
 						"provider", summaryModel.ModelCfg.Provider,
@@ -4078,19 +4182,12 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 	}
 	slog.Debug("[PERF] getSessionMessages: messages.List done", "duration", time.Since(start), "session_id", session.ID, "count", len(msgs))
 
-	if session.SummaryMessageID != "" {
-		summaryMsgIndex := -1
-		for i, msg := range msgs {
-			if msg.ID == session.SummaryMessageID {
-				summaryMsgIndex = i
-				break
-			}
-		}
-		if summaryMsgIndex != -1 {
-			msgs = msgs[summaryMsgIndex:]
-			msgs[0].Role = message.User
-		}
-	}
+	msgs = projectSessionMessages(sessionProjectionParams{
+		RawMessages:      msgs,
+		SummaryMessageID: session.SummaryMessageID,
+		Mode:             summaryWithRecentWork,
+		Model:            a.largeModel.Get(),
+	})
 	return filterAutoModePromptMessages(msgs, session.PermissionMode), nil
 }
 

@@ -509,10 +509,29 @@ func (c *coordinator) clearTranscriptTurnCountForSession(sessionID string) {
 	delete(c.transcriptTurnCounts, sessionID)
 }
 
+func (c *coordinator) clearResponsesSession(sessionID string) {
+	if c == nil || sessionID == "" {
+		return
+	}
+	if c.responsesWSPool != nil {
+		if err := c.responsesWSPool.CloseSession(sessionID); err != nil {
+			slog.Warn("Failed to close Responses WebSocket session", "error", err, "session_id", sessionID)
+		}
+	}
+	c.responsesWSTransportMu.Lock()
+	for _, entry := range c.responsesWSTransport {
+		if entry.session != nil {
+			entry.session.ClearSession(sessionID)
+		}
+	}
+	c.responsesWSTransportMu.Unlock()
+}
+
 // onSessionDeleted cleans up coordinator and memory-backend state for a session.
 // Fires only when a session is explicitly deleted (not on quit/Ctrl+C -
 // those paths use Backend.Close before Close).
 func (c *coordinator) onSessionDeleted(ctx context.Context, sessionID string) {
+	c.clearResponsesSession(sessionID)
 	c.clearTranscriptTurnCountForSession(sessionID)
 	c.backgroundAgents.RemoveForSession(sessionID)
 	if c.memoryBackend != nil {

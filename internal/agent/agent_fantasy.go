@@ -7,7 +7,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/session"
 )
 
 func mergeConsecutiveSameRoleFantasyMessages(msgs []fantasy.Message) []fantasy.Message {
@@ -296,18 +295,14 @@ func stripToolCallPartsFromFantasyMessages(messages []fantasy.Message) []fantasy
 	return result
 }
 
-// buildSummaryPrompt constructs the prompt text for session summarization.
-func buildSummaryPrompt(todos []session.Todo) string {
-	var sb strings.Builder
-	sb.WriteString("Provide a detailed summary of our conversation above.")
-	if len(todos) > 0 {
-		sb.WriteString("\n\n## Tracked Tasks\n\n")
-		for _, todo := range todos {
-			fmt.Fprintf(&sb, "- [%s] %s\n", todo.Status, todo.Content)
-		}
-		sb.WriteString("\nInclude these tasks and their statuses in your summary.")
-	}
-	return sb.String()
+// buildSummaryPrompt constructs the base prompt text for session
+// summarization. It intentionally does not include session.Todos: that
+// field is subagent-bridge runtime state, not a task list (see the stale-
+// todos clear in sessionAgent.Run), and the compaction anchor
+// (buildCompactionAnchor) already surfaces it once as "Running subagents" --
+// duplicating it here injected the same state into the prompt twice.
+func buildSummaryPrompt() string {
+	return "Provide a detailed summary of our conversation above."
 }
 
 func hasAutoRecallInMessages(messages []fantasy.Message) bool {

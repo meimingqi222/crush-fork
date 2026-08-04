@@ -43,7 +43,7 @@ func (c *coordinator) responsesWebSocketWrappedClient(
 		return entry.client, entry.session
 	}
 
-	session := &httpext.ResponsesWebSocketTransportSession{}
+	session := httpext.NewResponsesWebSocketTransportSession()
 	client := httpext.WrapOpenAIResponsesWebSocketHTTPClient(
 		base,
 		c.responsesWSPool,

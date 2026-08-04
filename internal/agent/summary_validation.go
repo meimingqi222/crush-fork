@@ -85,3 +85,17 @@ func isInvalidSummaryText(text string) bool {
 	}
 	return looksLikeToolCallMarkup(trimmed)
 }
+
+func isInvalidSessionSummaryText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return isInvalidSummaryText(trimmed) || !hasRequiredSummarySections(trimmed)
+}
+
+func hasRequiredSummarySections(text string) bool {
+	for _, section := range []string{"## Goal", "## Current State", "## Next Steps"} {
+		if !strings.Contains(text, section) {
+			return false
+		}
+	}
+	return true
+}

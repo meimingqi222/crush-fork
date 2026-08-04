@@ -21,8 +21,6 @@ import (
 // differs by more than casing.
 var claudeCodeToolNameAliases = map[string]string{
 	"task":       AgentToolName,
-	"todowrite":  tools.TodosToolName,
-	"todoread":   tools.TodosToolName,
 	"webfetch":   tools.WebFetchToolName,
 	"websearch":  tools.WebSearchToolName,
 	"multiedit":  tools.EditToolName,

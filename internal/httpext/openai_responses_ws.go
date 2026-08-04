@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
@@ -27,25 +26,26 @@ func WrapOpenAIResponsesWebSocketHTTPClient(
 	if client == nil {
 		client = &http.Client{Transport: http.DefaultTransport}
 	}
-	var preferHTTP *atomic.Bool
-	if session != nil {
-		preferHTTP = session.PreferHTTP()
-	}
 	clone := *client
 	clone.Transport = openAIResponsesWebSocketTransport{
-		base:       client.Transport,
-		pool:       pool,
-		opts:       opts,
-		preferHTTP: preferHTTP,
+		base:    client.Transport,
+		pool:    pool,
+		opts:    opts,
+		session: session,
 	}
 	return &clone
 }
 
 type openAIResponsesWebSocketTransport struct {
-	base       http.RoundTripper
-	pool       *ResponsesWebSocketPool
-	opts       ResponsesWebSocketOptions
-	preferHTTP *atomic.Bool
+	base    http.RoundTripper
+	pool    *ResponsesWebSocketPool
+	opts    ResponsesWebSocketOptions
+	session *ResponsesWebSocketTransportSession
+}
+
+func hasPreviousResponseID(payload map[string]any) bool {
+	value, ok := payload["previous_response_id"].(string)
+	return ok && strings.TrimSpace(value) != ""
 }
 
 func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -72,7 +72,11 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 		return base.RoundTrip(req)
 	}
 
-	if t.preferHTTP != nil && t.preferHTTP.Load() {
+	sessionID := responsesWebSocketSessionID(req.Context())
+	if t.session != nil && t.session.PreferHTTP(sessionID) {
+		if hasPreviousResponseID(payload) {
+			return nil, ErrResponsesReplayRequired
+		}
 		restoreRequestBody(req, body)
 		return base.RoundTrip(req)
 	}
@@ -90,24 +94,28 @@ func (t openAIResponsesWebSocketTransport) RoundTrip(req *http.Request) (*http.R
 		return nil, fmt.Errorf("marshal websocket request: %w", err)
 	}
 
-	entry, reused, err := t.pool.acquireConn(req.Context(), wsURL, headers, t.preferHTTP)
+	entry, reused, err := t.pool.acquireConn(req.Context(), wsURL, headers, t.sessionPreferHTTP(sessionID))
 	if err != nil {
 		if errors.Is(err, errWebSocketDisabled) || t.shouldFallbackToHTTP() {
 			if !errors.Is(err, errWebSocketDisabled) {
-				t.markPreferHTTP()
+				t.markPreferHTTP(req.Context())
+			}
+			if hasPreviousResponseID(payload) {
+				return nil, ErrResponsesReplayRequired
 			}
 			restoreRequestBody(req, body)
 			return base.RoundTrip(req)
 		}
-		t.markPreferHTTP()
+		t.markPreferHTTP(req.Context())
 		if t.shouldFallbackToHTTP() {
+			if hasPreviousResponseID(payload) {
+				return nil, ErrResponsesReplayRequired
+			}
 			restoreRequestBody(req, body)
 			return base.RoundTrip(req)
 		}
 		return nil, err
 	}
-
-	sessionID := responsesWebSocketSessionID(req.Context())
 
 	if reused {
 		slog.Debug("Responses websocket connection reused", "url", wsURL.Redacted())
@@ -193,9 +201,18 @@ func (t openAIResponsesWebSocketTransport) shouldFallbackToHTTP() bool {
 	return t.opts.fallbackEnabled()
 }
 
-func (t openAIResponsesWebSocketTransport) markPreferHTTP() {
-	if t.preferHTTP != nil && t.opts.fallbackSessionScoped() {
-		t.preferHTTP.Store(true)
+func (t openAIResponsesWebSocketTransport) sessionPreferHTTP(sessionID string) bool {
+	return t.session != nil && t.session.PreferHTTP(sessionID)
+}
+
+func (t openAIResponsesWebSocketTransport) markPreferHTTP(ctx context.Context) {
+	if t.session == nil {
+		return
+	}
+	sessionID := responsesWebSocketSessionID(ctx)
+	t.session.MarkReplayNeeded(sessionID)
+	if t.opts.fallbackSessionScoped() {
+		t.session.MarkPreferHTTP(sessionID)
 	}
 }
 
@@ -203,7 +220,13 @@ func (t openAIResponsesWebSocketTransport) invalidateConn(wsURL url.URL, headers
 	if t.pool != nil {
 		t.pool.invalidate(wsURL, headers, sessionID)
 	}
-	t.markPreferHTTP()
+	if t.session == nil {
+		return
+	}
+	t.session.MarkReplayNeeded(sessionID)
+	if t.opts.fallbackSessionScoped() {
+		t.session.MarkPreferHTTP(sessionID)
+	}
 }
 
 func pooledTurnState(pool *ResponsesWebSocketPool, wsURL url.URL, headers http.Header, sessionID string) string {

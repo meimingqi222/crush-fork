@@ -113,8 +113,8 @@ You MUST keep going until the plan is decision-complete.
 
 // ApprovedPlanSystemPrompt is appended to the user message sent when a plan
 // is approved and execution begins. It tells the executing agent to treat the
-// plan file as authoritative, track steps with todos, and verify each step
-// before proceeding.
+// plan file as authoritative, track progress with the goal tool, and verify
+// each step before proceeding.
 const ApprovedPlanSystemPrompt = `<approved_plan_execution>
 Plan approved.
 
@@ -124,9 +124,9 @@ The plan file is authoritative; visible or compressed context is secondary.
 Read failure? Report the exact path and error instead of guessing.
 After reading, you MUST execute the plan step by step with full tool access.
 Verify each step before proceeding to the next.
-After reading the plan, initialize todo tracking with the ` + "`todos`" + ` tool for every step in the plan's Approach.
-After each completed step, immediately update the ` + "`todos`" + ` tool.
-If the ` + "`todos`" + ` tool fails, fix the payload and retry before continuing.
+After reading the plan, set its objective as the active goal with the ` + "`goal`" + ` tool (` + "`op: \"create\"`" + `) so progress survives compaction.
+After each completed step, check it off in the plan file and confirm the goal is still on track with the ` + "`goal`" + ` tool (` + "`op: \"get\"`" + `).
+If the ` + "`goal`" + ` tool fails, fix the payload and retry before continuing.
 </instruction>
 
 <critical>
@@ -147,7 +147,7 @@ Your tool budget is:
 - ` + "`agent`" + ` for dispatching subagents
 - ` + "`irc`" + ` for inter-agent coordination
 - ` + "`bash`" + ` for verification commands only (type checks, tests, lint)
-- ` + "`todos`" + ` for tracking progress
+- ` + "`goal`" + ` for tracking progress
 
 Rules:
 1. Do not edit files yourself, even for small changes. Delegate all edits to subagents.
@@ -213,7 +213,6 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.RecallToolName:           toolRiskRead,
 	tools.ReflectToolName:          toolRiskRead,
 	tools.MemoryStatusToolName:     toolRiskRead,
-	tools.TodosToolName:            toolRiskWrite,
 	tools.SendMessageToolName:      toolRiskWrite,
 	tools.TaskStopToolName:         toolRiskWrite,
 	tools.WriteToolName:            toolRiskWrite,
@@ -245,7 +244,6 @@ var orchestrateModeAllowedToolNames = map[string]struct{}{
 	tools.BashToolName:             {},
 	AgentToolName:                  {},
 	tools.IrcToolName:              {},
-	tools.TodosToolName:            {},
 	tools.RequestUserInputToolName: {},
 	tools.RecallToolName:           {},
 	tools.ReflectToolName:          {},

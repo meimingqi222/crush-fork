@@ -96,6 +96,14 @@ func (p *requestPurposeSystemPrefixPlugin) Init(context.Context, plugin.PluginIn
 
 func (p *requestPurposeSystemPrefixPlugin) Close(context.Context) error { return nil }
 
+// defaultFakeSummaryText is the default text autoSummarizeTestAgent emits for
+// a summary call when the test does not supply its own summaryTexts. It must
+// satisfy hasRequiredSummarySections (## Goal / ## Current State /
+// ## Next Steps) so tests that aren't specifically exercising the summary
+// schema/content validation in Summarize don't spuriously exhaust the
+// content-retry budget against isInvalidSessionSummaryText.
+const defaultFakeSummaryText = "## Goal\nsummary\n\n## Current State\nsummary\n\n## Next Steps\n1. summary"
+
 func textFromFantasyMessage(msg fantasy.Message) string {
 	var b strings.Builder
 	for _, part := range msg.Content {
@@ -119,8 +127,8 @@ type autoSummarizeTestAgent struct {
 	summaryErrs  []error
 	// summaryTexts, when non-empty, supplies the text emitted via
 	// OnTextDelta for successive summary calls (one entry dequeued per
-	// call). If exhausted or unset, the summary branch emits the default
-	// "summary" text.
+	// call). If exhausted or unset, the summary branch emits
+	// defaultFakeSummaryText.
 	summaryTexts            []string
 	onSummary               func(fantasy.AgentStreamCall)
 	lastCall                fantasy.AgentStreamCall
@@ -158,7 +166,7 @@ func (a *autoSummarizeTestAgent) Stream(ctx context.Context, call fantasy.AgentS
 			}
 		}
 		if call.OnTextDelta != nil {
-			text := "summary"
+			text := defaultFakeSummaryText
 			if len(a.summaryTexts) > 0 {
 				text = a.summaryTexts[0]
 				a.summaryTexts = a.summaryTexts[1:]
@@ -469,7 +477,7 @@ func TestSummarizeDoesNotLeakFullSummaryRequestIntoLastPromptTokens(t *testing.T
 	// write into LastPromptTokens.
 	fullSummaryRequestEstimate := concrete.estimateSessionPromptTokens(
 		aiMsgs,
-		buildSessionCompactingPrompt(nil, nil, ""),
+		buildSessionCompactingPrompt(nil, ""),
 		nil,
 		nil,
 		string(summaryPrompt),
@@ -1221,7 +1229,7 @@ func TestSummarizeRetriesAfterToolCallMarkupThenSucceeds(t *testing.T) {
 	require.NoError(t, err)
 
 	garbage := buildLeakedToolCallText("internal/agent/agent.go")
-	const goodSummary = "A concise, well-formed summary of the session."
+	const goodSummary = "## Goal\nA concise, well-formed summary of the session.\n\n## Current State\nDone.\n\n## Next Steps\n1. None."
 	fakeAgent := &autoSummarizeTestAgent{
 		t:            t,
 		summaryTexts: []string{garbage, goodSummary},
@@ -1612,9 +1620,15 @@ func TestSummarizeTriggersWorkingMemoryGeneration(t *testing.T) {
 	sess, err := env.sessions.Create(t.Context(), "test-session")
 	require.NoError(t, err)
 
+	// Large enough that discardedTokens (pre- vs. post-compaction estimate)
+	// stays positive despite the structured summary schema's fixed header
+	// overhead (## Goal / ## Current State / ## Next Steps) -- a one-line
+	// "hello world" message compacts to something *larger* than the
+	// original under that overhead, which would spuriously suppress working
+	// memory generation below and defeat the point of this test.
 	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
 		Role:  message.User,
-		Parts: []message.ContentPart{message.TextContent{Text: "hello world"}},
+		Parts: []message.ContentPart{message.TextContent{Text: strings.Repeat("hello world ", 2000)}},
 	})
 	require.NoError(t, err)
 

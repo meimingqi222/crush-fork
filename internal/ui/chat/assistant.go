@@ -113,7 +113,7 @@ type AssistantMessageItem struct {
 
 	// Cached main content render: avoids expensive glamour markdown render on
 	// every frame when the content hasn't changed.
-	contentRenderCache   string
+	contentRenderCache string
 	contentContentHash uint64
 	contentRenderWidth int
 
@@ -122,6 +122,10 @@ type AssistantMessageItem struct {
 	summaryRenderCache string
 	summaryContentHash uint64
 	summaryRenderWidth int
+
+	// loadingStartedAt is used as a fallback for messages created without a
+	// persisted timestamp, such as lightweight UI tests.
+	loadingStartedAt time.Time
 }
 
 var (
@@ -138,6 +142,10 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 		message:                  message,
 		sty:                      sty,
 		showLoadingState:         true,
+		loadingStartedAt:         time.Now(),
+	}
+	if message.CreatedAt > 0 {
+		a.loadingStartedAt = time.Unix(message.CreatedAt, 0)
 	}
 
 	a.anim = anim.New(anim.Settings{
@@ -557,19 +565,35 @@ func (a *AssistantMessageItem) invalidateContentRenderCache() {
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {
-	var label string
-	if a.message.IsThinking() {
-		label = "Thinking"
-	} else if a.message.IsSummaryMessage {
+	label := "Thinking"
+	if a.message.IsSummaryMessage {
 		label = "Summarizing"
 	}
+	label = fmt.Sprintf("%s (%s)", label, formatLoadingDuration(a.loadingElapsed()))
+
 	// Only update the animation label when it actually changes to avoid
-	// re-rendering overhead on every animation frame.
-	if label != "" && label != a.currentAnimLabel {
+	// re-rendering overhead on every animation frame. The label changes once
+	// per second as the elapsed time advances.
+	if label != a.currentAnimLabel {
 		a.currentAnimLabel = label
 		a.anim.SetLabel(label)
 	}
 	return a.anim.Render()
+}
+
+func (a *AssistantMessageItem) loadingElapsed() time.Duration {
+	if a.loadingStartedAt.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(a.loadingStartedAt)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
+func formatLoadingDuration(duration time.Duration) string {
+	return duration.Truncate(time.Second).String()
 }
 
 // invalidateCache clears all render caches: base content, prefixed render,
@@ -654,8 +678,16 @@ func (a *AssistantMessageItem) ensureViewportCache(cappedWidth int) {
 		return
 	}
 	content := a.renderMessageContent(cappedWidth)
-	a.viewportLines = strings.Split(content, "\n")
 	a.viewportWidth = cappedWidth
+	if content == "" {
+		// strings.Split("", "\n") returns one empty line. Treat an empty
+		// assistant message as zero content lines so the spinner does not
+		// reserve a blank line before rendering.
+		a.viewportLines = nil
+		a.viewportHeight = 0
+		return
+	}
+	a.viewportLines = strings.Split(content, "\n")
 	a.viewportHeight = len(a.viewportLines)
 }
 

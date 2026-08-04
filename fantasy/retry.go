@@ -85,6 +85,9 @@ type RetryOptions struct {
 	InitialDelayIn time.Duration
 	BackoffFactor  float64
 	OnRetry        OnRetryCallback
+	// ShouldRetry optionally overrides retry eligibility for a specific error.
+	// Returning false surfaces the error immediately without backoff.
+	ShouldRetry func(error) bool
 
 	// OnAuthRefresh is called when an operation fails with an authentication
 	// error the caller may be able to resolve (e.g. an expired SSO session).
@@ -128,6 +131,9 @@ func retryWithExponentialBackoff[T any](ctx context.Context, fn RetryFn[T], opti
 
 	if isAbortError(err) {
 		return zero, err // don't retry when the request was aborted
+	}
+	if options.ShouldRetry != nil && !options.ShouldRetry(err) {
+		return zero, err
 	}
 
 	if options.MaxRetries == 0 {

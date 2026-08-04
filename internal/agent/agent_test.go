@@ -22,16 +22,17 @@ import (
 	_ "github.com/joho/godotenv/autoload"
 )
 
-func TestBuildSummaryPromptIncludesTrackedTasksWithoutTodoInstructions(t *testing.T) {
+func TestBuildSummaryPromptDoesNotDuplicateTrackedTasks(t *testing.T) {
 	t.Parallel()
 
-	prompt := buildSummaryPrompt([]session.Todo{{
-		Status:  session.TodoStatusInProgress,
-		Content: "Investigate delegation bias",
-	}})
+	// session.Todos is subagent-bridge runtime state, not a task list, and
+	// is surfaced once in the compaction anchor as "Running subagents" (see
+	// buildCompactionAnchor). buildSummaryPrompt must not also emit a
+	// "Tracked Tasks" section, or todos get injected into the same prompt
+	// twice.
+	prompt := buildSummaryPrompt()
 
-	require.Contains(t, prompt, "## Tracked Tasks")
-	require.Contains(t, prompt, "[in_progress] Investigate delegation bias")
+	require.NotContains(t, prompt, "## Tracked Tasks")
 	require.NotContains(t, prompt, "use the `todos` tool")
 }
 

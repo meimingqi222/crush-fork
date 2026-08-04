@@ -131,7 +131,6 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),
 		agenttools.NewCrushTool(c.cfg, c.lspManager, c.memoryEngine(), filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
-		agenttools.NewTodosTool(c.sessions),
 		agenttools.NewGoalTool(c.sessions, c.goalRuntime),
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),

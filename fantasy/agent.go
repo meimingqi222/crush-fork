@@ -100,6 +100,9 @@ type PrepareStepFunctionOptions struct {
 	StepNumber int
 	Model      LanguageModel
 	Messages   []Message
+	// Replay is true when the previous prepared request could not use its
+	// server-side conversation state and the logical step is being rebuilt.
+	Replay bool
 }
 
 // PrepareStepResult contains the result of preparing a step in an agent execution.
@@ -189,8 +192,11 @@ type AgentCall struct {
 	// nil, the model captured at step preparation time is used.
 	ModelProvider func() LanguageModel
 
-	StopWhen       []StopCondition
-	PrepareStep    PrepareStepFunction
+	StopWhen    []StopCondition
+	PrepareStep PrepareStepFunction
+	// ReplayRequired reports whether an error requires rebuilding the logical
+	// step from full messages instead of reusing the prepared request.
+	ReplayRequired func(error) bool
 	RepairToolCall RepairToolCallFunction
 }
 
@@ -298,8 +304,11 @@ type AgentStreamCall struct {
 	// nil, the model captured at step preparation time is used.
 	ModelProvider func() LanguageModel
 
-	StopWhen       []StopCondition
-	PrepareStep    PrepareStepFunction
+	StopWhen    []StopCondition
+	PrepareStep PrepareStepFunction
+	// ReplayRequired reports whether an error requires rebuilding the logical
+	// step from full messages instead of reusing the prepared request.
+	ReplayRequired func(error) bool
 	RepairToolCall RepairToolCallFunction
 
 	// Agent-level callbacks
@@ -962,6 +971,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 		ModelProvider:    opts.ModelProvider,
 		StopWhen:         opts.StopWhen,
 		PrepareStep:      opts.PrepareStep,
+		ReplayRequired:   opts.ReplayRequired,
 		RepairToolCall:   opts.RepairToolCall,
 	}
 
@@ -1001,7 +1011,7 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 		// step before any PrepareStep incremental-chaining override, so a
 		// previous_response_not_found failure can be retried with a full replay.
 		fullStepMessages := stepInputMessages
-		chainingOverrideUsed := false
+		replayAttempted := false
 		// Apply step preparation if provided
 		if call.PrepareStep != nil {
 			updatedCtx, prepared, err := call.PrepareStep(ctx, PrepareStepFunctionOptions{
@@ -1037,7 +1047,6 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			}
 			if prepared.ProviderOptions != nil {
 				stepProviderOptions = prepared.ProviderOptions
-				chainingOverrideUsed = true
 			}
 		}
 
@@ -1086,6 +1095,11 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 		}
 		retryOptions.OnRetry = call.OnRetry
 		retryOptions.OnAuthRefresh = call.OnAuthRefresh
+		if call.ReplayRequired != nil {
+			retryOptions.ShouldRetry = func(err error) bool {
+				return !call.ReplayRequired(err)
+			}
+		}
 		retry := RetryWithExponentialBackoffRespectingRetryHeaders[stepExecutionResult](retryOptions)
 
 		result, err := retry(ctx, func() (stepExecutionResult, error) {
@@ -1109,24 +1123,65 @@ func (a *agent) Stream(ctx context.Context, opts AgentStreamCall) (*AgentResult,
 			}
 			return result, nil
 		})
-		if err != nil && chainingOverrideUsed && IsPreviousResponseNotFoundError(err) {
-			// The referenced previous_response_id no longer exists upstream.
-			// Retry this step once with the full transcript replay and the base
-			// provider options (which never carry previous_response_id).
-			fallbackCall := streamCall
-			fallbackCall.Prompt = fullStepMessages
-			fallbackCall.ProviderOptions = call.ProviderOptions
-			result, err = retry(ctx, func() (stepExecutionResult, error) {
-				stream, ferr := stepModel.Stream(ctx, fallbackCall)
-				if ferr != nil {
-					return stepExecutionResult{}, ferr
-				}
-				r, ferr := a.processStepStream(ctx, stream, opts, steps, stepTools, stepExecProviderTools)
-				if ferr != nil {
-					return stepExecutionResult{}, ferr
-				}
-				return r, nil
+		if err != nil && !replayAttempted && call.ReplayRequired != nil && call.ReplayRequired(err) && call.PrepareStep != nil {
+			replayAttempted = true
+			// The referenced server-side conversation state is unavailable.
+			// Re-run preparation once so the logical step can rebuild its full
+			// request; ordinary provider retries still reuse the prepared step.
+			updatedCtx, prepared, prepareErr := call.PrepareStep(ctx, PrepareStepFunctionOptions{
+				Model:      stepModel,
+				Steps:      steps,
+				StepNumber: stepNumber,
+				Messages:   fullStepMessages,
+				Replay:     true,
 			})
+			if prepareErr != nil {
+				err = prepareErr
+			} else {
+				ctx = updatedCtx
+				stepInputMessages = fullStepMessages
+				stepProviderOptions = call.ProviderOptions
+				if prepared.Messages != nil {
+					stepInputMessages = prepared.Messages
+				}
+				if prepared.Model != nil {
+					stepModel = prepared.Model
+				}
+				if prepared.ToolChoice != nil {
+					stepToolChoice = *prepared.ToolChoice
+				}
+				if len(prepared.ActiveTools) > 0 {
+					stepActiveTools = prepared.ActiveTools
+				}
+				if prepared.Tools != nil {
+					stepTools = prepared.Tools
+				}
+				disableAllTools = prepared.DisableAllTools
+				if prepared.ProviderOptions != nil {
+					stepProviderOptions = prepared.ProviderOptions
+				}
+				preparedTools = a.prepareTools(stepTools, a.settings.providerDefinedTools, stepActiveTools, disableAllTools)
+				stepExecProviderTools = a.filterExecProviderTools(stepActiveTools)
+				fallbackCall := streamCall
+				fallbackCall.Prompt = stepInputMessages
+				fallbackCall.ProviderOptions = stepProviderOptions
+				result, err = retry(ctx, func() (stepExecutionResult, error) {
+					retryModel := stepModel
+					if call.ModelProvider != nil {
+						retryModel = call.ModelProvider()
+					}
+					fallbackCall.ProviderOptions = stepProviderOptions
+					stream, ferr := retryModel.Stream(ctx, fallbackCall)
+					if ferr != nil {
+						return stepExecutionResult{}, ferr
+					}
+					r, ferr := a.processStepStream(ctx, stream, opts, steps, stepTools, stepExecProviderTools)
+					if ferr != nil {
+						return stepExecutionResult{}, ferr
+					}
+					return r, nil
+				})
+			}
 		}
 		if err != nil {
 			if opts.OnError != nil {

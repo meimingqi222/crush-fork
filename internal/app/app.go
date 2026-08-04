@@ -468,6 +468,23 @@ func (app *App) resolveSession(ctx context.Context, continueSessionID string, us
 
 // RunNonInteractive runs the application in non-interactive mode with the
 // given prompt, printing to stdout.
+// shouldStreamMessageToOutput reports whether a message published on the
+// session's message stream belongs on `crush run`'s stdout.
+//
+// Compaction summaries are assistant messages in the same session, so they
+// arrive here like any model reply, but they are internal context-management
+// output rather than an answer to the user's prompt. Writing them to stdout
+// would interleave a whole structured summary into the result whenever
+// `crush run` is piped into a file or another command. The TUI draws the same
+// distinction by rendering summaries in their own box (see
+// internal/ui/chat/assistant.go).
+func shouldStreamMessageToOutput(msg message.Message, sessionID string) bool {
+	return msg.SessionID == sessionID &&
+		msg.Role == message.Assistant &&
+		!msg.IsSummaryMessage &&
+		len(msg.Parts) > 0
+}
+
 func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, largeModel, smallModel string, hideSpinner bool, continueSessionID string, useLast bool) error {
 	slog.Info("Running in non-interactive mode")
 
@@ -609,7 +626,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 		case event := <-messageEvents:
 			msg := event.Payload
-			if msg.SessionID == sess.ID && msg.Role == message.Assistant && len(msg.Parts) > 0 {
+			if shouldStreamMessageToOutput(msg, sess.ID) {
 				stopSpinner()
 
 				content := msg.Content().String()

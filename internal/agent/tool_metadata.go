@@ -76,8 +76,6 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "view memory backend status", SearchTags: []string{"memory", "status", "observability", "backend", "diagnostics"}, Exposure: tools.ToolExposureDeferred}
 	case tools.GraphToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "traverse the memory knowledge graph or query structured triples", SearchTags: []string{"memory", "knowledge-graph", "triples", "traversal", "facts"}, Exposure: tools.ToolExposureDeferred}
-	case tools.TodosToolName:
-		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track structured task progress", SearchTags: []string{"todo", "task-list", "planning", "progress"}, Direct: true}
 	case tools.SendMessageToolName:
 		return tools.ToolMetadata{RiskHint: "write", SearchHint: "send mailbox messages to running task graph tasks", SearchTags: []string{"mailbox", "taskgraph", "message", "subagent"}, Direct: true, Exposure: tools.ToolExposureDeferred}
 	case tools.TaskStopToolName:
