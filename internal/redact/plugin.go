@@ -60,17 +60,14 @@ func (p *redactPlugin) Init(ctx context.Context, input plugin.PluginInput) (plug
 
 	return plugin.Hooks{
 		ToolBeforeExecute: func(ctx context.Context, input plugin.ToolBeforeExecuteInput) (*plugin.ToolBeforeExecuteOutput, error) {
-			if input.Args == nil {
-				return &plugin.ToolBeforeExecuteOutput{}, nil
-			}
-			cache := make(map[string]string)
-			redacted := RedactDeep(input.Args, p.patterns, cache)
-			if m, ok := redacted.(map[string]interface{}); ok {
-				for k, v := range m {
-					input.Args[k] = v
-				}
-			}
-			return &plugin.ToolBeforeExecuteOutput{Args: input.Args}, nil
+			// Deliberately a no-op: redaction must never alter the
+			// arguments a tool actually executes with. Mutating args would
+			// corrupt tool execution (e.g. a write tool receiving
+			// [REDACTED] file content) and would diverge the stored
+			// ToolCall.Input from what actually ran. Secrets in tool calls
+			// are already scrubbed on the way out to the LLM by
+			// ChatMessagesTransform and ToolAfterExecute.
+			return &plugin.ToolBeforeExecuteOutput{}, nil
 		},
 
 		ToolAfterExecute: func(ctx context.Context, input plugin.ToolAfterExecuteInput) (*plugin.ToolAfterExecuteOutput, error) {

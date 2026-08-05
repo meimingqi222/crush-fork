@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/plugin"
 	"github.com/stretchr/testify/require"
@@ -252,4 +254,34 @@ func TestRedactPluginCacheKindIsolation(t *testing.T) {
 	localCache3 := make(map[string]string)
 	require.Equal(t, wantString, rp.redactStringCached(input, localCache3))
 	require.Equal(t, wantTool, rp.redactToolInputCached(input, localCache3), "tool path must not hit the string cache entry")
+}
+
+// TestRedactPluginToolBeforeExecuteIsNoop verifies that the redact plugin
+// never alters the arguments a tool actually executes with. Redacting
+// execution args would corrupt tool behavior (e.g. a write tool receiving
+// [REDACTED] content) and would diverge the stored ToolCall.Input from what
+// actually ran.
+func TestRedactPluginToolBeforeExecuteIsNoop(t *testing.T) {
+	store, err := config.Init(t.TempDir(), t.TempDir(), false)
+	require.NoError(t, err)
+	// config.Init sets up a lumberjack log file that holds the file open;
+	// release it so t.TempDir() cleanup can remove the directory on Windows.
+	t.Cleanup(func() { _ = log.ResetForTesting() })
+
+	hooks, err := NewPlugin().Init(context.Background(), plugin.PluginInput{Config: store})
+	require.NoError(t, err)
+	require.NotNil(t, hooks.ToolBeforeExecute)
+
+	out, err := hooks.ToolBeforeExecute(context.Background(), plugin.ToolBeforeExecuteInput{
+		Tool:   "write",
+		CallID: "call-1",
+		Args: map[string]any{
+			"file":    "/tmp/x.txt",
+			"content": "token [REDACTED:sk-secret] value",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.Nil(t, out.Args, "redact must not alter execution args")
+	require.False(t, out.Skip)
 }
