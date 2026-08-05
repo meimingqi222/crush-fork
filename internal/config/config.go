@@ -1053,6 +1053,7 @@ type Agent struct {
 type Tools struct {
 	Ls   ToolLs   `json:"ls,omitzero"`
 	Grep ToolGrep `json:"grep,omitzero"`
+	Edit ToolEdit `json:"edit,omitzero"`
 }
 
 type ToolLs struct {
@@ -1072,6 +1073,16 @@ type ToolGrep struct {
 // GetTimeout returns the user-defined timeout or the default.
 func (t ToolGrep) GetTimeout() time.Duration {
 	return ptrValOr(t.Timeout, 5*time.Second)
+}
+
+type ToolEdit struct {
+	FuzzyThreshold *float64 `json:"fuzzy_threshold,omitempty" jsonschema:"description=Similarity threshold (0.0-1.0) for fuzzy text matching fallback when exact old_string match fails. Lower values are more permissive. 0.0 disables fuzzy matching.,default=0.92,minimum=0,maximum=1"`
+}
+
+// GetFuzzyThreshold returns the configured fuzzy match threshold or the default of 0.92.
+// A value of 0.0 disables fuzzy matching entirely.
+func (t ToolEdit) GetFuzzyThreshold() float64 {
+	return ptrValOr(t.FuzzyThreshold, 0.92)
 }
 
 type PluginConfig struct {

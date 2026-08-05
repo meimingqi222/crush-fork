@@ -120,6 +120,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	var goalRuntime *goal.Runtime
 	sessions := session.NewServiceWithDeleteCallback(q, conn, func(sessionID string) {
 		tools.GlobalFileCache.Clear(sessionID)
+		tools.GlobalClipboard.Clear(sessionID)
 		runtimeService.DeleteSession(sessionID)
 		if goalRuntime != nil {
 			goalRuntime.DeleteSession(sessionID)

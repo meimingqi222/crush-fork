@@ -123,13 +123,27 @@ func stripImagePartsFromFantasyMessagesWithVision(messages []fantasy.Message, vi
 	for _, msg := range messages {
 		switch msg.Role {
 		case fantasy.MessageRoleUser:
+			// Recover the persisted message ID (if any) so the placeholder can
+			// point describe_image back at this exact message. Messages built
+			// via message.Message.ToAIMessage() - including steering and
+			// join-active-run prompts injected mid-turn in PrepareStep - carry
+			// this in their provider metadata even though the image itself is
+			// about to be replaced with text below.
+			messageID := message.MessageIDFromFantasyMessage(msg)
+			imageIndex := 0
 			filtered := make([]fantasy.MessagePart, 0, len(msg.Content))
 			for _, part := range msg.Content {
-				if filePart := filePartFromMessagePart(part); filePart != nil {
+				filePart := filePartFromMessagePart(part)
+				if filePart == nil {
+					filtered = append(filtered, part)
+					continue
+				}
+				if !strings.HasPrefix(filePart.MediaType, "image/") {
 					filtered = append(filtered, fantasy.TextPart{Text: imageAttachmentPlaceholder(filePart.Filename, filePart.MediaType, true)})
 					continue
 				}
-				filtered = append(filtered, part)
+				imageIndex++
+				filtered = append(filtered, fantasy.TextPart{Text: imageAttachmentPlaceholderForMessage(filePart.Filename, filePart.MediaType, messageID, imageIndex, true)})
 			}
 			if len(filtered) == 0 {
 				continue

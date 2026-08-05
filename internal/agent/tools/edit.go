@@ -33,13 +33,21 @@ type EditEntry struct {
 }
 
 type EditParams struct {
-	FilePath   string                  `json:"file_path,omitempty" description:"The absolute path to the file to modify"`
-	OldString  string                  `json:"old_string,omitempty" description:"The text to replace"`
-	NewString  string                  `json:"new_string,omitempty" description:"The text to replace it with"`
-	ReplaceAll bool                    `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)"`
-	Edits      []EditEntry             `json:"edits,omitempty" description:"Array of edit operations to perform sequentially on the file. When provided, old_string/new_string/replace_all are ignored."`
-	Operations []HashlineEditOperation `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from read with a line selector (e.g. path=\"file.ts:50-200\"). When provided, all other parameters except file_path are ignored."`
-	Patch      string                  `json:"patch,omitempty" description:"Unified diff format patch containing changes to apply to files"`
+	FilePath       string                   `json:"file_path,omitempty" description:"The absolute path to the file to modify"`
+	OldString      string                   `json:"old_string,omitempty" description:"The text to replace"`
+	NewString      string                   `json:"new_string,omitempty" description:"The text to replace it with"`
+	ReplaceAll     bool                     `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)"`
+	Edits          []EditEntry              `json:"edits,omitempty" description:"Array of edit operations to perform sequentially on the file. When provided, old_string/new_string/replace_all are ignored."`
+	Operations     []HashlineEditOperation  `json:"operations,omitempty" description:"Array of hashline operations using LINE#HASH references from read with a line selector (e.g. path=\"file.ts:50-200\"). Supports replace_line, replace_range, prepend, append, cut, and paste. When provided, all other parameters except file_path are ignored."`
+	Patch          string                   `json:"patch,omitempty" description:"Unified diff format patch containing changes to apply to files"`
+	FileOperations []FileHashlineOperations `json:"file_operations,omitempty" description:"Array of per-file hashline operations for multi-file atomic edits with cross-file CUT/PASTE support. Each entry specifies a file_path and its operations array. When provided, all other parameters are ignored."`
+}
+
+// FileHashlineOperations groups hashline operations targeting a single file.
+// Used by the file_operations parameter to edit multiple files atomically in one call.
+type FileHashlineOperations struct {
+	FilePath   string                  `json:"file_path" description:"The absolute path to the file to modify"`
+	Operations []HashlineEditOperation `json:"operations" description:"Array of hashline operations to apply to this file"`
 }
 
 type EditPermissionsParams struct {
@@ -118,11 +126,12 @@ var (
 var editDescription []byte
 
 type editContext struct {
-	ctx         context.Context
-	permissions permission.Service
-	files       history.Service
-	filetracker filetracker.Service
-	workingDir  string
+	ctx            context.Context
+	permissions    permission.Service
+	files          history.Service
+	filetracker    filetracker.Service
+	workingDir     string
+	fuzzyThreshold float64
 }
 
 func NewEditTool(
@@ -131,6 +140,7 @@ func NewEditTool(
 	files history.Service,
 	filetracker filetracker.Service,
 	workingDir string,
+	fuzzyThreshold float64,
 ) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		EditToolName,
@@ -152,9 +162,22 @@ func NewEditTool(
 			var response fantasy.ToolResponse
 			var opErr error
 
-			editCtx := editContext{ctx, permissions, files, filetracker, effectiveWorkingDir}
+			editCtx := editContext{ctx, permissions, files, filetracker, effectiveWorkingDir, fuzzyThreshold}
 
-			if params.Patch != "" {
+			if len(params.FileOperations) > 0 {
+				// Multi-file hashline mode: resolve and lock all target paths.
+				absPaths := make([]string, 0, len(params.FileOperations))
+				for _, fo := range params.FileOperations {
+					if fo.FilePath == "" {
+						return fantasy.NewTextErrorResponse("file_path is required for each file_operations entry"), nil
+					}
+					absPath := ResolveToolPath(ctx, effectiveWorkingDir, fo.FilePath).AbsolutePath
+					absPaths = append(absPaths, absPath)
+				}
+				unlock := LockFilePaths(absPaths)
+				defer unlock()
+				response, opErr = applyFileHashlineOperations(editCtx, params.FileOperations, call)
+			} else if params.Patch != "" {
 				// Parse the patch to determine the real files being touched and
 				// lock each one so that concurrent writers serialize on the
 				// actual target paths, not just the primary file_path.
@@ -218,7 +241,15 @@ func NewEditTool(
 			enrichClientFSEditMetadata(ctx, &response, effectiveWorkingDir)
 
 			modifiedFiles := []string{params.FilePath}
-			if params.Patch != "" && response.Metadata != "" {
+			if len(params.FileOperations) > 0 && response.Metadata != "" {
+				var meta []EditResponseMetadata
+				if err := json.Unmarshal([]byte(response.Metadata), &meta); err == nil {
+					modifiedFiles = nil
+					for _, m := range meta {
+						modifiedFiles = append(modifiedFiles, m.FilePath)
+					}
+				}
+			} else if params.Patch != "" && response.Metadata != "" {
 				var meta []EditResponseMetadata
 				if err := json.Unmarshal([]byte(response.Metadata), &meta); err == nil {
 					modifiedFiles = nil
@@ -363,7 +394,7 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 	var failedEdits []FailedEdit
 	for i := 1; i < len(entries); i++ {
 		e := entries[i]
-		newContent, err := applyEntryToContent(currentContent, e)
+		newContent, err := applyEntryToContent(currentContent, e, edit.fuzzyThreshold)
 		if err != nil {
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
@@ -500,7 +531,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 
 	var failedEdits []FailedEdit
 	for i, e := range entries {
-		newContent, applyErr := applyEntryToContent(currentContent, e)
+		newContent, applyErr := applyEntryToContent(currentContent, e, edit.fuzzyThreshold)
 		if applyErr != nil {
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
@@ -621,7 +652,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 }
 
 // applyEntryToContent applies a single EditEntry to content, using fuzzy matching as fallback.
-func applyEntryToContent(content string, entry EditEntry) (string, error) {
+func applyEntryToContent(content string, entry EditEntry, fuzzyThreshold float64) (string, error) {
 	if entry.OldString == "" && entry.NewString == "" {
 		return content, nil
 	}
@@ -633,7 +664,7 @@ func applyEntryToContent(content string, entry EditEntry) (string, error) {
 		if strings.Contains(content, entry.OldString) {
 			return strings.ReplaceAll(content, entry.OldString, entry.NewString), nil
 		}
-		result, ok := fuzzyReplace(content, entry.OldString, entry.NewString, true)
+		result, ok := fuzzyReplace(content, entry.OldString, entry.NewString, true, fuzzyThreshold)
 		if !ok {
 			return "", fmt.Errorf("%s", buildDetailedMatchError(content, entry.OldString))
 		}
@@ -642,7 +673,7 @@ func applyEntryToContent(content string, entry EditEntry) (string, error) {
 
 	index := strings.Index(content, entry.OldString)
 	if index == -1 {
-		result, ok := fuzzyReplace(content, entry.OldString, entry.NewString, false)
+		result, ok := fuzzyReplace(content, entry.OldString, entry.NewString, false, fuzzyThreshold)
 		if !ok {
 			return "", fmt.Errorf("%s", buildDetailedMatchError(content, entry.OldString))
 		}
@@ -772,7 +803,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 			newContent = strings.ReplaceAll(oldContent, oldString, "")
 		} else {
 			var ok bool
-			newContent, ok = fuzzyReplace(oldContent, oldString, "", true)
+			newContent, ok = fuzzyReplace(oldContent, oldString, "", true, edit.fuzzyThreshold)
 			if !ok {
 				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
@@ -781,7 +812,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		index := strings.Index(oldContent, oldString)
 		if index == -1 {
 			var ok bool
-			newContent, ok = fuzzyReplace(oldContent, oldString, "", false)
+			newContent, ok = fuzzyReplace(oldContent, oldString, "", false, edit.fuzzyThreshold)
 			if !ok {
 				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
@@ -901,7 +932,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 			newContent = strings.ReplaceAll(oldContent, oldString, newString)
 		} else {
 			var ok bool
-			newContent, ok = fuzzyReplace(oldContent, oldString, newString, true)
+			newContent, ok = fuzzyReplace(oldContent, oldString, newString, true, edit.fuzzyThreshold)
 			if !ok {
 				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
@@ -910,7 +941,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		index := strings.Index(oldContent, oldString)
 		if index == -1 {
 			var ok bool
-			newContent, ok = fuzzyReplace(oldContent, oldString, newString, false)
+			newContent, ok = fuzzyReplace(oldContent, oldString, newString, false, edit.fuzzyThreshold)
 			if !ok {
 				return fantasy.NewTextErrorResponse(buildDetailedMatchError(oldContent, oldString)), nil
 			}
@@ -1181,6 +1212,32 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 	oldLines, hadTrailingNewline := splitHashlineFileLines(oldContent)
 
 	parsedOps, err := parseHashlineOperations(operations, oldLines)
+
+	// Pre-pass: capture CUT operations' lines and convert them to replace_range
+	// deletions. The captures are NOT committed to the global clipboard here --
+	// only once permission is granted and the file is actually written (below) --
+	// so a denied or failed edit never leaves a register claiming lines were cut
+	// when the source file was never modified. pendingCuts lets a PASTE later in
+	// this same batch see freshly cut lines before that commit happens.
+	pendingCuts := collectPendingHashlineCuts(parsedOps, oldLines)
+	for i, op := range parsedOps {
+		if op.Operation == hashlineEditOpCut {
+			startLine := op.Start.Line
+			endLine := op.End.Line
+			if startLine < 1 || endLine > len(oldLines) || startLine > endLine {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("operation %d (cut): invalid line range %d-%d (file has %d lines)", i+1, startLine, endLine, len(oldLines))), nil
+			}
+			parsedOps[i].Operation = hashlineEditOpReplaceRange
+			parsedOps[i].ContentLines = nil
+		}
+	}
+
+	// Resolve PASTE operations: prefer lines cut earlier in this same batch,
+	// falling back to the persisted clipboard for cross-call transfers.
+	if resp := resolvePendingHashlinePastes(parsedOps, pendingCuts, sessionID); resp != nil {
+		return *resp, nil
+	}
+
 	var newLines []string
 	var recovered bool
 	if err != nil {
@@ -1205,6 +1262,11 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 
 	newContent := joinHashlineFileLines(newLines, hadTrailingNewline)
 	if newContent == oldContent {
+		// Still commit any named-register CUTs even though the net content is
+		// unchanged (e.g. a cut immediately pasted back in place) -- the
+		// register capture is a real outcome the model may rely on later.
+		commitPendingHashlineCuts(pendingCuts, sessionID)
+		GlobalClipboard.ClearAnonymous(sessionID)
 		return fantasy.WithResponseMetadata(
 			fantasy.NewTextResponse("No changes were needed. The file is already in the desired state."),
 			EditResponseMetadata{
@@ -1255,6 +1317,11 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
 	GlobalFileCache.Put(sessionID, filePath, newLines)
+	// Commit CUT captures to named registers now that the edit has actually
+	// been written, and clear the anonymous register at the end of the batch.
+	// Named registers persist across edit calls for cross-file move operations.
+	commitPendingHashlineCuts(pendingCuts, sessionID)
+	GlobalClipboard.ClearAnonymous(sessionID)
 
 	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, sessionID)
 	if err != nil {
@@ -1292,6 +1359,263 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 	), nil
 }
 
+// applyFileHashlineOperations applies hashline operations across multiple files
+// in a single atomic call. CUT operations in any file populate clipboard registers
+// that PASTE operations in subsequent files can read, enabling cross-file moves.
+func applyFileHashlineOperations(edit editContext, fileOps []FileHashlineOperations, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	sessionID := GetSessionFromContext(edit.ctx)
+	if sessionID == "" {
+		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for multi-file hashline edit")
+	}
+
+	// Resolve all file paths and enforce plan-mode guards.
+	absPaths := make([]string, 0, len(fileOps))
+	for _, fo := range fileOps {
+		absPath := ResolveToolPath(edit.ctx, edit.workingDir, fo.FilePath).AbsolutePath
+		if response, blocked, guardErr := enforcePlanModeWriteTarget(edit.ctx, absPath); blocked || guardErr != nil {
+			return response, guardErr
+		}
+		absPaths = append(absPaths, absPath)
+	}
+
+	if err := checkPreflightLimits(edit.ctx, absPaths); err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
+	// Read all files upfront and parse operations.
+	type fileState struct {
+		path               string
+		oldContent         string
+		oldLines           []string
+		isCrlf             bool
+		hadTrailingNewline bool
+		parsedOps          []parsedHashlineOperation
+	}
+
+	states := make([]fileState, 0, len(fileOps))
+	// pendingCuts accumulates CUT captures across every file in the batch,
+	// uncommitted, so a PASTE in a later file within this same call can see
+	// lines cut earlier without touching the persisted clipboard yet (see
+	// commitPendingHashlineCuts below for why that commit is deferred).
+	var pendingCuts []pendingHashlineCut
+	for i, fo := range fileOps {
+		absPath := absPaths[i]
+
+		fileInfo, err := clientfs.Stat(edit.ctx, absPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", FormatToolPath(absPath, edit.workingDir))), nil
+			}
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to access file %s: %w", absPath, err)
+		}
+		if fileInfo.IsDir() {
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", FormatToolPath(absPath, edit.workingDir))), nil
+		}
+
+		content, err := clientfs.ReadFile(edit.ctx, absPath)
+		if err != nil {
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to read file %s: %w", absPath, err)
+		}
+
+		oldContent, isCrlf := fsext.ToUnixLineEndings(string(content))
+		oldLines, hadTrailingNewline := splitHashlineFileLines(oldContent)
+
+		parsedOps, err := parseHashlineOperations(fo.Operations, oldLines)
+		if err != nil {
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("file %s: %s", FormatToolPath(absPath, edit.workingDir), err)), nil
+		}
+
+		// Capture CUT lines (without committing to the clipboard yet) and
+		// convert them to replace_range deletions.
+		pendingCuts = append(pendingCuts, collectPendingHashlineCuts(parsedOps, oldLines)...)
+		for j, op := range parsedOps {
+			if op.Operation == hashlineEditOpCut {
+				startLine := op.Start.Line
+				endLine := op.End.Line
+				if startLine < 1 || endLine > len(oldLines) || startLine > endLine {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("file %s, operation %d (cut): invalid line range %d-%d (file has %d lines)", FormatToolPath(absPath, edit.workingDir), j+1, startLine, endLine, len(oldLines))), nil
+				}
+				parsedOps[j].Operation = hashlineEditOpReplaceRange
+				parsedOps[j].ContentLines = nil
+			}
+		}
+
+		states = append(states, fileState{
+			path:               absPath,
+			oldContent:         oldContent,
+			oldLines:           oldLines,
+			isCrlf:             isCrlf,
+			hadTrailingNewline: hadTrailingNewline,
+			parsedOps:          parsedOps,
+		})
+	}
+
+	// Resolve PASTE operations across the whole batch: prefer lines cut
+	// earlier in this call, falling back to the persisted clipboard for
+	// transfers started in a previous call.
+	for i := range states {
+		if resp := resolvePendingHashlinePastes(states[i].parsedOps, pendingCuts, sessionID); resp != nil {
+			return *resp, nil
+		}
+	}
+
+	// Pass 1: compute every file's new content and request permission for
+	// all of them. Nothing is written and no CUT is committed to the
+	// clipboard yet, so a denial on any one file leaves every file (and the
+	// clipboard) untouched -- matching the atomic guarantee this tool
+	// documents.
+	type preparedFile struct {
+		fileState
+		newLines   []string
+		newContent string
+		additions  int
+		removals   int
+		recovered  bool
+	}
+
+	prepared := make([]preparedFile, 0, len(states))
+	for _, st := range states {
+		newLines, applyErr := applyHashlineOperations(st.oldLines, st.parsedOps)
+		recovered := false
+		if applyErr != nil {
+			var origOps []HashlineEditOperation
+			for _, fo := range fileOps {
+				if ResolveToolPath(edit.ctx, edit.workingDir, fo.FilePath).AbsolutePath == st.path {
+					origOps = fo.Operations
+					break
+				}
+			}
+			var recoverErr error
+			newLines, recoverErr = tryRecoverHashline(sessionID, st.path, st.oldLines, origOps)
+			if recoverErr != nil {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("file %s: %s; recovery failed: %v", FormatToolPath(st.path, edit.workingDir), applyErr, recoverErr)), nil
+			}
+			recovered = true
+		}
+
+		newContent := joinHashlineFileLines(newLines, st.hadTrailingNewline)
+
+		_, additions, removals := diff.GenerateDiff(
+			st.oldContent,
+			newContent,
+			strings.TrimPrefix(st.path, edit.workingDir),
+		)
+
+		p, permErr := edit.permissions.Request(edit.ctx,
+			permission.CreatePermissionRequest{
+				SessionID:          sessionID,
+				AuthoritySessionID: ResolveAuthoritySessionID(edit.ctx, sessionID),
+				Path:               fsext.PathOrPrefix(st.path, edit.workingDir),
+				ToolCallID:         call.ID,
+				ToolName:           EditToolName,
+				Action:             "write",
+				Description:        fmt.Sprintf("Apply hashline operations to file %s", st.path),
+				Params: EditPermissionsParams{
+					FilePath:   st.path,
+					OldContent: st.oldContent,
+					NewContent: newContent,
+				},
+			},
+		)
+		if permErr != nil {
+			return fantasy.ToolResponse{}, permErr
+		}
+		if !p {
+			return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
+		}
+
+		prepared = append(prepared, preparedFile{
+			fileState:  st,
+			newLines:   newLines,
+			newContent: newContent,
+			additions:  additions,
+			removals:   removals,
+			recovered:  recovered,
+		})
+	}
+
+	// Pass 2: every file's permission is granted, so the batch is committed
+	// to happen -- commit CUT captures to the clipboard now, then write each
+	// file. If a write fails partway through, best-effort roll back the
+	// files already written in this call so a mid-batch I/O failure doesn't
+	// leave a silent partial edit on disk.
+	commitPendingHashlineCuts(pendingCuts, sessionID)
+
+	var fileMetadata []EditResponseMetadata
+	var successMessage strings.Builder
+	successMessage.WriteString("Multi-file hashline operations applied:\n")
+	var written []preparedFile
+
+	for _, pf := range prepared {
+		fileContent := pf.newContent
+		if pf.isCrlf {
+			fileContent, _ = fsext.ToWindowsLineEndings(pf.newContent)
+		}
+
+		if err := clientfs.WriteFile(edit.ctx, pf.path, []byte(fileContent), 0o644); err != nil {
+			for _, w := range written {
+				restoreContent := w.oldContent
+				if w.isCrlf {
+					restoreContent, _ = fsext.ToWindowsLineEndings(w.oldContent)
+				}
+				if rbErr := clientfs.WriteFile(edit.ctx, w.path, []byte(restoreContent), 0o644); rbErr != nil {
+					slog.Error("Failed to roll back file after partial multi-file write failure", "path", w.path, "error", rbErr)
+				} else {
+					GlobalFileCache.Put(sessionID, w.path, w.oldLines)
+				}
+			}
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to write file %s: %w (rolled back %d previously written file(s) in this batch)", pf.path, err, len(written))
+		}
+		written = append(written, pf)
+
+		GlobalFileCache.Put(sessionID, pf.path, pf.newLines)
+
+		file, err := edit.files.GetByPathAndSession(edit.ctx, pf.path, sessionID)
+		if err != nil {
+			_, err = edit.files.Create(edit.ctx, sessionID, pf.path, pf.oldContent)
+			if err != nil {
+				slog.Error("Failed to create file history", "error", err, "path", pf.path)
+			}
+		} else if file.Content != pf.oldContent {
+			_, err = edit.files.CreateVersion(edit.ctx, sessionID, pf.path, pf.oldContent)
+			if err != nil {
+				slog.Error("Failed to create version in history", "error", err, "path", pf.path)
+			}
+		}
+		_, err = edit.files.CreateVersion(edit.ctx, sessionID, pf.path, pf.newContent)
+		if err != nil {
+			slog.Error("Failed to create version in history", "error", err, "path", pf.path)
+		}
+
+		edit.filetracker.RecordRead(edit.ctx, sessionID, pf.path)
+
+		pathMeta := NewToolPathMetadata(ResolveToolPath(edit.ctx, edit.workingDir, pf.path))
+		fileMetadata = append(fileMetadata, EditResponseMetadata{
+			ToolPathMetadata: pathMeta,
+			FilePath:         pf.path,
+			OldContent:       pf.oldContent,
+			NewContent:       pf.newContent,
+			Additions:        pf.additions,
+			Removals:         pf.removals,
+		})
+
+		msgLine := fmt.Sprintf("- %s (+%d, -%d)", FormatToolPath(pf.path, edit.workingDir), pf.additions, pf.removals)
+		if pf.recovered {
+			msgLine += " [recovered]"
+		}
+		fmt.Fprintf(&successMessage, "%s\n", msgLine)
+	}
+
+	// Clear the anonymous clipboard register after the batch completes.
+	// Named registers persist across edit calls for cross-file move operations.
+	GlobalClipboard.ClearAnonymous(sessionID)
+
+	return fantasy.WithResponseMetadata(
+		fantasy.NewTextResponse(successMessage.String()),
+		fileMetadata,
+	), nil
+}
+
 // fuzzyReplace attempts to match oldString in content using normalization strategies.
 // Returns (newContent, true) on success. Tries:
 // 1. Trim trailing whitespace on each line
@@ -1299,7 +1623,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 // 3. Indentation-flexible (strip common indent prefix from both sides).
 // 4. Comment-prefix strip matching.
 // 5. Levenshtein similarity matching (average similarity >= 0.92).
-func fuzzyReplace(content, oldString, newString string, replaceAll bool) (string, bool) {
+func fuzzyReplace(content, oldString, newString string, replaceAll bool, threshold float64) (string, bool) {
 	contentLines := strings.Split(content, "\n")
 	oldLines := splitIntoLines(oldString)
 	if len(oldLines) == 0 {
@@ -1377,8 +1701,11 @@ func fuzzyReplace(content, oldString, newString string, replaceAll bool) (string
 		return applyMatches(content, oldString, newString, matches, replaceAll), true
 	}
 
-	// Strategy 5: Levenshtein similarity matching (average similarity >= 0.92).
-	matches, ok = fuzzySimilarityMatch(contentLines, oldLines, 0.92, replaceAll)
+	// Strategy 5: Levenshtein similarity matching (average similarity >= threshold).
+	if threshold <= 0 {
+		return "", false
+	}
+	matches, ok = fuzzySimilarityMatch(contentLines, oldLines, threshold, replaceAll)
 	if ok {
 		return applyMatches(content, oldString, newString, matches, replaceAll), true
 	}
@@ -1415,8 +1742,17 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		}
 
 		absPath := ResolveToolPath(edit.ctx, edit.workingDir, pPath).AbsolutePath
-		absPaths = append(absPaths, absPath)
+		if existing, ok := pathToPatch[absPath]; ok {
+			// The same file appeared in more than one "--- "/"+++ " section
+			// (e.g. two independently-generated single-hunk diffs
+			// concatenated together). Append this section's hunks to the
+			// file's hunk list in order instead of discarding the earlier
+			// section, so no hunk is silently dropped.
+			existing.Hunks = append(existing.Hunks, p.Hunks...)
+			continue
+		}
 		pathToPatch[absPath] = p
+		absPaths = append(absPaths, absPath)
 	}
 	for _, absPath := range absPaths {
 		if response, blocked, guardErr := enforcePlanModeWriteTarget(edit.ctx, absPath); blocked || guardErr != nil {
@@ -1463,10 +1799,20 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		memoryFiles[absPath] = newLines
 	}
 
-	var fileMetadata []EditResponseMetadata
-	var successMessage strings.Builder
-	successMessage.WriteString("Patch applied successfully:\n")
+	// Pass 1: compute every file's new content and request permission for all
+	// of them, without writing anything. A denial on any one file must leave
+	// every file untouched.
+	type preparedPatchFile struct {
+		absPath    string
+		oldContent string
+		newContent string
+		newLines   []string
+		crlf       bool
+		additions  int
+		removals   int
+	}
 
+	prepared := make([]preparedPatchFile, 0, len(absPaths))
 	for _, absPath := range absPaths {
 		newLines := memoryFiles[absPath]
 		crlf := originalCrlf[absPath]
@@ -1501,50 +1847,84 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 			return fantasy.ToolResponse{}, permission.ErrorPermissionDenied
 		}
 
-		dir := filepath.Dir(absPath)
+		prepared = append(prepared, preparedPatchFile{
+			absPath:    absPath,
+			oldContent: oldContent,
+			newContent: newContent,
+			newLines:   newLines,
+			crlf:       crlf,
+			additions:  additions,
+			removals:   removals,
+		})
+	}
+
+	// Pass 2: every file's permission is granted -- write them all. If a
+	// write fails partway through, best-effort roll back the files already
+	// written in this call so a mid-batch I/O failure doesn't leave a silent
+	// partial patch applied to disk.
+	var fileMetadata []EditResponseMetadata
+	var successMessage strings.Builder
+	successMessage.WriteString("Patch applied successfully:\n")
+	var written []preparedPatchFile
+
+	for _, pf := range prepared {
+		dir := filepath.Dir(pf.absPath)
 		if err := clientfs.MkdirAll(edit.ctx, dir, 0o755); err != nil {
-			return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories for %s: %w", absPath, err)
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories for %s: %w", pf.absPath, err)
 		}
 
-		fileContent := newContent
-		if crlf {
-			fileContent, _ = fsext.ToWindowsLineEndings(newContent)
+		fileContent := pf.newContent
+		if pf.crlf {
+			fileContent, _ = fsext.ToWindowsLineEndings(pf.newContent)
 		}
 
-		if err := clientfs.WriteFile(edit.ctx, absPath, []byte(fileContent), 0o644); err != nil {
-			return fantasy.ToolResponse{}, fmt.Errorf("failed to write file %s: %w", absPath, err)
-		}
-		GlobalFileCache.Put(sessionID, absPath, newLines)
-
-		fileHist, err := edit.files.GetByPathAndSession(edit.ctx, absPath, sessionID)
-		if err != nil {
-			_, err = edit.files.Create(edit.ctx, sessionID, absPath, oldContent)
-			if err != nil {
-				slog.Error("Failed to create file history", "error", err, "path", absPath)
+		if err := clientfs.WriteFile(edit.ctx, pf.absPath, []byte(fileContent), 0o644); err != nil {
+			for _, w := range written {
+				restoreContent := w.oldContent
+				if w.crlf {
+					restoreContent, _ = fsext.ToWindowsLineEndings(w.oldContent)
+				}
+				if rbErr := clientfs.WriteFile(edit.ctx, w.absPath, []byte(restoreContent), 0o644); rbErr != nil {
+					slog.Error("Failed to roll back file after partial multi-file patch write failure", "path", w.absPath, "error", rbErr)
+				} else {
+					oldLines, _ := splitHashlineFileLines(w.oldContent)
+					GlobalFileCache.Put(sessionID, w.absPath, oldLines)
+				}
 			}
-		} else if fileHist.Content != oldContent {
-			_, err = edit.files.CreateVersion(edit.ctx, sessionID, absPath, oldContent)
+			return fantasy.ToolResponse{}, fmt.Errorf("failed to write file %s: %w (rolled back %d previously written file(s) in this batch)", pf.absPath, err, len(written))
+		}
+		written = append(written, pf)
+		GlobalFileCache.Put(sessionID, pf.absPath, pf.newLines)
+
+		fileHist, err := edit.files.GetByPathAndSession(edit.ctx, pf.absPath, sessionID)
+		if err != nil {
+			_, err = edit.files.Create(edit.ctx, sessionID, pf.absPath, pf.oldContent)
 			if err != nil {
-				slog.Error("Failed to create version in history", "error", err, "path", absPath)
+				slog.Error("Failed to create file history", "error", err, "path", pf.absPath)
+			}
+		} else if fileHist.Content != pf.oldContent {
+			_, err = edit.files.CreateVersion(edit.ctx, sessionID, pf.absPath, pf.oldContent)
+			if err != nil {
+				slog.Error("Failed to create version in history", "error", err, "path", pf.absPath)
 			}
 		}
-		_, err = edit.files.CreateVersion(edit.ctx, sessionID, absPath, newContent)
+		_, err = edit.files.CreateVersion(edit.ctx, sessionID, pf.absPath, pf.newContent)
 		if err != nil {
-			slog.Error("Failed to create version in history", "error", err, "path", absPath)
+			slog.Error("Failed to create version in history", "error", err, "path", pf.absPath)
 		}
 
-		edit.filetracker.RecordRead(edit.ctx, sessionID, absPath)
+		edit.filetracker.RecordRead(edit.ctx, sessionID, pf.absPath)
 
 		fileMetadata = append(fileMetadata, EditResponseMetadata{
-			ToolPathMetadata: NewToolPathMetadata(ResolveToolPath(edit.ctx, edit.workingDir, absPath)),
-			FilePath:         absPath,
-			OldContent:       oldContent,
-			NewContent:       newContent,
-			Additions:        additions,
-			Removals:         removals,
+			ToolPathMetadata: NewToolPathMetadata(ResolveToolPath(edit.ctx, edit.workingDir, pf.absPath)),
+			FilePath:         pf.absPath,
+			OldContent:       pf.oldContent,
+			NewContent:       pf.newContent,
+			Additions:        pf.additions,
+			Removals:         pf.removals,
 		})
 
-		fmt.Fprintf(&successMessage, "- %s (+%d, -%d)\n", FormatToolPath(absPath, edit.workingDir), additions, removals)
+		fmt.Fprintf(&successMessage, "- %s (+%d, -%d)\n", FormatToolPath(pf.absPath, edit.workingDir), pf.additions, pf.removals)
 	}
 
 	return fantasy.WithResponseMetadata(

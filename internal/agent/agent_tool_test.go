@@ -626,7 +626,7 @@ func TestShapeToolsForSubagentFiltersToolList(t *testing.T) {
 	shaped := ShapeToolsForSubagent([]fantasy.AgentTool{
 		tools.NewGlobTool("/tmp"),
 		tools.NewReadTool(nil, nil, nil, "/tmp", config.ToolLs{}, nil, nil),
-		tools.NewEditTool(nil, nil, nil, nil, "/tmp"),
+		tools.NewEditTool(nil, nil, nil, nil, "/tmp", 0.92),
 	}, SubagentToolProfile{Allowed: map[string]struct{}{"glob": {}, "read": {}}, Denied: map[string]struct{}{"edit": {}}})
 
 	var names []string

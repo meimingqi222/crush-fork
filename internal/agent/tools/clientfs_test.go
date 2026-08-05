@@ -53,7 +53,7 @@ func TestFileToolsUseUnsavedClientFSAndPreserveRevisionMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "durable\n", string(local), "client FS must not bypass the client by writing disk directly")
 
-	editTool := NewEditTool(nil, permissions, historyService, &mockFileTracker{}, root)
+	editTool := NewEditTool(nil, permissions, historyService, &mockFileTracker{}, root, 0.92)
 	input, err := json.Marshal(EditParams{FilePath: path, OldString: "agent", NewString: "edited"})
 	require.NoError(t, err)
 	edited, err := editTool.Run(ctx, fantasy.ToolCall{ID: "edit-1", Name: EditToolName, Input: string(input)})
@@ -81,7 +81,7 @@ func TestEditToolRejectsClientFSRevisionConflict(t *testing.T) {
 	}
 	tool := NewEditTool(
 		nil, permissions, &mockHistoryService{Broker: pubsub.NewBroker[history.File]()},
-		&mockFileTracker{}, root,
+		&mockFileTracker{}, root, 0.92,
 	)
 	input, err := json.Marshal(EditParams{FilePath: path, OldString: "unsaved", NewString: "agent"})
 	require.NoError(t, err)

@@ -109,7 +109,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		}
 	}
 
-	editTool := agenttools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir())
+	editTool := agenttools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Edit.GetFuzzyThreshold())
 
 	// Discover skills for URL resolution in read and bash tools.
 	// Use coordinator cache to avoid repeated I/O overhead.

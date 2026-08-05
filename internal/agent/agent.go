@@ -1714,10 +1714,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				callbackStarted := time.Now()
 				toolResult := a.convertToToolResult(genCtx, result)
 				if toolResult.IsError {
+					// Capture the offending tool-call input (truncated) so model
+					// output-quality issues (e.g. a missing required field) can
+					// be diagnosed from the log without re-running the session.
+					inputExcerpt := ""
+					for _, tc := range currentAssistant.ToolCalls() {
+						if tc.ID == result.ToolCallID {
+							inputExcerpt = truncateForLog(tc.Input)
+							break
+						}
+					}
 					slog.Warn("Tool execution failed",
 						"session_id", currentAssistant.SessionID,
 						"tool_call_id", toolResult.ToolCallID,
 						"tool_name", toolResult.Name,
+						"input", inputExcerpt,
 						"error", redactSecrets(toolResult.Content),
 					)
 				}
@@ -4344,4 +4355,15 @@ func sanitizeToolInput(toolName, toolCallID, input string) (string, bool) {
 		return "{}", true
 	}
 	return input, false
+}
+
+// truncateForLog caps a tool-call input excerpt logged with an execution
+// failure so huge payloads (e.g. write/edit content) never flood the log.
+func truncateForLog(s string) string {
+	const maxLogInputRunes = 512
+	runes := []rune(s)
+	if len(runes) <= maxLogInputRunes {
+		return s
+	}
+	return string(runes[:maxLogInputRunes]) + "…"
 }

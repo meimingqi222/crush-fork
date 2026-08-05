@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -358,6 +359,86 @@ func TestResolveContextUsageSnapshotAccumulatesProvisionalExchange(t *testing.T)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 	require.True(t, snapshot.Provisional)
 	require.False(t, snapshot.Summary)
+}
+
+// TestProvisionalFirstExchangeWithoutAnchorUsesOutputOnly verifies the
+// oh-my-pi-style anchor accounting for a fresh session's first exchange:
+// with no confirmed anchor (LastTotalTokens == 0), the provisional display
+// must show only the live streamed-output estimate, never the local
+// character-based prompt estimate that agent.go writes into the message
+// before the API call. That estimate routinely overshoots the provider's
+// real prompt by 30-70% (e.g. ~36.5k estimated vs ~21.3k real), and using
+// it as the TotalTokens base made the sidebar visibly drop when the first
+// step finished. The finished total (real prompt + real output) is always
+// >= the streamed-output estimate, so the display now grows on completion.
+func TestProvisionalFirstExchangeWithoutAnchorUsesOutputOnly(t *testing.T) {
+	t.Parallel()
+
+	selected := &agent.Model{
+		CatwalkCfg: catwalk.Model{ContextWindow: 200_000},
+		ModelCfg:   config.SelectedModel{Provider: "openai", Model: "gpt-5"},
+	}
+
+	// Fresh session: no completed exchange yet, so LastTotalTokens is 0.
+	// The provisional message carries the local estimate written by
+	// agent.go before the API call (36_500), which overshoots the real
+	// ~21_000 prompt.
+	streamed := strings.Repeat("a", 400) // 400 ASCII chars => 100 estimated output tokens
+	provisionalSnapshot := resolveContextUsageSnapshot(&session.Session{}, []message.Message{
+		{
+			ID:       "first-reply",
+			Role:     message.Assistant,
+			Provider: "openai",
+			Model:    "gpt-5",
+			Parts: []message.ContentPart{
+				message.TextContent{Text: streamed},
+			},
+			Usage: message.Usage{
+				InputTokens: 36_500, // inflated local character estimate
+			},
+		},
+	}, nil, selected)
+
+	require.True(t, provisionalSnapshot.Provisional)
+	require.Less(t, provisionalSnapshot.TotalTokens, int64(36_500),
+		"provisional TotalTokens must not use the inflated local prompt estimate")
+	require.Equal(t, int64(100), provisionalSnapshot.TotalTokens,
+		"with no anchor, TotalTokens is the live streamed-output estimate only")
+	require.Equal(t, int64(100), provisionalSnapshot.OutputTokens)
+
+	// Finished: the provider's authoritative usage replaces the estimate.
+	// The display grows (100 -> 21_300) instead of dropping (36_500 -> 21_300).
+	finishedSess := &session.Session{
+		PromptTokens:         21_000,
+		CompletionTokens:     300,
+		LastPromptTokens:     21_000,
+		LastCompletionTokens: 300,
+	}
+	finishedSnapshot := resolveContextUsageSnapshot(finishedSess, []message.Message{
+		{
+			ID:       "first-reply",
+			Role:     message.Assistant,
+			Provider: "openai",
+			Model:    "gpt-5",
+			Parts: []message.ContentPart{
+				message.TextContent{Text: streamed},
+				message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			},
+			Usage: message.Usage{
+				InputTokens:  21_000,
+				OutputTokens: 300,
+			},
+		},
+	}, nil, selected)
+
+	require.False(t, finishedSnapshot.Provisional)
+	require.Equal(t, int64(21_300), finishedSnapshot.TotalTokens)
+	require.LessOrEqual(t, provisionalSnapshot.TotalTokens, finishedSnapshot.TotalTokens,
+		"provisional TotalTokens (%d) must not exceed finished TotalTokens (%d)",
+		provisionalSnapshot.TotalTokens, finishedSnapshot.TotalTokens)
+	require.LessOrEqual(t, provisionalSnapshot.OutputTokens, finishedSnapshot.OutputTokens,
+		"provisional OutputTokens (%d) must not exceed finished OutputTokens (%d)",
+		provisionalSnapshot.OutputTokens, finishedSnapshot.OutputTokens)
 }
 
 // TestProvisionalTotalNeverExceedsFinishedTotal verifies the core fix for

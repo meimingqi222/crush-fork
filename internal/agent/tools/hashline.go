@@ -18,14 +18,18 @@ const (
 	hashlineEditOpReplaceRange = "replace_range"
 	hashlineEditOpPrepend      = "prepend"
 	hashlineEditOpAppend       = "append"
+	hashlineEditOpCut          = "cut"
+	hashlineEditOpPaste        = "paste"
 )
 
 type HashlineEditOperation struct {
-	Operation string `json:"operation" description:"The operation to apply: replace_line, replace_range, prepend, or append"`
-	Line      string `json:"line,omitempty" description:"Target line reference in LINE#HASH format for replace_line, prepend, and append operations"`
-	Start     string `json:"start,omitempty" description:"Start line reference in LINE#HASH format for replace_range operations"`
-	End       string `json:"end,omitempty" description:"End line reference in LINE#HASH format for replace_range operations"`
-	Content   string `json:"content,omitempty" description:"Text content to write or insert. For replace_range, this can include multiple lines. Omit or leave empty to delete the referenced line or range"`
+	Operation   string `json:"operation" description:"The operation to apply: replace_line, replace_range, prepend, append, cut, or paste"`
+	Line        string `json:"line,omitempty" description:"Target line reference in LINE#HASH format for replace_line, prepend, append, and paste (insertion point) operations"`
+	Start       string `json:"start,omitempty" description:"Start line reference in LINE#HASH format for replace_range and cut operations"`
+	End         string `json:"end,omitempty" description:"End line reference in LINE#HASH format for replace_range and cut operations"`
+	Content     string `json:"content,omitempty" description:"Text content to write or insert. For replace_range, this can include multiple lines. Omit or leave empty to delete the referenced line or range"`
+	Register    string `json:"register,omitempty" description:"Clipboard register name for cut and paste operations. When omitted, uses the anonymous (batch-local) register"`
+	PasteBefore bool   `json:"paste_before,omitempty" description:"For paste operations: insert before the target line (true) or after (false, default)"`
 }
 
 type HashlineEditParams struct {

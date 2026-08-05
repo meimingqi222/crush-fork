@@ -223,7 +223,17 @@ func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.Too
 		return "", err
 	}
 
-	sum := sha256.Sum256([]byte(tr.Content))
+	// Sanitize to valid UTF-8 before hashing/writing. Tool output can contain
+	// invalid byte sequences (e.g. a subprocess emitting a non-UTF-8 codepage,
+	// or a truncated multi-byte sequence) that the read tool's strict
+	// utf8.ValidString check will otherwise reject outright, breaking the
+	// notice's promise that "the full output was saved to <path>; use the
+	// read tool to inspect it." Hashing the sanitized bytes (not the raw
+	// input) keeps the content-addressed filename consistent with what is
+	// actually written to disk.
+	content := strings.ToValidUTF8(tr.Content, "�")
+
+	sum := sha256.Sum256([]byte(content))
 	hash := hex.EncodeToString(sum[:16])
 	// Content in plain text so the read tool can surface it directly.
 	contentPath := filepath.Join(archiveDir, hash+".txt")
@@ -237,7 +247,7 @@ func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.Too
 	// concurrent archives of different contents never collide on the same
 	// temp file; same-content archives dedupe at the final path.
 	tmpContent := filepath.Join(archiveDir, fmt.Sprintf(".tmp-%d-%s", os.Getpid(), hash))
-	if err := os.WriteFile(tmpContent, []byte(tr.Content), 0o644); err != nil {
+	if err := os.WriteFile(tmpContent, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmpContent, contentPath); err != nil {

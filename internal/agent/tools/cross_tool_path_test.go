@@ -71,7 +71,7 @@ func TestCrossToolGlobToReadToEdit(t *testing.T) {
 		Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true,
 	}
 	historyService := &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}
-	editTool := NewEditTool(nil, permissions, historyService, &mockFileTracker{}, root)
+	editTool := NewEditTool(nil, permissions, historyService, &mockFileTracker{}, root, 0.92)
 	editCtx := newNonPlanModeContext("test-session")
 	editInput, err := json.Marshal(EditParams{
 		FilePath:  globPath,
@@ -275,7 +275,7 @@ func TestCrossToolAbsolutePathStaysAbsolute(t *testing.T) {
 		Broker: pubsub.NewBroker[permission.PermissionRequest](), granted: true,
 	}
 	historyService := &mockHistoryService{Broker: pubsub.NewBroker[history.File]()}
-	editTool := NewEditTool(nil, permissions, historyService, &mockFileTracker{}, root)
+	editTool := NewEditTool(nil, permissions, historyService, &mockFileTracker{}, root, 0.92)
 	editCtx := newNonPlanModeContext("test-session")
 	editInput, err := json.Marshal(EditParams{
 		FilePath:  externalFile,

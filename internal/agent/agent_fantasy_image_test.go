@@ -104,3 +104,45 @@ func TestStripImagePartsFromFantasyMessagesWithVision_PastedImage(t *testing.T) 
 	require.Contains(t, joined, "paste_1.png")
 	require.Contains(t, joined, "describe_image")
 }
+
+// TestStripImagePartsFromFantasyMessagesWithVision_PreservesMessageID covers
+// the mid-turn steering path: PrepareStep persists the steer as a real
+// message.Message (with an ID) via createUserMessage, converts it with
+// ToAIMessage, and appends it to prepared.Messages, which is then stripped by
+// this function. The placeholder must carry that message's real ID/index so
+// a later describe_image call can find it, instead of leaving the model to
+// guess or reuse a stale ID from earlier in the conversation.
+func TestStripImagePartsFromFantasyMessagesWithVision_PreservesMessageID(t *testing.T) {
+	t.Parallel()
+
+	msg := message.Message{
+		ID:        "steer-msg-456",
+		SessionID: "session-1",
+		Role:      message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "look at this instead"},
+			message.BinaryContent{
+				Path:     "paste_1.png",
+				MIMEType: "image/png",
+				Data:     []byte("fake-image-data"),
+			},
+		},
+	}
+
+	fantasyMsgs := msg.ToAIMessage()
+	require.Len(t, fantasyMsgs, 1)
+
+	stripped := stripImagePartsFromFantasyMessagesWithVision(fantasyMsgs, fakeVisionDescriber{})
+	require.Len(t, stripped, 1)
+
+	textParts := make([]string, 0)
+	for _, part := range stripped[0].Content {
+		if tp, ok := part.(fantasy.TextPart); ok {
+			textParts = append(textParts, tp.Text)
+		}
+	}
+
+	joined := strings.Join(textParts, " ")
+	require.Contains(t, joined, `message_id="steer-msg-456"`)
+	require.Contains(t, joined, "image_index=1")
+}

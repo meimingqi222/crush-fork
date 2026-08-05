@@ -17,7 +17,7 @@ func TestApplyEditToContentPartialSuccess(t *testing.T) {
 	newContent, err := applyEntryToContent(content, EditEntry{
 		OldString: "line 1",
 		NewString: "LINE 1",
-	})
+	}, 0.92)
 	require.NoError(t, err)
 	require.Contains(t, newContent, "LINE 1")
 	require.Contains(t, newContent, "line 2")
@@ -25,7 +25,7 @@ func TestApplyEditToContentPartialSuccess(t *testing.T) {
 	_, err = applyEntryToContent(content, EditEntry{
 		OldString: "line 99",
 		NewString: "LINE 99",
-	})
+	}, 0.92)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
 }
@@ -53,7 +53,7 @@ func TestEditSequentialApplication(t *testing.T) {
 	successCount := 0
 
 	for i, edit := range edits {
-		newContent, err := applyEntryToContent(currentContent, edit)
+		newContent, err := applyEntryToContent(currentContent, edit, 0.92)
 		if err != nil {
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
@@ -92,7 +92,7 @@ func TestEditAllEditsSucceed(t *testing.T) {
 	successCount := 0
 
 	for _, edit := range edits {
-		newContent, err := applyEntryToContent(currentContent, edit)
+		newContent, err := applyEntryToContent(currentContent, edit, 0.92)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -120,7 +120,7 @@ func TestEditAllEditsFail(t *testing.T) {
 	var failedEdits []FailedEdit
 
 	for i, edit := range edits {
-		newContent, err := applyEntryToContent(currentContent, edit)
+		newContent, err := applyEntryToContent(currentContent, edit, 0.92)
 		if err != nil {
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
@@ -356,7 +356,7 @@ func TestFuzzyReplaceCommentStrip(t *testing.T) {
 	oldStr := "func main() {\n    # this is a comment\n    doSomething()\n}"
 	newStr := "func main() {\n    doSomething()\n}"
 
-	res, ok := fuzzyReplace(content, oldStr, newStr, false)
+	res, ok := fuzzyReplace(content, oldStr, newStr, false, 0.92)
 	require.True(t, ok)
 	require.NotContains(t, res, "comment")
 }
@@ -369,7 +369,7 @@ func TestFuzzyReplaceLevenshteinSimilarity(t *testing.T) {
 	oldStr := "func processData(data string) {\n    valdate(data)\n    save(data)\n}"
 	newStr := "func processData(data string) {\n    validate(data)\n    // saved!\n    save(data)\n}"
 
-	res, ok := fuzzyReplace(content, oldStr, newStr, false)
+	res, ok := fuzzyReplace(content, oldStr, newStr, false, 0.92)
 	require.True(t, ok)
 	require.Contains(t, res, "saved!")
 }
@@ -398,7 +398,7 @@ func TestFuzzyReplaceCommentStripGuard(t *testing.T) {
 	oldStr := "return x + y"
 	newStr := "return a + b"
 
-	res, ok := fuzzyReplace(content, oldStr, newStr, false)
+	res, ok := fuzzyReplace(content, oldStr, newStr, false, 0.92)
 	require.True(t, ok)
 	require.Contains(t, res, "return a + b")
 	require.Contains(t, res, "// return x + y") // the comment line should remain untouched

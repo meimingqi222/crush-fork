@@ -88,6 +88,20 @@ func applyFantasyMessageMetadata(msg *Message, metadata *fantasyMessageMetadata)
 	msg.ActivatedDeferredTools = normalizeDeferredToolNames(metadata.ActivatedDeferredTools)
 }
 
+// MessageIDFromFantasyMessage returns the crush message ID embedded in msg's
+// provider metadata, or "" if msg carries none (e.g. a synthetic message that
+// was never persisted). Used to recover the ID of images re-serialized via
+// ToAIMessage so tools like describe_image can look them up later even after
+// stripImagePartsFromFantasyMessagesWithVision replaces the FilePart with a
+// text placeholder.
+func MessageIDFromFantasyMessage(msg fantasy.Message) string {
+	metadata, ok := fantasyMessageMetadataFromMessage(msg)
+	if !ok {
+		return ""
+	}
+	return metadata.ID
+}
+
 func fantasyMessageMetadataFromMessage(msg fantasy.Message) (*fantasyMessageMetadata, bool) {
 	if metadata, ok := fantasyMessageMetadataFromOptions(msg.ProviderOptions); ok {
 		return metadata, true

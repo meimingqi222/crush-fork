@@ -754,6 +754,17 @@ func toolErrorContent(sty *styles.Styles, result *message.ToolResult, width int,
 	}
 	errContent := result.Content
 	if !expanded {
+		// Model-internal correction errors (schema validation failures,
+		// malformed tool-call JSON) are fed back to the model, which retries
+		// on its own — they carry no action for the user, so rendering them
+		// as a full ERROR banner makes every self-correcting retry flash red
+		// across the transcript. Show them as a quiet single line instead;
+		// the full message stays available via the expanded view.
+		if isModelInternalToolError(errContent) {
+			first := strings.SplitN(errContent, "\n", 2)[0]
+			first = ansi.Truncate(first, width-3, "…")
+			return sty.Tool.ErrorMessage.Render(first)
+		}
 		errContent = strings.SplitN(errContent, "\n", 2)[0]
 	}
 	errContent = strings.ReplaceAll(errContent, "\n", " ")
@@ -761,6 +772,15 @@ func toolErrorContent(sty *styles.Styles, result *message.ToolResult, width int,
 	tagWidth := lipgloss.Width(errTag)
 	errContent = ansi.Truncate(errContent, width-tagWidth-3, "…")
 	return fmt.Sprintf("%s %s", errTag, sty.Tool.ErrorMessage.Render(errContent))
+}
+
+// isModelInternalToolError reports whether the tool result is a model
+// self-correction error (schema validation or JSON parse failure) rather than
+// a user-actionable failure. These messages are already returned to the model
+// as the tool result, so the UI keeps them quiet.
+func isModelInternalToolError(content string) bool {
+	return strings.HasPrefix(content, "validation failed for tool ") ||
+		strings.HasPrefix(content, "invalid JSON input")
 }
 
 // toolIcon returns the status icon for a tool call.

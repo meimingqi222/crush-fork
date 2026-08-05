@@ -130,6 +130,15 @@ func recoverHashlineFromSnapshot(baseLines, oursLines []string, operations []Has
 			}
 			mappedOp.Start = hashlineRef{Line: startMapped, Hash: op.Start.Hash}
 			mappedOp.End = hashlineRef{Line: endMapped, Hash: op.End.Hash}
+		case hashlineEditOpCut, hashlineEditOpPaste:
+			// CUT/PASTE are not safe to 3-way-merge here: this function has no
+			// session/clipboard access (recovery re-parses operations against a
+			// past snapshot, independent of the caller's clipboard pre-pass), so
+			// a mapped CUT would silently fail to populate any register and a
+			// mapped PASTE would silently insert nothing -- both would report
+			// "recovered" while actually doing nothing. Fail loudly instead so
+			// the caller re-reads the file and retries with fresh line refs.
+			return nil, fmt.Errorf("%s operation cannot be safely recovered via 3-way merge after a concurrent change; re-read the file with a line selector and retry", op.Operation)
 		}
 		mappedOps[idx] = mappedOp
 	}

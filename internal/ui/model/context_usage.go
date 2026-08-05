@@ -98,7 +98,7 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 			// During streaming the current exchange has not been committed to
 			// session totals yet. The message's PromptTokens may be a local
 			// character-based estimate (set in agent.go before the API call),
-			// which can overshoot the real value by 30-50%. Using it as the
+			// which can overshoot the real value by 30-70%. Using it as the
 			// TotalTokens base causes a visible drop when the step finishes
 			// and the API's authoritative usage replaces it.
 			//
@@ -114,9 +114,13 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 			// display above 100%. For summaries, keep the raw usage total
 			// (output-only) as before.
 			//
-			// When lastTotal is zero (first exchange in the session), fall
-			// back to the message's estimated total so the display is not
-			// stuck at zero until the first step finishes.
+			// When lastTotal is zero (first exchange of a fresh session,
+			// no confirmed anchor yet), mirror oh-my-pi's anchor-plus-tail
+			// accounting: show only the live output estimate instead of the
+			// inflated local prompt estimate. The finished total (real
+			// prompt + real output) is always >= the streaming output, so
+			// the display grows on completion rather than dropping from a
+			// ~36k guess to the ~21k real value.
 			if !usage.Summary {
 				lastTotal := sess.LastTotalTokens()
 				// Use the higher of the text-based streaming estimate and
@@ -124,6 +128,8 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 				streamingOutput := max(estimateStreamedOutput(messages), usage.OutputTokens)
 				if lastTotal > 0 {
 					usage.TotalTokens = lastTotal + streamingOutput
+				} else {
+					usage.TotalTokens = streamingOutput
 				}
 				// OutputTokens (displayed as "Xk out") tracks cumulative
 				// output across all exchanges. During streaming, the current

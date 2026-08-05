@@ -2,8 +2,10 @@ package chat
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 )
 
@@ -51,6 +53,54 @@ func TestLooksLikeMarkdown(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestToolErrorContentQuietForModelInternalErrors(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.DefaultStyles()
+	styPtr := &sty
+
+	validationContent := "validation failed for tool \"read\":\n  - path.type: Value is null but should be string\n  - required: Required property 'path' is missing"
+	jsonContent := "invalid JSON input: unexpected end of JSON input (raw: \"{\\\"path\\\":\")"
+
+	t.Run("validation failure collapsed without ERROR banner", func(t *testing.T) {
+		t.Parallel()
+		got := toolErrorContent(styPtr, &message.ToolResult{Content: validationContent, IsError: true}, 80, false)
+		if strings.Contains(got, "ERROR") {
+			t.Fatalf("model-internal validation error must not render the ERROR banner, got %q", got)
+		}
+		if !strings.Contains(got, "validation failed for tool \"read\":") {
+			t.Fatalf("collapsed message should keep the first line, got %q", got)
+		}
+	})
+
+	t.Run("invalid JSON collapsed without ERROR banner", func(t *testing.T) {
+		t.Parallel()
+		got := toolErrorContent(styPtr, &message.ToolResult{Content: jsonContent, IsError: true}, 80, false)
+		if strings.Contains(got, "ERROR") {
+			t.Fatalf("model-internal JSON error must not render the ERROR banner, got %q", got)
+		}
+	})
+
+	t.Run("expanded view keeps full message", func(t *testing.T) {
+		t.Parallel()
+		got := toolErrorContent(styPtr, &message.ToolResult{Content: validationContent, IsError: true}, 500, true)
+		if !strings.Contains(got, "ERROR") {
+			t.Fatalf("expanded view must keep the ERROR banner, got %q", got)
+		}
+		if !strings.Contains(got, "Required property 'path' is missing") {
+			t.Fatalf("expanded view must include the full message, got %q", got)
+		}
+	})
+
+	t.Run("user-actionable error keeps ERROR banner", func(t *testing.T) {
+		t.Parallel()
+		got := toolErrorContent(styPtr, &message.ToolResult{Content: "permission denied: /etc/passwd", IsError: true}, 80, false)
+		if !strings.Contains(got, "ERROR") {
+			t.Fatalf("user-actionable error must keep the ERROR banner, got %q", got)
+		}
+	})
 }
 
 func TestRenderToolResultTextContent(t *testing.T) {

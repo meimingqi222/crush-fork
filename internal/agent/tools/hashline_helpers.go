@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/fsext"
 )
 
@@ -13,6 +14,8 @@ type parsedHashlineOperation struct {
 	Start        hashlineRef
 	End          hashlineRef
 	ContentLines []string
+	Register     string
+	PasteBefore  bool
 }
 
 func splitHashlineFileLines(content string) ([]string, bool) {
@@ -117,8 +120,38 @@ func parseHashlineOperations(operations []HashlineEditOperation, originalLines [
 				Line:         lineRef,
 				ContentLines: contentLines,
 			})
+		case hashlineEditOpCut:
+			startRef, err := parseAndValidateHashlineReference(operation.Start, originalLines)
+			if err != nil {
+				return nil, fmt.Errorf("operation %d (%s): %w", opIndex, operation.Operation, err)
+			}
+			endRef, err := parseAndValidateHashlineReference(operation.End, originalLines)
+			if err != nil {
+				return nil, fmt.Errorf("operation %d (%s): %w", opIndex, operation.Operation, err)
+			}
+			if startRef.Line > endRef.Line {
+				return nil, fmt.Errorf("operation %d (%s): start line must be less than or equal to end line", opIndex, operation.Operation)
+			}
+			parsed = append(parsed, parsedHashlineOperation{
+				Operation: operation.Operation,
+				Start:     startRef,
+				End:       endRef,
+				Register:  operation.Register,
+			})
+		case hashlineEditOpPaste:
+			lineRef, err := parseAndValidateHashlineReference(operation.Line, originalLines)
+			if err != nil {
+				return nil, fmt.Errorf("operation %d (%s): %w", opIndex, operation.Operation, err)
+			}
+			parsed = append(parsed, parsedHashlineOperation{
+				Operation:    operation.Operation,
+				Line:         lineRef,
+				ContentLines: contentLines,
+				Register:     operation.Register,
+				PasteBefore:  operation.PasteBefore,
+			})
 		default:
-			return nil, fmt.Errorf("operation %d: unsupported operation %q. Use replace_line, replace_range, prepend, or append", opIndex, operation.Operation)
+			return nil, fmt.Errorf("operation %d: unsupported operation %q. Use replace_line, replace_range, prepend, append, cut, or paste", opIndex, operation.Operation)
 		}
 	}
 
@@ -149,6 +182,23 @@ func applyHashlineOperations(originalLines []string, operations []parsedHashline
 			currentLines, mapping, prependOffsets, err = insertRelativeToOriginalLine(currentLines, mapping, prependOffsets, appendOffsets, operation.Line.Line, true, operation.ContentLines)
 		case hashlineEditOpAppend:
 			currentLines, mapping, appendOffsets, err = insertRelativeToOriginalLine(currentLines, mapping, prependOffsets, appendOffsets, operation.Line.Line, false, operation.ContentLines)
+		case hashlineEditOpCut:
+			// Cut is handled in a pre-pass; here it's a no-op since lines are already deleted
+		case hashlineEditOpPaste:
+			var pasteLines []string
+			if len(operation.ContentLines) > 0 {
+				pasteLines = operation.ContentLines
+			} else {
+				// Retrieve from clipboard register - handled by caller
+				pasteLines = nil
+			}
+			if len(pasteLines) > 0 {
+				if operation.PasteBefore {
+					currentLines, mapping, prependOffsets, err = insertRelativeToOriginalLine(currentLines, mapping, prependOffsets, appendOffsets, operation.Line.Line, true, pasteLines)
+				} else {
+					currentLines, mapping, appendOffsets, err = insertRelativeToOriginalLine(currentLines, mapping, prependOffsets, appendOffsets, operation.Line.Line, false, pasteLines)
+				}
+			}
 		default:
 			err = fmt.Errorf("unsupported operation %q", operation.Operation)
 		}
@@ -274,4 +324,79 @@ func resolveCurrentLine(mapping []int, originalLine int) (int, error) {
 		return 0, fmt.Errorf("line %d no longer exists after previous operations", originalLine)
 	}
 	return mapping[originalLine], nil
+}
+
+// pendingHashlineCut holds a CUT operation's captured lines before they are
+// committed to the global clipboard. Keeping them uncommitted until the edit
+// that produced them actually succeeds prevents a denied or failed write from
+// leaving a register that claims lines were cut when the source file was
+// never modified (a later PASTE from that register would otherwise duplicate
+// content that is still present, unchanged, in the original file).
+type pendingHashlineCut struct {
+	Register string // "" for the anonymous register
+	Lines    []string
+}
+
+// collectPendingHashlineCuts captures the line ranges targeted by CUT
+// operations in opLines without touching the global clipboard. Invalid
+// ranges are left for the caller to validate and report.
+func collectPendingHashlineCuts(ops []parsedHashlineOperation, opLines []string) []pendingHashlineCut {
+	var pending []pendingHashlineCut
+	for _, op := range ops {
+		if op.Operation != hashlineEditOpCut {
+			continue
+		}
+		startLine, endLine := op.Start.Line, op.End.Line
+		if startLine < 1 || endLine > len(opLines) || startLine > endLine {
+			continue
+		}
+		captured := make([]string, endLine-startLine+1)
+		copy(captured, opLines[startLine-1:endLine])
+		pending = append(pending, pendingHashlineCut{Register: op.Register, Lines: captured})
+	}
+	return pending
+}
+
+// resolvePendingHashlinePastes fills in ContentLines for PASTE operations in
+// ops, preferring lines cut earlier in the same batch (pending, not yet
+// committed to the clipboard) and falling back to the persisted clipboard for
+// cross-call transfers. Returns a non-nil error response if a PASTE's
+// register cannot be resolved.
+func resolvePendingHashlinePastes(ops []parsedHashlineOperation, pending []pendingHashlineCut, sessionID string) *fantasy.ToolResponse {
+	for i, op := range ops {
+		if op.Operation != hashlineEditOpPaste || len(op.ContentLines) > 0 {
+			continue
+		}
+		var capturedLines []string
+		var found bool
+		for _, pc := range pending {
+			if pc.Register == op.Register {
+				capturedLines, found = pc.Lines, true
+			}
+		}
+		if !found {
+			if op.Register != "" {
+				capturedLines, found = GlobalClipboard.GetNamed(sessionID, op.Register)
+			} else {
+				capturedLines, found = GlobalClipboard.GetAnonymous(sessionID)
+			}
+		}
+		if !found || len(capturedLines) == 0 {
+			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("operation %d (paste): clipboard register %q is empty or not found. Use a cut operation first.", i+1, op.Register))
+			return &resp
+		}
+		ops[i].ContentLines = capturedLines
+	}
+	return nil
+}
+
+// commitPendingHashlineCuts writes captured CUT lines to the persisted,
+// named clipboard registers. Call only after the edit that produced them has
+// actually been written -- see pendingHashlineCut.
+func commitPendingHashlineCuts(pending []pendingHashlineCut, sessionID string) {
+	for _, pc := range pending {
+		if pc.Register != "" {
+			GlobalClipboard.PutNamed(sessionID, pc.Register, pc.Lines)
+		}
+	}
 }

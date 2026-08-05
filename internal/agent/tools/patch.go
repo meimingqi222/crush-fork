@@ -33,8 +33,45 @@ func ParseUnifiedPatch(patchText string) ([]*FilePatch, error) {
 	var currentPatch *FilePatch
 	var currentHunk *PatchHunk
 
+	// While inHunk is true, every line is consumed as hunk body verbatim and
+	// is never reinterpreted as a "--- "/"+++ "/"@@ " section marker, even if
+	// its content happens to start with one of those sequences (e.g. deleting
+	// a line of "-- " comment syntax used by SQL/Lua/Haskell/Ada, which diffs
+	// as the literal text "--- comment ..."). A hunk is bounded by the line
+	// counts declared in its own "@@" header, exactly like a real patch tool,
+	// rather than by scanning body lines for marker-looking prefixes.
+	var inHunk bool
+	var remainingOld, remainingNew int
+
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		if inHunk {
+			switch {
+			case strings.HasPrefix(line, "\\"):
+				// e.g. "\ No newline at end of file" -- not a content line.
+			case strings.HasPrefix(line, "+"):
+				currentHunk.Lines = append(currentHunk.Lines, line)
+				remainingNew--
+			case strings.HasPrefix(line, "-"):
+				currentHunk.Lines = append(currentHunk.Lines, line)
+				remainingOld--
+			case strings.HasPrefix(line, " "):
+				currentHunk.Lines = append(currentHunk.Lines, line)
+				remainingOld--
+				remainingNew--
+			case line == "":
+				currentHunk.Lines = append(currentHunk.Lines, "")
+				remainingOld--
+				remainingNew--
+			default:
+				return nil, fmt.Errorf("malformed hunk line (expected a '+', '-', or ' ' prefix): %q", line)
+			}
+			if remainingOld <= 0 && remainingNew <= 0 {
+				inHunk = false
+			}
+			continue
+		}
 
 		if strings.HasPrefix(line, "--- ") {
 			path := parseDiffPath(line[4:])
@@ -78,16 +115,13 @@ func ParseUnifiedPatch(patchText string) ([]*FilePatch, error) {
 				NewLen:   newLen,
 			}
 			currentPatch.Hunks = append(currentPatch.Hunks, currentHunk)
+			remainingOld, remainingNew = oldLen, newLen
+			inHunk = remainingOld > 0 || remainingNew > 0
 			continue
 		}
 
-		if currentHunk != nil {
-			if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, " ") {
-				currentHunk.Lines = append(currentHunk.Lines, line)
-			} else if line == "" {
-				currentHunk.Lines = append(currentHunk.Lines, "")
-			}
-		}
+		// Anything else outside a hunk (git "diff --git"/"index ..." lines,
+		// blank separators, etc.) is not part of the structured patch.
 	}
 
 	if err := scanner.Err(); err != nil {
