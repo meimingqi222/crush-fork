@@ -176,6 +176,7 @@ type (
 	planCompactedForExecutionMsg struct {
 		SessionID string
 		Plan      string
+		Mode      planmode.ExecutionContextMode
 		Err       error
 	}
 	goalUpdatedMsg struct {
@@ -874,7 +875,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		cmds = append(cmds, util.ReportInfo("Context compacted. Starting implementation."))
-		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, planmode.ExecuteWithCompact))
+		// After compaction, continue with the actual execution mode (not compact again).
+		nextMode := msg.Mode
+		if nextMode == planmode.ExecuteWithCompact {
+			nextMode = planmode.ExecuteDirect
+		}
+		cmds = append(cmds, m.executeApprovedPlan(msg.SessionID, msg.Plan, nextMode))
 
 	case goalUpdatedMsg:
 		if msg.Err != nil {
@@ -2865,6 +2871,32 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal dropped.", func(ctx context.Context, sid string) (session.Goal, error) {
 			return m.com.App.GoalRuntime.DropGoal(ctx, sid)
 		}))
+	case dialog.ActionCompleteGoal:
+		if m.session == nil {
+			break
+		}
+		if !m.session.Goal.IsActive() {
+			cmds = append(cmds, util.ReportWarn("No active goal to complete."))
+			break
+		}
+		cmds = append(cmds, m.runGoalOp(msg.SessionID, "Goal completed.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.CompleteGoal(ctx, sid)
+		}))
+	case dialog.ActionShowGoalTasks:
+		// Opens the goal status dialog, which now renders the task list.
+		cmds = append(cmds, m.openGoalStatusDialog())
+	case dialog.ActionAddGoalTask:
+		if m.session == nil {
+			break
+		}
+		if !m.session.Goal.IsActive() {
+			cmds = append(cmds, util.ReportWarn("No active goal to add a task to."))
+			break
+		}
+		// Send a message prompting the agent to add a task via the todo tool.
+		// The agent owns the task list; this keeps the task lifecycle in one
+		// place rather than duplicating todo tool logic in the UI.
+		cmds = append(cmds, m.sendMessage("Add a new task to the active goal using the todo tool (op: \"add\"). Ask me what the task should be before adding it."))
 	case dialog.ActionCycleTheme:
 		if cmd := m.cycleTheme(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -5559,7 +5591,7 @@ func (m *UI) goalSlashBlocked(cmd string) (tea.Cmd, bool) {
 		return nil, false
 	}
 	switch cmd {
-	case "set", "replace", "guided", "resume", "pause", "drop", "budget":
+	case "set", "replace", "guided", "resume", "pause", "drop", "budget", "complete", "add", "done":
 		return util.ReportWarn(session.ErrPlanBlocksGoalMode.Error()), true
 	default:
 		return nil, false
@@ -5650,6 +5682,55 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 		return m.runGoalOp(m.session.ID, "Goal dropped.", func(ctx context.Context, sid string) (session.Goal, error) {
 			return m.com.App.GoalRuntime.DropGoal(ctx, sid)
 		}), true
+	case "complete":
+		if cmd, blocked := m.goalSlashBlocked("complete"); blocked {
+			return cmd, true
+		}
+		return m.runGoalOp(m.session.ID, "Goal completed.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.CompleteGoal(ctx, sid)
+		}), true
+	case "tasks":
+		// /goal tasks is an alias for /goal show — opens the status dialog.
+		return m.openGoalStatusDialog(), true
+	case "add":
+		if cmd, blocked := m.goalSlashBlocked("add"); blocked {
+			return cmd, true
+		}
+		taskContent := strings.TrimSpace(strings.TrimPrefix(args, "add"))
+		if taskContent == "" {
+			return util.ReportWarn("Usage: /goal add <task content>"), true
+		}
+		return m.runGoalOp(m.session.ID, "Task added.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.AddGoalTask(ctx, sid, taskContent)
+		}), true
+	case "done":
+		if cmd, blocked := m.goalSlashBlocked("done"); blocked {
+			return cmd, true
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(args, "done"))
+		if rest == "" {
+			return util.ReportWarn("Usage: /goal done <task content or index> [evidence]"), true
+		}
+		// Split into task identifier and optional evidence on the first
+		// "--evidence" marker, or treat the first token as the identifier
+		// and the rest as evidence.
+		var taskID, evidence string
+		if idx := strings.Index(rest, "--evidence"); idx >= 0 {
+			taskID = strings.TrimSpace(rest[:idx])
+			evidence = strings.TrimSpace(rest[idx+len("--evidence"):])
+		} else {
+			fields := strings.Fields(rest)
+			taskID = fields[0]
+			if len(fields) > 1 {
+				evidence = strings.Join(fields[1:], " ")
+			}
+		}
+		if taskID == "" {
+			return util.ReportWarn("Usage: /goal done <task content or index> [evidence]"), true
+		}
+		return m.runGoalOp(m.session.ID, "Task completed.", func(ctx context.Context, sid string) (session.Goal, error) {
+			return m.com.App.GoalRuntime.CompleteGoalTask(ctx, sid, taskID, evidence)
+		}), true
 	case "budget":
 		if cmd, blocked := m.goalSlashBlocked("budget"); blocked {
 			return cmd, true
@@ -5665,7 +5746,7 @@ func (m *UI) handleGoalSlashCommand(content string) (tea.Cmd, bool) {
 			return m.com.App.GoalRuntime.SetBudgetGoal(ctx, sid, budget)
 		}), true
 	default:
-		return util.ReportWarn("Unknown /goal command. Use set, replace, show, pause, resume, drop, budget, or guided."), true
+		return util.ReportWarn("Unknown /goal command. Use set, replace, show, tasks, complete, add, done, pause, resume, drop, budget, or guided."), true
 	}
 }
 

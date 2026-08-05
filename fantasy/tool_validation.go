@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	maxCoercionPasses       = 5
-	maxArgEchoFieldLength   = 256
-	rawInputExcerptMax      = 256
+	maxCoercionPasses     = 5
+	maxArgEchoFieldLength = 256
+	rawInputExcerptMax    = 256
 )
 
 // parseToolCallInput parses a tool call's JSON input into a map. On strict

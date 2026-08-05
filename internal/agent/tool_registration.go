@@ -132,9 +132,23 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewSourcegraphTool(nil),
 		agenttools.NewCrushTool(c.cfg, c.lspManager, c.memoryEngine(), filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
 		agenttools.NewGoalTool(c.sessions, c.goalRuntime),
+	}
+
+	// The todo tool is conditionally registered based on the todo.enabled
+	// config (default true). max_items is passed through to cap task lists.
+	todoCfg := c.cfg.Config().EffectiveTodoConfig()
+	if todoCfg.Enabled == nil || *todoCfg.Enabled {
+		maxItems := 50
+		if todoCfg.MaxItems != nil {
+			maxItems = *todoCfg.MaxItems
+		}
+		builtin = append(builtin, agenttools.NewTodoTool(c.sessions, c.goalRuntime, maxItems))
+	}
+
+	builtin = append(builtin,
 		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
-	}
+	)
 	// resolve only works in plan mode -- resolve.go rejects the call with an
 	// error in every other mode. Registering it unconditionally spent a tool
 	// slot and a decision point on a tool the model could never use.

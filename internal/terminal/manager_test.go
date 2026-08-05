@@ -271,24 +271,29 @@ func (p *fakeProcess) exit(value ProcessExit) {
 	}
 	_ = p.Close()
 }
+
 func (p *fakeProcess) writtenBytes() []byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]byte(nil), p.written...)
 }
+
 func (p *fakeProcess) dimensions() [2]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.size
 }
+
 func (p *fakeProcess) isClosed() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.closed
 }
 
-var _ Factory = (*fakeFactory)(nil)
-var _ Process = (*fakeProcess)(nil)
+var (
+	_ Factory = (*fakeFactory)(nil)
+	_ Process = (*fakeProcess)(nil)
+)
 
 func BenchmarkRetainedOutputRingAppend(b *testing.B) {
 	ring := newByteRing(defaultRetainedBytes)

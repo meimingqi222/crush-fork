@@ -34,6 +34,10 @@ func (a *sessionAgent) Cancel(sessionID string) {
 		slog.Debug("Clearing queued prompts", "session_id", sessionID)
 		a.clearQueuedCalls(sessionID)
 	}
+	// Steer messages are tied to the active run; a user cancel should
+	// discard them so the next turn starts clean.
+	a.clearSteeringQueue(sessionID)
+	a.steeringSignals.Del(sessionID)
 	a.pausedQueues.Del(sessionID)
 }
 
@@ -42,27 +46,41 @@ func (a *sessionAgent) EnqueueSteer(sessionID string, call SessionAgentCall) boo
 		return false
 	}
 	call.SessionID = sessionID
-	call.JoinActiveRun = true
-	a.enqueueQueuedCall(sessionID, call)
+	call.Steering = true
+	a.enqueueSteer(sessionID, call)
+	// Notify the running tools that a mid-turn steering message arrived so
+	// cooperative tools (e.g. foreground bash) can yield at a safe point.
+	a.signalSteering(sessionID)
 	return true
 }
 
 func (a *sessionAgent) RemoveQueuedTurn(sessionID, turnID string) bool {
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()
-	queuedCalls, ok := a.messageQueue.Get(sessionID)
-	if !ok {
-		return false
-	}
-	for index := range queuedCalls {
-		if queuedCalls[index].TurnID != turnID {
-			continue
+	removed := false
+	if queuedCalls, ok := a.messageQueue.Get(sessionID); ok {
+		for index := range queuedCalls {
+			if queuedCalls[index].TurnID != turnID {
+				continue
+			}
+			updated := append(queuedCalls[:index:index], queuedCalls[index+1:]...)
+			a.setQueuedCallsLocked(sessionID, updated)
+			removed = true
+			break
 		}
-		updated := append(queuedCalls[:index:index], queuedCalls[index+1:]...)
-		a.setQueuedCallsLocked(sessionID, updated)
-		return true
 	}
-	return false
+	if steering, ok := a.steeringQueue.Get(sessionID); ok {
+		for index := range steering {
+			if steering[index].TurnID != turnID {
+				continue
+			}
+			updated := append(steering[:index:index], steering[index+1:]...)
+			a.setSteeringCallsLocked(sessionID, updated)
+			removed = true
+			break
+		}
+	}
+	return removed
 }
 
 func (a *sessionAgent) RemoveQueuedPrompt(sessionID string, index int) bool {
@@ -82,6 +100,9 @@ func (a *sessionAgent) ClearQueue(sessionID string) {
 		slog.Debug("Clearing queued prompts", "session_id", sessionID)
 		a.clearQueuedCalls(sessionID)
 	}
+	// Steering messages are tied to the active run; clearing the queue
+	// should discard them too so the next turn starts clean.
+	a.clearSteeringQueue(sessionID)
 	// Auto-unpause when the queue is cleared.
 	a.pausedQueues.Del(sessionID)
 }
@@ -297,4 +318,104 @@ func (a *sessionAgent) setQueuedCallsLocked(sessionID string, queuedCalls []Sess
 		return
 	}
 	a.messageQueue.Set(sessionID, append([]SessionAgentCall(nil), queuedCalls...))
+}
+
+// enqueueSteer appends a steering message to the session's dedicated
+// steering queue. Unlike enqueueQueuedCall this never sets JoinActiveRun:
+// steering messages are drained through popSteeringCalls at safe mid-turn
+// points and formatted with a priority notice, so they must not share the
+// join-active-run budget, dedupe, or queue-pause semantics.
+func (a *sessionAgent) enqueueSteer(sessionID string, call SessionAgentCall) {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	steering, _ := a.steeringQueue.Get(sessionID)
+	steering = append(append([]SessionAgentCall(nil), steering...), call)
+	a.setSteeringCallsLocked(sessionID, steering)
+}
+
+// popSteeringCalls drains and returns all pending steering messages for the
+// session in FIFO order. It is the only consumer of the steering queue and
+// is called exclusively at safe drain points (PrepareStep) or to flush
+// stranded messages at the end of a run.
+func (a *sessionAgent) popSteeringCalls(sessionID string) []SessionAgentCall {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	steering, ok := a.steeringQueue.Get(sessionID)
+	if !ok || len(steering) == 0 {
+		return nil
+	}
+	a.steeringQueue.Del(sessionID)
+	return steering
+}
+
+// clearSteeringQueue discards all pending steering messages for the session.
+func (a *sessionAgent) clearSteeringQueue(sessionID string) {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	a.steeringQueue.Del(sessionID)
+}
+
+// queuedSteeringSnapshot returns a copy of the session's pending steering
+// messages without draining them.
+func (a *sessionAgent) queuedSteeringSnapshot(sessionID string) []SessionAgentCall {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	steering, ok := a.steeringQueue.Get(sessionID)
+	if !ok || len(steering) == 0 {
+		return nil
+	}
+	return append([]SessionAgentCall(nil), steering...)
+}
+
+func (a *sessionAgent) setSteeringCallsLocked(sessionID string, steering []SessionAgentCall) {
+	if len(steering) == 0 {
+		a.steeringQueue.Del(sessionID)
+		return
+	}
+	a.steeringQueue.Set(sessionID, append([]SessionAgentCall(nil), steering...))
+}
+
+// signalSteering cancels the session's current cooperative steering signal
+// so running tools can notice the mid-turn message and yield at a safe
+// point. No-op when no signal is registered (e.g. the run just started and
+// PrepareStep has not injected a signal yet).
+func (a *sessionAgent) signalSteering(sessionID string) {
+	if cancel, ok := a.steeringSignals.Get(sessionID); ok && cancel != nil {
+		cancel()
+	}
+}
+
+// flushStrandedSteeringMessages promotes steering messages that missed every
+// mid-turn drain point (e.g. they arrived between the last PrepareStep and
+// the end of the run) to the front of the regular queue, so the run's
+// queued-message dispatch starts them as their own turn instead of silently
+// dropping them.
+func (a *sessionAgent) flushStrandedSteeringMessages(sessionID string) {
+	stranded := a.popSteeringCalls(sessionID)
+	if len(stranded) == 0 {
+		return
+	}
+
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	queuedCalls, _ := a.messageQueue.Get(sessionID)
+	queuedCalls = append(append([]SessionAgentCall(nil), stranded...), queuedCalls...)
+	a.setQueuedCallsLocked(sessionID, queuedCalls)
+}
+
+// formatSteeringPrompt wraps a mid-turn steering message so the model
+// recognizes it as a high-priority instruction that supersedes earlier
+// directions, rather than an ordinary user message. The prompt is capped at
+// steeringMaxPromptChars runes to guard against pathological input.
+func formatSteeringPrompt(prompt string) string {
+	runes := []rune(prompt)
+	if len(runes) > steeringMaxPromptChars {
+		prompt = string(runes[:steeringMaxPromptChars-1]) + "…"
+	}
+	return "The user sent a message while you were working. Treat it as the active instruction; it supersedes earlier directions if they conflict.\n<user_query>\n" + prompt + "\n</user_query>"
 }

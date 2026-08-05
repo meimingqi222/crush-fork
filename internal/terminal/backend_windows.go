@@ -40,6 +40,7 @@ func (p *windowsProcess) Kill(signal string) error {
 	p.mu.Unlock()
 	return p.Close()
 }
+
 func (p *windowsProcess) Wait(ctx context.Context) (ProcessExit, error) {
 	code, err := p.pty.Wait(ctx)
 	p.mu.Lock()
@@ -47,6 +48,7 @@ func (p *windowsProcess) Wait(ctx context.Context) (ProcessExit, error) {
 	p.mu.Unlock()
 	return ProcessExit{Code: int(code), Signal: signal}, err
 }
+
 func (p *windowsProcess) Close() error {
 	p.closeOnce.Do(func() { p.closeErr = p.pty.Close() })
 	return p.closeErr

@@ -124,6 +124,20 @@ type (
 	ActionDropGoal struct {
 		SessionID string
 	}
+	// ActionCompleteGoal completes the current goal after task gate validation.
+	ActionCompleteGoal struct {
+		SessionID string
+	}
+	// ActionAddGoalTask opens a prompt for the user to enter a new task and
+	// adds it to the active goal's task list.
+	ActionAddGoalTask struct {
+		SessionID string
+	}
+	// ActionShowGoalTasks opens the goal status dialog which renders the
+	// task list alongside goal counters.
+	ActionShowGoalTasks struct {
+		SessionID string
+	}
 	ActionInitializeProject struct{}
 	ActionSummarize         struct {
 		SessionID string

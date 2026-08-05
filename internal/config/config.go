@@ -1162,6 +1162,95 @@ type Config struct {
 
 	Agents    map[string]Agent       `json:"agents,omitempty" jsonschema:"description=Named agent configurations, including built-in overrides and custom subagents"`
 	Subagents *SubagentRuntimeConfig `json:"subagents,omitempty" jsonschema:"description=Subagent runtime execution controls"`
+	Goal      *GoalConfig            `json:"goal,omitempty" jsonschema:"description=Goal runtime configuration (iteration caps, evaluator, task gate)"`
+	Todo      *TodoConfig            `json:"todo,omitempty" jsonschema:"description=Todo tool configuration (enabled flag, max items)"`
+}
+
+// TodoConfig configures the todo tool's behavior. All fields are optional;
+// zero-value defaults are applied by EffectiveTodoConfig.
+type TodoConfig struct {
+	Enabled  *bool `json:"enabled,omitempty" jsonschema:"description=Enable the todo tool for goal task tracking (default true)"`
+	MaxItems *int  `json:"max_items,omitempty" jsonschema:"description=Maximum number of tasks allowed in a goal's task list (default 50)"`
+}
+
+// EffectiveTodoConfig returns the todo config with defaults applied.
+func (c *Config) EffectiveTodoConfig() TodoConfig {
+	if c == nil || c.Todo == nil {
+		defaultEnabled := true
+		defaultMax := 50
+		return TodoConfig{
+			Enabled:  &defaultEnabled,
+			MaxItems: &defaultMax,
+		}
+	}
+	t := *c.Todo
+	if t.Enabled == nil {
+		v := true
+		t.Enabled = &v
+	}
+	if t.MaxItems == nil {
+		v := 50
+		t.MaxItems = &v
+	}
+	return t
+}
+
+// GoalConfig configures the goal runtime's iteration limits, evaluator, and
+// task completion gate. All fields are optional; zero-value defaults are
+// applied by EffectiveGoalConfig.
+type GoalConfig struct {
+	MaxIterations      *int64 `json:"max_iterations,omitempty" jsonschema:"description=Maximum goal iterations before auto-drop (default 50)"`
+	BlockCap           *int64 `json:"block_cap,omitempty" jsonschema:"description=Consecutive no-progress turns before stall (default 8)"`
+	EvaluatorEnabled   *bool  `json:"evaluator_enabled,omitempty" jsonschema:"description=Enable external goal evaluator (default false)"`
+	EvaluatorTimeoutMs *int   `json:"evaluator_timeout_ms,omitempty" jsonschema:"description=Evaluator call timeout in milliseconds (default 30000)"`
+	TaskGate           string `json:"task_gate,omitempty" jsonschema:"description=Task completion gate mode: strict, lax, off (default strict)"`
+	MaxTaskContext     *int   `json:"max_task_context,omitempty" jsonschema:"description=Maximum tasks injected into continuation prompts (default 10)"`
+}
+
+// EffectiveGoalConfig returns the goal config with defaults applied.
+func (c *Config) EffectiveGoalConfig() GoalConfig {
+	cfg := GoalConfig{
+		TaskGate: "strict",
+	}
+	if c == nil || c.Goal == nil {
+		// Apply defaults via pointer values.
+		defaultMax := int64(50)
+		defaultCap := int64(8)
+		defaultEval := false
+		defaultTimeout := 30000
+		defaultMaxTask := 10
+		cfg.MaxIterations = &defaultMax
+		cfg.BlockCap = &defaultCap
+		cfg.EvaluatorEnabled = &defaultEval
+		cfg.EvaluatorTimeoutMs = &defaultTimeout
+		cfg.MaxTaskContext = &defaultMaxTask
+		return cfg
+	}
+	g := *c.Goal
+	if g.MaxIterations == nil {
+		v := int64(50)
+		g.MaxIterations = &v
+	}
+	if g.BlockCap == nil {
+		v := int64(8)
+		g.BlockCap = &v
+	}
+	if g.EvaluatorEnabled == nil {
+		v := false
+		g.EvaluatorEnabled = &v
+	}
+	if g.EvaluatorTimeoutMs == nil {
+		v := 30000
+		g.EvaluatorTimeoutMs = &v
+	}
+	if strings.TrimSpace(g.TaskGate) == "" {
+		g.TaskGate = "strict"
+	}
+	if g.MaxTaskContext == nil {
+		v := 10
+		g.MaxTaskContext = &v
+	}
+	return g
 }
 
 func (c *Config) EffectiveSubagentRuntime() SubagentRuntimeConfig {

@@ -278,8 +278,15 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 			startTime := time.Now()
 			commandToRun := params.Command
 			attemptedFallback := false
+			// Observe the run's cooperative steering signal so a mid-turn
+			// user message can promote this command to the background at a
+			// safe point instead of blocking the run.
+			var steeringDone <-chan struct{}
+			if steeringSignal := GetSteeringSignalFromContext(ctx); steeringSignal != nil {
+				steeringDone = steeringSignal.Done()
+			}
 			for {
-				output, execErr, timedOut, promotedShellID, runErr := runForegroundBashCommand(ctx, call.ID, execWorkingDir, runningBlockFuncs, commandToRun, timeoutSeconds, sessionID, params.Description)
+				output, execErr, timedOut, promotedShellID, steered, runErr := runForegroundBashCommand(ctx, call.ID, execWorkingDir, runningBlockFuncs, commandToRun, timeoutSeconds, sessionID, params.Description, steeringDone)
 				if runErr != nil {
 					return fantasy.ToolResponse{}, runErr
 				}
@@ -309,7 +316,18 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				appendDeprecationNotes(&metadata, deprecationNotes)
 
 				responseText := buildBashResponseText(output, execWorkingDir)
-				if timedOut && promotedShellID != "" {
+				if steered && promotedShellID != "" {
+					metadata.Background = true
+					metadata.ShellID = promotedShellID
+					msg := "The user sent a mid-turn instruction while this command was running. " +
+						"The command has been moved to the background (shell ID: " + promotedShellID + ") so its work is not lost."
+					if output != "" {
+						msg += "\n\nOutput so far:\n" + output
+					}
+					msg += "\n\nUse the job tool with action=output to check current output, action=wait to wait for completion, or action=kill to terminate it."
+					metadata.Output = msg
+					responseText = msg
+				} else if timedOut && promotedShellID != "" {
 					metadata.Background = true
 					metadata.ShellID = promotedShellID
 					msg := fmt.Sprintf("Command timed out after %d seconds. The process is still running in the background (shell ID: %s).", timeoutSeconds, promotedShellID)
@@ -400,12 +418,12 @@ func runBackgroundBash(ctx context.Context, call fantasy.ToolCall, params BashPa
 	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 }
 
-func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkingDir string, execBlockFuncs []shell.BlockFunc, command string, timeoutSeconds int, sessionID string, description string) (output string, execErr error, timedOut bool, promotedShellID string, runErr error) {
+func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkingDir string, execBlockFuncs []shell.BlockFunc, command string, timeoutSeconds int, sessionID string, description string, steeringDone <-chan struct{}) (output string, execErr error, timedOut bool, promotedShellID string, steered bool, runErr error) {
 	bgManager := shell.GetBackgroundShellManager()
 	bgManager.Cleanup()
 	bgShell, err := bgManager.StartWithMetadata(context.Background(), execWorkingDir, execBlockFuncs, command, description, sessionID, toolCallID, BashToolName)
 	if err != nil {
-		return "", nil, false, "", fmt.Errorf("error starting foreground shell: %w", err)
+		return "", nil, false, "", false, fmt.Errorf("error starting foreground shell: %w", err)
 	}
 
 	publishBashRuntime(ctx, toolCallID, toolruntime.StatusRunning, "", nil)
@@ -428,7 +446,7 @@ func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkin
 			if ctx.Err() != nil {
 				_ = bgManager.Remove(bgShell.ID)
 				publishBashRuntime(ctx, toolCallID, toolruntime.StatusCanceled, truncateOutput(combinedOutputSnapshot(stdout, stderr)), nil)
-				return "", nil, false, "", ctx.Err()
+				return "", nil, false, "", false, ctx.Err()
 			}
 			_ = bgManager.Remove(bgShell.ID)
 			out := finalShellOutput(stdout, stderr, exitErr)
@@ -440,7 +458,21 @@ func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkin
 				status = toolruntime.StatusFailed
 			}
 			publishBashRuntime(ctx, toolCallID, status, out, nil)
-			return out, exitErr, false, "", nil
+			return out, exitErr, false, "", false, nil
+
+		case <-steeringDone:
+			// The user sent a mid-turn steering message. Promote the command
+			// to the background (work is not lost) and hand the partial
+			// output back to the model so it can immediately address the
+			// new instruction.
+			stdout, stderr, _, _ := bgShell.GetOutput()
+			partialOut := truncateOutput(combinedOutputSnapshot(stdout, stderr))
+			publishBashRuntime(ctx, toolCallID, toolruntime.StatusBackgroundRunning, partialOut, map[string]any{
+				"shell_id":   bgShell.ID,
+				"background": true,
+			})
+			go watchBackgroundShellRuntime(detachedToolRuntimeContext(ctx), bgShell)
+			return partialOut, nil, false, bgShell.ID, true, nil
 
 		case <-timer:
 			stdout, stderr, _, _ := bgShell.GetOutput()
@@ -450,11 +482,11 @@ func runForegroundBashCommand(ctx context.Context, toolCallID string, execWorkin
 				"background": true,
 			})
 			go watchBackgroundShellRuntime(detachedToolRuntimeContext(ctx), bgShell)
-			return partialOut, nil, true, bgShell.ID, nil
+			return partialOut, nil, true, bgShell.ID, false, nil
 
 		case <-ctx.Done():
 			_ = bgManager.Kill(bgShell.ID)
-			return "", nil, false, "", ctx.Err()
+			return "", nil, false, "", false, ctx.Err()
 
 		case <-ticker.C:
 			stdout, stderr, _, _ := bgShell.GetOutput()

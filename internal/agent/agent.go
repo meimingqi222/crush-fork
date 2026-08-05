@@ -64,6 +64,12 @@ const (
 
 	joinActiveRunMaxInjectedCalls  = 2
 	joinActiveRunPromptCharsBudget = 1_600
+
+	// steeringMaxPromptChars caps a single mid-turn steering message. Steers
+	// ride a dedicated queue with their own budget, so this only guards
+	// against pathological input sizes, not against crowding out regular
+	// queued prompts.
+	steeringMaxPromptChars = 10_000
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -141,6 +147,12 @@ type SessionAgentCall struct {
 	// run's next provider step instead of waiting for the current run to
 	// finish.
 	JoinActiveRun bool
+	// Steering marks a mid-turn steering message: the user redirected the
+	// active run while it was working. Steering calls ride a dedicated
+	// steeringQueue, are drained before join-active-run prompts, and are
+	// formatted with an explicit priority notice so the model treats them
+	// as the current active instruction.
+	Steering bool
 	// BypassQueuePause allows this queued call to be processed even if the
 	// queue is paused. Used for auto-resume calls after summarization.
 	BypassQueuePause bool
@@ -286,9 +298,16 @@ type sessionAgent struct {
 
 	queueMu        sync.Mutex
 	messageQueue   *csync.Map[string, []SessionAgentCall]
+	steeringQueue  *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
 	activeTurnIDs  *csync.Map[string, string]
 	pausedQueues   *csync.Map[string, bool]
+	// steeringSignals holds, per session, the cancel func for the current
+	// run's cooperative steering signal. EnqueueSteer cancels it so running
+	// tools can notice the mid-turn message and yield at a safe point;
+	// PrepareStep resets it after draining so handled steers don't keep
+	// interrupting later tool steps.
+	steeringSignals *csync.Map[string, context.CancelFunc]
 
 	// lastSummarizeTime tracks when each session was last compacted.
 	// Used to prevent immediate re-summarization after compaction.
@@ -453,9 +472,11 @@ func NewSessionAgent(
 		retryDelayFunc:                  retryDelayFunc,
 		retryWaitFunc:                   retryWaitFunc,
 		messageQueue:                    csync.NewMap[string, []SessionAgentCall](),
+		steeringQueue:                   csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:                  csync.NewMap[string, context.CancelFunc](),
 		activeTurnIDs:                   csync.NewMap[string, string](),
 		pausedQueues:                    csync.NewMap[string, bool](),
+		steeringSignals:                 csync.NewMap[string, context.CancelFunc](),
 		lastSummarizeTime:               csync.NewMap[string, time.Time](),
 		pendingExtractions:              make(map[string][]pendingExtraction),
 		sessionMemoryEnabled:            opts.EnableSessionMemory,
@@ -527,6 +548,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		a.activeTurnIDs.Set(call.SessionID, call.TurnID)
 		defer a.activeTurnIDs.Del(call.SessionID)
 	}
+	// Create a per-run cooperative steering signal. Tools observe it to
+	// notice mid-turn steering messages and yield at a safe point; it is
+	// intentionally separate from genCtx so a steer never cancels the LLM
+	// stream or in-flight tool work (a "steer" is not a "cancel").
+	steerCtx, steerCancel := context.WithCancel(context.Background())
+	a.steeringSignals.Set(call.SessionID, steerCancel)
+	defer func() {
+		a.steeringSignals.Del(call.SessionID)
+		steerCancel()
+	}()
 	defer a.activeRequests.Del(call.SessionID)
 	defer cancel()
 	a.publishSessionEvent(genCtx, call.SessionID, time.Now(), sessionevent.NewEvent{
@@ -1209,6 +1240,34 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						}
 					}
 				}
+
+				// Drain any pending mid-turn steering messages first. These
+				// take priority over regular queued prompts and are injected
+				// before join-active-run prompts so the model treats them as
+				// the current active instruction.
+				steeringCalls := a.popSteeringCalls(call.SessionID)
+				for _, steer := range steeringCalls {
+					steer.Prompt = strings.TrimSpace(steer.Prompt)
+					if steer.Prompt == "" {
+						continue
+					}
+					steer.Prompt = formatSteeringPrompt(steer.Prompt)
+					userMessage, createErr := a.createUserMessage(callContext, steer)
+					if createErr != nil {
+						return callContext, prepared, createErr
+					}
+					prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
+					chainingContextInjected = true
+				}
+				// Reset the steering signal now that the messages were
+				// drained into this step: tools in subsequent steps must not
+				// keep yielding for an already-handled steer. Cancel the
+				// previous signal first to avoid leaking its context when no
+				// steer arrived this step.
+				steerCancel()
+				steerCtx, steerCancel = context.WithCancel(context.Background())
+				a.steeringSignals.Set(call.SessionID, steerCancel)
+				callContext = context.WithValue(callContext, tools.SteeringSignalContextKey, steerCtx)
 
 				queuedCalls := a.takeJoinActiveRunCalls(call.SessionID)
 				remainingJoinBudget := joinActiveRunPromptCharsBudget
@@ -2860,6 +2919,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 
 	// Release active request before processing queued messages.
+	// Any steering messages that missed every mid-turn drain point are
+	// promoted to the front of the regular queue first, so the dispatch
+	// below starts them as their own turn instead of silently dropping
+	// them at the end of the run.
+	a.flushStrandedSteeringMessages(call.SessionID)
 	a.activeRequests.Del(call.SessionID)
 	cancel()
 

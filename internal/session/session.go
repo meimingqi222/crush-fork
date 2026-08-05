@@ -147,7 +147,57 @@ type Todo struct {
 	CompletedAt int64      `json:"completed_at,omitempty"`
 }
 
-// HasIncompleteTodos returns true if there are any non-completed todos.
+// TaskStatus represents the lifecycle of a goal task.
+type TaskStatus string
+
+const (
+	TaskStatusPending    TaskStatus = "pending"
+	TaskStatusInProgress TaskStatus = "in_progress"
+	TaskStatusCompleted  TaskStatus = "completed"
+	TaskStatusBlocked    TaskStatus = "blocked"
+	TaskStatusDropped    TaskStatus = "dropped"
+)
+
+func NormalizeTaskStatus(status string) TaskStatus {
+	switch TaskStatus(status) {
+	case TaskStatusInProgress:
+		return TaskStatusInProgress
+	case TaskStatusCompleted:
+		return TaskStatusCompleted
+	case TaskStatusBlocked:
+		return TaskStatusBlocked
+	case TaskStatusDropped:
+		return TaskStatusDropped
+	default:
+		return TaskStatusPending
+	}
+}
+
+// Task is a goal-owned subtask. It is stored in the session's goal_tasks
+// column and managed via the todo tool. Tasks are not the same as
+// session.Todos, which track subagent progress for the UI.
+type Task struct {
+	ID          string     `json:"id,omitempty"`
+	Content     string     `json:"content"`
+	Status      TaskStatus `json:"status"`
+	Blocker     string     `json:"blocker,omitempty"`
+	Evidence    string     `json:"evidence,omitempty"`
+	DropReason  string     `json:"drop_reason,omitempty"`
+	CreatedAt   int64      `json:"created_at,omitempty"`
+	UpdatedAt   int64      `json:"updated_at,omitempty"`
+	CompletedAt int64      `json:"completed_at,omitempty"`
+}
+
+// HasActionableTasks returns true if any task is pending or in_progress.
+func HasActionableTasks(tasks []Task) bool {
+	for _, t := range tasks {
+		if t.Status == TaskStatusPending || t.Status == TaskStatusInProgress {
+			return true
+		}
+	}
+	return false
+}
+
 func HasIncompleteTodos(todos []Todo) bool {
 	for _, todo := range todos {
 		if todo.Status != TodoStatusCompleted {
@@ -268,22 +318,32 @@ const (
 	GoalStatusActive        GoalStatus = "active"
 	GoalStatusPaused        GoalStatus = "paused"
 	GoalStatusBudgetLimited GoalStatus = "budget-limited"
+	GoalStatusStalled       GoalStatus = "stalled"
 	GoalStatusComplete      GoalStatus = "complete"
 	GoalStatusDropped       GoalStatus = "dropped"
 )
 
 // Goal represents a persistent autonomous objective for a session. The agent
 // works toward the goal across multiple turns, with optional token budget
-// tracking.
+// tracking and a subtask list stored in Tasks.
 type Goal struct {
-	ID          string     `json:"id,omitempty"`
-	Text        string     `json:"text,omitempty"`
-	Status      GoalStatus `json:"status,omitempty"`
-	TokenBudget int64      `json:"token_budget,omitempty"`
-	TokensUsed  int64      `json:"tokens_used,omitempty"`
-	TimeSeconds int64      `json:"time_seconds,omitempty"`
-	CreatedAt   int64      `json:"created_at,omitempty"`
-	UpdatedAt   int64      `json:"updated_at,omitempty"`
+	ID               string     `json:"id,omitempty"`
+	Text             string     `json:"text,omitempty"`
+	Status           GoalStatus `json:"status,omitempty"`
+	TokenBudget      int64      `json:"token_budget,omitempty"`
+	TokensUsed       int64      `json:"tokens_used,omitempty"`
+	TimeSeconds      int64      `json:"time_seconds,omitempty"`
+	MaxIterations    int64      `json:"max_iterations,omitempty"`
+	BlockCap         int64      `json:"block_cap,omitempty"`
+	Iterations       int64      `json:"iterations,omitempty"`
+	NoProgress       int64      `json:"no_progress,omitempty"`
+	LastReason       string     `json:"last_reason,omitempty"`
+	VerifierID       string     `json:"verifier_id,omitempty"`
+	LastEvaluatorMet *bool      `json:"last_evaluator_met,omitempty"`
+	LastEvaluatorAt  int64      `json:"last_evaluator_at,omitempty"`
+	Tasks            []Task     `json:"tasks,omitempty"`
+	CreatedAt        int64      `json:"created_at,omitempty"`
+	UpdatedAt        int64      `json:"updated_at,omitempty"`
 }
 
 // NewGoalID returns a new stable identifier for a goal.
@@ -684,9 +744,19 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	goalTasksJSON, err := marshalGoalTasks(session.Goal.Tasks)
+	if err != nil {
+		return Session{}, err
+	}
 	relevantFilesJSON, err := marshalStringSlice(session.HandoffRelevantFiles)
 	if err != nil {
 		return Session{}, err
+	}
+
+	lastEvaluatorMet := sql.NullInt64{}
+	if session.Goal.LastEvaluatorMet != nil {
+		lastEvaluatorMet.Int64 = boolInt64(*session.Goal.LastEvaluatorMet)
+		lastEvaluatorMet.Valid = true
 	}
 
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
@@ -712,6 +782,15 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 		GoalTimeSeconds:      session.Goal.TimeSeconds,
 		GoalCreatedAt:        session.Goal.CreatedAt,
 		GoalUpdatedAt:        session.Goal.UpdatedAt,
+		GoalTasks:            goalTasksJSON,
+		GoalMaxIterations:    session.Goal.MaxIterations,
+		GoalBlockCap:         session.Goal.BlockCap,
+		GoalIterations:       session.Goal.Iterations,
+		GoalNoProgress:       session.Goal.NoProgress,
+		GoalLastReason:       session.Goal.LastReason,
+		GoalVerifierID:       session.Goal.VerifierID,
+		GoalLastEvaluatorMet: lastEvaluatorMet,
+		GoalLastEvaluatorAt:  session.Goal.LastEvaluatorAt,
 		PromptTokens:         session.PromptTokens,
 		CompletionTokens:     session.CompletionTokens,
 		LastPromptTokens:     session.LastPromptTokens,
@@ -954,6 +1033,10 @@ func (s service) fromDBItem(item db.Session) Session {
 	if err != nil {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
+	goalTasks, err := unmarshalGoalTasks(item.GoalTasks)
+	if err != nil {
+		slog.Error("Failed to unmarshal goal tasks", "session_id", item.ID, "error", err)
+	}
 	relevantFiles, err := unmarshalStringSlice(item.HandoffRelevantFiles)
 	if err != nil {
 		slog.Error("Failed to unmarshal handoff relevant files", "session_id", item.ID, "error", err)
@@ -976,14 +1059,23 @@ func (s service) fromDBItem(item db.Session) Session {
 		HandoffDraftPrompt:     item.HandoffDraftPrompt,
 		HandoffRelevantFiles:   relevantFiles,
 		Goal: Goal{
-			ID:          item.GoalID,
-			Text:        item.GoalText,
-			Status:      GoalStatus(item.GoalStatus),
-			TokenBudget: item.GoalTokenBudget,
-			TokensUsed:  item.GoalTokensUsed,
-			TimeSeconds: item.GoalTimeSeconds,
-			CreatedAt:   item.GoalCreatedAt,
-			UpdatedAt:   item.GoalUpdatedAt,
+			ID:               item.GoalID,
+			Text:             item.GoalText,
+			Status:           GoalStatus(item.GoalStatus),
+			TokenBudget:      item.GoalTokenBudget,
+			TokensUsed:       item.GoalTokensUsed,
+			TimeSeconds:      item.GoalTimeSeconds,
+			MaxIterations:    item.GoalMaxIterations,
+			BlockCap:         item.GoalBlockCap,
+			Iterations:       item.GoalIterations,
+			NoProgress:       item.GoalNoProgress,
+			LastReason:       item.GoalLastReason,
+			VerifierID:       item.GoalVerifierID,
+			LastEvaluatorAt:  item.GoalLastEvaluatorAt,
+			LastEvaluatorMet: int64ToBool(item.GoalLastEvaluatorMet),
+			Tasks:            goalTasks,
+			CreatedAt:        item.GoalCreatedAt,
+			UpdatedAt:        item.GoalUpdatedAt,
 		},
 		MessageCount:         item.MessageCount,
 		PromptTokens:         item.PromptTokens,
@@ -1000,6 +1092,105 @@ func (s service) fromDBItem(item db.Session) Session {
 		CreatedAt:            item.CreatedAt,
 		UpdatedAt:            item.UpdatedAt,
 	}
+}
+
+// marshalGoalTasks serializes the goal task list for storage.
+func marshalGoalTasks(tasks []Task) (string, error) {
+	if len(tasks) == 0 {
+		return "[]", nil
+	}
+	data, err := json.Marshal(NormalizeTasksForStorage(tasks))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// unmarshalGoalTasks deserializes the goal task list from storage.
+func unmarshalGoalTasks(data string) ([]Task, error) {
+	if data == "" {
+		return []Task{}, nil
+	}
+	var tasks []Task
+	if err := json.Unmarshal([]byte(data), &tasks); err != nil {
+		return []Task{}, err
+	}
+	return normalizeTasksForLoad(tasks), nil
+}
+
+// NormalizeTasksForStorage prepares tasks for persistence, populating missing
+// IDs and timestamps. This intentionally mutates a copy; callers should not
+// rely on the original slice after this call.
+func NormalizeTasksForStorage(tasks []Task) []Task {
+	if len(tasks) == 0 {
+		return nil
+	}
+	return normalizeTasks(tasks, true)
+}
+
+// normalizeTasksForLoad prepares tasks loaded from storage, normalizing status
+// and assigning stable legacy IDs when missing.
+func normalizeTasksForLoad(tasks []Task) []Task {
+	if len(tasks) == 0 {
+		return []Task{}
+	}
+	return normalizeTasks(tasks, false)
+}
+
+// normalizeTasks normalizes task content, IDs, and timestamps. It deduplicates
+// IDs and assigns new UUIDs or legacy IDs when needed.
+func normalizeTasks(tasks []Task, populateTimestamps bool) []Task {
+	normalized := make([]Task, len(tasks))
+	seenIDs := make(map[string]struct{}, len(tasks))
+	now := time.Now().Unix()
+
+	for i, task := range tasks {
+		current := Task{
+			ID:          strings.TrimSpace(task.ID),
+			Content:     strings.TrimSpace(task.Content),
+			Status:      NormalizeTaskStatus(string(task.Status)),
+			Blocker:     strings.TrimSpace(task.Blocker),
+			Evidence:    strings.TrimSpace(task.Evidence),
+			DropReason:  strings.TrimSpace(task.DropReason),
+			CreatedAt:   task.CreatedAt,
+			UpdatedAt:   task.UpdatedAt,
+			CompletedAt: task.CompletedAt,
+		}
+
+		if current.ID == "" {
+			if populateTimestamps {
+				current.ID = uuid.New().String()
+			} else {
+				current.ID = legacyTaskID(current, i)
+			}
+		} else if _, exists := seenIDs[current.ID]; exists {
+			current.ID = uuid.New().String()
+		}
+		seenIDs[current.ID] = struct{}{}
+
+		if current.Status != TaskStatusCompleted && current.CompletedAt != 0 {
+			current.CompletedAt = 0
+		}
+
+		if populateTimestamps {
+			if current.CreatedAt == 0 {
+				current.CreatedAt = now
+			}
+			current.UpdatedAt = now
+			if current.Status == TaskStatusCompleted && current.CompletedAt == 0 {
+				current.CompletedAt = now
+			}
+		}
+
+		normalized[i] = current
+	}
+
+	return normalized
+}
+
+func legacyTaskID(task Task, index int) string {
+	source := fmt.Sprintf("%d|%s|%s|%s|%d|%d", index, strings.TrimSpace(task.Content), task.Status, strings.TrimSpace(task.Evidence), task.CreatedAt, task.CompletedAt)
+	return fmt.Sprintf("task-%x", xxh3.HashString(source))
 }
 
 func marshalTodos(todos []Todo) (string, error) {
@@ -1051,6 +1242,18 @@ func boolInt64(value bool) int64 {
 		return 1
 	}
 	return 0
+}
+
+// int64ToBool converts a sql.NullInt64 to a *bool. It returns nil only when
+// the SQL value is NULL (evaluator never ran); a stored 0 is a legitimate
+// "met=false" verdict and must round-trip as *false, not nil, so the
+// completion gate can enforce it instead of fail-opening.
+func int64ToBool(v sql.NullInt64) *bool {
+	if !v.Valid {
+		return nil
+	}
+	b := v.Int64 == 1
+	return &b
 }
 
 func NewService(q *db.Queries, conn *sql.DB, defaultModes ...CollaborationMode) MutationService {

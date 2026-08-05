@@ -256,11 +256,13 @@ func (f *guiTerminalFactory) Start(context.Context, terminal.OpenRequest) (termi
 	f.mu.Unlock()
 	return value, nil
 }
+
 func (f *guiTerminalFactory) latest() *guiTerminalProcess {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.processes[len(f.processes)-1]
 }
+
 func (f *guiTerminalFactory) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -283,6 +285,7 @@ func (p *guiTerminalProcess) Read(value []byte) (int, error) {
 	}
 	return copy(value, chunk), nil
 }
+
 func (p *guiTerminalProcess) Write(value []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -297,6 +300,7 @@ func (p *guiTerminalProcess) Kill(signal string) error {
 	}
 	return p.Close()
 }
+
 func (p *guiTerminalProcess) Wait(ctx context.Context) (terminal.ProcessExit, error) {
 	select {
 	case value := <-p.exitCh:
@@ -305,6 +309,7 @@ func (p *guiTerminalProcess) Wait(ctx context.Context) (terminal.ProcessExit, er
 		return terminal.ProcessExit{}, ctx.Err()
 	}
 }
+
 func (p *guiTerminalProcess) Close() error {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()

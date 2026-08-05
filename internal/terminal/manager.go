@@ -348,6 +348,7 @@ func (m *Manager) ActiveCount() int {
 func (m *Manager) CloseSession(sessionID string) {
 	m.release(func(t *terminal) bool { return t.metadata.SessionID == sessionID })
 }
+
 func (m *Manager) CloseClient(clientID string) {
 	m.release(func(t *terminal) bool { return t.clientID == clientID })
 }

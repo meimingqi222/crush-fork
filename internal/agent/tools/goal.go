@@ -37,6 +37,10 @@ func NewGoalTool(sessions session.Service, runtime *goal.Runtime) fantasy.AgentT
 		GoalToolName,
 		string(goalDescription),
 		func(ctx context.Context, params GoalParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if isSubagent := IsSubagentFromContext(ctx); isSubagent {
+				return handleSubagentGoal(ctx, sessions, params)
+			}
+
 			sessionID := GetSessionFromContext(ctx)
 			if sessionID == "" {
 				return fantasy.ToolResponse{}, fmt.Errorf("goal tool requires a session context")
@@ -102,6 +106,43 @@ func NewGoalTool(sessions session.Service, runtime *goal.Runtime) fantasy.AgentT
 			}, nil
 		},
 	)
+}
+
+// handleSubagentGoal restricts goal operations from subagents to read-only
+// access. Subagents cannot create, replace, complete, pause, resume, drop, or
+// budget the parent goal.
+func handleSubagentGoal(ctx context.Context, sessions session.Service, params GoalParams) (fantasy.ToolResponse, error) {
+	if params.Op != "get" {
+		return fantasy.ToolResponse{}, fmt.Errorf("subagent goal tool only supports op=%q; %q is not allowed", "get", params.Op)
+	}
+
+	parentSessionID := GetParentSessionIDFromContext(ctx)
+	if parentSessionID == "" {
+		parentSessionID = GetSessionFromContext(ctx)
+	}
+	if parentSessionID == "" {
+		return fantasy.ToolResponse{}, fmt.Errorf("goal tool in subagent mode requires a parent session context")
+	}
+
+	sess, err := sessions.Get(ctx, parentSessionID)
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("failed to get parent session: %w", err)
+	}
+
+	goalResult := sess.Goal
+	if goalResult.Status == "" {
+		return fantasy.ToolResponse{Content: "No goal is currently set in the parent session."}, nil
+	}
+
+	text := formatGoalResponse(goalResult, "get")
+	metadata, err := json.Marshal(GoalResponseMetadata{
+		Goal:            goalResult,
+		RemainingTokens: goalResult.RemainingTokens(),
+	})
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("failed to encode goal metadata: %w", err)
+	}
+	return fantasy.ToolResponse{Content: text, Metadata: string(metadata)}, nil
 }
 
 func formatGoalResponse(goal session.Goal, op string) string {

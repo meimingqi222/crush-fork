@@ -33,6 +33,7 @@ func (p *unixProcess) Write(value []byte) (int, error) { return p.file.Write(val
 func (p *unixProcess) Resize(cols, rows int) error {
 	return pty.Setsize(p.file, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
+
 func (p *unixProcess) Kill(signal string) error {
 	if p.cmd.Process == nil {
 		return nil
@@ -49,6 +50,7 @@ func (p *unixProcess) Kill(signal string) error {
 	}
 	return err
 }
+
 func (p *unixProcess) Wait(context.Context) (ProcessExit, error) {
 	err := p.cmd.Wait()
 	result := ProcessExit{Code: p.cmd.ProcessState.ExitCode()}

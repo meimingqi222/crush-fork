@@ -1,6 +1,7 @@
 package session
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -85,4 +86,26 @@ func TestUnmarshalTodosAssignsLegacyIDsAndPreservesStructuredFields(t *testing.T
 	require.Equal(t, TodoStatusInProgress, todos[0].Status)
 	require.Equal(t, "task-2", todos[1].ID)
 	require.Equal(t, int64(42), todos[1].CompletedAt)
+}
+
+// TestInt64ToBoolRoundTripsEvaluatorVerdict ensures that a stored
+// "met=false" evaluator verdict (sql.NullInt64{Int64:0, Valid:true})
+// round-trips as *false, not nil. The completion gate relies on this
+// distinction: nil means "evaluator never ran" (fail-open), while *false
+// means "evaluator ran and said not met" (must block completion).
+func TestInt64ToBoolRoundTripsEvaluatorVerdict(t *testing.T) {
+	t.Parallel()
+
+	// NULL → nil (evaluator never ran).
+	require.Nil(t, int64ToBool(sql.NullInt64{Valid: false}))
+
+	// 0/valid → *false (evaluator ran, verdict not met).
+	met := int64ToBool(sql.NullInt64{Int64: 0, Valid: true})
+	require.NotNil(t, met)
+	require.False(t, *met)
+
+	// 1/valid → *true (evaluator ran, verdict met).
+	met = int64ToBool(sql.NullInt64{Int64: 1, Valid: true})
+	require.NotNil(t, met)
+	require.True(t, *met)
 }

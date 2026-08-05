@@ -13,7 +13,13 @@ Operations:
 - `budget`: Adjust the token budget
 
 Use `create` when the user sets an objective. Use `replace` when the user
-wants to adjust the objective without losing progress statistics. Use
-`complete` only after verifying the objective is fully met — never call
-complete just because the budget is low or a turn is ending. Use `get` to
-check remaining budget and progress.
+wants to adjust the objective without losing progress statistics. Use `todo`
+to track subtasks: `init` the task list, `start` one task, mark it `done`
+with `evidence`, and `drop` impossible tasks with a `reason`. Use `complete`
+only after every task is done or dropped — the completion gate requires
+evidence for completed tasks, reasons for dropped tasks, and a dropped ratio
+no higher than 50%. Never call complete just because the budget is low or a
+turn is ending. Use `get` to check remaining budget and progress.
+
+When called from a subagent, only `get` is allowed. Subagents cannot create,
+replace, complete, pause, resume, drop, or budget the parent goal.

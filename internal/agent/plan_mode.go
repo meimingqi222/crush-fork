@@ -124,8 +124,9 @@ The plan file is authoritative; visible or compressed context is secondary.
 Read failure? Report the exact path and error instead of guessing.
 After reading, you MUST execute the plan step by step with full tool access.
 Verify each step before proceeding to the next.
-After reading the plan, set its objective as the active goal with the ` + "`goal`" + ` tool (` + "`op: \"create\"`" + `) so progress survives compaction.
-After each completed step, check it off in the plan file and confirm the goal is still on track with the ` + "`goal`" + ` tool (` + "`op: \"get\"`" + `).
+A goal and task list may already have been initialized from the plan.
+If not, create the active goal with the ` + "`goal`" + ` tool (` + "`op: \"create\"`" + `) and initialize the task list with ` + "`todo`" + ` (` + "`op: \"init\"`" + `) so progress survives compaction.
+After each completed step, check it off in the plan file and mark the corresponding task done with the ` + "`todo`" + ` tool (` + "`op: \"done\"`" + `) including evidence. Confirm the goal is still on track with the ` + "`goal`" + ` tool (` + "`op: \"get\"`" + `).
 If the ` + "`goal`" + ` tool fails, fix the payload and retry before continuing.
 </instruction>
 
@@ -148,6 +149,7 @@ Your tool budget is:
 - ` + "`irc`" + ` for inter-agent coordination
 - ` + "`bash`" + ` for verification commands only (type checks, tests, lint)
 - ` + "`goal`" + ` for tracking progress
+- ` + "`todo`" + ` for managing goal subtasks
 
 Rules:
 1. Do not edit files yourself, even for small changes. Delegate all edits to subagents.
@@ -158,6 +160,7 @@ Rules:
 6. If a subagent returns incomplete or wrong work, dispatch a corrective subagent — do not fix it yourself.
 7. Do not mark work complete based solely on subagent self-reports — verify with gates.
 8. Do not add work the user did not request, and do not relabel unfinished work as "follow-up" or "MVP".
+9. Subagents can report task progress with ` + "`todo`" + ` (` + "`op: \"done\"`" + ` with evidence, or ` + "`op: \"start\"`" + `). These updates are queued and applied to the parent goal at the start of your next turn.
 </collaboration_mode>`
 
 const autoModeSystemPrompt = `<permission_mode>
@@ -221,6 +224,7 @@ var toolRiskLevels = map[string]toolRiskLevel{
 	tools.ResolveToolName:          toolRiskRead,
 	tools.ToolSearchToolName:       toolRiskRead,
 	tools.GoalToolName:             toolRiskWrite,
+	tools.TodoToolName:             toolRiskWrite,
 }
 
 var planModeFileInspectToolNames = map[string]struct{}{
@@ -251,6 +255,7 @@ var orchestrateModeAllowedToolNames = map[string]struct{}{
 	tools.ToolSearchToolName:       {},
 	tools.AgenticFetchToolName:     {},
 	tools.GoalToolName:             {},
+	tools.TodoToolName:             {},
 	tools.ResolveToolName:          {},
 }
 
@@ -314,6 +319,7 @@ func GoalPromptForSession(goal session.Goal) string {
 		sb.WriteString(fmt.Sprintf("Active time: %ds\n", goal.TimeSeconds))
 	}
 	sb.WriteString("\nRules:\n")
+	sb.WriteString("- Use the todo tool to track subtasks (init, start, done with evidence, drop with reason).\n")
 	sb.WriteString("- Use the goal tool to inspect state (get) or signal completion (complete).\n")
 	sb.WriteString("- Keep the full objective intact across turns. Never redefine success around a smaller subset.\n")
 	sb.WriteString("- Before completing, audit current repo state against every deliverable with direct evidence.\n")

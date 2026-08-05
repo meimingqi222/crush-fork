@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -175,6 +176,97 @@ func List(workspaceRoot string) ([]string, error) {
 		paths = append(paths, filepath.Join(dir, entry.Name()))
 	}
 	return paths, nil
+}
+
+var (
+	checklistItemRegex = regexp.MustCompile(`(?i)^\s*-\s*\[([ xX])\]\s*(.+)$`)
+	headingRegex       = regexp.MustCompile(`^(#{1,6})\s+(.+)$`)
+	listItemRegex      = regexp.MustCompile(`^(\s*)[-*]\s+(.+)$`)
+	numberedItemRegex  = regexp.MustCompile(`^(\s*)\d+\.\s+(.+)$`)
+)
+
+// ExtractGoalAndTasks parses an approved plan markdown and returns the
+// objective and a list of actionable task strings. It recognizes GitHub-style
+// checklist items (`- [ ] step`) first, then falls back to bulleted or
+// numbered items under the "Approach" section. The boolean ok is false when
+// no objective can be inferred.
+func ExtractGoalAndTasks(plan string) (objective string, tasks []string, ok bool) {
+	plan = strings.TrimSpace(plan)
+	if plan == "" {
+		return "", nil, false
+	}
+
+	lines := strings.Split(plan, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if m := headingRegex.FindStringSubmatch(line); m != nil {
+			objective = strings.TrimSpace(m[2])
+		} else {
+			objective = line
+		}
+		if objective != "" {
+			break
+		}
+	}
+
+	if objective == "" {
+		return "", nil, false
+	}
+
+	// First pass: collect explicit checklist items anywhere in the file.
+	for _, line := range lines {
+		if m := checklistItemRegex.FindStringSubmatch(line); m != nil {
+			task := strings.TrimSpace(m[2])
+			if task != "" {
+				tasks = append(tasks, task)
+			}
+		}
+	}
+	if len(tasks) > 0 {
+		return objective, tasks, true
+	}
+
+	// Second pass: find the Approach section and collect its list items.
+	inApproach := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if m := headingRegex.FindStringSubmatch(trimmed); m != nil {
+			inApproach = strings.EqualFold(strings.TrimSpace(m[2]), "Approach")
+			continue
+		}
+		if !inApproach {
+			continue
+		}
+		// Stop collecting at the next heading or a blank line followed by a new heading.
+		if trimmed == "" && i+1 < len(lines) {
+			next := strings.TrimSpace(lines[i+1])
+			if headingRegex.MatchString(next) {
+				inApproach = false
+				continue
+			}
+		}
+		if listItem := listItemRegex.FindStringSubmatch(line); listItem != nil {
+			// Only top-level bullets under Approach count as tasks.
+			if listItem[1] == "" {
+				task := strings.TrimSpace(listItem[2])
+				if task != "" {
+					tasks = append(tasks, task)
+				}
+			}
+		} else if numbered := numberedItemRegex.FindStringSubmatch(line); numbered != nil {
+			if numbered[1] == "" {
+				task := strings.TrimSpace(numbered[2])
+				if task != "" {
+					tasks = append(tasks, task)
+				}
+			}
+		}
+	}
+
+	return objective, tasks, len(tasks) > 0
 }
 
 // sanitizeSlug converts a string into a safe filename component.

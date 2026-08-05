@@ -65,6 +65,22 @@ func (g *GoalStatus) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		if g.goal.TimeSeconds > 0 {
 			rc.AddPart(fmt.Sprintf("Elapsed: %s", (time.Duration(g.goal.TimeSeconds) * time.Second).String()))
 		}
+		if g.goal.MaxIterations > 0 {
+			rc.AddPart(fmt.Sprintf("Iterations: %d / %d", g.goal.Iterations, g.goal.MaxIterations))
+		}
+		if g.goal.BlockCap > 0 {
+			rc.AddPart(fmt.Sprintf("No-progress streak: %d / %d", g.goal.NoProgress, g.goal.BlockCap))
+		}
+		if g.goal.LastReason != "" {
+			rc.AddPart(fmt.Sprintf("Last reason: %s", g.goal.LastReason))
+		}
+		if len(g.goal.Tasks) > 0 {
+			var lines []string
+			for i, task := range g.goal.Tasks {
+				lines = append(lines, fmt.Sprintf("%d. [%s] %s", i+1, task.Status, task.Content))
+			}
+			rc.AddPart("Tasks:\n" + strings.Join(lines, "\n"))
+		}
 	}
 	rc.Help = g.help.View(g)
 	DrawCenterCursor(scr, area, rc.Render(), nil)

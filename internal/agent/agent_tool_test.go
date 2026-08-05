@@ -535,19 +535,20 @@ func TestDeriveSubagentPermissionsReadOnlyDeniesStateMutatingTools(t *testing.T)
 	assert.Contains(t, denied, tools.IrcToolName)
 }
 
-func TestDeriveSubagentPermissionsGloballyDeniesGoalTool(t *testing.T) {
-	// The goal tool is denied for ALL subagents (not just read-only ones)
-	// because subagent runs bypass coordinator.Run and the goalRuntime
-	// OnTurnStart/PostTurn accounting. A goal created by a subagent would
-	// silently never accumulate tokens/time and never trigger continuation.
+func TestDeriveSubagentPermissionsGoalAndTodoInSubagent(t *testing.T) {
 	allTools := []string{
 		"bash", "edit", "read", "write", "glob", "grep", "yield",
-		"goal", "job", "irc",
+		"goal", "todo", "job", "irc",
 	}
 
+	// General subagents may use goal (read-only get) and todo (view, start,
+	// done) in a parent-controlled way. Read-only subagents must not mutate
+	// parent task state, so those tools are denied.
 	profiles := []struct {
-		name    string
-		profile SubagentProfile
+		name            string
+		profile         SubagentProfile
+		wantGoalAllowed bool
+		wantTodoAllowed bool
 	}{
 		{
 			name: "general writer",
@@ -557,6 +558,8 @@ func TestDeriveSubagentPermissionsGloballyDeniesGoalTool(t *testing.T) {
 				CanSpawn:  true,
 				ToolNames: allTools,
 			},
+			wantGoalAllowed: true,
+			wantTodoAllowed: true,
 		},
 		{
 			name: "explore read-only",
@@ -566,6 +569,8 @@ func TestDeriveSubagentPermissionsGloballyDeniesGoalTool(t *testing.T) {
 				ReadOnly:  true,
 				ToolNames: allTools,
 			},
+			wantGoalAllowed: false,
+			wantTodoAllowed: false,
 		},
 	}
 
@@ -577,8 +582,20 @@ func TestDeriveSubagentPermissionsGloballyDeniesGoalTool(t *testing.T) {
 
 			allowed := toolNamesFromSet(derived.AllowedTools)
 			denied := toolNamesFromSet(derived.DeniedTools)
-			assert.NotContains(t, allowed, tools.GoalToolName)
-			assert.Contains(t, denied, tools.GoalToolName)
+			if tc.wantGoalAllowed {
+				assert.Contains(t, allowed, tools.GoalToolName)
+				assert.NotContains(t, denied, tools.GoalToolName)
+			} else {
+				assert.NotContains(t, allowed, tools.GoalToolName)
+				assert.Contains(t, denied, tools.GoalToolName)
+			}
+			if tc.wantTodoAllowed {
+				assert.Contains(t, allowed, tools.TodoToolName)
+				assert.NotContains(t, denied, tools.TodoToolName)
+			} else {
+				assert.NotContains(t, allowed, tools.TodoToolName)
+				assert.Contains(t, denied, tools.TodoToolName)
+			}
 		})
 	}
 }

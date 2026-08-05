@@ -611,6 +611,9 @@ func (c *Commands) goalCommands() []*CommandItem {
 	case session.GoalStatusActive:
 		return []*CommandItem{
 			NewCommandItem(c.com.Styles, "show_goal", "Goal: Show Goal", "", ActionOpenDialog{GoalStatusID}),
+			NewCommandItem(c.com.Styles, "show_goal_tasks", "Goal: Show Tasks", "", ActionShowGoalTasks{SessionID: c.sessionID}),
+			NewCommandItem(c.com.Styles, "add_goal_task", "Goal: Add Task", "", ActionAddGoalTask{SessionID: c.sessionID}),
+			NewCommandItem(c.com.Styles, "complete_goal", "Goal: Complete", "", ActionCompleteGoal{SessionID: c.sessionID}),
 			NewCommandItem(c.com.Styles, "pause_goal", "Goal: Pause Goal", "", ActionPauseGoal{SessionID: c.sessionID}),
 			NewCommandItem(c.com.Styles, "set_goal_budget", "Goal: Set Budget", "", ActionOpenDialog{GoalBudgetID}),
 			NewCommandItem(c.com.Styles, "drop_goal", "Goal: Drop Goal", "", ActionDropGoal{SessionID: c.sessionID}),
@@ -626,6 +629,11 @@ func (c *Commands) goalCommands() []*CommandItem {
 		return []*CommandItem{
 			NewCommandItem(c.com.Styles, "show_goal", "Goal: Show Goal", "", ActionOpenDialog{GoalStatusID}),
 			NewCommandItem(c.com.Styles, "set_goal_budget", "Goal: Resume With New Budget", "", ActionOpenDialog{GoalBudgetID}),
+			NewCommandItem(c.com.Styles, "drop_goal", "Goal: Drop Goal", "", ActionDropGoal{SessionID: c.sessionID}),
+		}
+	case session.GoalStatusStalled:
+		return []*CommandItem{
+			NewCommandItem(c.com.Styles, "show_goal", "Goal: Show Goal", "", ActionOpenDialog{GoalStatusID}),
 			NewCommandItem(c.com.Styles, "drop_goal", "Goal: Drop Goal", "", ActionDropGoal{SessionID: c.sessionID}),
 		}
 	default:

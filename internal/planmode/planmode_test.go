@@ -17,7 +17,7 @@ func TestBuildExecutionPrompt(t *testing.T) {
 
 	// Approved-plan execution instructions.
 	require.Contains(t, prompt, "read the active plan file")
-	require.Contains(t, prompt, "`todos` tool")
+	require.Contains(t, prompt, "`todo` tool")
 	require.Contains(t, prompt, "Verify each step")
 	require.Contains(t, prompt, "plan file is authoritative")
 }

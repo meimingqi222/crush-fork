@@ -84,8 +84,12 @@ func builtinToolMetadata(name string) tools.ToolMetadata {
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "query language-server code intelligence", SearchTags: []string{"lsp", "code-intelligence", "symbols", "definitions", "references", "diagnostics"}, Direct: true}
 	case tools.RequestUserInputToolName, tools.ResolveToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "plan mode interaction control", SearchTags: []string{"plan-mode", "user-input", "interaction", "approval"}, Direct: true}
+	case tools.TodoToolName:
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "track and update subtasks for the active goal", SearchTags: []string{"todo", "tasks", "subtasks", "goal-tasks", "track"}, Direct: true}
 	case tools.YieldToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "submit subagent result or structured completion metadata", SearchTags: []string{"subagent", "completion", "result", "metadata"}}
+	case tools.GoalToolName:
+		return tools.ToolMetadata{RiskHint: "write", SearchHint: "create, manage, and complete session goals", SearchTags: []string{"goal", "objective", "track", "complete", "budget"}, Direct: true}
 	case tools.CrushToolName:
 		return tools.ToolMetadata{ReadOnly: true, ConcurrencySafe: true, RiskHint: "read", SearchHint: "inspect Crush instance status and logs", SearchTags: []string{"crush", "status", "logs", "debug", "diagnostics"}, Exposure: tools.ToolExposureDeferred}
 	default:

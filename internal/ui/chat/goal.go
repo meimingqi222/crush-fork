@@ -116,6 +116,42 @@ func renderGoalMeta(meta tools.GoalResponseMetadata) string {
 		sb.WriteString(fmt.Sprintf("  Time: %ds\n", g.TimeSeconds))
 	}
 
+	// Iteration / stall counters.
+	if g.MaxIterations > 0 {
+		sb.WriteString(fmt.Sprintf("  Iterations: %d/%d\n", g.Iterations, g.MaxIterations))
+	}
+	if g.BlockCap > 0 {
+		sb.WriteString(fmt.Sprintf("  No-progress: %d/%d\n", g.NoProgress, g.BlockCap))
+	}
+	if g.LastReason != "" {
+		sb.WriteString(fmt.Sprintf("  Last reason: %s\n", g.LastReason))
+	}
+
+	// Task list.
+	if len(g.Tasks) > 0 {
+		sb.WriteString("  Tasks:\n")
+		for i, t := range g.Tasks {
+			marker := "  "
+			switch t.Status {
+			case session.TaskStatusCompleted:
+				marker = "✓ "
+			case session.TaskStatusInProgress:
+				marker = "▶ "
+			case session.TaskStatusBlocked:
+				marker = "⛔"
+			case session.TaskStatusDropped:
+				marker = "✗ "
+			}
+			line := fmt.Sprintf("    %s%d. %s", marker, i+1, t.Content)
+			if t.Evidence != "" {
+				line += fmt.Sprintf(" (evidence: %s)", t.Evidence)
+			} else if t.DropReason != "" {
+				line += fmt.Sprintf(" (dropped: %s)", t.DropReason)
+			}
+			sb.WriteString(line + "\n")
+		}
+	}
+
 	return sb.String()
 }
 
@@ -128,6 +164,8 @@ func goalStatusIcon(status session.GoalStatus) string {
 		return "⏸"
 	case session.GoalStatusBudgetLimited:
 		return "⚠"
+	case session.GoalStatusStalled:
+		return "⛔"
 	case session.GoalStatusComplete:
 		return "✓"
 	case session.GoalStatusDropped:

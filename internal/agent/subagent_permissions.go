@@ -92,14 +92,6 @@ func globalSubagentDeniedTools() []string {
 	return []string{
 		agenttools.ResolveToolName,
 		agenttools.RequestUserInputToolName,
-		// goal is denied for all subagents because subagent runs invoke
-		// params.Agent.Run directly, bypassing coordinator.Run and the
-		// goalRuntime OnTurnStart/PostTurn accounting. A goal created by a
-		// subagent would silently never accumulate tokens/time and never
-		// trigger continuation — dead surface area that confuses callers.
-		// Denial is the safe fix until subagent-owned goals have a real
-		// use case that warrants routing through the goal runtime.
-		agenttools.GoalToolName,
 	}
 }
 
@@ -114,6 +106,8 @@ func readOnlyDeniedToolNames() []string {
 		agenttools.LSPToolName,
 		agenttools.JobToolName,
 		agenttools.IrcToolName,
+		agenttools.GoalToolName,
+		agenttools.TodoToolName,
 	}
 }
 

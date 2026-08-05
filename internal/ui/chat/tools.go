@@ -327,6 +327,9 @@ func NewToolMessageItem(
 	case tools.GoalToolName:
 		item = NewGoalToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "Goal"
+	case tools.TodoToolName:
+		item = NewTodoToolMessageItem(sty, toolCall, result, canceled)
+		item.(*baseToolMessageItem).displayName = "Todo"
 	case tools.RequestUserInputToolName:
 		item = NewRequestUserInputToolMessageItem(sty, toolCall, result, canceled)
 		item.(*baseToolMessageItem).displayName = "Request User Input"

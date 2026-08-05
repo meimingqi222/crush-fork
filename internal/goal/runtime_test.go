@@ -3,6 +3,7 @@ package goal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -423,4 +424,408 @@ func TestPostTurnIsolatesConcurrentSessions(t *testing.T) {
 	loadedB, err := svc.Get(ctx, sessB.ID)
 	require.NoError(t, err)
 	require.Equal(t, int64(320), loadedB.Goal.TokensUsed)
+}
+
+func TestCanCompleteGoal(t *testing.T) {
+	t.Parallel()
+
+	// No tasks: pass.
+	require.NoError(t, CanCompleteGoal(session.Goal{}))
+
+	// All completed with evidence: pass.
+	require.NoError(t, CanCompleteGoal(session.Goal{Tasks: []session.Task{
+		{Content: "A", Status: session.TaskStatusCompleted, Evidence: "did A"},
+	}}))
+
+	// Pending task: fail.
+	require.Error(t, CanCompleteGoal(session.Goal{Tasks: []session.Task{
+		{Content: "A", Status: session.TaskStatusPending},
+	}}))
+
+	// Completed without evidence: fail.
+	require.Error(t, CanCompleteGoal(session.Goal{Tasks: []session.Task{
+		{Content: "A", Status: session.TaskStatusCompleted},
+	}}))
+
+	// Dropped without reason: fail.
+	require.Error(t, CanCompleteGoal(session.Goal{Tasks: []session.Task{
+		{Content: "A", Status: session.TaskStatusDropped},
+	}}))
+
+	// Drop ratio too high: fail (two dropped and one completed).
+	require.Error(t, CanCompleteGoal(session.Goal{Tasks: []session.Task{
+		{Content: "A", Status: session.TaskStatusCompleted, Evidence: "did A"},
+		{Content: "B", Status: session.TaskStatusDropped, DropReason: "nope"},
+		{Content: "C", Status: session.TaskStatusDropped, DropReason: "nope"},
+	}}))
+
+	// Mixed with drop ratio at exactly 50%: pass.
+	require.NoError(t, CanCompleteGoal(session.Goal{Tasks: []session.Task{
+		{Content: "A", Status: session.TaskStatusCompleted, Evidence: "did A"},
+		{Content: "B", Status: session.TaskStatusCompleted, Evidence: "did B"},
+		{Content: "C", Status: session.TaskStatusDropped, DropReason: "nope"},
+		{Content: "D", Status: session.TaskStatusDropped, DropReason: "nope"},
+	}}))
+
+	// Evaluator says not met: fail.
+	met := false
+	require.Error(t, CanCompleteGoal(session.Goal{
+		Tasks:            []session.Task{{Content: "A", Status: session.TaskStatusCompleted, Evidence: "did A"}},
+		LastEvaluatorMet: &met,
+	}))
+}
+
+func TestCanCompleteGoalWithGateLax(t *testing.T) {
+	t.Parallel()
+
+	// Lax gate: no evidence required, no drop ratio check.
+	tasks := []session.Task{
+		{Content: "A", Status: session.TaskStatusCompleted}, // no evidence
+		{Content: "B", Status: session.TaskStatusDropped},   // no drop reason
+		{Content: "C", Status: session.TaskStatusDropped},   // no drop reason
+		{Content: "D", Status: session.TaskStatusDropped},   // no drop reason
+	}
+	// Strict: should fail (missing evidence + too many drops).
+	require.Error(t, CanCompleteGoalWithGate(session.Goal{Tasks: tasks}, "strict"))
+	// Lax: should pass (only checks no pending/in_progress/blocked).
+	require.NoError(t, CanCompleteGoalWithGate(session.Goal{Tasks: tasks}, "lax"))
+	// Off: always passes.
+	require.NoError(t, CanCompleteGoalWithGate(session.Goal{Tasks: tasks}, "off"))
+
+	// Lax still rejects pending tasks.
+	pendingTasks := []session.Task{{Content: "X", Status: session.TaskStatusPending}}
+	require.Error(t, CanCompleteGoalWithGate(session.Goal{Tasks: pendingTasks}, "lax"))
+}
+
+func TestApplyEvaluatorVerdict(t *testing.T) {
+	t.Parallel()
+
+	t.Run("met resets_no_progress", func(t *testing.T) {
+		t.Parallel()
+		g := session.Goal{NoProgress: 5, Status: session.GoalStatusActive}
+		ApplyEvaluatorVerdict(&g, EvaluatorVerdict{Met: true, Reason: "done"})
+		require.Equal(t, int64(0), g.NoProgress)
+		require.NotNil(t, g.LastEvaluatorMet)
+		require.True(t, *g.LastEvaluatorMet)
+	})
+
+	t.Run("not_met_no_progress_increments", func(t *testing.T) {
+		t.Parallel()
+		g := session.Goal{NoProgress: 2, Status: session.GoalStatusActive}
+		ApplyEvaluatorVerdict(&g, EvaluatorVerdict{Met: false, Progress: false, Reason: "stuck"})
+		require.Equal(t, int64(3), g.NoProgress)
+		require.False(t, *g.LastEvaluatorMet)
+	})
+
+	t.Run("waiting_does_not_increment", func(t *testing.T) {
+		t.Parallel()
+		g := session.Goal{NoProgress: 2, Status: session.GoalStatusActive}
+		ApplyEvaluatorVerdict(&g, EvaluatorVerdict{Met: false, Progress: false, Waiting: true})
+		require.Equal(t, int64(2), g.NoProgress)
+	})
+
+	t.Run("impossible_drops_goal", func(t *testing.T) {
+		t.Parallel()
+		g := session.Goal{NoProgress: 2, Status: session.GoalStatusActive}
+		ApplyEvaluatorVerdict(&g, EvaluatorVerdict{Impossible: true, Reason: "can't do it"})
+		require.Equal(t, session.GoalStatusDropped, g.Status)
+		require.Contains(t, g.LastReason, "can't do it")
+	})
+}
+
+func TestPostTurnTerminatesOnMaxIterations(t *testing.T) {
+	t.Parallel()
+
+	svc, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Iterate", 10000)
+	require.NoError(t, err)
+
+	loaded, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.MaxIterations = 3
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	for i := int64(1); i <= 3; i++ {
+		require.NoError(t, runtime.OnTurnStart(ctx, sessionID, fmt.Sprintf("turn-%d", i), TokenUsage{}))
+		goal, _, err := runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 10})
+		require.NoError(t, err)
+		require.Equal(t, i, goal.Iterations, "iteration %d", i)
+		if i < 3 {
+			require.Equal(t, session.GoalStatusActive, goal.Status, "still active at iteration %d", i)
+		}
+	}
+
+	final, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, session.GoalStatusDropped, final.Goal.Status)
+	require.Contains(t, final.Goal.LastReason, "maximum iterations")
+}
+
+func TestPostTurnDrivesNoProgressFromTasks(t *testing.T) {
+	t.Parallel()
+
+	svc, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Stall test", 10000)
+	require.NoError(t, err)
+
+	loaded, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.BlockCap = 3
+	loaded.Goal.Tasks = []session.Task{
+		{Content: "A", Status: session.TaskStatusPending},
+		{Content: "B", Status: session.TaskStatusPending},
+	}
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	// Turn 1 with no task completion: no_progress increments.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-1", TokenUsage{}))
+	goal, _, err := runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 10})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), goal.NoProgress)
+
+	// Start turn 2, then simulate a tool call completing a task mid-turn.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-2", TokenUsage{}))
+	loaded, err = svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.Tasks[0].Status = session.TaskStatusCompleted
+	loaded.Goal.NoProgress = 0
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	goal, _, err = runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 10})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), goal.NoProgress)
+
+	// Idempotent completion (no new completed tasks) does not reset again.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-3", TokenUsage{}))
+	goal, _, err = runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 10})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), goal.NoProgress)
+}
+
+func TestSubagentTaskUpdateQueue(t *testing.T) {
+	t.Parallel()
+
+	svc, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Refactor auth module", 10000)
+	require.NoError(t, err)
+
+	// Initialize two tasks in the parent session.
+	loaded, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.Tasks = []session.Task{
+		{Content: "Task A", Status: session.TaskStatusPending},
+		{Content: "Task B", Status: session.TaskStatusPending},
+	}
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	// A subagent marks Task A as in-progress and provides evidence for Task B.
+	require.NoError(t, runtime.ApplySubagentTaskUpdate(sessionID, SubagentTaskUpdate{
+		TaskContent: "Task A",
+		NewStatus:   session.TaskStatusInProgress,
+		ToolCallID:  "call-1",
+	}))
+	require.NoError(t, runtime.ApplySubagentTaskUpdate(sessionID, SubagentTaskUpdate{
+		TaskContent: "Task B",
+		NewStatus:   session.TaskStatusCompleted,
+		Evidence:    "B is done",
+		ToolCallID:  "call-2",
+	}))
+
+	// Parent turn starts: pending updates are applied.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-1", TokenUsage{}))
+
+	loaded, err = svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, loaded.Goal.Tasks, 2)
+	require.Equal(t, session.TaskStatusInProgress, loaded.Goal.Tasks[0].Status)
+	require.Equal(t, session.TaskStatusCompleted, loaded.Goal.Tasks[1].Status)
+	require.Equal(t, "B is done", loaded.Goal.Tasks[1].Evidence)
+	require.Equal(t, int64(0), loaded.Goal.NoProgress)
+
+	// Queue is drained.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-2", TokenUsage{}))
+	loaded, err = svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), loaded.Goal.NoProgress)
+}
+
+func TestSubagentTaskUpdateRejectsUnknownTask(t *testing.T) {
+	t.Parallel()
+
+	svc, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Refactor auth module", 10000)
+	require.NoError(t, err)
+
+	loaded, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.Tasks = []session.Task{
+		{Content: "Task A", Status: session.TaskStatusPending},
+	}
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	// Subagent tries to mark a non-existent task as done.
+	require.NoError(t, runtime.ApplySubagentTaskUpdate(sessionID, SubagentTaskUpdate{
+		TaskContent: "Task does not exist",
+		NewStatus:   session.TaskStatusCompleted,
+		Evidence:    "fake evidence",
+		ToolCallID:  "call-1",
+	}))
+
+	// Parent applies pending updates; the unknown task must NOT be created.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-1", TokenUsage{}))
+
+	loaded, err = svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, loaded.Goal.Tasks, 1)
+	require.Equal(t, "Task A", loaded.Goal.Tasks[0].Content)
+}
+
+func TestBuildContinuationPromptWithTaskLimit(t *testing.T) {
+	t.Parallel()
+
+	// 3 actionable + 5 completed = 8 tasks, limit 5 -> render 3 actionable
+	// + 2 completed, omit 3.
+	tasks := make([]session.Task, 0, 8)
+	tasks = append(tasks,
+		session.Task{Content: "A1", Status: session.TaskStatusInProgress},
+		session.Task{Content: "A2", Status: session.TaskStatusPending},
+		session.Task{Content: "A3", Status: session.TaskStatusBlocked, Blocker: "x"},
+	)
+	for i := 0; i < 5; i++ {
+		tasks = append(tasks, session.Task{
+			Content:  fmt.Sprintf("C%d", i),
+			Status:   session.TaskStatusCompleted,
+			Evidence: "done",
+		})
+	}
+	g := session.Goal{Text: "Test", Tasks: tasks}
+
+	prompt := BuildContinuationPromptWithTaskLimit(g, 5)
+	require.Contains(t, prompt, "A1")
+	require.Contains(t, prompt, "A2")
+	require.Contains(t, prompt, "A3")
+	require.Contains(t, prompt, "C0")
+	require.Contains(t, prompt, "C1")
+	require.NotContains(t, prompt, "C2")
+	require.Contains(t, prompt, "3 additional completed/dropped tasks omitted")
+
+	// No limit -> all tasks rendered.
+	promptFull := BuildContinuationPromptWithTaskLimit(g, 0)
+	require.Contains(t, promptFull, "C4")
+	require.NotContains(t, promptFull, "omitted")
+}
+
+func TestAddGoalTaskAndCompleteGoalTask(t *testing.T) {
+	t.Parallel()
+
+	svc, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Test goal", 10000)
+	require.NoError(t, err)
+
+	// Add a task.
+	_, err = runtime.AddGoalTask(ctx, sessionID, "Task A")
+	require.NoError(t, err)
+	loaded, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, loaded.Goal.Tasks, 1)
+	require.Equal(t, "Task A", loaded.Goal.Tasks[0].Content)
+	require.Equal(t, session.TaskStatusPending, loaded.Goal.Tasks[0].Status)
+
+	// Duplicate add is rejected.
+	_, err = runtime.AddGoalTask(ctx, sessionID, "Task A")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "duplicate")
+
+	// Complete the task by content.
+	_, err = runtime.CompleteGoalTask(ctx, sessionID, "Task A", "evidence here")
+	require.NoError(t, err)
+	loaded, err = svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, session.TaskStatusCompleted, loaded.Goal.Tasks[0].Status)
+	require.Equal(t, "evidence here", loaded.Goal.Tasks[0].Evidence)
+
+	// Unknown task is rejected.
+	_, err = runtime.CompleteGoalTask(ctx, sessionID, "Nonexistent", "")
+	require.Error(t, err)
+}
+
+func TestPostTurnTerminatesOnStall(t *testing.T) {
+	t.Parallel()
+
+	svc, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Stall test", 10000)
+	require.NoError(t, err)
+
+	loaded, err := svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.BlockCap = 2
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	// First turn does not make progress.
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-1", TokenUsage{}))
+	goal, _, err := runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 10})
+	require.NoError(t, err)
+	require.Equal(t, session.GoalStatusActive, goal.Status)
+
+	// Manually increment no_progress to simulate a stall from todo drops/evaluator.
+	loaded, err = svc.Get(ctx, sessionID)
+	require.NoError(t, err)
+	loaded.Goal.NoProgress = 2
+	_, err = svc.Save(ctx, loaded)
+	require.NoError(t, err)
+
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-2", TokenUsage{}))
+	goal, _, err = runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 10})
+	require.NoError(t, err)
+	require.Equal(t, session.GoalStatusStalled, goal.Status)
+	require.Contains(t, goal.LastReason, "No progress")
+}
+
+// TestBudgetExhaustedGoalNeedsContinuationForWrapUp documents the contract
+// that the coordinator relies on: when a goal's budget is exhausted,
+// PostTurn returns budgetExhausted=true and the goal enters
+// GoalStatusBudgetLimited. NeedsContinuation returns false for that status,
+// so the coordinator must OR the two conditions together
+// (NeedsContinuation(goal) || budgetExhausted) to still inject the
+// BuildBudgetLimitPrompt wrap-up turn. This test guards against regressing
+// that OR back to a plain NeedsContinuation check.
+func TestBudgetExhaustedGoalNeedsContinuationForWrapUp(t *testing.T) {
+	t.Parallel()
+
+	_, runtime, sessionID := newRuntimeTestSession(t)
+	ctx := context.Background()
+
+	_, err := runtime.CreateGoal(ctx, sessionID, "Test goal", 100)
+	require.NoError(t, err)
+
+	require.NoError(t, runtime.OnTurnStart(ctx, sessionID, "turn-1", TokenUsage{}))
+	goal, budgetExhausted, err := runtime.PostTurn(ctx, sessionID, TokenUsage{Input: 200, Output: 50})
+	require.NoError(t, err)
+
+	// Budget exhausted: the goal is no longer "active" but the coordinator
+	// must still chain a wrap-up turn.
+	require.True(t, budgetExhausted)
+	require.Equal(t, session.GoalStatusBudgetLimited, goal.Status)
+	require.False(t, NeedsContinuation(goal), "NeedsContinuation must be false for budget-limited goals")
+	// The coordinator condition is: NeedsContinuation(goal) || budgetExhausted
+	require.True(t, NeedsContinuation(goal) || budgetExhausted,
+		"coordinator must chain a wrap-up turn when budget is exhausted even though NeedsContinuation is false")
 }

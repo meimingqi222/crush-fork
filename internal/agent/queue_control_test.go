@@ -69,11 +69,13 @@ func newQueueControlTestAgent(env fakeEnv) *sessionAgent {
 		agentFactory: func(fantasy.LanguageModel, ...fantasy.AgentOption) fantasy.Agent {
 			return queueTestAgent{}
 		},
-		sessions:       env.sessions,
-		messages:       env.messages,
-		messageQueue:   csync.NewMap[string, []SessionAgentCall](),
-		activeRequests: csync.NewMap[string, context.CancelFunc](),
-		pausedQueues:   csync.NewMap[string, bool](),
+		sessions:        env.sessions,
+		messages:        env.messages,
+		messageQueue:    csync.NewMap[string, []SessionAgentCall](),
+		steeringQueue:   csync.NewMap[string, []SessionAgentCall](),
+		activeRequests:  csync.NewMap[string, context.CancelFunc](),
+		pausedQueues:    csync.NewMap[string, bool](),
+		steeringSignals: csync.NewMap[string, context.CancelFunc](),
 	}
 }
 
@@ -427,10 +429,14 @@ func TestRemoveQueuedTurnAndEnqueueSteerUseStableTurnIdentity(t *testing.T) {
 	t.Cleanup(func() { a.activeRequests.Del(sess.ID) })
 
 	require.True(t, a.EnqueueSteer(sess.ID, SessionAgentCall{TurnID: "steer-1", Prompt: "direction"}))
-	queue := a.queuedCallsSnapshot(sess.ID)
-	require.Len(t, queue, 1)
-	require.Equal(t, "steer-1", queue[0].TurnID)
-	require.True(t, queue[0].JoinActiveRun)
+	// Steering messages ride the dedicated steering queue, never the regular
+	// messageQueue, and are not JoinActiveRun prompts.
+	require.Equal(t, 0, a.QueuedPrompts(sess.ID))
+	steering := a.queuedSteeringSnapshot(sess.ID)
+	require.Len(t, steering, 1)
+	require.Equal(t, "steer-1", steering[0].TurnID)
+	require.True(t, steering[0].Steering)
+	require.False(t, steering[0].JoinActiveRun)
 	require.True(t, a.RemoveQueuedTurn(sess.ID, "steer-1"))
 	require.False(t, a.RemoveQueuedTurn(sess.ID, "steer-1"))
 }
@@ -550,4 +556,120 @@ func TestBusyRunRemovesPrecreatedUserMessageBeforeQueueing(t *testing.T) {
 			t.Fatalf("queued user message %q should have been deleted while waiting", queuedUser.ID)
 		}
 	}
+}
+
+// steerCaptureTestAgent behaves like queuePrepareTestAgent but captures the
+// prepared messages of the second PrepareStep so tests can assert what was
+// injected mid-run.
+type steerCaptureTestAgent struct {
+	t                 *testing.T
+	afterFirstPrepare func()
+	secondPrepareMsgs []fantasy.Message
+}
+
+func (steerCaptureTestAgent) Generate(context.Context, fantasy.AgentCall) (*fantasy.AgentResult, error) {
+	return &fantasy.AgentResult{}, nil
+}
+
+func (a *steerCaptureTestAgent) Stream(ctx context.Context, call fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
+	preparedCtx, prepared, err := call.PrepareStep(ctx, fantasy.PrepareStepFunctionOptions{Messages: call.Messages})
+	require.NoError(a.t, err)
+
+	if a.afterFirstPrepare != nil {
+		a.afterFirstPrepare()
+		a.afterFirstPrepare = nil
+	}
+
+	_, prepared2, err := call.PrepareStep(preparedCtx, fantasy.PrepareStepFunctionOptions{Messages: prepared.Messages})
+	require.NoError(a.t, err)
+	a.secondPrepareMsgs = prepared2.Messages
+
+	if call.OnTextDelta != nil {
+		require.NoError(a.t, call.OnTextDelta("reply", "ok"))
+	}
+	if call.OnStepFinish != nil {
+		require.NoError(a.t, call.OnStepFinish(fantasy.StepResult{
+			Response: fantasy.Response{
+				FinishReason: fantasy.FinishReasonStop,
+			},
+		}))
+	}
+	return &fantasy.AgentResult{}, nil
+}
+
+func TestSteerMessageIsInjectedIntoActiveRun(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	testAgent := &steerCaptureTestAgent{t: t}
+	sessionAgent := newQueuePrepareTestSessionAgent(env, testAgent)
+
+	sess, err := env.sessions.Create(t.Context(), "steer inject")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "seed"},
+		},
+	})
+	require.NoError(t, err)
+
+	testAgent.afterFirstPrepare = func() {
+		// The steer arrives while the run is busy, mid-tool-loop.
+		require.True(t, sessionAgent.EnqueueSteer(sess.ID, SessionAgentCall{
+			SessionID: sess.ID,
+			Prompt:    "stop and fix the test first",
+		}))
+	}
+
+	_, err = sessionAgent.Run(t.Context(), SessionAgentCall{
+		SessionID:       sess.ID,
+		Prompt:          "run now",
+		MaxOutputTokens: 1000,
+	})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, testAgent.secondPrepareMsgs)
+	var userText strings.Builder
+	for _, m := range testAgent.secondPrepareMsgs {
+		if m.Role != fantasy.MessageRoleUser {
+			continue
+		}
+		for _, part := range m.Content {
+			if tp, ok := part.(fantasy.TextPart); ok {
+				userText.WriteString(tp.Text)
+			}
+		}
+	}
+	// The steer was injected into the next provider step, wrapped with the
+	// priority notice so the model treats it as the active instruction.
+	require.Contains(t, userText.String(), "stop and fix the test first")
+	require.Contains(t, userText.String(), "<user_query>")
+	require.Contains(t, userText.String(), "supersedes earlier directions")
+
+	// The steering queue was drained: nothing is stranded for the next run.
+	require.Empty(t, sessionAgent.queuedSteeringSnapshot(sess.ID))
+	require.Equal(t, 0, sessionAgent.QueuedPrompts(sess.ID))
+}
+
+func TestFlushStrandedSteeringMessagesPromotesToQueueFront(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := newQueueControlTestAgent(env)
+	sess, err := env.sessions.Create(t.Context(), "flush steer")
+	require.NoError(t, err)
+
+	a.enqueueSteer(sess.ID, SessionAgentCall{SessionID: sess.ID, TurnID: "steer-1", Prompt: "stop"})
+	a.messageQueue.Set(sess.ID, []SessionAgentCall{
+		{SessionID: sess.ID, TurnID: "t-1", Prompt: "first queued"},
+	})
+
+	a.flushStrandedSteeringMessages(sess.ID)
+
+	require.Empty(t, a.queuedSteeringSnapshot(sess.ID))
+	queue := a.queuedCallsSnapshot(sess.ID)
+	require.Len(t, queue, 2)
+	require.Equal(t, "steer-1", queue[0].TurnID)
+	require.Equal(t, "t-1", queue[1].TurnID)
 }

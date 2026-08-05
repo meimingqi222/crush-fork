@@ -197,6 +197,10 @@ type coordinator struct {
 
 	// goalRuntime tracks goal state, token accounting, and wall-clock time.
 	goalRuntime *goalruntime.Runtime
+	// goalEvaluator optionally evaluates goal progress after each turn.
+	// Nil (the default) disables the evaluator entirely; a non-nil
+	// implementation is responsible for producing a meaningful verdict.
+	goalEvaluator goalruntime.Evaluator
 
 	responsesWSPool *httpext.ResponsesWebSocketPool
 
@@ -269,6 +273,14 @@ func NewCoordinator(
 	if memoryBackend != nil {
 		c.SetMemoryBackend(memoryBackend)
 	}
+	// The goal evaluator is opt-in. NoopEvaluator returns a zero verdict
+	// (Met=false) which ApplyEvaluatorVerdict would persist as
+	// LastEvaluatorMet=*false, permanently blocking goal completion under the
+	// strict task gate. Until a real evaluator implementation is wired in,
+	// leave goalEvaluator nil so the post-turn evaluation block is skipped
+	// entirely; the config flag alone must not activate a stub that breaks
+	// completion. Callers that supply a real evaluator should set it after
+	// construction.
 	c.visionService = NewVisionService(c)
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -965,22 +977,62 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 		if goalResult, budgetExhausted, goalErr := c.goalRuntime.PostTurn(ctx, sessionID, goalruntime.TokenUsageFromFantasy(result.TotalUsage)); goalErr != nil {
 			slog.Warn("Failed to update goal runtime", "error", goalErr, "session_id", sessionID)
-		} else if c.currentAgent.QueuedPrompts(sessionID) == 0 {
-			depth, _ := ctx.Value(goalContinuationDepthKey{}).(int)
-			if depth < maxGoalContinuationsPerRun && goalruntime.ShouldChainContinuation(prompt, depth, guidedGoalSetup) {
-				continuationCtx := context.WithValue(ctx, goalContinuationDepthKey{}, depth+1)
-				var continuationPrompt string
-				if budgetExhausted {
-					continuationPrompt = goalruntime.BuildBudgetLimitPrompt(goalResult)
-				} else if goalruntime.NeedsContinuation(goalResult) {
-					continuationPrompt = goalruntime.BuildContinuationPrompt(goalResult)
+		} else {
+			// Run the optional goal evaluator after PostTurn. The evaluator
+			// is default-off (nil); when a real implementation is supplied,
+			// it updates the goal's LastEvaluatorMet/LastEvaluatorAt and
+			// no_progress.
+			if c.goalEvaluator != nil && goalResult.IsActive() {
+				goalCfg := c.cfg.Config().EffectiveGoalConfig()
+				evalTimeout := 30 * time.Second
+				if goalCfg.EvaluatorTimeoutMs != nil && *goalCfg.EvaluatorTimeoutMs > 0 {
+					evalTimeout = time.Duration(*goalCfg.EvaluatorTimeoutMs) * time.Millisecond
 				}
-				if continuationPrompt != "" {
-					contResult, contErr := c.Run(continuationCtx, sessionID, continuationPrompt)
-					if contResult != nil {
-						result = contResult
+				evalCtx, evalCancel := context.WithTimeout(ctx, evalTimeout)
+				if sess, getErr := c.sessions.Get(evalCtx, sessionID); getErr == nil {
+					if verdict, evalErr := c.goalEvaluator.Evaluate(evalCtx, sess, sess.Goal); evalErr == nil {
+						updatedGoal := sess.Goal
+						goalruntime.ApplyEvaluatorVerdict(&updatedGoal, verdict)
+						sess.Goal = updatedGoal
+						if _, saveErr := c.sessions.Save(evalCtx, sess); saveErr != nil {
+							slog.Warn("Failed to save evaluator verdict", "error", saveErr, "session_id", sessionID)
+						}
+						goalResult = updatedGoal
+					} else {
+						slog.Warn("Goal evaluator failed", "error", evalErr, "session_id", sessionID)
 					}
-					originalErr = contErr
+				}
+				evalCancel()
+			}
+
+			if c.currentAgent.QueuedPrompts(sessionID) == 0 && (goalruntime.NeedsContinuation(goalResult) || budgetExhausted) {
+				depth, _ := ctx.Value(goalContinuationDepthKey{}).(int)
+				if depth < maxGoalContinuationsPerRun && goalruntime.ShouldChainContinuation(prompt, depth, guidedGoalSetup) {
+					continuationCtx := context.WithValue(ctx, goalContinuationDepthKey{}, depth+1)
+					var continuationPrompt string
+					if budgetExhausted {
+						continuationPrompt = goalruntime.BuildBudgetLimitPrompt(goalResult)
+					} else {
+						maxTaskCtx := 0
+						if goalCfg := c.cfg.Config().EffectiveGoalConfig(); goalCfg.MaxTaskContext != nil {
+							maxTaskCtx = *goalCfg.MaxTaskContext
+						}
+						continuationPrompt = goalruntime.BuildContinuationPromptWithTaskLimit(goalResult, maxTaskCtx)
+					}
+					if continuationPrompt != "" {
+						// Prepend a task reminder when actionable tasks remain but
+						// the agent did not operate on them this turn. The reminder
+						// is only injected once per continuation (the continuation
+						// prompt itself is the single per-turn system message).
+						if reminder := goalruntime.BuildTaskReminder(goalResult); reminder != "" {
+							continuationPrompt = reminder + continuationPrompt
+						}
+						contResult, contErr := c.Run(continuationCtx, sessionID, continuationPrompt)
+						if contResult != nil {
+							result = contResult
+						}
+						originalErr = contErr
+					}
 				}
 			}
 		}
@@ -3119,6 +3171,8 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 	)
 	applySubagentRuntimeConfig(&runtime, c.cfg.Config().EffectiveSubagentRuntime())
 	ctx = withSubagentRuntimeContext(ctx, runtime)
+	ctx = context.WithValue(ctx, tools.SubagentContextKey, true)
+	ctx = context.WithValue(ctx, tools.ParentSessionIDContextKey, params.SessionID)
 
 	if c.escalationBridge != nil {
 		workerIdentity := permission.WorkerIdentity{

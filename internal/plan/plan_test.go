@@ -108,6 +108,63 @@ func TestSanitizeSlug(t *testing.T) {
 	}
 }
 
+func TestExtractGoalAndTasks(t *testing.T) {
+	t.Parallel()
+
+	objective, tasks, ok := ExtractGoalAndTasks("")
+	require.False(t, ok)
+	require.Empty(t, objective)
+	require.Empty(t, tasks)
+
+	// Checklist items.
+	objective, tasks, ok = ExtractGoalAndTasks(`# Refactor auth module
+
+## Approach
+- [ ] Update password hashing
+- [ ] Add unit tests
+- [x] Review existing code
+`)
+	require.True(t, ok)
+	require.Equal(t, "Refactor auth module", objective)
+	require.Equal(t, []string{"Update password hashing", "Add unit tests", "Review existing code"}, tasks)
+
+	// Approach section with bulleted steps.
+	objective, tasks, ok = ExtractGoalAndTasks(`Refactor auth module
+
+## Approach
+- Update password hashing
+- Add unit tests
+- Update docs
+
+## Verification
+Run go test.
+`)
+	require.True(t, ok)
+	require.Equal(t, "Refactor auth module", objective)
+	require.Equal(t, []string{"Update password hashing", "Add unit tests", "Update docs"}, tasks)
+
+	// Numbered steps under Approach.
+	objective, tasks, ok = ExtractGoalAndTasks(`# Fix login bug
+
+## Approach
+1. Reproduce the issue
+2. Patch the validator
+3. Add regression test
+`)
+	require.True(t, ok)
+	require.Equal(t, "Fix login bug", objective)
+	require.Equal(t, []string{"Reproduce the issue", "Patch the validator", "Add regression test"}, tasks)
+
+	// No actionable steps: objective is still returned but ok is false.
+	objective, tasks, ok = ExtractGoalAndTasks(`# Refactor auth module
+
+Just do it.
+`)
+	require.False(t, ok)
+	require.Equal(t, "Refactor auth module", objective)
+	require.Empty(t, tasks)
+}
+
 func TestPlanFilePathRoundTrip(t *testing.T) {
 	t.Parallel()
 

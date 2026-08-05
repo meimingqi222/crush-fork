@@ -175,6 +175,19 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	basePermissions := permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, nil)
 	pluginRuntime := plugin.NewRuntime()
 	goalRuntime = goal.NewRuntime(sessions)
+	// Apply configurable goal runtime parameters (max iterations, block cap, task gate).
+	goalCfg := cfg.EffectiveGoalConfig()
+	rc := goal.RuntimeConfig{}
+	if goalCfg.MaxIterations != nil {
+		rc.MaxIterations = *goalCfg.MaxIterations
+	}
+	if goalCfg.BlockCap != nil {
+		rc.BlockCap = *goalCfg.BlockCap
+	}
+	if goalCfg.TaskGate != "" {
+		rc.TaskGate = goalCfg.TaskGate
+	}
+	goalRuntime.SetConfig(rc)
 
 	app = &App{
 		Sessions:    sessions,

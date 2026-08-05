@@ -9,6 +9,8 @@ import (
 
 type (
 	sessionIDContextKey       string
+	parentSessionIDContextKey string
+	subagentContextKey        string
 	messageIDContextKey       string
 	messageServiceContextKey  string
 	supportsImagesKey         string
@@ -20,6 +22,7 @@ type (
 	agentIsolationContextKey  string
 	agentBackgroundContextKey string
 	visionServiceKey          string
+	steeringSignalContextKey  string
 )
 
 type sessionLookupService interface {
@@ -31,6 +34,11 @@ type sessionLookupService interface {
 const (
 	// SessionIDContextKey is the key for the session ID in the context.
 	SessionIDContextKey sessionIDContextKey = "session_id"
+	// ParentSessionIDContextKey is the key for the parent session ID in the
+	// context when a tool is invoked from a subagent.
+	ParentSessionIDContextKey parentSessionIDContextKey = "parent_session_id"
+	// SubagentContextKey is set to true when the tool is invoked from a subagent.
+	SubagentContextKey subagentContextKey = "subagent"
 	// MessageIDContextKey is the key for the message ID in the context.
 	MessageIDContextKey messageIDContextKey = "message_id"
 	// MessageServiceContextKey is the key for the message service in the context.
@@ -48,6 +56,11 @@ const (
 	AgentBackgroundContextKey agentBackgroundContextKey = "agent_background"
 	// VisionServiceContextKey is the key for the vision helper service in the context.
 	VisionServiceContextKey visionServiceKey = "vision_service"
+	// SteeringSignalContextKey is the key for the per-run cooperative
+	// steering signal. Tools select on the signal's Done() channel to notice
+	// a mid-turn steering message and yield at a safe point instead of
+	// blocking the run.
+	SteeringSignalContextKey steeringSignalContextKey = "steering_signal"
 )
 
 // getContextValue is a generic helper that retrieves a typed value from context.
@@ -128,4 +141,28 @@ type VisionDescriber interface {
 // Returns nil when no vision helper is configured.
 func GetVisionServiceFromContext(ctx context.Context) VisionDescriber {
 	return getContextValue(ctx, VisionServiceContextKey, VisionDescriber(nil))
+}
+
+// IsSubagentFromContext reports whether the tool is being called from a subagent.
+func IsSubagentFromContext(ctx context.Context) bool {
+	return getContextValue(ctx, SubagentContextKey, false)
+}
+
+// GetParentSessionIDFromContext returns the parent session ID when the tool is
+// invoked from a subagent, or empty string otherwise.
+func GetParentSessionIDFromContext(ctx context.Context) string {
+	return getContextValue(ctx, ParentSessionIDContextKey, "")
+}
+
+// SteeringSignal is the per-run cooperative interruption signal exposed to
+// tools. Done() closes when a mid-turn steering message arrives; tools may
+// select on it and yield at a safe point. The zero value signals nothing.
+type SteeringSignal interface {
+	Done() <-chan struct{}
+}
+
+// GetSteeringSignalFromContext returns the current run's steering signal, or
+// nil when no signal is present (e.g. the tool runs outside a session run).
+func GetSteeringSignalFromContext(ctx context.Context) SteeringSignal {
+	return getContextValue(ctx, SteeringSignalContextKey, SteeringSignal(nil))
 }

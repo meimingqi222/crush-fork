@@ -8,16 +8,16 @@ import "time"
 type Kind string
 
 const (
-	KindSessionUpdated      Kind = "session.updated"
-	KindTurnStarted         Kind = "turn.started"
-	KindTurnCompleted       Kind = "turn.completed"
-	KindTurnFailed          Kind = "turn.failed"
-	KindTurnCancelled       Kind = "turn.cancelled"
-	KindTurnSteered         Kind = "turn.steered"
+	KindSessionUpdated Kind = "session.updated"
+	KindTurnStarted    Kind = "turn.started"
+	KindTurnCompleted  Kind = "turn.completed"
+	KindTurnFailed     Kind = "turn.failed"
+	KindTurnCancelled  Kind = "turn.cancelled"
+	KindTurnSteered    Kind = "turn.steered"
 	// KindTurnProgress is a best-effort heartbeat while a turn is still active
 	// but producing no message/tool deltas (e.g. provider stream retry delay).
-	KindTurnProgress       Kind = "turn.progress"
-	KindCancelAcknowledged Kind = "cancel.acknowledged"
+	KindTurnProgress        Kind = "turn.progress"
+	KindCancelAcknowledged  Kind = "cancel.acknowledged"
 	KindMessageDelta        Kind = "message.delta"
 	KindMessageCreated      Kind = "message.created"
 	KindMessageCompleted    Kind = "message.completed"
