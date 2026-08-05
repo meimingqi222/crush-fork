@@ -2,6 +2,7 @@ package filetracker
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -125,4 +126,58 @@ func TestService_RecordRead_DifferentPaths(t *testing.T) {
 
 	lastRead2 := env.svc.LastReadTime(env.ctx, sessionID, path2)
 	require.True(t, lastRead2.IsZero(), "path2 should not be recorded")
+}
+
+// TestService_RecordReadAfterClose verifies that RecordRead never panics or
+// blocks after Close, even though the write channel is not closed.
+func TestService_RecordReadAfterClose(t *testing.T) {
+	env := setupTest(t)
+	env.createSession(t, "test-session-close")
+
+	env.svc.RecordRead(env.ctx, "test-session-close", "/path/to/file.go")
+	require.NotPanics(t, func() {
+		env.svc.Close()
+		// Records after close must be dropped, not panic (send on closed
+		// channel) and not block.
+		env.svc.RecordRead(env.ctx, "test-session-close", "/path/to/after-close.go")
+	})
+	// Close is idempotent.
+	require.NotPanics(t, func() { env.svc.Close() })
+}
+
+// TestService_ConcurrentRecordAndRead exercises concurrent RecordRead and
+// read queries to shake out races in the write loop and syncFlush.
+func TestService_ConcurrentRecordAndRead(t *testing.T) {
+	env := setupTest(t)
+	env.createSession(t, "test-session-conc")
+
+	done := make(chan struct{})
+	defer close(done)
+
+	const writers, readers = 4, 4
+	for w := 0; w < writers; w++ {
+		go func(w int) {
+			for i := 0; i < 200; i++ {
+				path := fmt.Sprintf("/path/to/w%d/f%d.go", w, i%16)
+				env.svc.RecordRead(env.ctx, "test-session-conc", path)
+			}
+		}(w)
+	}
+	for r := 0; r < readers; r++ {
+		go func() {
+			for i := 0; i < 200; i++ {
+				path := fmt.Sprintf("/path/to/w%d/f%d.go", r, i%16)
+				_ = env.svc.LastReadTime(env.ctx, "test-session-conc", path)
+				_, _ = env.svc.ListReadFiles(env.ctx, "test-session-conc")
+			}
+		}()
+	}
+
+	// Give the goroutines time to finish before t.Cleanup closes the
+	// service. Use a barrier that waits for all writes to be visible.
+	require.Eventually(t, func() bool {
+		env.svc.syncFlush()
+		files, err := env.svc.ListReadFiles(env.ctx, "test-session-conc")
+		return err == nil && len(files) > 0
+	}, 5*time.Second, 20*time.Millisecond)
 }

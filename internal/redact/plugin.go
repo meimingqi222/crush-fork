@@ -164,6 +164,11 @@ func (p *redactPlugin) redactStringCached(input string, localCache map[string]st
 	return result
 }
 
+// redactToolInputCached is like redactStringCached but uses RedactToolInput.
+// Its cache keys are prefixed with "t:" so results never collide with the
+// string-redaction cache: RedactString and RedactToolInput can produce
+// different output for the same input (JSON reformatting, image/base64 data
+// handling), and sharing keys would return the wrong variant.
 func (p *redactPlugin) redactToolInputCached(input string, localCache map[string]string) string {
 	// Try JSON parse + deep redact (which may hit the cache for string values).
 	// Fall back to plain string redaction.
@@ -173,21 +178,22 @@ func (p *redactPlugin) redactToolInputCached(input string, localCache map[string
 	}
 
 	// Check caches first.
-	if cached, ok := localCache[input]; ok {
+	localKey := "t:" + input
+	if cached, ok := localCache[localKey]; ok {
 		return cached
 	}
-	key := hashKey(input)
+	key := "t:" + hashKey(input)
 	p.cacheMu.Lock()
 	cached, ok := p.cache[key]
 	p.cacheMu.Unlock()
 	if ok {
-		localCache[input] = cached
+		localCache[localKey] = cached
 		return cached
 	}
 
 	// Miss: run the full pipeline.
 	result := RedactToolInput(input, p.patterns, nil)
-	localCache[input] = result
+	localCache[localKey] = result
 
 	if len(input) <= maxCachableTextLen {
 		p.cacheMu.Lock()

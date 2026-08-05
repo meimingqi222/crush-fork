@@ -37,11 +37,16 @@ type service struct {
 	cwd string
 
 	// writeCh buffers RecordRead calls so they don't block callers.
-	// The channel is drained by a single background goroutine.
+	// The channel is drained by a single background goroutine. It is never
+	// closed: closing it would make any late RecordRead panic on send, so
+	// shutdown is signaled via stop instead.
 	writeCh chan readRecord
 	// flushWake wakes the write loop to drain and write all pending
 	// records before a reader queries the database.
 	flushWake chan struct{}
+	// stop requests the write loop to drain, flush and exit. It is closed
+	// by Close; writeCh is never closed.
+	stop chan struct{}
 	closeOnce sync.Once
 	done      chan struct{}
 
@@ -69,6 +74,7 @@ func NewService(q *db.Queries) Service {
 		cwd:       cwd,
 		writeCh:   make(chan readRecord, 256),
 		flushWake: make(chan struct{}, 1),
+		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
 	go s.writeLoop()
@@ -123,6 +129,8 @@ func (s *service) writeLoop() {
 		select {
 		case rec, ok := <-s.writeCh:
 			if !ok {
+				// Defensive: writeCh is never closed today, but drain
+				// whatever is left if it ever is.
 				flush()
 				return
 			}
@@ -140,6 +148,10 @@ func (s *service) writeLoop() {
 		case <-s.flushWake:
 			drain()
 			flush()
+		case <-s.stop:
+			drain()
+			flush()
+			return
 		case <-timer.C:
 			if len(batch) > 0 {
 				flush()
@@ -174,6 +186,11 @@ func (s *service) syncFlush() {
 	default:
 	}
 
+	// Record the baseline BEFORE waking the loop. If we read it after, a
+	// fast flush could complete first and bump flushGen past our baseline,
+	// making us wait for a flush that will never come (and timeout).
+	baseline := s.flushGen.Load()
+
 	// Wake the write loop. If the wake slot is already full, a previous
 	// request is still pending and the loop will flush anyway.
 	select {
@@ -181,7 +198,6 @@ func (s *service) syncFlush() {
 	default:
 	}
 
-	baseline := s.flushGen.Load()
 	// Spin without blocking primitives: the write loop runs outside any
 	// synctest bubble, so channel/cond waits would need cross-bubble
 	// wakeups, which are fatal. Flushes are fast; this settles in a few
@@ -255,9 +271,10 @@ func (s *service) ListReadFiles(ctx context.Context, sessionID string) ([]string
 }
 
 // Close flushes pending writes and stops the background goroutine.
+// It is safe to call multiple times.
 func (s *service) Close() {
 	s.closeOnce.Do(func() {
-		close(s.writeCh)
+		close(s.stop)
 		// Wait for the write loop to drain and exit.
 		select {
 		case <-s.done:

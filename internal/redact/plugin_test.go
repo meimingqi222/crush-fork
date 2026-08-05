@@ -206,3 +206,50 @@ func cloneMsgs(msgs []message.Message) []message.Message {
 	}
 	return cloned
 }
+
+// TestRedactPluginCacheKindIsolation verifies that the string-redaction and
+// tool-input-redaction caches never share entries: RedactString and
+// RedactToolInput can produce different output for the same input (JSON
+// reformatting, image/base64 data handling), so a shared key space would
+// return the wrong variant and leak unredacted data.
+func TestRedactPluginCacheKindIsolation(t *testing.T) {
+	rp := &redactPlugin{
+		patterns: []SecretPattern{
+			{ID: "test-secret", Pattern: `(SECRET-[A-Z0-9]+)`, Keywords: []string{"SECRET-"}},
+		},
+		cache: make(map[string]string),
+	}
+	for i := range rp.patterns {
+		compilePattern(&rp.patterns[i])
+	}
+
+	// JSON with image data: RedactToolInput skips the data field (deep
+	// redact), while RedactString replaces the secret.
+	input := `{"type": "image", "data": "SECRET-123", "note": "keep"}`
+
+	wantTool := RedactToolInput(input, rp.patterns, nil)
+	wantString := RedactString(input, rp.patterns, nil)
+	require.NotEqual(t, wantTool, wantString, "test requires different outputs per kind")
+	require.NotContains(t, wantTool, "[REDACTED:test-secret]")
+	require.Contains(t, wantString, "[REDACTED:test-secret]")
+
+	// Tool path first, then string path: the string result must NOT come
+	// from the tool cache.
+	localCache := make(map[string]string)
+	toolResult := rp.redactToolInputCached(input, localCache)
+	require.Equal(t, wantTool, toolResult)
+
+	stringResult := rp.redactStringCached(input, localCache)
+	require.Equal(t, wantString, stringResult, "string path must not hit the tool-input cache entry")
+
+	// Same call order across transform invocations (fresh local cache,
+	// persistent cache persists).
+	localCache2 := make(map[string]string)
+	require.Equal(t, wantTool, rp.redactToolInputCached(input, localCache2))
+	require.Equal(t, wantString, rp.redactStringCached(input, localCache2))
+
+	// Reverse order: string first, then tool.
+	localCache3 := make(map[string]string)
+	require.Equal(t, wantString, rp.redactStringCached(input, localCache3))
+	require.Equal(t, wantTool, rp.redactToolInputCached(input, localCache3), "tool path must not hit the string cache entry")
+}
