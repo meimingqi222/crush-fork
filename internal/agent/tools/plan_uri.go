@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"strings"
@@ -21,7 +20,7 @@ func resolveLocalPlanURI(ctx context.Context, uri string, fallbackWorkingDir str
 		return "", fmt.Errorf("session ID is required for local plan URI")
 	}
 
-	workspaceRoot := cmp.Or(GetWorkingDirFromContext(ctx), fallbackWorkingDir)
+	workspaceRoot := EffectiveWorkingDir(ctx, fallbackWorkingDir)
 	if workspaceRoot == "" {
 		return "", fmt.Errorf("working directory is required for local plan URI")
 	}
@@ -54,9 +53,9 @@ func adoptPlanFilePathIfNeeded(ctx context.Context, filePath string) error {
 		return fmt.Errorf("failed to load session for plan path adoption: %w", err)
 	}
 
-	workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
+	workspaceRoot := EffectiveWorkingDir(ctx, "")
 	if workspaceRoot == "" {
-		workspaceRoot = cmp.Or(GetWorkingDirFromContext(ctx), "")
+		workspaceRoot = strings.TrimSpace(sess.WorkspaceCWD)
 	}
 	if workspaceRoot == "" {
 		return nil
@@ -77,22 +76,4 @@ func adoptPlanFilePathIfNeeded(ctx context.Context, filePath string) error {
 		return fmt.Errorf("failed to adopt plan file path: %w", err)
 	}
 	return nil
-}
-
-// activePlanFilePath returns the active plan file path for the session, or an
-// empty string if none is set.
-func activePlanFilePath(ctx context.Context) string {
-	sessionID := GetSessionFromContext(ctx)
-	if sessionID == "" {
-		return ""
-	}
-	sessions := GetSessionServiceFromContext(ctx)
-	if sessions == nil {
-		return ""
-	}
-	sess, err := sessions.Get(ctx, sessionID)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(sess.PlanFilePath)
 }

@@ -127,6 +127,25 @@ func TestReadToolMissingPathReturnsGroundingAdviceAndDoesNotRecordRead(t *testin
 	require.Equal(t, "file_not_found_suggestions", meta.RecoveredBy)
 }
 
+func TestReadToolMissingPathSuggestsDuplicateWorkingDirPrefix(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	tracker := &readToolFileTracker{}
+	tool := newReadToolForTest(workingDir, tracker)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "session-1")
+
+	inputPath := filepath.Base(workingDir) + "/missing.go"
+	resp := runReadToolForTest(t, tool, ctx, ReadParams{Path: inputPath})
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "repeats the working-directory name")
+
+	meta := parseReadMetadata(t, resp)
+	require.Equal(t, "path_not_found", meta.ErrorKind)
+	require.NotEmpty(t, meta.PrefixHint)
+	require.Equal(t, inputPath, meta.InputPath)
+	require.Equal(t, filepath.Join(workingDir, inputPath), meta.ResolvedPath)
+}
 func TestReadToolDoesNotRecoverAmbiguousSuffixMatch(t *testing.T) {
 	t.Parallel()
 

@@ -19,6 +19,12 @@ type ToolInfo struct {
 	Parameters  map[string]any `json:"parameters"`
 	Required    []string       `json:"required"`
 	Parallel    bool           `json:"parallel"` // Whether this tool can run in parallel with other tools
+	// SchemaDefs carries root-level schema definitions ($defs) for tools whose
+	// parameters reference them, such as MCP tools whose input schema was
+	// generated from zod or pydantic. Without them, a property declared as
+	// {"$ref": "#/$defs/Foo"} reaches the model — and the local validator —
+	// with nothing to resolve against.
+	SchemaDefs map[string]any `json:"schema_defs,omitempty"`
 }
 
 // ToolCall represents a tool invocation, matching the existing pattern.

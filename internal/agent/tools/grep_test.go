@@ -1,12 +1,16 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
 
+	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -526,6 +530,30 @@ func TestGrepWithDifferentWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestGrepToolUsesSessionWorkingDirForRelativeSearchPath(t *testing.T) {
+	t.Parallel()
+
+	sessionDir := t.TempDir()
+	fallbackDir := t.TempDir()
+	relativeDir := filepath.Join(sessionDir, "src")
+	require.NoError(t, os.Mkdir(relativeDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(relativeDir, "main.go"), []byte("package session\n"), 0o644))
+
+	tool := NewGrepTool(fallbackDir, config.ToolGrep{})
+	ctx := context.WithValue(t.Context(), WorkingDirContextKey, sessionDir)
+	input, err := json.Marshal(GrepParams{Pattern: "package", Path: "src"})
+	require.NoError(t, err)
+	response, err := tool.Run(ctx, fantasy.ToolCall{ID: "grep-contract", Name: GrepToolName, Input: string(input)})
+	require.NoError(t, err)
+	require.False(t, response.IsError)
+
+	var metadata GrepResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(response.Metadata), &metadata))
+	require.Equal(t, sessionDir, metadata.WorkingDirectory)
+	require.Equal(t, filepath.Join(sessionDir, "src"), metadata.ResolvedPath)
+	require.Equal(t, "src", metadata.DisplayPath)
+	require.Contains(t, response.Content, "src/main.go")
+}
 func TestGrepSortingByModTime(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()

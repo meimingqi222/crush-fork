@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -400,6 +401,26 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		data.ContextFiles = append(data.ContextFiles, projectFiles[k]...)
 	}
 	data.GlobalContextFiles = globalFiles
+
+	// When context usage diagnostics are enabled, log the total size of
+	// context files injected into the system prompt. This helps identify
+	// context file bloat as a source of prompt prefix growth.
+	if os.Getenv("CRUSH_CONTEXT_USAGE_DIAG") != "" {
+		var totalChars int
+		for _, cf := range data.ContextFiles {
+			totalChars += len([]rune(cf.Content))
+		}
+		for _, cf := range data.GlobalContextFiles {
+			totalChars += len([]rune(cf.Content))
+		}
+		slog.Info("Context file sizes",
+			"project_files", len(data.ContextFiles),
+			"global_files", len(data.GlobalContextFiles),
+			"total_chars", totalChars,
+			"estimated_tokens", totalChars/4,
+		)
+	}
+
 	return data, nil
 }
 

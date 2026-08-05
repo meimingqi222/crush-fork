@@ -28,13 +28,14 @@ const (
 )
 
 type GlobParams struct {
-	Path      string `json:"path" description:"Glob, file, or directory to search. A single path or a semicolon-delimited list (e.g. \"src/**/*.ts; test/**/*.ts\"). Defaults to the current working directory."`
+	Path      string `json:"path,omitempty" description:"Glob, file, or directory to search. A single path or a semicolon-delimited list (e.g. \"src/**/*.ts; test/**/*.ts\"). Defaults to the current working directory."`
 	Hidden    *bool  `json:"hidden,omitempty" description:"If true, hidden files and directories are included. Default is true."`
 	Gitignore *bool  `json:"gitignore,omitempty" description:"If true, .gitignore and .crushignore rules are respected. Default is true."`
 	Limit     *int   `json:"limit,omitempty" description:"Maximum number of results to return. Default is 200, maximum is 200."`
 }
 
 type GlobResponseMetadata struct {
+	ToolPathMetadata
 	NumberOfFiles int  `json:"number_of_files"`
 	Truncated     bool `json:"truncated"`
 }
@@ -80,12 +81,14 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 			var allFiles []string
 			seen := make(map[string]struct{})
 			truncated := false
+			var skippedPaths []string
 
 			for _, p := range paths {
 				files, tr, err := globForPath(ctx, p, effectiveWorkingDir, limit, hidden, gitignore)
 				if err != nil {
-					slog.Warn("Glob search failed", "error", err, "path", p)
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Glob search failed: %v", err)), nil
+					slog.Warn("Glob search skipped missing path", "error", err, "path", p)
+					skippedPaths = append(skippedPaths, p)
+					continue
 				}
 				if tr {
 					truncated = true
@@ -107,6 +110,21 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 				}
 			}
 
+			// If every path failed, return an error so the agent knows nothing
+			// was found and can adjust.
+			if len(allFiles) == 0 && len(skippedPaths) == len(paths) {
+				pathMeta := ResolveToolPath(ctx, workingDir, skippedPaths[0])
+				detail := skippedPaths[0]
+				if len(skippedPaths) > 1 {
+					detail = fmt.Sprintf("%d paths (%s)", len(skippedPaths), strings.Join(skippedPaths, "; "))
+				}
+				return fantasy.WithResponseMetadata(
+					fantasy.NewTextErrorResponse(fmt.Sprintf("Glob search failed: path not found: %s", detail)),
+					NewToolPathErrorMetadata(pathMeta, "path_not_found",
+						"Verify the base directory exists. Use a broader path or list the parent directory with read before retrying."),
+				), nil
+			}
+
 			var output string
 			if len(allFiles) == 0 {
 				output = "No files found"
@@ -117,12 +135,16 @@ func NewGlobTool(workingDir string) fantasy.AgentTool {
 					output += "\n\n(Results are truncated. Consider using a more specific path or pattern.)"
 				}
 			}
+			if len(skippedPaths) > 0 {
+				output += "\n\nSkipped missing paths: " + strings.Join(skippedPaths, "; ")
+			}
 
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextResponse(output),
 				GlobResponseMetadata{
-					NumberOfFiles: len(allFiles),
-					Truncated:     truncated,
+					ToolPathMetadata: NewToolPathMetadata(ResolveToolPath(ctx, workingDir, pathInput)),
+					NumberOfFiles:    len(allFiles),
+					Truncated:        truncated,
 				},
 			), nil
 		})
@@ -198,7 +220,7 @@ func globForPath(ctx context.Context, pathInput, workingDir string, limit int, h
 
 	info, err := os.Stat(searchPath)
 	if err != nil {
-		return nil, false, fmt.Errorf("path not found: %s", searchPath)
+		return nil, false, fmt.Errorf("path not found: %s", FormatToolPath(searchPath, workingDir))
 	}
 
 	if !hasGlob && info.IsDir() {

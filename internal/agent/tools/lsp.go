@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	_ "embed"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -128,16 +128,8 @@ func lspReferences(ctx context.Context, lspManager *lsp.Manager, symbol, path st
 		return fantasy.NewTextErrorResponse("no LSP clients available"), nil
 	}
 
-	effectiveWorkingDir := GetWorkingDirFromContext(ctx)
-	if effectiveWorkingDir == "" {
-		effectiveWorkingDir = "."
-	}
-	wd := path
-	if wd == "" {
-		wd = effectiveWorkingDir
-	}
-
-	result, err := runGrepSearch(ctx, GrepParams{Pattern: symbol, LiteralText: true}, wd, 100, 0, 0)
+	searchPath := ResolveToolPath(ctx, "", cmp.Or(path, ".")).AbsolutePath
+	result, err := runGrepSearch(ctx, GrepParams{Pattern: symbol, LiteralText: true}, searchPath, 100, 0, 0)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to search for symbol: %s", err)), nil
 	}
@@ -164,7 +156,7 @@ func lspReferences(ctx context.Context, lspManager *lsp.Manager, symbol, path st
 	}
 
 	if len(allLocations) > 0 {
-		output := formatReferences(cleanupLocations(allLocations))
+		output := formatReferences(cleanupLocations(allLocations), EffectiveWorkingDir(ctx, ""))
 		return fantasy.NewTextResponse(output), nil
 	}
 	if allErrs != nil {
@@ -186,12 +178,10 @@ func lspDefinition(ctx context.Context, lspManager *lsp.Manager, params LSPParam
 
 	wd := params.Path
 	if wd == "" {
-		wd = GetWorkingDirFromContext(ctx)
+		wd = EffectiveWorkingDir(ctx, "")
 	}
-	if wd == "" {
-		wd = "."
-	}
-	resolved, err := resolveSymbol(ctx, lspManager, params.Symbol, wd)
+	resolvedWorkingDir := ResolveToolPath(ctx, "", wd).AbsolutePath
+	resolved, err := resolveSymbol(ctx, lspManager, params.Symbol, resolvedWorkingDir)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Symbol '%s' not found", params.Symbol)), nil
 	}
@@ -207,7 +197,7 @@ func lspDefinition(ctx context.Context, lspManager *lsp.Manager, params LSPParam
 	if len(locations) == 0 {
 		return fantasy.NewTextResponse(fmt.Sprintf("No definition found for '%s'.", params.Symbol)), nil
 	}
-	return fantasy.NewTextResponse(formatLocations("definition", locations)), nil
+	return fantasy.NewTextResponse(formatLocations("definition", locations, EffectiveWorkingDir(ctx, ""))), nil
 }
 
 // lspDocumentSymbols handles document symbols.
@@ -218,10 +208,7 @@ func lspDocumentSymbols(ctx context.Context, lspManager *lsp.Manager, filePath s
 	if lspManager == nil || lspManager.Clients().Len() == 0 {
 		return fantasy.NewTextErrorResponse("no LSP clients available"), nil
 	}
-	absPath, err := filepath.Abs(filepath.FromSlash(filePath))
-	if err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get absolute path: %s", err)), nil
-	}
+	absPath := ResolveToolPath(ctx, "", filePath).AbsolutePath
 	openInLSPs(ctx, lspManager, absPath)
 	client := firstHandlingClient(lspManager, absPath)
 	if client == nil {
@@ -234,7 +221,7 @@ func lspDocumentSymbols(ctx context.Context, lspManager *lsp.Manager, filePath s
 	if len(symbols) == 0 {
 		return fantasy.NewTextResponse("No document symbols found."), nil
 	}
-	return fantasy.NewTextResponse(formatDocumentSymbols(absPath, documentSymbolEntries(symbols))), nil
+	return fantasy.NewTextResponse(formatDocumentSymbols(absPath, EffectiveWorkingDir(ctx, ""), documentSymbolEntries(symbols))), nil
 }
 
 // lspWorkspaceSymbols handles workspace symbols.
@@ -253,7 +240,7 @@ func lspWorkspaceSymbols(ctx context.Context, lspManager *lsp.Manager, query str
 	if len(all) == 0 {
 		return fantasy.NewTextResponse("No workspace symbols found."), nil
 	}
-	return fantasy.NewTextResponse(formatWorkspaceSymbols(all)), nil
+	return fantasy.NewTextResponse(formatWorkspaceSymbols(all, EffectiveWorkingDir(ctx, ""))), nil
 }
 
 // lspCodeAction handles code actions.
@@ -432,10 +419,7 @@ func lspReplaceSymbol(ctx context.Context, lspManager *lsp.Manager, permissions 
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("replacement is required for action %q", action)), nil
 	}
 
-	absPath, err := filepath.Abs(filepath.FromSlash(params.FilePath))
-	if err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get absolute path: %s", err)), nil
-	}
+	absPath := ResolveToolPath(ctx, "", params.FilePath).AbsolutePath
 	if lspManager == nil || lspManager.Clients().Len() == 0 {
 		return fantasy.NewTextErrorResponse("no LSP clients available"), nil
 	}
@@ -550,11 +534,8 @@ func lspCallHierarchy(ctx context.Context, lspManager *lsp.Manager, params LSPPa
 		line, char int
 	)
 	if strings.TrimSpace(params.Symbol) != "" {
-		wd := GetWorkingDirFromContext(ctx)
-		if wd == "" {
-			wd = "."
-		}
-		resolved, err := resolveSymbol(ctx, lspManager, params.Symbol, wd)
+		wd := EffectiveWorkingDir(ctx, "")
+		resolved, err := resolveSymbol(ctx, lspManager, params.Symbol, ResolveToolPath(ctx, "", wd).AbsolutePath)
 		if err != nil {
 			return fantasy.NewTextErrorResponse(err.Error()), nil
 		}

@@ -88,6 +88,7 @@ type grepMatch struct {
 }
 
 type GrepResponseMetadata struct {
+	ToolPathMetadata
 	NumberOfMatches     int      `json:"number_of_matches"`
 	Truncated           bool     `json:"truncated"`
 	Pattern             string   `json:"pattern,omitempty"`
@@ -135,9 +136,9 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("pattern is required"), nil
 			}
 
-			// Use session-specific working directory from context if available.
-			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
-			searchPath := cmp.Or(params.Path, effectiveWorkingDir)
+			effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
+			pathInput := cmp.Or(params.Path, ".")
+			toolPath := ResolveToolPath(ctx, effectiveWorkingDir, pathInput)
 
 			searchCtx, cancel := context.WithTimeout(ctx, config.GetTimeout())
 			defer cancel()
@@ -156,10 +157,16 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 			if ctxAfter > 5 {
 				ctxAfter = 5
 			}
-			result, err := runGrepSearch(searchCtx, params, searchPath, 100, ctxBefore, ctxAfter)
+			result, err := runGrepSearch(searchCtx, params, toolPath.AbsolutePath, 100, ctxBefore, ctxAfter)
 			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("error searching files: %v", err)), nil
+				return fantasy.WithResponseMetadata(
+					fantasy.NewTextErrorResponse(fmt.Sprintf("error searching files: %v", err)),
+					NewToolPathErrorMetadata(toolPath, "search_failed",
+						"Verify the search path exists. Use glob to list files before retrying."),
+				), nil
 			}
+
+			result.metadata.ToolPathMetadata = NewToolPathMetadata(toolPath)
 
 			var output strings.Builder
 			if len(result.matches) == 0 {
@@ -174,7 +181,7 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 							output.WriteString("\n")
 						}
 						lastFilePrinted = match.path
-						fmt.Fprintf(&output, "%s:\n", filepath.ToSlash(match.path))
+						fmt.Fprintf(&output, "%s:\n", FormatToolPath(match.path, effectiveWorkingDir))
 					}
 					lastPrintedLine := 0
 					for _, ctx := range match.contextBefore {

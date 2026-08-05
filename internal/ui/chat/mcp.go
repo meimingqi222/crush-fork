@@ -34,7 +34,7 @@ func (b *MCPToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *T
 	cappedWidth := toolMessageWidth(width)
 	toolNameParts := strings.SplitN(opts.ToolCall.Name, "_", 3)
 	if len(toolNameParts) != 3 {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid tool name"}, cappedWidth)
+		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid tool name"}, cappedWidth, false)
 	}
 	mcpName := humanizedToolName(toolNameParts[1])
 	toolName := humanizedToolName(toolNameParts[2])

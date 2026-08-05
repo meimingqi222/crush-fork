@@ -25,7 +25,7 @@ type HashlineEditOperation struct {
 	Line      string `json:"line,omitempty" description:"Target line reference in LINE#HASH format for replace_line, prepend, and append operations"`
 	Start     string `json:"start,omitempty" description:"Start line reference in LINE#HASH format for replace_range operations"`
 	End       string `json:"end,omitempty" description:"End line reference in LINE#HASH format for replace_range operations"`
-	Content   string `json:"content" description:"Text content to write or insert. For replace_range, this can include multiple lines"`
+	Content   string `json:"content,omitempty" description:"Text content to write or insert. For replace_range, this can include multiple lines. Omit or leave empty to delete the referenced line or range"`
 }
 
 type HashlineEditParams struct {
@@ -40,6 +40,7 @@ type HashlineEditPermissionsParams struct {
 }
 
 type HashlineEditResponseMetadata struct {
+	ToolPathMetadata
 	FilePath   string `json:"file_path,omitempty"`
 	Additions  int    `json:"additions"`
 	Removals   int    `json:"removals"`
@@ -64,10 +65,6 @@ func computeHashlineID(lineNumber int, line string) string {
 		hashlineNibbleAlphabet[(val>>4)&0x0f],
 		hashlineNibbleAlphabet[val&0x0f],
 	})
-}
-
-func formatHashlineReference(lineNumber int, line string) string {
-	return fmt.Sprintf("%d#%s", lineNumber, computeHashlineID(lineNumber, line))
 }
 
 func parseHashlineReference(reference string) (hashlineRef, error) {
@@ -98,13 +95,4 @@ func validateHashlineReference(reference hashlineRef, lines []string) (string, e
 	}
 
 	return currentHash, nil
-}
-
-func containsSignificantRune(value string) bool {
-	for _, r := range value {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return true
-		}
-	}
-	return false
 }

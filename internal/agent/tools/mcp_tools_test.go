@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,4 +60,55 @@ func TestMCPServerAllowedWithoutScopeRejectsScopedServers(t *testing.T) {
 
 	require.False(t, MCPServerAllowed(context.Background(), name))
 	require.True(t, MCPServerAllowed(context.Background(), "static-server-"+t.Name()))
+}
+
+func TestMCPToolInfoCarriesSchemaDefs(t *testing.T) {
+	t.Parallel()
+
+	// Schemas generated from zod or pydantic hoist shared shapes into $defs
+	// and reference them from properties. Dropping the definitions leaves the
+	// model (and the local validator) with an unresolvable $ref.
+	tool := &Tool{
+		mcpName: "server",
+		tool: &mcp.Tool{
+			Name:        "configure",
+			Description: "Configure the thing",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cfg": map[string]any{"$ref": "#/$defs/Cfg"},
+				},
+				"required": []any{"cfg"},
+				"$defs": map[string]any{
+					"Cfg": map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"mode": map[string]any{"type": "string"}},
+					},
+				},
+			},
+		},
+	}
+
+	info := tool.Info()
+	require.Contains(t, info.Parameters, "cfg")
+	require.Equal(t, []string{"cfg"}, info.Required)
+	require.Contains(t, info.SchemaDefs, "Cfg")
+}
+
+func TestMCPToolInfoAcceptsLegacyDefinitions(t *testing.T) {
+	t.Parallel()
+
+	tool := &Tool{
+		mcpName: "server",
+		tool: &mcp.Tool{
+			Name: "legacy",
+			InputSchema: map[string]any{
+				"type":        "object",
+				"properties":  map[string]any{"cfg": map[string]any{"$ref": "#/$defs/Cfg"}},
+				"definitions": map[string]any{"Cfg": map[string]any{"type": "object"}},
+			},
+		},
+	}
+
+	require.Contains(t, tool.Info().SchemaDefs, "Cfg")
 }

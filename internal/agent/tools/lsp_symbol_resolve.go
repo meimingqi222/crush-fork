@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
 // resolvedSymbol holds the result of resolving a symbol name to an LSP position.
@@ -86,50 +85,6 @@ func resolveSymbolResults(ctx context.Context, lspManager *lsp.Manager, symbol, 
 		return nil, fmt.Errorf("no LSP client handles any file matching '%s'", symbol)
 	}
 	return results, nil
-}
-
-// collectAffectedFiles extracts all unique file paths from a WorkspaceEdit.
-func collectAffectedFiles(edit *protocol.WorkspaceEdit) []string {
-	seen := make(map[string]struct{})
-	var files []string
-
-	for uri := range edit.Changes {
-		path, err := uri.Path()
-		if err != nil {
-			continue
-		}
-		if _, ok := seen[path]; !ok {
-			seen[path] = struct{}{}
-			files = append(files, path)
-		}
-	}
-
-	addURI := func(uri protocol.DocumentURI) {
-		path, err := uri.Path()
-		if err != nil {
-			return
-		}
-		if _, ok := seen[path]; !ok {
-			seen[path] = struct{}{}
-			files = append(files, path)
-		}
-	}
-
-	for _, change := range edit.DocumentChanges {
-		switch {
-		case change.TextDocumentEdit != nil:
-			addURI(change.TextDocumentEdit.TextDocument.URI)
-		case change.CreateFile != nil:
-			addURI(change.CreateFile.URI)
-		case change.RenameFile != nil:
-			addURI(change.RenameFile.OldURI)
-			addURI(change.RenameFile.NewURI)
-		case change.DeleteFile != nil:
-			addURI(change.DeleteFile.URI)
-		}
-	}
-
-	return files
 }
 
 // isNoIdentifierError checks if an error indicates the grep match was not

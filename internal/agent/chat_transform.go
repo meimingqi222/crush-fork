@@ -50,6 +50,13 @@ type chatRequestState struct {
 	PromptSuffix     string
 	TransformChanged bool
 	EstimateReduced  bool
+	// Segment token breakdown for diagnostics.
+	SystemPromptTokens int64
+	ToolSchemaTokens   int64
+	PriorHistoryTokens int64
+	CurrentUserTokens  int64
+	PromptPrefixTokens int64
+	PromptSuffixTokens int64
 }
 
 type chatRequestStateInput struct {
@@ -319,7 +326,13 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 		TransformChanged: !reflect.DeepEqual(transformedMessages, input.Messages) ||
 			systemPrompt != input.SystemPrompt ||
 			promptPrefix != input.PromptPrefix,
-		EstimateReduced: transformedEstimate < originalEstimate,
+		EstimateReduced:    transformedEstimate < originalEstimate,
+		SystemPromptTokens: systemPromptTokens,
+		ToolSchemaTokens:   toolSchemaTokens,
+		PriorHistoryTokens: historyTokens,
+		CurrentUserTokens:  userTokens,
+		PromptPrefixTokens: promptPrefixTokens,
+		PromptSuffixTokens: promptSuffixTokens,
 	}, nil
 }
 

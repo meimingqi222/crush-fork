@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	_ "embed"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/permission"
 )
 
@@ -27,6 +25,13 @@ type DownloadPermissionsParams struct {
 	URL      string `json:"url"`
 	FilePath string `json:"file_path"`
 	Timeout  int    `json:"timeout,omitempty"`
+}
+
+type DownloadResponseMetadata struct {
+	ToolPathMetadata
+	FilePath    string `json:"file_path"`
+	Bytes       int64  `json:"bytes"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 const DownloadToolName = "download"
@@ -54,12 +59,9 @@ func NewDownloadTool(permissions permission.Service, workingDir string, client *
 				return fantasy.NewTextErrorResponse("URL must start with http:// or https://"), nil
 			}
 
-			// Use session-specific working directory from context if available.
-			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
-
-			filePath := filepathext.SmartJoin(effectiveWorkingDir, params.FilePath)
-			relPath, _ := filepath.Rel(effectiveWorkingDir, filePath)
-			relPath = filepath.ToSlash(cmp.Or(relPath, filePath))
+			effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
+			path := ResolveToolPath(ctx, effectiveWorkingDir, params.FilePath)
+			filePath := path.AbsolutePath
 
 			sessionID := GetSessionFromContext(ctx)
 			if sessionID == "" {
@@ -148,11 +150,19 @@ func NewDownloadTool(permissions permission.Service, workingDir string, client *
 			}
 
 			contentType := resp.Header.Get("Content-Type")
-			responseMsg := fmt.Sprintf("Successfully downloaded %d bytes to %s", bytesWritten, relPath)
+			responseMsg := fmt.Sprintf("Successfully downloaded %d bytes to %s", bytesWritten, path.DisplayPath)
 			if contentType != "" {
 				responseMsg += fmt.Sprintf(" (Content-Type: %s)", contentType)
 			}
 
-			return fantasy.NewTextResponse(responseMsg), nil
+			return fantasy.WithResponseMetadata(
+				fantasy.NewTextResponse(responseMsg),
+				DownloadResponseMetadata{
+					ToolPathMetadata: NewToolPathMetadata(path),
+					FilePath:         filePath,
+					Bytes:            bytesWritten,
+					ContentType:      contentType,
+				},
+			), nil
 		})
 }

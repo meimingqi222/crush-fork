@@ -34,6 +34,7 @@ type DescribeImagePermissionsParams struct {
 }
 
 type DescribeImageResponseMetadata struct {
+	ToolPathMetadata
 	Path       string `json:"path,omitempty"`
 	MessageID  string `json:"message_id,omitempty"`
 	ImageIndex int    `json:"image_index,omitempty"`
@@ -56,9 +57,10 @@ func NewDescribeImageTool(permissions permission.Service, workingDir string) fan
 				return fantasy.NewTextErrorResponse("No vision helper model is configured. Set a \"vision\" model in crush.json to enable image descriptions."), nil
 			}
 
-			effectiveWorkingDir := GetWorkingDirFromContext(ctx)
-			if effectiveWorkingDir == "" {
-				effectiveWorkingDir = workingDir
+			effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
+			var toolPath ToolPath
+			if params.Path != "" && params.MessageID == "" {
+				toolPath = ResolveToolPath(ctx, effectiveWorkingDir, params.Path)
 			}
 
 			sessionID := GetSessionFromContext(ctx)
@@ -68,9 +70,7 @@ func NewDescribeImageTool(permissions permission.Service, workingDir string) fan
 
 			filePath := params.Path
 			if params.MessageID == "" {
-				if !filepath.IsAbs(filePath) {
-					filePath = filepath.Join(effectiveWorkingDir, filePath)
-				}
+				filePath = toolPath.AbsolutePath
 
 				absWorkingDir, err := filepath.Abs(effectiveWorkingDir)
 				if err != nil {
@@ -128,6 +128,9 @@ func NewDescribeImageTool(permissions permission.Service, workingDir string) fan
 				Path:       image.path,
 				MessageID:  image.messageID,
 				ImageIndex: image.imageIndex,
+			}
+			if toolPath.AbsolutePath != "" {
+				meta.ToolPathMetadata = NewToolPathMetadata(toolPath)
 			}
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextResponse(description),

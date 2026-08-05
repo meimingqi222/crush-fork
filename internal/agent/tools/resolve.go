@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -34,6 +33,7 @@ type ResolveParams struct {
 
 // ResolveMetadata is attached to tool responses for UI rendering.
 type ResolveMetadata struct {
+	ToolPathMetadata
 	Action       string `json:"action"`
 	Reason       string `json:"reason,omitempty"`
 	Title        string `json:"title,omitempty"`
@@ -66,6 +66,13 @@ func NewResolveTool(sessions session.Service) fantasy.AgentTool {
 			if planPath == "" {
 				return fantasy.NewTextErrorResponse("No active plan file is set for this session."), nil
 			}
+			workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
+			if workspaceRoot == "" {
+				workspaceRoot = EffectiveWorkingDir(ctx, "")
+			}
+			planPathContext := ResolveToolPath(ctx, workspaceRoot, planPath)
+			planPath = planPathContext.AbsolutePath
+
 			data, err := os.ReadFile(planPath)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to read plan file: %w", err)
@@ -74,10 +81,6 @@ func NewResolveTool(sessions session.Service) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse("The active plan file is empty. Write the final plan before calling resolve."), nil
 			}
 
-			workspaceRoot := strings.TrimSpace(sess.WorkspaceCWD)
-			if workspaceRoot == "" {
-				workspaceRoot = cmp.Or(GetWorkingDirFromContext(ctx), "")
-			}
 			title := strings.TrimSpace(params.Extra.Title)
 			if title == "" {
 				return fantasy.NewTextErrorResponse("resolve requires extra.title to be a non-empty plan slug (e.g. 'auth-refactor')."), nil
@@ -91,18 +94,19 @@ func NewResolveTool(sessions session.Service) fantasy.AgentTool {
 			}
 
 			metadata, err := json.Marshal(ResolveMetadata{
-				Action:       params.Action,
-				Reason:       params.Reason,
-				Title:        params.Extra.Title,
-				PlanFilePath: planPath,
+				ToolPathMetadata: NewToolPathMetadata(planPathContext),
+				Action:           params.Action,
+				Reason:           params.Reason,
+				Title:            params.Extra.Title,
+				PlanFilePath:     planPathContext.DisplayPath,
 			})
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to encode resolve metadata: %w", err)
 			}
 
-			content := fmt.Sprintf("Plan submitted for review. Plan file: %s", planPath)
+			content := fmt.Sprintf("Plan submitted for review. Plan file: %s", planPathContext.DisplayPath)
 			if params.Extra.Title != "" {
-				content = fmt.Sprintf("Plan '%s' submitted for review. Plan file: %s", params.Extra.Title, planPath)
+				content = fmt.Sprintf("Plan '%s' submitted for review. Plan file: %s", params.Extra.Title, planPathContext.DisplayPath)
 			}
 
 			return fantasy.ToolResponse{

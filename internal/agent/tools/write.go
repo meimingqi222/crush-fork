@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	_ "embed"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/diff"
-	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
@@ -37,6 +35,7 @@ type WritePermissionsParams struct {
 }
 
 type WriteResponseMetadata struct {
+	ToolPathMetadata
 	FilePath  string `json:"file_path,omitempty"`
 	Diff      string `json:"diff"`
 	Additions int    `json:"additions"`
@@ -67,15 +66,15 @@ func NewWriteTool(
 				return fantasy.ToolResponse{}, fmt.Errorf("session_id is required")
 			}
 
-			// Use session-specific working directory from context if available.
-			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
+			effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
 
 			resolvedPath, err := resolveLocalPlanURI(ctx, params.FilePath, effectiveWorkingDir)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
 
-			filePath := filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
+			path := ResolveToolPath(ctx, effectiveWorkingDir, resolvedPath)
+			filePath := path.AbsolutePath
 			if response, blocked, guardErr := enforcePlanModeWriteTarget(ctx, filePath); blocked || guardErr != nil {
 				return response, guardErr
 			}
@@ -94,7 +93,11 @@ func NewWriteTool(
 			fileInfo, err := clientfs.Stat(ctx, filePath)
 			if err == nil {
 				if fileInfo.IsDir() {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Path is a directory, not a file: %s. Use the 'read' tool to list directory contents.", filePath)), nil
+					message := fmt.Sprintf("Path is a directory, not a file: %s. Use the 'read' tool to list directory contents.", path.DisplayPath)
+					return fantasy.WithResponseMetadata(
+						fantasy.NewTextErrorResponse(message),
+						NewToolPathErrorMetadata(path, "directory_not_file", "Use read on the directory to inspect its contents."),
+					), nil
 				}
 
 				oldContent, readErr := clientfs.ReadFile(ctx, filePath)
@@ -102,7 +105,10 @@ func NewWriteTool(
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("File %s already contains the exact content. No changes made.", filePath)), nil
 				}
 			} else if !os.IsNotExist(err) {
-				return fantasy.ToolResponse{}, fmt.Errorf("error checking file: %w", err)
+				return fantasy.WithResponseMetadata(
+					fantasy.NewTextErrorResponse(fmt.Sprintf("error checking file: %v", err)),
+					NewToolPathErrorMetadata(path, "stat_failed", "Verify the parent directory and path before retrying."),
+				), nil
 			}
 
 			oldContent := ""
@@ -180,14 +186,15 @@ func NewWriteTool(
 
 			notifyLSPs(ctx, lspManager, params.FilePath)
 
-			result := fmt.Sprintf("File successfully written: %s", filePath)
+			result := fmt.Sprintf("File successfully written: %s", path.DisplayPath)
 			result = fmt.Sprintf("<result>\n%s\n</result>", result)
 			result += getDiagnostics(filePath, lspManager)
 			metadata := WriteResponseMetadata{
-				FilePath:  filePath,
-				Diff:      diff,
-				Additions: additions,
-				Removals:  removals,
+				ToolPathMetadata: NewToolPathMetadata(path),
+				FilePath:         filePath,
+				Diff:             diff,
+				Additions:        additions,
+				Removals:         removals,
 			}
 			if current, ok := clientfs.MetadataFor(ctx, filePath); ok {
 				metadata.SourceURI = current.SourceURI

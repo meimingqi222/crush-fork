@@ -822,8 +822,12 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 
 	// Skip invalid tool calls - create error result (not critical)
 	if toolCall.Invalid {
+		validationError := toolCall.ValidationError
+		if safeError, ok := validationError.(*toolValidationError); ok {
+			validationError = errors.New(safeError.ModelSafeMessage())
+		}
 		result.Result = ToolResultOutputContentError{
-			Error: toolCall.ValidationError,
+			Error: validationError,
 		}
 		if toolResultCallback != nil {
 			_ = toolResultCallback(result)
@@ -1262,6 +1266,9 @@ func (a *agent) prepareTools(tools []AgentTool, providerDefinedTools []ProviderD
 			"type":       "object",
 			"properties": info.Parameters,
 			"required":   info.Required,
+		}
+		if len(info.SchemaDefs) > 0 {
+			inputSchema["$defs"] = info.SchemaDefs
 		}
 		schema.Normalize(inputSchema)
 		preparedTools = append(preparedTools, FunctionTool{

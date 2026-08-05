@@ -23,10 +23,16 @@ const YieldToolName = "yield"
 
 // YieldParams is the input for the yield tool.
 type YieldParams struct {
-	Status  string          `json:"status" description:"Terminal status: completed, completed_with_warnings, failed, canceled, or blocked"`
-	Data    string          `json:"data,omitempty" description:"The complete result text to submit to the parent agent. Required unless status is failed or blocked."`
-	Error   string          `json:"error,omitempty" description:"The error message. Required if status is failed or blocked."`
-	Payload json.RawMessage `json:"payload,omitempty" description:"Optional structured JSON payload. This must conform to the expected schema if OutputSchema is defined."`
+	Status string `json:"status" description:"Terminal status: completed, completed_with_warnings, failed, canceled, or blocked"`
+	Data   string `json:"data,omitempty" description:"The complete result text to submit to the parent agent. Required unless status is failed or blocked."`
+	Error  string `json:"error,omitempty" description:"The error message. Required if status is failed or blocked."`
+	// Payload is declared as `any` (not json.RawMessage) on purpose: the tool
+	// input schema is reflected from this struct, and json.RawMessage is a
+	// []byte, which reflects to {"type":"array","items":{"type":"integer"}}.
+	// That made the advertised schema contradict the output schema injected
+	// into the system prompt, so every structured yield failed validation at
+	// least once. `any` reflects to {"type":"object"}.
+	Payload any `json:"payload,omitempty" description:"Optional structured JSON object. This must conform to the expected output schema if OutputSchema is defined."`
 }
 
 // YieldOption configures optional behavior for the yield tool.
@@ -82,6 +88,7 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 			status := strings.TrimSpace(params.Status)
 			data := strings.TrimSpace(params.Data)
 			errVal := strings.TrimSpace(params.Error)
+			payload := normalizeYieldPayload(params.Payload)
 
 			sessionID := strings.TrimSpace(GetSessionFromContext(ctx))
 			if sessionID != "" && messages != nil {
@@ -115,19 +122,19 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 			if (status == string(message.ToolResultSubtaskStatusFailed) || status == string(message.ToolResultSubtaskStatusBlocked)) && errVal == "" {
 				return fantasy.NewTextErrorResponse("error is required for failed and blocked statuses"), nil
 			}
-			if (status != string(message.ToolResultSubtaskStatusFailed) && status != string(message.ToolResultSubtaskStatusBlocked)) && data == "" && len(params.Payload) == 0 {
+			if (status != string(message.ToolResultSubtaskStatusFailed) && status != string(message.ToolResultSubtaskStatusBlocked)) && data == "" && len(payload) == 0 {
 				return fantasy.NewTextErrorResponse("data or payload is required for successful statuses"), nil
 			}
 
 			// Validate payload against output schema if configured.
-			if compiledSchema != nil && len(params.Payload) > 0 {
+			if compiledSchema != nil && len(payload) > 0 {
 				validationAttemptsMu.Lock()
 				attempts := validationAttempts[sessionID]
 				validationAttempts[sessionID] = attempts + 1
 				validationAttemptsMu.Unlock()
 
 				var dataValue any
-				if unmarshalErr := json.Unmarshal(params.Payload, &dataValue); unmarshalErr != nil {
+				if unmarshalErr := json.Unmarshal(payload, &dataValue); unmarshalErr != nil {
 					if attempts < maxSchemaRetries {
 						remaining := maxSchemaRetries - attempts
 						return fantasy.NewTextErrorResponse(
@@ -140,8 +147,8 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 					if !result.IsValid() {
 						// Try to auto-repair the payload (inject missing required
 						// string fields, remove unrecognized fields, coerce types).
-						if repaired, repairErr := repairPayloadAgainstSchema(params.Payload, cfg.outputSchema); repairErr == nil && repaired != nil {
-							params.Payload = repaired
+						if repaired, repairErr := repairPayloadAgainstSchema(payload, cfg.outputSchema); repairErr == nil && repaired != nil {
+							payload = repaired
 							// Re-validate the repaired payload.
 							var repairedValue any
 							if json.Unmarshal(repaired, &repairedValue) == nil {
@@ -184,7 +191,7 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 				Data:    data,
 				Status:  status,
 				Error:   errVal,
-				Payload: params.Payload,
+				Payload: payload,
 			}).Metadata
 
 			// Signal the agent loop to terminate immediately after this tool call.
@@ -192,6 +199,42 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 			return response, nil
 		},
 	)
+}
+
+// normalizeYieldPayload converts the decoded payload argument into raw JSON.
+// Models sometimes send the payload as a JSON-encoded string instead of an
+// object; in that case the string is decoded so schema validation sees the
+// structure rather than a string. Returns nil when there is no payload.
+func normalizeYieldPayload(value any) json.RawMessage {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return nil
+		}
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var decoded any
+			if json.Unmarshal([]byte(trimmed), &decoded) == nil {
+				return json.RawMessage(trimmed)
+			}
+		}
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		return encoded
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		if string(encoded) == "null" {
+			return nil
+		}
+		return encoded
+	}
 }
 
 // repairPayloadAgainstSchema attempts to fix a JSON payload that failed schema

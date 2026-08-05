@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -604,10 +605,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// subsequent turns of the same session can benefit from server-side
 	// prompt caching (xAI Grok, OpenAI o-series, etc.). Using the session ID
 	// as the cache key ensures a stable prefix across turns.
+	//
+	// The API limits prompt_cache_key to 64 characters. Subagent session IDs
+	// use the compound format "messageID$$toolCallID" and can exceed this
+	// limit, so we hash them with SHA-256 (hex digest = 64 chars exactly)
+	// when they're too long.
 	if call.SessionID != "" && call.ProviderOptions != nil {
 		if opts, ok := call.ProviderOptions[openai.Name]; ok {
 			if respOpts, ok := opts.(*openai.ResponsesProviderOptions); ok && respOpts.PromptCacheKey == nil {
 				cacheKey := call.SessionID
+				if len(cacheKey) > 64 {
+					h := sha256.Sum256([]byte(cacheKey))
+					cacheKey = hex.EncodeToString(h[:])
+				}
 				respOpts.PromptCacheKey = &cacheKey
 			}
 		}
@@ -1703,6 +1713,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			OnToolResult: func(result fantasy.ToolResultContent) error {
 				callbackStarted := time.Now()
 				toolResult := a.convertToToolResult(genCtx, result)
+				if toolResult.IsError {
+					slog.Warn("Tool execution failed",
+						"session_id", currentAssistant.SessionID,
+						"tool_call_id", toolResult.ToolCallID,
+						"tool_name", toolResult.Name,
+						"error", redactSecrets(toolResult.Content),
+					)
+				}
 				if sanitizedToolCalls[result.ToolCallID] {
 					toolResult.Content = "Tool call failed: arguments were not valid JSON. Please check your tool call format and try again."
 					toolResult.IsError = true
@@ -1857,6 +1875,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					EstimatedPromptTokens: estimatedPromptTokens,
 					UsageEstimated:        estimated,
 					PreparedMessageCount:  len(stepMessages),
+					SystemPromptTokens:    requestState.SystemPromptTokens,
+					ToolSchemaTokens:      requestState.ToolSchemaTokens,
+					PriorHistoryTokens:    requestState.PriorHistoryTokens,
+					CurrentUserTokens:     requestState.CurrentUserTokens,
+					PromptPrefixTokens:    requestState.PromptPrefixTokens,
+					PromptSuffixTokens:    requestState.PromptSuffixTokens,
 				})
 				slog.Debug("Updated assistant usage from provider response",
 					"session_id", call.SessionID,

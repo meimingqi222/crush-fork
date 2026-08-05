@@ -130,6 +130,14 @@ func (f *Fork) HandleMsg(msg tea.Msg) Action {
 			f.list.SetSelected(0)
 			return ActionCmd{cmd}
 		}
+	case tea.PasteMsg:
+		var cmd tea.Cmd
+		f.input, cmd = f.input.Update(msg)
+		value := f.input.Value()
+		f.list.SetFilter(value)
+		f.list.ScrollToTop()
+		f.list.SetSelected(0)
+		return ActionCmd{cmd}
 	}
 	return nil
 }

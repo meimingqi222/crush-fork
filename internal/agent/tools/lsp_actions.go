@@ -1,11 +1,9 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	_ "embed"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -24,10 +22,7 @@ func lspClientForFile(ctx context.Context, lspManager *lsp.Manager, filePath str
 		return nil, "", fantasy.NewTextErrorResponse("no LSP clients available"), false
 	}
 
-	absPath, err := filepath.Abs(filepath.FromSlash(filePath))
-	if err != nil {
-		return nil, "", fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get absolute path: %s", err)), false
-	}
+	absPath := ResolveToolPath(ctx, "", filePath).AbsolutePath
 	openInLSPs(ctx, lspManager, absPath)
 	client := firstHandlingClient(lspManager, absPath)
 	if client == nil {
@@ -44,7 +39,7 @@ func requestLSPWritePermission(ctx context.Context, permissions permission.Servi
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
 	}
-	effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
+	effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
 	permissionResponse, err := RequestPermission(ctx, permissions,
 		permission.CreatePermissionRequest{
 			SessionID:   sessionID,

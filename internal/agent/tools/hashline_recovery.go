@@ -20,9 +20,8 @@ func alignLinesLCS(base, ours []string) []int {
 		return baseToOurs
 	}
 
-	// Guard against large files to avoid memory pressure of O(M*N) matrix.
 	if m*n > maxLCSMatrixSize {
-		return baseToOurs
+		return alignLinesGreedy(base, ours)
 	}
 
 	dp := make([][]int, m+1)
@@ -55,36 +54,60 @@ func alignLinesLCS(base, ours []string) []int {
 	return baseToOurs
 }
 
+func alignLinesGreedy(base, ours []string) []int {
+	mapping := make([]int, len(base)+1)
+	positions := make(map[string][]int)
+	for index, line := range ours {
+		positions[line] = append(positions[line], index+1)
+	}
+	searchStart := 1
+	for baseIndex, baseLine := range base {
+		candidates := positions[baseLine]
+		for _, candidate := range candidates {
+			if candidate < searchStart {
+				continue
+			}
+			mapping[baseIndex+1] = candidate
+			searchStart = candidate + 1
+			break
+		}
+	}
+	return mapping
+}
+
 // tryRecoverHashline attempts to apply the hashline operations to current disk lines (ours)
 // using an LCS-aligned mapping against the memory read cache (base) of the current session.
 // Fuzz factor is strictly 0: any mismatch on modified/deleted target lines will fail and throw a conflict.
 func tryRecoverHashline(sessionID, filePath string, oursLines []string, operations []HashlineEditOperation) ([]string, error) {
-	baseLines, ok := GlobalFileCache.Get(sessionID, filePath)
+	snapshots, ok := GlobalFileCache.GetHistory(sessionID, filePath)
 	if !ok {
 		return nil, fmt.Errorf("read snapshot not found in memory cache")
 	}
 
-	// 1. Dry run parse operations against the original Base content.
-	// Since operations are constructed targeting Base, this parse must succeed if the input is valid.
+	var lastErr error
+	for index := len(snapshots) - 1; index >= 0; index-- {
+		newLines, err := recoverHashlineFromSnapshot(snapshots[index], oursLines, operations)
+		if err == nil {
+			return newLines, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func recoverHashlineFromSnapshot(baseLines, oursLines []string, operations []HashlineEditOperation) ([]string, error) {
 	parsedOps, err := parseHashlineOperations(operations, baseLines)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse operations against base snapshot: %w", err)
 	}
 
-	// 2. Perform LCS alignment between Base and Ours to find shifts.
 	baseToOurs := alignLinesLCS(baseLines, oursLines)
-
-	// 3. Map Base target lines to current Ours target lines.
 	mappedOps := make([]parsedHashlineOperation, len(parsedOps))
 	for idx, op := range parsedOps {
-		mappedOp := parsedHashlineOperation{
-			Operation:    op.Operation,
-			ContentLines: op.ContentLines,
-		}
-
+		mappedOp := parsedHashlineOperation{Operation: op.Operation, ContentLines: op.ContentLines}
 		switch op.Operation {
-		case hashlineEditOpReplaceLine:
-			if op.Line.Line < 0 || op.Line.Line >= len(baseToOurs) {
+		case hashlineEditOpReplaceLine, hashlineEditOpPrepend, hashlineEditOpAppend:
+			if op.Line.Line < 1 || op.Line.Line >= len(baseToOurs) {
 				return nil, fmt.Errorf("target line %d is out of bounds (hash mismatch)", op.Line.Line)
 			}
 			mappedLine := baseToOurs[op.Line.Line]
@@ -92,51 +115,28 @@ func tryRecoverHashline(sessionID, filePath string, oursLines []string, operatio
 				return nil, fmt.Errorf("target line %d has been modified or deleted by another change (hash mismatch)", op.Line.Line)
 			}
 			mappedOp.Line = hashlineRef{Line: mappedLine, Hash: op.Line.Hash}
-
 		case hashlineEditOpReplaceRange:
-			if op.Start.Line < 0 || op.Start.Line >= len(baseToOurs) || op.End.Line < 0 || op.End.Line >= len(baseToOurs) {
+			if op.Start.Line < 1 || op.Start.Line >= len(baseToOurs) || op.End.Line < 1 || op.End.Line >= len(baseToOurs) {
 				return nil, fmt.Errorf("range boundary lines %d-%d are out of bounds (hash mismatch)", op.Start.Line, op.End.Line)
 			}
-			startMapped := baseToOurs[op.Start.Line]
-			endMapped := baseToOurs[op.End.Line]
-			if startMapped == 0 || endMapped == 0 {
-				return nil, fmt.Errorf("range boundary lines %d-%d have been modified or deleted by another change (hash mismatch)", op.Start.Line, op.End.Line)
+			startMapped, endMapped := baseToOurs[op.Start.Line], baseToOurs[op.End.Line]
+			if startMapped == 0 || endMapped == 0 || endMapped-startMapped != op.End.Line-op.Start.Line {
+				return nil, fmt.Errorf("range %d-%d has been modified or split (hash mismatch)", op.Start.Line, op.End.Line)
 			}
-			// Strict continuity: mapped range must not have changed its size
-			if endMapped-startMapped != op.End.Line-op.Start.Line {
-				return nil, fmt.Errorf("range %d-%d has split or mutated structurally in current disk content (hash mismatch)", op.Start.Line, op.End.Line)
-			}
-			// Verify that every single line inside the range remains unchanged and continuous
 			for line := op.Start.Line; line <= op.End.Line; line++ {
-				if line < 0 || line >= len(baseToOurs) {
-					return nil, fmt.Errorf("range %d-%d contains out of bounds line %d (hash mismatch)", op.Start.Line, op.End.Line, line)
-				}
-				expected := startMapped + (line - op.Start.Line)
-				if baseToOurs[line] != expected {
-					return nil, fmt.Errorf("range %d-%d contains lines mutated by another change (hash mismatch)", op.Start.Line, op.End.Line)
+				if baseToOurs[line] != startMapped+line-op.Start.Line {
+					return nil, fmt.Errorf("range %d-%d contains modified lines (hash mismatch)", op.Start.Line, op.End.Line)
 				}
 			}
 			mappedOp.Start = hashlineRef{Line: startMapped, Hash: op.Start.Hash}
 			mappedOp.End = hashlineRef{Line: endMapped, Hash: op.End.Hash}
-
-		case hashlineEditOpPrepend, hashlineEditOpAppend:
-			if op.Line.Line < 0 || op.Line.Line >= len(baseToOurs) {
-				return nil, fmt.Errorf("target line %d is out of bounds (hash mismatch)", op.Line.Line)
-			}
-			mappedLine := baseToOurs[op.Line.Line]
-			if mappedLine == 0 {
-				return nil, fmt.Errorf("anchor line %d for %s has been modified or deleted by another change (hash mismatch)", op.Line.Line, op.Operation)
-			}
-			mappedOp.Line = hashlineRef{Line: mappedLine, Hash: op.Line.Hash}
 		}
 		mappedOps[idx] = mappedOp
 	}
 
-	// 4. Apply the mapped operations to Ours.
 	newLines, err := applyHashlineOperations(oursLines, mappedOps)
 	if err != nil {
 		return nil, fmt.Errorf("conflict applying recovered operations: %w", err)
 	}
-
 	return newLines, nil
 }

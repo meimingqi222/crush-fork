@@ -96,6 +96,14 @@ func (g *Goal) HandleMsg(msg tea.Msg) Action {
 			}
 			return ActionCmd{Cmd: cmd}
 		}
+	case tea.PasteMsg:
+		var cmd tea.Cmd
+		if g.focus == 0 {
+			g.objective, cmd = g.objective.Update(msg)
+		} else {
+			g.budget, cmd = g.budget.Update(msg)
+		}
+		return ActionCmd{Cmd: cmd}
 	}
 	return nil
 }

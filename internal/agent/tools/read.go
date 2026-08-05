@@ -23,7 +23,6 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/imageutil"
@@ -51,6 +50,7 @@ const (
 )
 
 type ReadResponseMetadata struct {
+	ToolPathMetadata
 	Path                string           `json:"path"`
 	Content             string           `json:"content"`
 	Hashline            bool             `json:"hashline,omitempty"`
@@ -65,6 +65,7 @@ type ReadResponseMetadata struct {
 	RecoveryAction      string           `json:"recovery_action,omitempty"`
 	FallbackTool        string           `json:"fallback_tool,omitempty"`
 	FallbackToolQuery   string           `json:"fallback_tool_query,omitempty"`
+	ErrorKind           string           `json:"error_kind,omitempty"`
 	IsDirectory         bool             `json:"is_directory,omitempty"`
 	IsURL               bool             `json:"is_url,omitempty"`
 	TotalLines          int              `json:"total_lines,omitempty"`
@@ -410,16 +411,15 @@ func handleFileRead(
 	lsConfig config.ToolLs,
 	skillsPaths ...string,
 ) (fantasy.ToolResponse, error) {
-	// Use session-specific working directory from context if available.
-	effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
+	effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
 
 	resolvedPath, err := resolveLocalPlanURI(ctx, params.Path, effectiveWorkingDir)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
 
-	// Handle relative paths.
-	filePath := filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
+	toolPath := ResolveToolPath(ctx, effectiveWorkingDir, resolvedPath)
+	filePath := toolPath.AbsolutePath
 
 	// Check if file is outside working directory and request permission if needed.
 	absWorkingDir, err := filepath.Abs(effectiveWorkingDir)
@@ -495,9 +495,15 @@ func handleFileRead(
 					message += fmt.Sprintf("\n- Read parent directory: %s", parentDir)
 				}
 				message += "\n- Search symbol/content with grep before retrying read"
+				missingMetadata := newMissingReadMetadata(advice, suggestions, effectiveWorkingDir)
+				missingMetadata.ErrorKind = "path_not_found"
+				if hint := DuplicateWorkingDirPrefixHint(params.Path, effectiveWorkingDir); hint != "" {
+					message += "\n- " + hint
+					missingMetadata.PrefixHint = hint
+				}
 				return fantasy.WithResponseMetadata(
 					fantasy.NewTextErrorResponse(message),
-					newMissingReadMetadata(advice, suggestions),
+					missingMetadata,
 				), nil
 			}
 		}
@@ -512,7 +518,12 @@ func handleFileRead(
 		if lsErr != nil {
 			return fantasy.NewTextErrorResponse(lsErr.Error()), nil
 		}
-		meta := ReadResponseMetadata{Path: filePath, Content: out, IsDirectory: true}
+		meta := ReadResponseMetadata{
+			ToolPathMetadata: NewToolPathMetadata(toolPath),
+			Path:             filePath,
+			Content:          out,
+			IsDirectory:      true,
+		}
 		meta.applyRecovery(recovery)
 		if notice := recovery.notice(absWorkingDir); notice != "" {
 			out = notice + "\n\n" + out
@@ -548,7 +559,10 @@ func handleFileRead(
 				if descErr != nil {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to describe image: %v", descErr)), nil
 				}
-				meta := ReadResponseMetadata{Path: filePath}
+				meta := ReadResponseMetadata{
+					ToolPathMetadata: NewToolPathMetadata(toolPath),
+					Path:             filePath,
+				}
 				applyClientFSReadMetadata(ctx, filePath, &meta)
 				meta.applyRecovery(recovery)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(desc), meta), nil
@@ -575,7 +589,10 @@ func handleFileRead(
 			}
 		}
 
-		meta := ReadResponseMetadata{Path: filePath}
+		meta := ReadResponseMetadata{
+			ToolPathMetadata: NewToolPathMetadata(toolPath),
+			Path:             filePath,
+		}
 		applyClientFSReadMetadata(ctx, filePath, &meta)
 		meta.applyRecovery(recovery)
 		return fantasy.WithResponseMetadata(fantasy.NewImageResponse(result.Data, result.MimeType), meta), nil
@@ -602,8 +619,9 @@ func handleFileRead(
 			}
 			msg := fmt.Sprintf("Line %d is beyond end of file (%d lines total). %s.", readOffset+1, readResult.Total, suggestion)
 			meta := ReadResponseMetadata{
-				Path:       filePath,
-				TotalLines: readResult.Total,
+				ToolPathMetadata: NewToolPathMetadata(toolPath),
+				Path:             filePath,
+				TotalLines:       readResult.Total,
 			}
 			return fantasy.WithResponseMetadata(
 				fantasy.NewTextErrorResponse(msg),
@@ -661,10 +679,11 @@ func handleFileRead(
 	filetracker.RecordRead(ctx, sessionID, filePath)
 
 	meta := ReadResponseMetadata{
-		Path:      filePath,
-		Content:   content,
-		Hashline:  useHashline,
-		StartLine: readOffset + 1,
+		ToolPathMetadata: NewToolPathMetadata(toolPath),
+		Path:             filePath,
+		Content:          content,
+		Hashline:         useHashline,
+		StartLine:        readOffset + 1,
 	}
 	applyClientFSReadMetadata(ctx, filePath, &meta)
 	if readResult.TotalKnown {
@@ -694,9 +713,11 @@ type missingReadAdvice struct {
 	SuggestedParentDirs []string
 }
 
-func newMissingReadMetadata(advice missingReadAdvice, suggestions []string) ReadResponseMetadata {
+func newMissingReadMetadata(advice missingReadAdvice, suggestions []string, workingDir string) ReadResponseMetadata {
 	recoveryAvailable := false
+	path := ResolveToolPath(context.Background(), workingDir, advice.MissingPath)
 	metadata := ReadResponseMetadata{
+		ToolPathMetadata:    NewToolPathMetadata(path),
 		Path:                advice.MissingPath,
 		MissingPath:         advice.MissingPath,
 		SuggestedGlobs:      advice.SuggestedGlobs,

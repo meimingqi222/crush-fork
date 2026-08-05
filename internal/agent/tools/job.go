@@ -53,6 +53,7 @@ type JobParams struct {
 
 // JobResponseMetadata is the unified metadata for job output/wait responses.
 type JobResponseMetadata struct {
+	ToolPathMetadata
 	ShellID          string `json:"shell_id"`
 	Command          string `json:"command"`
 	Description      string `json:"description"`
@@ -82,6 +83,7 @@ func NewJobTool() fantasy.AgentTool {
 			case "output":
 				result, meta := formatJobToolResponse(bgShell, params.ShellID)
 				metadata := JobResponseMetadata{
+					ToolPathMetadata: NewCommandToolPathMetadata(EffectiveWorkingDir(ctx, ""), meta.WorkingDirectory, meta.WorkingDirectory),
 					ShellID:          meta.ShellID,
 					Command:          meta.Command,
 					Description:      meta.Description,
@@ -125,6 +127,7 @@ func NewJobTool() fantasy.AgentTool {
 					)
 				}
 				metadata := JobResponseMetadata{
+					ToolPathMetadata: NewCommandToolPathMetadata(EffectiveWorkingDir(ctx, ""), meta.WorkingDirectory, meta.WorkingDirectory),
 					ShellID:          meta.ShellID,
 					Command:          meta.Command,
 					Description:      meta.Description,

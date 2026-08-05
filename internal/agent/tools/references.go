@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -26,10 +25,7 @@ type ReferencesParams struct {
 const ReferencesToolName = "lsp_references"
 
 func find(ctx context.Context, lspManager *lsp.Manager, symbol string, match grepMatch) ([]protocol.Location, error) {
-	absPath, err := filepath.Abs(match.path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path: %s", err)
-	}
+	absPath := ResolveToolPath(ctx, "", match.path).AbsolutePath
 
 	var client *lsp.Client
 	for c := range lspManager.Clients().Seq() {
@@ -101,7 +97,7 @@ func groupByFilename(locations []protocol.Location) map[string][]protocol.Locati
 	return files
 }
 
-func formatReferences(locations []protocol.Location) string {
+func formatReferences(locations []protocol.Location, workingDir string) string {
 	fileRefs := groupByFilename(locations)
 	files := slices.Collect(maps.Keys(fileRefs))
 	sort.Strings(files)
@@ -111,7 +107,7 @@ func formatReferences(locations []protocol.Location) string {
 
 	for _, file := range files {
 		refs := fileRefs[file]
-		fmt.Fprintf(&output, "%s (%d reference(s)):\n", file, len(refs))
+		fmt.Fprintf(&output, "%s (%d reference(s)):\n", FormatToolPath(file, workingDir), len(refs))
 		for _, ref := range refs {
 			line := ref.Range.Start.Line + 1
 			char := ref.Range.Start.Character + 1

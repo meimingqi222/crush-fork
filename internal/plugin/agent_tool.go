@@ -147,31 +147,72 @@ type customAgentTool struct {
 }
 
 func NewCustomToolAgentTool(def ToolDefinition, workingDir string) fantasy.AgentTool {
+	properties, required := normalizeToolParameters(def.Parameters)
 	return &customAgentTool{
 		info: fantasy.ToolInfo{
 			Name:        def.Name,
 			Description: def.Description,
-			Parameters:  normalizeToolParameters(def.Parameters),
+			Parameters:  properties,
+			Required:    required,
 		},
 		def:        def,
 		defaultDir: workingDir,
 	}
 }
 
-func normalizeToolParameters(parameters any) map[string]any {
+// normalizeToolParameters converts a tool definition's parameters into the
+// property map and required list that [fantasy.ToolInfo] expects.
+//
+// Tool definitions declare parameters as a full JSON Schema object
+// (`{"type": "object", "properties": {...}, "required": [...]}`), but
+// ToolInfo.Parameters is only the property map. Passing the wrapper through
+// unchanged advertises three phantom parameters named "type", "properties",
+// and "required", so the schema is unwrapped here. A bare property map is
+// still accepted for definitions written that way.
+func normalizeToolParameters(parameters any) (map[string]any, []string) {
+	decoded := decodeParameterMap(parameters)
+	if decoded == nil {
+		return map[string]any{}, nil
+	}
+
+	properties, hasProperties := decoded["properties"].(map[string]any)
+	if !hasProperties {
+		if schemaType, ok := decoded["type"].(string); !ok || schemaType != "object" {
+			// A bare property map.
+			return decoded, nil
+		}
+		// An object schema with no properties: no parameters.
+		return map[string]any{}, nil
+	}
+
+	var required []string
+	switch list := decoded["required"].(type) {
+	case []string:
+		required = list
+	case []any:
+		for _, item := range list {
+			if name, ok := item.(string); ok {
+				required = append(required, name)
+			}
+		}
+	}
+	return properties, required
+}
+
+func decodeParameterMap(parameters any) map[string]any {
 	if parameters == nil {
-		return map[string]any{}
+		return nil
 	}
 	if parsed, ok := parameters.(map[string]any); ok {
 		return parsed
 	}
 	encoded, err := json.Marshal(parameters)
 	if err != nil {
-		return map[string]any{}
+		return nil
 	}
 	decoded := make(map[string]any)
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		return map[string]any{}
+		return nil
 	}
 	return decoded
 }

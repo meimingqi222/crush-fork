@@ -1,11 +1,14 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"charm.land/fantasy"
 	"github.com/stretchr/testify/require"
 )
 
@@ -169,4 +172,60 @@ func TestParseFindPattern(t *testing.T) {
 			require.Equal(t, tt.wantHasGlob, hasGlob)
 		})
 	}
+}
+
+func TestGlobMultiPathPartialFailure(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	// Create files for two existing paths.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "src", "a.go"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "readme.md"), []byte("x"), 0o644))
+
+	globTool := NewGlobTool(root)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	// Three paths: two exist, one does not.
+	input, err := json.Marshal(GlobParams{Path: "src/*.go; nonexistent/*.tpl; docs/*.md"})
+	require.NoError(t, err)
+
+	resp, err := globTool.Run(ctx, fantasy.ToolCall{
+		ID:    "glob-multi",
+		Name:  GlobToolName,
+		Input: string(input),
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, "partial failure should not be an error response")
+
+	// Should contain results from both existing paths.
+	require.Contains(t, resp.Content, "src/a.go")
+	require.Contains(t, resp.Content, "docs/readme.md")
+
+	// Should mention the skipped path.
+	require.Contains(t, resp.Content, "Skipped missing paths:")
+	require.Contains(t, resp.Content, "nonexistent/*.tpl")
+}
+
+func TestGlobMultiPathAllFail(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	globTool := NewGlobTool(root)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	// Two paths, neither exists.
+	input, err := json.Marshal(GlobParams{Path: "missing1/*.go; missing2/*.go"})
+	require.NoError(t, err)
+
+	resp, err := globTool.Run(ctx, fantasy.ToolCall{
+		ID:    "glob-all-fail",
+		Name:  GlobToolName,
+		Input: string(input),
+	})
+	require.NoError(t, err)
+	require.True(t, resp.IsError, "all paths failing should be an error response")
+	require.Contains(t, resp.Content, "path not found")
 }

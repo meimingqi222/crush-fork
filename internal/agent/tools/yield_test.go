@@ -44,6 +44,69 @@ func TestYieldToolReturnsYieldMetadata(t *testing.T) {
 	require.Equal(t, "completed_with_warnings", yield.Status)
 }
 
+func TestYieldToolAdvertisesObjectPayloadSchema(t *testing.T) {
+	t.Parallel()
+
+	// The payload parameter must be advertised as an object. Declaring it as
+	// json.RawMessage ([]byte) reflected to an integer array, which
+	// contradicted the output schema injected into the system prompt and made
+	// every structured yield fail validation before succeeding.
+	info := NewYieldTool(nil).Info()
+	payload, ok := info.Parameters["payload"].(map[string]any)
+	require.True(t, ok, "payload parameter should be present")
+	require.Equal(t, "object", payload["type"])
+}
+
+func TestYieldToolAcceptsObjectPayloadAgainstOutputSchema(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{"type": "string"},
+		},
+		"required": []string{"summary"},
+	}
+	tool := NewYieldTool(nil, WithOutputSchema(schema))
+
+	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  YieldToolName,
+		Input: `{"status":"completed","data":"done","payload":{"summary":"findings"}}`,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, resp.Content)
+
+	yield, ok := message.ParseToolResultYield(resp.Metadata)
+	require.True(t, ok)
+	require.JSONEq(t, `{"summary":"findings"}`, string(yield.Payload))
+}
+
+func TestYieldToolDecodesStringEncodedPayload(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{"type": "string"},
+		},
+		"required": []string{"summary"},
+	}
+	tool := NewYieldTool(nil, WithOutputSchema(schema))
+
+	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  YieldToolName,
+		Input: `{"status":"completed","data":"done","payload":"{\"summary\":\"findings\"}"}`,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, resp.Content)
+
+	yield, ok := message.ParseToolResultYield(resp.Metadata)
+	require.True(t, ok)
+	require.JSONEq(t, `{"summary":"findings"}`, string(yield.Payload))
+}
+
 func TestYieldToolRejectsEmptyData(t *testing.T) {
 	t.Parallel()
 

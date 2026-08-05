@@ -41,6 +41,7 @@ type BashPermissionsParams struct {
 }
 
 type BashResponseMetadata struct {
+	ToolPathMetadata
 	StartTime        int64    `json:"start_time"`
 	EndTime          int64    `json:"end_time"`
 	Output           string   `json:"output"`
@@ -304,6 +305,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				}
 
 				metadata := BashResponseMetadata{
+					ToolPathMetadata: NewCommandToolPathMetadata(sessionWorkingDir, execWorkingDir, params.WorkingDir),
 					StartTime:        startTime.UnixMilli(),
 					EndTime:          time.Now().UnixMilli(),
 					Output:           output,
@@ -315,7 +317,7 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 				}
 				appendDeprecationNotes(&metadata, deprecationNotes)
 
-				responseText := buildBashResponseText(output, execWorkingDir)
+				responseText := buildBashResponseText(output, FormatToolPath(execWorkingDir, sessionWorkingDir))
 				if steered && promotedShellID != "" {
 					metadata.Background = true
 					metadata.ShellID = promotedShellID
@@ -341,10 +343,10 @@ func NewBashToolWithSessions(sessions session.Service, permissions permission.Se
 					timeoutNote := fmt.Sprintf("Command timed out after %d seconds", timeoutSeconds)
 					if output == "" {
 						metadata.Output = timeoutNote
-						responseText = buildBashResponseText(timeoutNote, execWorkingDir)
+						responseText = buildBashResponseText(timeoutNote, FormatToolPath(execWorkingDir, sessionWorkingDir))
 					} else {
 						metadata.Output = output + "\n" + timeoutNote
-						responseText = buildBashResponseText(metadata.Output, execWorkingDir)
+						responseText = buildBashResponseText(metadata.Output, FormatToolPath(execWorkingDir, sessionWorkingDir))
 					}
 				}
 				if hookMgr != nil {
@@ -403,6 +405,7 @@ func runBackgroundBash(ctx context.Context, call fantasy.ToolCall, params BashPa
 	go watchBackgroundShellRuntime(detachedToolRuntimeContext(ctx), bgShell)
 
 	metadata := BashResponseMetadata{
+		ToolPathMetadata: NewCommandToolPathMetadata(EffectiveWorkingDir(ctx, ""), bgShell.WorkingDir, params.WorkingDir),
 		StartTime:        startTime.UnixMilli(),
 		EndTime:          time.Now().UnixMilli(),
 		Description:      params.Description,

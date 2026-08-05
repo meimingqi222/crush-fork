@@ -25,6 +25,17 @@ type contextUsageDiagnosticInput struct {
 	EstimatedPromptTokens int64
 	UsageEstimated        bool
 	PreparedMessageCount  int
+	// Segment breakdown for the prompt prefix (when available from
+	// buildChatRequestState). Zero values mean the segment was not
+	// measured.
+	SystemPromptTokens int64
+	ToolSchemaTokens   int64
+	PriorHistoryTokens int64
+	CurrentUserTokens  int64
+	PromptPrefixTokens int64
+	PromptSuffixTokens int64
+	ContextFilesTokens int64
+	ContextFilesCount  int
 }
 
 // logContextUsageDiagnostic emits a single INFO log line per completed step
@@ -84,5 +95,14 @@ func logContextUsageDiagnostic(in contextUsageDiagnosticInput) {
 		"usage_source", source,
 		"provider_vs_display_delta", displayTotal-providerPrompt-in.NormalizedUsage.OutputTokens,
 		"estimate_vs_provider_delta", in.EstimatedPromptTokens-providerPrompt,
+		// Per-segment token breakdown (zero when not measured).
+		"segment_system_prompt_tokens", in.SystemPromptTokens,
+		"segment_tool_schema_tokens", in.ToolSchemaTokens,
+		"segment_prior_history_tokens", in.PriorHistoryTokens,
+		"segment_current_user_tokens", in.CurrentUserTokens,
+		"segment_prompt_prefix_tokens", in.PromptPrefixTokens,
+		"segment_prompt_suffix_tokens", in.PromptSuffixTokens,
+		"segment_context_files_tokens", in.ContextFilesTokens,
+		"segment_context_files_count", in.ContextFilesCount,
 	)
 }

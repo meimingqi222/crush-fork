@@ -731,7 +731,7 @@ func toolEarlyStateContent(sty *styles.Styles, opts *ToolRenderOpts, width int) 
 	var msg string
 	switch opts.Status {
 	case ToolStatusError:
-		msg = toolErrorContent(sty, opts.Result, width)
+		msg = toolErrorContent(sty, opts.Result, width, opts.ExpandedContent)
 	case ToolStatusCanceled:
 		msg = sty.Tool.StateCancelled.Render("Canceled.")
 	case ToolStatusAwaitingPermission:
@@ -748,11 +748,15 @@ func toolEarlyStateContent(sty *styles.Styles, opts *ToolRenderOpts, width int) 
 }
 
 // toolErrorContent formats an error message with ERROR tag.
-func toolErrorContent(sty *styles.Styles, result *message.ToolResult, width int) string {
+func toolErrorContent(sty *styles.Styles, result *message.ToolResult, width int, expanded bool) string {
 	if result == nil {
 		return ""
 	}
-	errContent := strings.ReplaceAll(result.Content, "\n", " ")
+	errContent := result.Content
+	if !expanded {
+		errContent = strings.SplitN(errContent, "\n", 2)[0]
+	}
+	errContent = strings.ReplaceAll(errContent, "\n", " ")
 	errTag := sty.Tool.ErrorTag.Render("ERROR")
 	tagWidth := lipgloss.Width(errTag)
 	errContent = ansi.Truncate(errContent, width-tagWidth-3, "…")

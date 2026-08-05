@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"cmp"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -17,7 +16,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/clientfs"
 	"github.com/charmbracelet/crush/internal/diff"
-	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
@@ -51,6 +49,7 @@ type EditPermissionsParams struct {
 }
 
 type EditResponseMetadata struct {
+	ToolPathMetadata
 	FilePath     string       `json:"file_path,omitempty"`
 	Additions    int          `json:"additions"`
 	Removals     int          `json:"removals"`
@@ -69,7 +68,7 @@ type FailedEdit struct {
 	Edit  EditEntry `json:"edit"`
 }
 
-func enrichClientFSEditMetadata(ctx context.Context, response *fantasy.ToolResponse) {
+func enrichClientFSEditMetadata(ctx context.Context, response *fantasy.ToolResponse, workingDir string) {
 	if response == nil || strings.TrimSpace(response.Metadata) == "" {
 		return
 	}
@@ -77,6 +76,9 @@ func enrichClientFSEditMetadata(ctx context.Context, response *fantasy.ToolRespo
 		if metadata == nil || metadata.FilePath == "" {
 			return
 		}
+		path := ResolveToolPath(ctx, workingDir, metadata.FilePath)
+		metadata.ToolPathMetadata = NewToolPathMetadata(path)
+		response.Content = strings.ReplaceAll(response.Content, metadata.FilePath, path.DisplayPath)
 		if current, ok := clientfs.MetadataFor(ctx, metadata.FilePath); ok {
 			metadata.SourceURI = current.SourceURI
 			metadata.Revision = current.Revision
@@ -138,15 +140,14 @@ func NewEditTool(
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
 			}
 
-			// Use session-specific working directory from context if available.
-			effectiveWorkingDir := cmp.Or(GetWorkingDirFromContext(ctx), workingDir)
+			effectiveWorkingDir := EffectiveWorkingDir(ctx, workingDir)
 
 			resolvedPath, err := resolveLocalPlanURI(ctx, params.FilePath, effectiveWorkingDir)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
 
-			params.FilePath = filepathext.SmartJoin(effectiveWorkingDir, resolvedPath)
+			params.FilePath = ResolveToolPath(ctx, effectiveWorkingDir, resolvedPath).AbsolutePath
 
 			var response fantasy.ToolResponse
 			var opErr error
@@ -176,7 +177,7 @@ func NewEditTool(
 					if pPath == "" {
 						return fantasy.NewTextErrorResponse("missing file path in patch header"), nil
 					}
-					absPath := filepathext.SmartJoin(effectiveWorkingDir, pPath)
+					absPath := ResolveToolPath(ctx, effectiveWorkingDir, pPath).AbsolutePath
 					pathSet[absPath] = struct{}{}
 				}
 				absPaths := make([]string, 0, len(pathSet))
@@ -211,11 +212,10 @@ func NewEditTool(
 				return response, opErr
 			}
 			if response.IsError {
-				// Return early if there was an error during content replacement
-				// This prevents unnecessary LSP diagnostics processing
+				response.Content = strings.ReplaceAll(response.Content, params.FilePath, FormatToolPath(params.FilePath, effectiveWorkingDir))
 				return response, nil
 			}
-			enrichClientFSEditMetadata(ctx, &response)
+			enrichClientFSEditMetadata(ctx, &response, effectiveWorkingDir)
 
 			modifiedFiles := []string{params.FilePath}
 			if params.Patch != "" && response.Metadata != "" {
@@ -424,6 +424,7 @@ func applyEditEntriesWithCreation(edit editContext, filePath string, entries []E
 	if err := clientfs.WriteFile(edit.ctx, filePath, []byte(currentContent), 0o644); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
+	GlobalFileCache.Put(sessionID, filePath, splitIntoLines(currentContent))
 
 	_, err = edit.files.Create(edit.ctx, sessionID, filePath, "")
 	if err != nil {
@@ -462,16 +463,26 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 		return fantasy.NewTextErrorResponse(err.Error()), nil
 	}
 
+	path := ResolveToolPath(edit.ctx, edit.workingDir, filePath)
 	fileInfo, err := clientfs.Stat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
+			return fantasy.WithResponseMetadata(
+				fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", path.DisplayPath)),
+				NewToolPathErrorMetadata(path, "path_not_found", "Use glob or read the parent directory to verify the path before editing."),
+			), nil
 		}
-		return fantasy.ToolResponse{}, fmt.Errorf("failed to access file: %w", err)
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextErrorResponse(fmt.Sprintf("failed to access file: %v", err)),
+			NewToolPathErrorMetadata(path, "stat_failed", "Verify the parent directory and path before retrying."),
+		), nil
 	}
 
 	if fileInfo.IsDir() {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", filePath)), nil
+		return fantasy.WithResponseMetadata(
+			fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", path.DisplayPath)),
+			NewToolPathErrorMetadata(path, "directory_not_file", "Use read on the directory to inspect its contents."),
+		), nil
 	}
 
 	sessionID := GetSessionFromContext(edit.ctx)
@@ -566,6 +577,7 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 	if err := clientfs.WriteFile(edit.ctx, filePath, []byte(fileContent), 0o644); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
+	GlobalFileCache.Put(sessionID, filePath, splitIntoLines(currentContent))
 
 	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, sessionID)
 	if err != nil {
@@ -589,9 +601,9 @@ func applyEditEntriesExistingFile(edit editContext, filePath string, entries []E
 
 	var message string
 	if len(failedEdits) > 0 {
-		message = fmt.Sprintf("Applied %d of %d edits to file: %s (%d edit(s) failed)", editsApplied, len(entries), filePath, len(failedEdits))
+		message = fmt.Sprintf("Applied %d of %d edits to file: %s (%d edit(s) failed)", editsApplied, len(entries), FormatToolPath(filePath, edit.workingDir), len(failedEdits))
 	} else {
-		message = fmt.Sprintf("Applied %d edits to file: %s", len(entries), filePath)
+		message = fmt.Sprintf("Applied %d edits to file: %s", len(entries), FormatToolPath(filePath, edit.workingDir))
 	}
 
 	return fantasy.WithResponseMetadata(
@@ -698,6 +710,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
+	GlobalFileCache.Put(sessionID, filePath, splitIntoLines(content))
 
 	// File can't be in the history so we create a new file history
 	_, err = edit.files.Create(edit.ctx, sessionID, filePath, "")
@@ -716,7 +729,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
 
 	return fantasy.WithResponseMetadata(
-		fantasy.NewTextResponse("File created: "+filePath),
+		fantasy.NewTextResponse("File created: "+FormatToolPath(filePath, edit.workingDir)),
 		EditResponseMetadata{
 			FilePath:   filePath,
 			OldContent: "",
@@ -819,6 +832,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
+	GlobalFileCache.Put(sessionID, filePath, splitIntoLines(newContent))
 
 	// Check if file exists in history
 	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, sessionID)
@@ -844,7 +858,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
 
 	return fantasy.WithResponseMetadata(
-		fantasy.NewTextResponse("Content deleted from file: "+filePath),
+		fantasy.NewTextResponse("Content deleted from file: "+FormatToolPath(filePath, edit.workingDir)),
 		EditResponseMetadata{
 			FilePath:   filePath,
 			OldContent: oldContent,
@@ -960,6 +974,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
+	GlobalFileCache.Put(sessionID, filePath, splitIntoLines(newContent))
 
 	// Check if file exists in history
 	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, sessionID)
@@ -985,7 +1000,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
 
 	return fantasy.WithResponseMetadata(
-		fantasy.NewTextResponse("Content replaced in file: "+filePath),
+		fantasy.NewTextResponse("Content replaced in file: "+FormatToolPath(filePath, edit.workingDir)),
 		EditResponseMetadata{
 			FilePath:   filePath,
 			OldContent: oldContent,
@@ -1172,7 +1187,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 		var recoverErr error
 		newLines, recoverErr = tryRecoverHashline(sessionID, filePath, oldLines, operations)
 		if recoverErr != nil {
-			return fantasy.NewTextErrorResponse(err.Error()), nil
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("%s; recovery failed: %v", err, recoverErr)), nil
 		}
 		recovered = true
 	} else {
@@ -1182,7 +1197,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 			var recoverErr error
 			newLines, recoverErr = tryRecoverHashline(sessionID, filePath, oldLines, operations)
 			if recoverErr != nil {
-				return fantasy.NewTextErrorResponse(applyErr.Error()), nil
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("%s; recovery failed: %v", applyErr, recoverErr)), nil
 			}
 			recovered = true
 		}
@@ -1239,6 +1254,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 	if err := clientfs.WriteFile(edit.ctx, filePath, []byte(fileContent), 0o644); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
+	GlobalFileCache.Put(sessionID, filePath, newLines)
 
 	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, sessionID)
 	if err != nil {
@@ -1259,7 +1275,7 @@ func applyHashlineEdit(edit editContext, filePath string, operations []HashlineE
 
 	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
 
-	msgText := fmt.Sprintf("Applied %d hashline operation(s) to file: %s", len(operations), filePath)
+	msgText := fmt.Sprintf("Applied %d hashline operation(s) to file: %s", len(operations), FormatToolPath(filePath, edit.workingDir))
 	if recovered {
 		msgText += "\n[Warning: Hashline anchor mismatch occurred due to concurrent changes. Successfully recovered and merged edits using 3-Way Merge.]"
 	}
@@ -1398,7 +1414,7 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 			return fantasy.NewTextErrorResponse("missing file path in patch header"), nil
 		}
 
-		absPath := filepathext.SmartJoin(edit.workingDir, pPath)
+		absPath := ResolveToolPath(edit.ctx, edit.workingDir, pPath).AbsolutePath
 		absPaths = append(absPaths, absPath)
 		pathToPatch[absPath] = p
 	}
@@ -1498,6 +1514,7 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		if err := clientfs.WriteFile(edit.ctx, absPath, []byte(fileContent), 0o644); err != nil {
 			return fantasy.ToolResponse{}, fmt.Errorf("failed to write file %s: %w", absPath, err)
 		}
+		GlobalFileCache.Put(sessionID, absPath, newLines)
 
 		fileHist, err := edit.files.GetByPathAndSession(edit.ctx, absPath, sessionID)
 		if err != nil {
@@ -1519,14 +1536,15 @@ func applyUnifiedPatch(edit editContext, fallbackPath string, patchText string, 
 		edit.filetracker.RecordRead(edit.ctx, sessionID, absPath)
 
 		fileMetadata = append(fileMetadata, EditResponseMetadata{
-			FilePath:   absPath,
-			OldContent: oldContent,
-			NewContent: newContent,
-			Additions:  additions,
-			Removals:   removals,
+			ToolPathMetadata: NewToolPathMetadata(ResolveToolPath(edit.ctx, edit.workingDir, absPath)),
+			FilePath:         absPath,
+			OldContent:       oldContent,
+			NewContent:       newContent,
+			Additions:        additions,
+			Removals:         removals,
 		})
 
-		fmt.Fprintf(&successMessage, "- %s (+%d, -%d)\n", filepath.Base(absPath), additions, removals)
+		fmt.Fprintf(&successMessage, "- %s (+%d, -%d)\n", FormatToolPath(absPath, edit.workingDir), additions, removals)
 	}
 
 	return fantasy.WithResponseMetadata(

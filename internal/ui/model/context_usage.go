@@ -1,6 +1,8 @@
 package model
 
 import (
+	"unicode/utf8"
+
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
@@ -93,12 +95,46 @@ func resolveContextUsageSnapshot(sess *session.Session, messages []message.Messa
 		// messages, take the max of the streaming value and CompletionTokens
 		// so the display reflects live growth without dropping below known history.
 		if usage.Provisional {
-			usage.OutputTokens = max(usage.OutputTokens, sess.CompletionTokens)
 			// During streaming the current exchange has not been committed to
-			// session totals yet. Use the live provisional usage but floor it
-			// at the last known exchange total so the display never drops
-			// below the confirmed context length.
-			usage.TotalTokens = max(usage.TotalTokens, sess.LastTotalTokens())
+			// session totals yet. The message's PromptTokens may be a local
+			// character-based estimate (set in agent.go before the API call),
+			// which can overshoot the real value by 30-50%. Using it as the
+			// TotalTokens base causes a visible drop when the step finishes
+			// and the API's authoritative usage replaces it.
+			//
+			// Anchor TotalTokens at sess.LastTotalTokens() plus a live
+			// estimate of the streamed output (reasoning + text). This is
+			// monotonically non-decreasing during streaming and never
+			// exceeds the finished value: the real prompt is always >=
+			// lastTotal (it includes all prior history), and the real
+			// output is always >= the streaming estimate.
+			//
+			// Summary messages are excluded: their lastTotal reflects the
+			// pre-compaction context, which is stale and would push the
+			// display above 100%. For summaries, keep the raw usage total
+			// (output-only) as before.
+			//
+			// When lastTotal is zero (first exchange in the session), fall
+			// back to the message's estimated total so the display is not
+			// stuck at zero until the first step finishes.
+			if !usage.Summary {
+				lastTotal := sess.LastTotalTokens()
+				// Use the higher of the text-based streaming estimate and
+				// any output tokens already reported by the provider.
+				streamingOutput := max(estimateStreamedOutput(messages), usage.OutputTokens)
+				if lastTotal > 0 {
+					usage.TotalTokens = lastTotal + streamingOutput
+				}
+				// OutputTokens (displayed as "Xk out") tracks cumulative
+				// output across all exchanges. During streaming, the current
+				// exchange's output has not been committed to
+				// sess.CompletionTokens yet, so add the streaming estimate
+				// on top of the committed cumulative total.
+				usage.OutputTokens = sess.CompletionTokens + streamingOutput
+			} else {
+				usage.OutputTokens = max(usage.OutputTokens, sess.CompletionTokens)
+				usage.TotalTokens = max(usage.TotalTokens, sess.LastTotalTokens())
+			}
 			usage.Estimated = sess.EstimatedUsage
 		} else {
 			usage.OutputTokens = sess.CompletionTokens
@@ -177,6 +213,38 @@ func contextWindowForUsageMessage(msg message.Message, cfg *config.Config, selec
 	}
 	if selected != nil {
 		return agent.EffectiveContextWindow(selected.CatwalkCfg)
+	}
+	return 0
+}
+
+// estimateStreamedOutput estimates the output token count of the latest
+// assistant message's streamed text and reasoning. This mirrors the
+// heuristic used by renderThinkingStatusLine: ~4 ASCII bytes per token,
+// one token per non-ASCII rune. Used during provisional (streaming)
+// display to provide a live, monotonically growing output estimate that
+// never exceeds the final API-reported output.
+func estimateStreamedOutput(messages []message.Message) int64 {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role != message.Assistant {
+			continue
+		}
+		var asciiBytes, nonASCIIRunes int64
+		for _, r := range msg.Content().Text {
+			if r < utf8.RuneSelf {
+				asciiBytes++
+			} else {
+				nonASCIIRunes++
+			}
+		}
+		for _, r := range msg.ReasoningContent().Thinking {
+			if r < utf8.RuneSelf {
+				asciiBytes++
+			} else {
+				nonASCIIRunes++
+			}
+		}
+		return asciiBytes/4 + nonASCIIRunes
 	}
 	return 0
 }

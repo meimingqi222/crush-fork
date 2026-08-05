@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"strings"
 
 	"github.com/charmbracelet/crush/internal/message"
 )
@@ -30,28 +29,4 @@ func toolAlreadyCalled(ctx context.Context, messages message.Service, sessionID 
 		}
 	}
 	return false
-}
-
-// dedupeTrimmed returns a copy of values with whitespace trimmed and empty /
-// duplicate entries removed, preserving the original order of first
-// occurrence. Used to normalize list-shaped fields on tool params (artifacts,
-// files touched, risks, etc.) before persisting to metadata.
-func dedupeTrimmed(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	return result
 }

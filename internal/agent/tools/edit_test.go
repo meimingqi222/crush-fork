@@ -258,6 +258,27 @@ func TestFileCacheFIFO(t *testing.T) {
 	}
 }
 
+func TestFileCacheHistory(t *testing.T) {
+	t.Parallel()
+
+	cache := &FileCache{}
+	cache.Put("session", "/file", []string{"one"})
+	cache.Put("session", "/file", []string{"two"})
+
+	history, ok := cache.GetHistory("session", "/file")
+	require.True(t, ok)
+	require.Equal(t, [][]string{{"one"}, {"two"}}, history)
+}
+
+func TestAlignLinesGreedyForLargeFiles(t *testing.T) {
+	t.Parallel()
+
+	base := make([]string, maxLCSMatrixSize/1000+1)
+	ours := append([]string{"inserted"}, base...)
+	alignment := alignLinesLCS(base, ours)
+	require.Equal(t, 2, alignment[1])
+}
+
 func TestPatchEmptyLineMatch(t *testing.T) {
 	t.Parallel()
 

@@ -151,11 +151,12 @@ func TestResolveContextUsageSnapshotReturnsProvisionalDirectly(t *testing.T) {
 	}, nil, selected)
 
 	// For provisional messages the current exchange has not been committed
-	// to session totals yet. TotalTokens is floored at the last known
-	// exchange total (110_000 + 600 = 110_600) and OutputTokens is floored
-	// at the committed completion tokens.
-	require.Equal(t, int64(110_600), snapshot.TotalTokens)
-	require.Equal(t, int64(600), snapshot.OutputTokens)
+	// to session totals yet. TotalTokens is anchored at the last known
+	// exchange total (110_000 + 600 = 110_600) plus the streaming output
+	// estimate (20 tokens from the provisional usage). OutputTokens is the
+	// committed cumulative total (600) plus the streaming estimate (20).
+	require.Equal(t, int64(110_620), snapshot.TotalTokens)
+	require.Equal(t, int64(620), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 	require.True(t, snapshot.Provisional)
 	require.False(t, snapshot.Summary)
@@ -348,12 +349,185 @@ func TestResolveContextUsageSnapshotAccumulatesProvisionalExchange(t *testing.T)
 		},
 	}, nil, selected)
 
-	// TotalTokens is floored at the last exchange total (50_000 + 500 =
-	// 50_500). OutputTokens uses the live provisional value since it is
-	// larger than the committed completion tokens.
-	require.Equal(t, int64(50_500), snapshot.TotalTokens)
-	require.Equal(t, int64(1_200), snapshot.OutputTokens)
+	// TotalTokens is anchored at the last exchange total (50_000 + 500 =
+	// 50_500) plus the streaming output (1_200 from the provisional usage).
+	// OutputTokens is the committed cumulative total (500) plus the
+	// streaming output (1_200).
+	require.Equal(t, int64(51_700), snapshot.TotalTokens)
+	require.Equal(t, int64(1_700), snapshot.OutputTokens)
 	require.Equal(t, int64(200_000), snapshot.ContextWindow)
 	require.True(t, snapshot.Provisional)
 	require.False(t, snapshot.Summary)
+}
+
+// TestProvisionalTotalNeverExceedsFinishedTotal verifies the core fix for
+// the "context usage suddenly drops" bug: during streaming, the provisional
+// TotalTokens (anchored at lastTotal + streamingOutput) must never exceed
+// the finished TotalTokens (realPrompt + realOutput) that replaces it.
+func TestProvisionalTotalNeverExceedsFinishedTotal(t *testing.T) {
+	t.Parallel()
+
+	selected := &agent.Model{
+		CatwalkCfg: catwalk.Model{ContextWindow: 200_000},
+		ModelCfg:   config.SelectedModel{Provider: "openai", Model: "gpt-5"},
+	}
+
+	// Simulate a session where the last exchange used 100k prompt + 2k output.
+	// The next exchange's estimated prompt (set by agent.go) is 130k, which
+	// overshoots the real 105k by ~24%. Before the fix, the provisional
+	// display would show max(130k, 102k) = 130k, then drop to 105k + 3k = 108k
+	// when the step finishes.
+	sess := &session.Session{
+		PromptTokens:         100_000,
+		CompletionTokens:     2_000,
+		LastPromptTokens:     100_000,
+		LastCompletionTokens: 2_000,
+	}
+
+	// Provisional: assistant message with an inflated prompt estimate and
+	// some streamed text (~20 tokens).
+	provisionalSnapshot := resolveContextUsageSnapshot(sess, []message.Message{
+		{
+			ID:       "current",
+			Role:     message.Assistant,
+			Provider: "openai",
+			Model:    "gpt-5",
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Here is a brief reply."},
+			},
+			Usage: message.Usage{
+				InputTokens: 130_000, // over-estimated by ~24%
+			},
+		},
+	}, nil, selected)
+
+	// Finished: the session now has the real prompt (105k) and output (3k).
+	finishedSess := &session.Session{
+		PromptTokens:         105_000,
+		CompletionTokens:     5_000, // cumulative: 2k + 3k
+		LastPromptTokens:     105_000,
+		LastCompletionTokens: 3_000,
+	}
+	finishedSnapshot := resolveContextUsageSnapshot(finishedSess, []message.Message{
+		{
+			ID:       "current",
+			Role:     message.Assistant,
+			Provider: "openai",
+			Model:    "gpt-5",
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Here is a brief reply."},
+				message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			},
+			Usage: message.Usage{
+				InputTokens:  105_000,
+				OutputTokens: 3_000,
+			},
+		},
+	}, nil, selected)
+
+	require.True(t, provisionalSnapshot.Provisional)
+	require.False(t, finishedSnapshot.Provisional)
+	require.LessOrEqual(t, provisionalSnapshot.TotalTokens, finishedSnapshot.TotalTokens,
+		"provisional TotalTokens (%d) must not exceed finished TotalTokens (%d)",
+		provisionalSnapshot.TotalTokens, finishedSnapshot.TotalTokens)
+	require.LessOrEqual(t, provisionalSnapshot.OutputTokens, finishedSnapshot.OutputTokens,
+		"provisional OutputTokens (%d) must not exceed finished OutputTokens (%d)",
+		provisionalSnapshot.OutputTokens, finishedSnapshot.OutputTokens)
+}
+
+// TestProvisionalAfterCompactionUsesPostCompactionBaseline verifies that
+// after a context compaction, the provisional (streaming) display for the
+// next exchange correctly anchors at the post-compaction LastTotalTokens
+// rather than the pre-compaction values. This is the critical compaction
+// boundary scenario:
+//
+//  1. Before compaction: session had ~190k tokens (near auto-summarize).
+//  2. Compaction runs: Summarize recomputes LastPromptTokens to the
+//     post-compaction baseline (e.g. 20k), LastCompletionTokens to 0.
+//     CompletionTokens keeps accumulating (includes summary output).
+//  3. Post-compaction streaming: the new exchange must display
+//     lastTotal + streamingOutput, NOT the pre-compaction 190k.
+//  4. Post-compaction finished: display = LastTotalTokens() (the real
+//     post-compaction prompt + output).
+//
+// The provisional value must never exceed the finished value.
+func TestProvisionalAfterCompactionUsesPostCompactionBaseline(t *testing.T) {
+	t.Parallel()
+
+	selected := &agent.Model{
+		CatwalkCfg: catwalk.Model{ContextWindow: 200_000},
+		ModelCfg:   config.SelectedModel{Provider: "openai", Model: "gpt-5"},
+	}
+
+	// Post-compaction session state: Summarize has reset
+	// LastPromptTokens to the post-compaction baseline and
+	// LastCompletionTokens to 0. CompletionTokens is cumulative
+	// (includes all prior output + the summary's own output).
+	postCompactionSess := &session.Session{
+		PromptTokens:         20_000, // post-compaction baseline
+		CompletionTokens:     25_000, // cumulative (pre-compaction + summary)
+		LastPromptTokens:     20_000, // post-compaction baseline
+		LastCompletionTokens: 0,      // reset by Summarize
+	}
+
+	// Provisional: new exchange streaming after compaction.
+	// The message's InputTokens is a local estimate that may be
+	// inflated, but our code must ignore it and use lastTotal.
+	provisionalSnapshot := resolveContextUsageSnapshot(postCompactionSess, []message.Message{
+		{
+			ID:       "post-compaction-reply",
+			Role:     message.Assistant,
+			Provider: "openai",
+			Model:    "gpt-5",
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Here is a reply after compaction."},
+			},
+			Usage: message.Usage{
+				InputTokens: 50_000, // local estimate, should be ignored
+			},
+		},
+	}, nil, selected)
+
+	// Finished: the real API usage arrives. The prompt is the
+	// post-compaction context (summary + tail + new user msg).
+	finishedSess := &session.Session{
+		PromptTokens:         22_000,
+		CompletionTokens:     25_500, // 25k + 500 new output
+		LastPromptTokens:     22_000,
+		LastCompletionTokens: 500,
+	}
+	finishedSnapshot := resolveContextUsageSnapshot(finishedSess, []message.Message{
+		{
+			ID:       "post-compaction-reply",
+			Role:     message.Assistant,
+			Provider: "openai",
+			Model:    "gpt-5",
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Here is a reply after compaction."},
+				message.Finish{Reason: message.FinishReasonEndTurn, Time: 1},
+			},
+			Usage: message.Usage{
+				InputTokens:  22_000,
+				OutputTokens: 500,
+			},
+		},
+	}, nil, selected)
+
+	require.True(t, provisionalSnapshot.Provisional)
+	require.False(t, provisionalSnapshot.Summary,
+		"post-compaction exchange must not be flagged as summary")
+	require.False(t, finishedSnapshot.Provisional)
+
+	// Provisional TotalTokens must be anchored at post-compaction
+	// lastTotal (20k) + streamingOutput, NOT the inflated 50k estimate.
+	require.Less(t, provisionalSnapshot.TotalTokens, int64(50_000),
+		"provisional TotalTokens must not use the inflated local prompt estimate")
+
+	// Provisional must not exceed finished (no drop on completion).
+	require.LessOrEqual(t, provisionalSnapshot.TotalTokens, finishedSnapshot.TotalTokens,
+		"provisional TotalTokens (%d) must not exceed finished TotalTokens (%d) after compaction",
+		provisionalSnapshot.TotalTokens, finishedSnapshot.TotalTokens)
+	require.LessOrEqual(t, provisionalSnapshot.OutputTokens, finishedSnapshot.OutputTokens,
+		"provisional OutputTokens (%d) must not exceed finished OutputTokens (%d) after compaction",
+		provisionalSnapshot.OutputTokens, finishedSnapshot.OutputTokens)
 }

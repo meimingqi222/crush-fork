@@ -72,6 +72,10 @@ func (g *GoalBudget) HandleMsg(msg tea.Msg) Action {
 			g.input, cmd = g.input.Update(msg)
 			return ActionCmd{Cmd: cmd}
 		}
+	case tea.PasteMsg:
+		var cmd tea.Cmd
+		g.input, cmd = g.input.Update(msg)
+		return ActionCmd{Cmd: cmd}
 	}
 	return nil
 }

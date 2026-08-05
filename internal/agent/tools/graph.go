@@ -21,7 +21,7 @@ const GraphToolName = "graph"
 // Both modes read from the same TripleStore, so they are merged into one
 // tool rather than presenting the LLM with two tools over one dataset.
 type GraphParams struct {
-	Mode string `json:"mode" description:"Query mode: \"path\" (traverse edges from seed IDs) or \"triples\" (structured subject/predicate lookup). Defaults to \"path\"."`
+	Mode string `json:"mode,omitempty" description:"Query mode: \"path\" (traverse edges from seed IDs) or \"triples\" (structured subject/predicate lookup). Defaults to \"path\"."`
 
 	// path mode
 	SeedIDs   []string `json:"seed_ids,omitempty" description:"Starting memory event or triple IDs to traverse from (path mode, required)"`

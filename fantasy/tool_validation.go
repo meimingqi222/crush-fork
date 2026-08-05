@@ -21,6 +21,24 @@ const (
 	rawInputExcerptMax    = 256
 )
 
+type toolValidationError struct {
+	toolName string
+	issues   string
+	detail   string
+}
+
+func (e *toolValidationError) Error() string {
+	return e.detail
+}
+
+func (e *toolValidationError) ModelSafeMessage() string {
+	return fmt.Sprintf("validation failed for tool %q:\n%s", e.toolName, e.issues)
+}
+
+func (e *toolValidationError) DiagnosticMessage() string {
+	return e.detail
+}
+
 // parseToolCallInput parses a tool call's JSON input into a map. On strict
 // parse failure it retries with jsonrepair to tolerate weak-model output
 // (single quotes, trailing commas, Python literals, truncated JSON, bareword
@@ -113,6 +131,9 @@ func buildToolInputSchema(toolInfo ToolInfo) map[string]any {
 		"type":       "object",
 		"properties": cloneDefaultValue(toolInfo.Parameters),
 		"required":   toolInfo.Required,
+	}
+	if len(toolInfo.SchemaDefs) > 0 {
+		inputSchema["$defs"] = cloneDefaultValue(toolInfo.SchemaDefs)
 	}
 	schema.Normalize(inputSchema)
 	return inputSchema
@@ -213,12 +234,16 @@ func formatToolValidationError(toolName string, originalArgs, normalizedArgs map
 	}
 	receivedJSON, _ := json.MarshalIndent(receivedArgs, "", "  ")
 
-	return fmt.Errorf(
-		"validation failed for tool %q:\n%s\n\nReceived arguments:\n%s",
-		toolName,
-		strings.Join(messages, "\n"),
-		receivedJSON,
-	)
+	return &toolValidationError{
+		toolName: toolName,
+		issues:   strings.Join(messages, "\n"),
+		detail: fmt.Sprintf(
+			"validation failed for tool %q:\n%s\n\nReceived arguments:\n%s",
+			toolName,
+			strings.Join(messages, "\n"),
+			receivedJSON,
+		),
+	}
 }
 
 func formatIssuePath(path string) string {

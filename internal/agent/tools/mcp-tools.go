@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 
@@ -142,10 +143,25 @@ func (m *Tool) MCPToolName() string {
 func (m *Tool) Info() fantasy.ToolInfo {
 	parameters := make(map[string]any)
 	required := make([]string, 0)
+	var schemaDefs map[string]any
 
 	if input, ok := m.tool.InputSchema.(map[string]any); ok {
 		if props, ok := input["properties"].(map[string]any); ok {
 			parameters = props
+		}
+		// Servers that generate their schema from zod or pydantic hoist
+		// shared shapes into $defs (or the older definitions) and reference
+		// them from properties. Carry them along so the refs resolve for both
+		// the model and the local validator.
+		for _, key := range []string{"$defs", "definitions"} {
+			defs, ok := input[key].(map[string]any)
+			if !ok || len(defs) == 0 {
+				continue
+			}
+			if schemaDefs == nil {
+				schemaDefs = make(map[string]any, len(defs))
+			}
+			maps.Copy(schemaDefs, defs)
 		}
 		if req, ok := input["required"].([]any); ok {
 			// Convert []any -> []string when elements are strings
@@ -165,6 +181,7 @@ func (m *Tool) Info() fantasy.ToolInfo {
 		Description: m.tool.Description,
 		Parameters:  parameters,
 		Required:    required,
+		SchemaDefs:  schemaDefs,
 	}
 }
 

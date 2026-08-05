@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -42,10 +41,7 @@ func lspClientForPosition(ctx context.Context, lspManager *lsp.Manager, params l
 		return nil, "", fantasy.NewTextErrorResponse("no LSP clients available"), false
 	}
 
-	absPath, err := filepath.Abs(filepath.FromSlash(params.FilePath))
-	if err != nil {
-		return nil, "", fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get absolute path: %s", err)), false
-	}
+	absPath := ResolveToolPath(ctx, "", params.FilePath).AbsolutePath
 	openInLSPs(ctx, lspManager, absPath)
 	client := firstHandlingClient(lspManager, absPath)
 	if client == nil {
@@ -63,7 +59,7 @@ func firstHandlingClient(lspManager *lsp.Manager, absPath string) *lsp.Client {
 	return nil
 }
 
-func formatLocations(kind string, locations []protocol.Location) string {
+func formatLocations(kind string, locations []protocol.Location, workingDir string) string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "Found %d %s location(s):\n\n", len(locations), kind)
 	for _, loc := range locations {
@@ -71,7 +67,7 @@ func formatLocations(kind string, locations []protocol.Location) string {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(&output, "%s:%d:%d\n", path, loc.Range.Start.Line+1, loc.Range.Start.Character+1)
+		fmt.Fprintf(&output, "%s:%d:%d\n", FormatToolPath(path, workingDir), loc.Range.Start.Line+1, loc.Range.Start.Character+1)
 	}
 	return strings.TrimSpace(output.String())
 }
@@ -84,9 +80,9 @@ type documentSymbolEntry struct {
 	Children []documentSymbolEntry
 }
 
-func formatDocumentSymbols(filePath string, symbols []documentSymbolEntry) string {
+func formatDocumentSymbols(filePath, workingDir string, symbols []documentSymbolEntry) string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "%s\n", filePath)
+	fmt.Fprintf(&output, "%s\n", FormatToolPath(filePath, workingDir))
 	for _, symbol := range symbols {
 		writeDocumentSymbol(&output, symbol, 0)
 	}
@@ -109,7 +105,7 @@ type workspaceSymbolEntry struct {
 	Column uint32
 }
 
-func formatWorkspaceSymbols(symbols []workspaceSymbolEntry) string {
+func formatWorkspaceSymbols(symbols []workspaceSymbolEntry, workingDir string) string {
 	sort.Slice(symbols, func(i, j int) bool {
 		if symbols[i].Path != symbols[j].Path {
 			return symbols[i].Path < symbols[j].Path
@@ -123,7 +119,7 @@ func formatWorkspaceSymbols(symbols []workspaceSymbolEntry) string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "Found %d workspace symbol(s):\n\n", len(symbols))
 	for _, symbol := range symbols {
-		fmt.Fprintf(&output, "%s (%s) %s:%d:%d\n", symbol.Name, symbol.Kind, symbol.Path, symbol.Line, symbol.Column)
+		fmt.Fprintf(&output, "%s (%s) %s:%d:%d\n", symbol.Name, symbol.Kind, FormatToolPath(symbol.Path, workingDir), symbol.Line, symbol.Column)
 	}
 	return strings.TrimSpace(output.String())
 }
@@ -199,44 +195,4 @@ func workspaceSymbolKind(result protocol.WorkspaceSymbolResult) string {
 	default:
 		return "unknown"
 	}
-}
-
-func combineLocationResults(primary any, secondary []protocol.Location) []protocol.Location {
-	locations := locationResults(primary)
-	locations = append(locations, secondary...)
-	return cleanupLocations(locations)
-}
-
-func locationResults(value any) []protocol.Location {
-	switch v := value.(type) {
-	case protocol.Location:
-		return []protocol.Location{v}
-	case []protocol.Location:
-		return append([]protocol.Location(nil), v...)
-	case protocol.LocationLink:
-		return []protocol.Location{{
-			URI:   v.TargetURI,
-			Range: v.TargetSelectionRange,
-		}}
-	case []protocol.LocationLink:
-		locs := make([]protocol.Location, 0, len(v))
-		for _, link := range v {
-			locs = append(locs, protocol.Location{
-				URI:   link.TargetURI,
-				Range: link.TargetSelectionRange,
-			})
-		}
-		return locs
-	case protocol.Or_Definition:
-		return locationResults(v.Value)
-	case protocol.Or_Declaration:
-		return locationResults(v.Value)
-	default:
-		return nil
-	}
-}
-
-func effectiveWorkspaceQuery(query string) string {
-	query = strings.TrimSpace(query)
-	return query
 }
