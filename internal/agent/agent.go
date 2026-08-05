@@ -634,8 +634,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		genCtx, wallCancel = context.WithTimeout(genCtx, time.Duration(runtimeConfig.MaxRuntimeMs)*time.Millisecond)
 		defer wallCancel()
 	}
-	slog.Debug("[PERF] sessionAgent: initial setup done", "duration", time.Since(start), "session_id", call.SessionID)
-
 	// Copy mutable fields under lock to avoid races with SetTools/SetModels.
 	agentTools := a.tools.Copy()
 	largeModel := effectiveRuntimeModel(a.largeModel.Get(), runtimeConfig)
@@ -663,18 +661,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	)
 	systemPrompt = a.buildEnhancedSystemPrompt(genCtx, systemPrompt, largeModel, enhancedContextSig)
 
-	// Check if memory prefetch is ready (non-blocking) for logging purposes.
 	// Memory is always injected via PrepareStep as a trailing System Message,
 	// never into the system prompt, to keep the prompt prefix stable for caching.
-	prefetchNotReadyLogged := false
-	if !a.isSubAgent && call.MemoryPrefetch != nil {
-		if _, settled := call.MemoryPrefetch.GetSettled(); settled {
-			slog.Debug("[PERF] sessionAgent: prefetched memory recall ready", "session_id", call.SessionID)
-		} else {
-			prefetchNotReadyLogged = true
-			slog.Debug("[PERF] sessionAgent: memory prefetch not ready, will retry on next step", "session_id", call.SessionID)
-		}
-	}
 
 	providerCtx := defaultProviderContext()
 	requestPurpose := call.Purpose
@@ -694,7 +682,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
 	msgs = excludeCurrentUserMessage(msgs, call.UserMessage)
-	slog.Debug("[PERF] sessionAgent: got session messages", "duration", time.Since(start), "count", len(msgs), "session_id", call.SessionID)
 	promptPrefix = buildDelegationPromptPrefix(promptPrefix, agentTools, a.isSubAgent)
 	if len(msgs) > 0 {
 		// Prune old tool results before sending to plugins. This is a
@@ -703,8 +690,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		// exceeding plugin buffer limits on session restore.
 		msgs = builtinPruneToolResultsWithArchive(msgs, a.planCompactionProtector(genCtx, call.SessionID), nil, a.archiveToolResultForSession(call.SessionID))
 	}
-	slog.Debug("[PERF] sessionAgent: restored session context", "duration", time.Since(start), "session_id", call.SessionID)
-
 	preflightState, err := a.buildChatRequestState(genCtx, chatRequestStateInput{
 		SessionID:      call.SessionID,
 		Agent:          "session",
@@ -723,7 +708,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("[PERF] sessionAgent: preflight estimate done", "duration", time.Since(start), "session_id", call.SessionID)
 	if !a.disableAutoSummarize && len(msgs) > 0 {
 		// Estimate input tokens only. The shouldAutoSummarize function handles
 		// output token reservation internally, so we don't need to add maxOutputTokens here.
@@ -770,8 +754,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			msgs = excludeCurrentUserMessage(msgs, call.UserMessage)
 		}
 	}
-	slog.Debug("[PERF] sessionAgent: auto summarize check done", "duration", time.Since(start), "session_id", call.SessionID)
-
 	var wg sync.WaitGroup
 	if !call.NonInteractive && shouldGenerateSessionTitle(currentSession.Title) {
 		titlePrompt := titlePromptFromCallOrHistory(call.Prompt, msgs)
@@ -801,8 +783,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			return nil, err
 		}
 	}
-	slog.Debug("[PERF] sessionAgent: user message created (animation starts here)", "duration", time.Since(start), "session_id", call.SessionID)
-
 	// Memory prefetch is NOT injected into systemPrompt. Instead, it is always
 	// injected via PrepareStep as a trailing System Message. This keeps the
 	// system prompt prefix stable across turns, which is critical for prompt
@@ -830,7 +810,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if err != nil {
 		return nil, err
 	}
-	slog.Debug("[PERF] sessionAgent: buildChatRequestState done", "duration", time.Since(start), "session_id", call.SessionID)
 	if len(agentTools) > 0 {
 		// Add Anthropic caching to the last tool.
 		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
@@ -1125,13 +1104,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							// Inject settled memory prefetch into prepared messages as System Message to isolate roles.
 							// Appended to the end to keep the prefix stable and preserve prompt caching.
 							prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(memoryContent))
-							slog.Debug("[PERF] sessionAgent: injected settled memory prefetch into prepared messages as System Message", "session_id", call.SessionID)
 							injectedInPrepareStep = true
 							chainingContextInjected = true
 						}
-					} else if !prefetchNotReadyLogged {
-						prefetchNotReadyLogged = true
-						slog.Debug("[PERF] sessionAgent: memory prefetch not ready, will retry on next step", "session_id", call.SessionID)
 					}
 				}
 
@@ -1211,7 +1186,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							memoryContent := FormatAutoRecallMessage(autoRecallContent)
 							// Appended to the end to keep the prefix stable and preserve prompt caching.
 							prepared.Messages = append(prepared.Messages, fantasy.NewSystemMessage(memoryContent))
-							slog.Debug("[PERF] sessionAgent: re-injected auto_recall as System Message after transform", "session_id", call.SessionID)
 							chainingContextInjected = true
 						}
 

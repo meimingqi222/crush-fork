@@ -260,7 +260,6 @@ func (a *sessionAgent) buildChatRequestState(ctx context.Context, input chatRequ
 	if err != nil {
 		return chatRequestState{}, err
 	}
-	slog.Debug("[PERF] buildChatRequestState: transformSystemPrompt done", "duration", time.Since(start), "session_id", input.SessionID)
 	var promptSuffix string
 	if autoModePrompt, ok := pendingAutoModePromptText(transformedMessages, input.PermissionMode); ok {
 		// Keep the main system prompt stable for prompt caching; inject the

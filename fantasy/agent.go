@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/fantasy/schema"
 	"github.com/charmbracelet/x/exp/slice"
@@ -857,11 +859,18 @@ func (a *agent) executeSingleTool(ctx context.Context, toolMap map[string]AgentT
 	// single misbehaving tool cannot take down the whole process. The panic
 	// value and stack are included so they survive in the transcript even
 	// when stderr is lost.
+	toolStart := time.Now()
 	toolResult, err := runToolSafely(ctx, runTool, ToolCall{
 		ID:    toolCall.ToolCallID,
 		Name:  toolCall.ToolName,
 		Input: toolCall.Input,
 	})
+	slog.Debug("[PERF] tool executed",
+		"tool", toolCall.ToolName,
+		"tool_call_id", toolCall.ToolCallID,
+		"duration", time.Since(toolStart),
+		"error", err,
+	)
 	if err != nil {
 		result.Result = ToolResultOutputContentError{
 			Error: err,

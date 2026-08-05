@@ -189,7 +189,6 @@ func (s *service) List(ctx context.Context, sessionID string) ([]Message, error)
 			return nil, err
 		}
 	}
-	slog.Debug("[PERF] message.List: fromDBItem conversion done", "duration", time.Since(start), "session_id", sessionID)
 	return messages, nil
 }
 

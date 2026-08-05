@@ -85,6 +85,16 @@ type Shell struct {
 	mu         sync.Mutex
 	logger     Logger
 	blockFuncs []BlockFunc
+
+	// runner is the cached interpreter, reused across commands to avoid
+	// the overhead of interp.New on every exec. Protected by mu.
+	//
+	// The runner is only cached when the command does NOT spawn background
+	// processes (&), coprocesses (&|), or process substitutions (<() >()).
+	// Those constructs spawn goroutines that outlive Runner.Run and would
+	// race with the next command if the runner were reused.
+	// SetEnv/SetWorkingDir/SetBlockFuncs invalidate the cache.
+	runner *interp.Runner
 }
 
 // Options for creating a new shell
@@ -171,6 +181,8 @@ func (s *Shell) SetWorkingDir(dir string) error {
 	}
 
 	s.cwd = dir
+	// Invalidate the cached runner so the next command picks up the new cwd.
+	s.runner = nil
 	return nil
 }
 
@@ -194,10 +206,14 @@ func (s *Shell) SetEnv(key, value string) {
 	for i, env := range s.env {
 		if strings.HasPrefix(env, keyPrefix) {
 			s.env[i] = keyPrefix + value
+			// Invalidate the cached runner so the new env takes effect.
+			s.runner = nil
 			return
 		}
 	}
 	s.env = append(s.env, keyPrefix+value)
+	// Invalidate the cached runner so the new env takes effect.
+	s.runner = nil
 }
 
 // SetBlockFuncs sets the command block functions for the shell
@@ -205,6 +221,8 @@ func (s *Shell) SetBlockFuncs(blockFuncs []BlockFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blockFuncs = blockFuncs
+	// Invalidate the cached runner so the new block funcs take effect.
+	s.runner = nil
 }
 
 // CommandsBlocker creates a BlockFunc that blocks exact command matches
@@ -297,7 +315,7 @@ func (s *Shell) builtinHandler() func(next interp.ExecHandlerFunc) interp.ExecHa
 	}
 }
 
-// newInterp creates a new interpreter with the current shell state
+// newInterp creates a new interpreter with the current shell state.
 func (s *Shell) newInterp(ctx context.Context, stdout, stderr io.Writer) (*interp.Runner, map[string]runtimeEnvOverride, error) {
 	env := slices.Clone(s.env)
 	overrides := make(map[string]runtimeEnvOverride)
@@ -379,19 +397,68 @@ func (s *Shell) updateShellFromRunner(runner *interp.Runner, overrides map[strin
 		}
 		if override.HadOriginal {
 			setEnvValue(&s.env, key, override.OriginalValue)
+			// Restore the runner's variable too, so the cached runner
+			// doesn't leak the hook override into the next command.
+			runner.Vars[key] = expand.Variable{
+				Str:      override.OriginalValue,
+				Exported: true,
+			}
 			continue
 		}
 		removeEnvValue(&s.env, key)
+		delete(runner.Vars, key)
 	}
 }
 
-// execCommon is the shared implementation for executing commands
+// hasBackgroundOrProcSubst reports whether the parsed command contains any
+// construct that spawns goroutines outliving Runner.Run:
+//   - Background commands:   cmd &
+//   - Coprocesses:           cmd &|
+//   - Process substitution:  <(cmd) or >(cmd)
+//
+// When any of these are present, the cached runner must NOT be reused, because
+// the lingering goroutines would race with the next Run call.
+func hasBackgroundOrProcSubst(node syntax.Node) bool {
+	var found bool
+	syntax.Walk(node, func(n syntax.Node) bool {
+		switch n := n.(type) {
+		case *syntax.Stmt:
+			if n.Background || n.Coprocess {
+				found = true
+				return false
+			}
+		case *syntax.ProcSubst:
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// execCommon is the shared implementation for executing commands.
+//
+// The interp.Runner is cached on the Shell and reused across calls to avoid
+// the overhead of interp.New (which rebuilds the entire shell environment)
+// on every command. The runner's state (cwd, variables, functions) persists
+// across commands, matching the incremental Run semantics documented by
+// mvdan.cc/sh.
+//
+// Safety: the cached runner is only reused for commands that do NOT spawn
+// background processes, coprocesses, or process substitutions. Those
+// constructs create goroutines that outlive Runner.Run and would race with
+// the next command. When such constructs are detected, a fresh one-shot
+// runner is used and the cache is invalidated.
 func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr io.Writer) (err error) {
 	var runner *interp.Runner
-	overrides := make(map[string]runtimeEnvOverride)
+	var overrides map[string]runtimeEnvOverride
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("command execution panic: %v", r)
+			// Discard the cached runner on panic, as its state may be
+			// corrupted. If this was a one-shot runner, s.runner is
+			// already nil.
+			s.runner = nil
 		}
 		if runner != nil {
 			s.updateShellFromRunner(runner, overrides)
@@ -405,13 +472,64 @@ func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr i
 	}
 	normalizeWindowsGitBashCDPaths(line, s.cwd)
 
-	runner, overrides, err = s.newInterp(ctx, stdout, stderr)
-	if err != nil {
-		return fmt.Errorf("could not run command: %w", err)
+	// Check if the command spawns background processes or process
+	// substitutions. If so, don't use the cached runner, because those
+	// goroutines outlive Run() and would race with the next command.
+	unsafe := hasBackgroundOrProcSubst(line)
+
+	if unsafe || s.runner == nil {
+		// Create a fresh runner.
+		runner, overrides, err = s.newInterp(ctx, stdout, stderr)
+		if err != nil {
+			return fmt.Errorf("could not run command: %w", err)
+		}
+		if unsafe {
+			// Don't cache runners for unsafe commands. Also invalidate
+			// any existing cached runner, as the one-shot runner may
+			// change cwd/env which would make the cached runner stale.
+			s.runner = nil
+		} else {
+			// Safe command with no cached runner: cache the new one.
+			s.runner = runner
+		}
+	} else {
+		// Reuse the cached runner.
+		runner = s.runner
+		// Update stdio for this invocation.
+		interp.StdIO(nil, stdout, stderr)(runner)
+		// Apply runtime env hook overrides for this invocation.
+		overrides = s.applyEnvHook(ctx, runner)
 	}
 
 	err = runner.Run(ctx, line)
+	// If the runner exited (e.g. "exit" was called), discard the cache.
+	if runner.Exited() {
+		s.runner = nil
+	}
 	return err
+}
+
+// applyEnvHook applies runtime env hook variables to the cached runner's
+// environment and returns the override map for later restoration.
+func (s *Shell) applyEnvHook(ctx context.Context, runner *interp.Runner) map[string]runtimeEnvOverride {
+	overrides := make(map[string]runtimeEnvOverride)
+	hook := getRuntimeEnvHook()
+	if hook == nil || runner == nil {
+		return overrides
+	}
+	for key, value := range hook(ctx, RuntimeEnvInput{CWD: runner.Dir}) {
+		vr, exists := runner.Vars[key]
+		overrides[key] = runtimeEnvOverride{
+			InjectedValue: value,
+			HadOriginal:   exists && vr.Exported,
+			OriginalValue: vr.Str,
+		}
+		runner.Vars[key] = expand.Variable{
+			Str:      value,
+			Exported: true,
+		}
+	}
+	return overrides
 }
 
 // exec executes commands using a cross-platform shell interpreter.
@@ -580,7 +698,7 @@ func setLiteralWord(word *syntax.Word, value string) {
 			x.Value = value
 			return
 		case *syntax.DblQuoted:
-			x.Parts = []syntax.WordPart{&syntax.Lit{Value: value}}
+			word.Parts = []syntax.WordPart{&syntax.Lit{Value: value}}
 			return
 		}
 	}

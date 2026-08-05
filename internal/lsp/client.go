@@ -717,29 +717,6 @@ func (c *Client) openKeyConfigFiles(ctx context.Context) {
 	}
 }
 
-// WaitForDiagnostics waits until diagnostics change or the timeout is reached.
-func (c *Client) WaitForDiagnostics(ctx context.Context, d time.Duration) {
-	if c == nil {
-		return
-	}
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(d)
-	pv := c.diagnostics.Version()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timeout:
-			return
-		case <-ticker.C:
-			if pv != c.diagnostics.Version() {
-				return
-			}
-		}
-	}
-}
-
 // FindReferences finds all references to the symbol at the given position.
 func (c *Client) FindReferences(ctx context.Context, filepath string, line, character int, includeDeclaration bool) ([]protocol.Location, error) {
 	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {

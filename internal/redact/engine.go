@@ -42,8 +42,10 @@ func RedactString(input string, patterns []SecretPattern, cache map[string]strin
 		return input
 	}
 
-	if cached, ok := cache[input]; ok {
-		return cached
+	if cache != nil {
+		if cached, ok := cache[input]; ok {
+			return cached
+		}
 	}
 
 	result := stripInvisibleUnicode(input)
@@ -67,7 +69,7 @@ func RedactString(input string, patterns []SecretPattern, cache map[string]strin
 		})
 	}
 
-	if len(input) <= maxCacheEntryLen {
+	if cache != nil && len(input) <= maxCacheEntryLen {
 		if len(cache) >= maxCacheSize {
 			for k := range cache {
 				delete(cache, k)

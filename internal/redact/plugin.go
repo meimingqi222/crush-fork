@@ -2,7 +2,10 @@ package redact
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
+	"sync"
 
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/plugin"
@@ -10,10 +13,30 @@ import (
 
 type redactPlugin struct {
 	patterns []SecretPattern
+
+	// persistentCache caches redaction results across ChatMessagesTransform
+	// calls. The key is a SHA-256 hash of the input string; the value is the
+	// redacted output. This avoids re-running 111 regex patterns on the same
+	// text (e.g. old messages) on every LLM call, turning the transform from
+	// O(N×M×111) per call into O(new_messages×M×111).
+	//
+	// The cache is guarded by cacheMu. It is evicted when it exceeds
+	// maxPersistentCacheEntries to bound memory.
+	cacheMu sync.Mutex
+	cache   map[string]string
+	cacheSz int
 }
 
+const (
+	maxPersistentCacheEntries = 10_000
+	// If a text is longer than this, skip caching it to bound memory.
+	maxCachableTextLen = 512_000
+)
+
 func NewPlugin() plugin.Plugin {
-	return &redactPlugin{}
+	return &redactPlugin{
+		cache: make(map[string]string),
+	}
 }
 
 func (p *redactPlugin) Name() string {
@@ -73,14 +96,17 @@ func (p *redactPlugin) Init(ctx context.Context, input plugin.PluginInput) (plug
 		},
 
 		ChatMessagesTransform: func(ctx context.Context, input plugin.ChatMessagesTransformInput, output *plugin.ChatMessagesTransformOutput) error {
-			cache := make(map[string]string)
+			// Use a per-call local cache seeded from the persistent cache.
+			// The local cache avoids lock contention on every string lookup;
+			// we only take the lock to get/set entries in the persistent cache.
+			localCache := make(map[string]string, 64)
 
 			for i := range output.Messages {
 				msg := &output.Messages[i]
-				redactMessageInfo(msg, p.patterns, cache)
+				p.redactMessageInfoCached(msg, localCache)
 				for j := range msg.Parts {
 					part := &msg.Parts[j]
-					redactPart(part, p.patterns, cache)
+					p.redactPartCached(part, localCache)
 				}
 			}
 
@@ -93,6 +119,127 @@ func (p *redactPlugin) Close(ctx context.Context) error {
 	return nil
 }
 
+// redactStringCached looks up the persistent cache first, then falls back to
+// running the full regex pipeline. On a miss, the result is stored in the
+// persistent cache for future calls.
+func (p *redactPlugin) redactStringCached(input string, localCache map[string]string) string {
+	if input == "" {
+		return input
+	}
+
+	// Fast path: check the per-call local cache.
+	if cached, ok := localCache[input]; ok {
+		return cached
+	}
+
+	// Check the persistent cache.
+	key := hashKey(input)
+	p.cacheMu.Lock()
+	cached, ok := p.cache[key]
+	p.cacheMu.Unlock()
+	if ok {
+		localCache[input] = cached
+		return cached
+	}
+
+	// Miss: run the full redaction pipeline.
+	result := RedactString(input, p.patterns, nil)
+	localCache[input] = result
+
+	// Store in the persistent cache if the text is not too large.
+	if len(input) <= maxCachableTextLen {
+		p.cacheMu.Lock()
+		if p.cacheSz >= maxPersistentCacheEntries {
+			// Evict all entries to bound memory (simple, infrequent).
+			clear(p.cache)
+			p.cacheSz = 0
+		}
+		if _, exists := p.cache[key]; !exists {
+			p.cache[key] = result
+			p.cacheSz++
+		}
+		p.cacheMu.Unlock()
+	}
+
+	return result
+}
+
+func (p *redactPlugin) redactToolInputCached(input string, localCache map[string]string) string {
+	// Try JSON parse + deep redact (which may hit the cache for string values).
+	// Fall back to plain string redaction.
+	// We use the persistent cache for the final result.
+	if input == "" {
+		return input
+	}
+
+	// Check caches first.
+	if cached, ok := localCache[input]; ok {
+		return cached
+	}
+	key := hashKey(input)
+	p.cacheMu.Lock()
+	cached, ok := p.cache[key]
+	p.cacheMu.Unlock()
+	if ok {
+		localCache[input] = cached
+		return cached
+	}
+
+	// Miss: run the full pipeline.
+	result := RedactToolInput(input, p.patterns, nil)
+	localCache[input] = result
+
+	if len(input) <= maxCachableTextLen {
+		p.cacheMu.Lock()
+		if p.cacheSz >= maxPersistentCacheEntries {
+			clear(p.cache)
+			p.cacheSz = 0
+		}
+		if _, exists := p.cache[key]; !exists {
+			p.cache[key] = result
+			p.cacheSz++
+		}
+		p.cacheMu.Unlock()
+	}
+
+	return result
+}
+
+func (p *redactPlugin) redactMessageInfoCached(msg *message.Message, localCache map[string]string) {
+	msg.Model = p.redactStringCached(msg.Model, localCache)
+	msg.Provider = p.redactStringCached(msg.Provider, localCache)
+	msg.SessionID = p.redactStringCached(msg.SessionID, localCache)
+}
+
+func (p *redactPlugin) redactPartCached(part *message.ContentPart, localCache map[string]string) {
+	switch v := (*part).(type) {
+	case message.TextContent:
+		v.Text = p.redactStringCached(v.Text, localCache)
+		*part = v
+	case message.ReasoningContent:
+		v.Thinking = p.redactStringCached(v.Thinking, localCache)
+		*part = v
+	case message.ToolCall:
+		if v.Input != "" {
+			v.Input = p.redactToolInputCached(v.Input, localCache)
+		}
+		*part = v
+	case message.ToolResult:
+		v.Content = p.redactStringCached(v.Content, localCache)
+		v.Data = p.redactStringCached(v.Data, localCache)
+		v.Metadata = p.redactStringCached(v.Metadata, localCache)
+		*part = v
+	}
+}
+
+// hashKey returns a hex-encoded SHA-256 hash of the input string.
+func hashKey(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// redactMessageInfo and redactPart are kept for backward compatibility
+// (they are used by tests).
 func redactMessageInfo(msg *message.Message, patterns []SecretPattern, cache map[string]string) {
 	msg.Model = RedactString(msg.Model, patterns, cache)
 	msg.Provider = RedactString(msg.Provider, patterns, cache)

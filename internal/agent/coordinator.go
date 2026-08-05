@@ -790,8 +790,6 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			return nil, err
 		}
 	}
-	slog.Debug("[PERF] coordinator: got session", "duration", time.Since(start), "session_id", sessionID)
-
 	// Set session-specific working directory in context.
 	// Tools will use this instead of the global working dir to avoid
 	// race conditions when multiple sessions run concurrently.
@@ -838,7 +836,6 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			return nil, fmt.Errorf("failed to create user message: %w", err)
 		}
 		userMessage = &created
-		slog.Debug("[PERF] coordinator: created user message", "duration", time.Since(start), "session_id", sessionID)
 	}
 
 	// Start async memory prefetch immediately after user message creation.
@@ -871,17 +868,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			}
 		}
 		memoryPrefetch.Settle(recall)
-		slog.Debug("[PERF] coordinator: memory prefetch completed", "has_recall", recall != "", "session_id", sessionID)
 	}()
-	slog.Debug("[PERF] coordinator: started memory prefetch", "session_id", sessionID)
-
 	// refresh models before each run
 	runtimeConfig, err := c.updateCurrentAgentRuntime(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update models: %w", err)
 	}
-	slog.Debug("[PERF] coordinator: updated agent runtime", "duration", time.Since(start), "session_id", sessionID)
-
 	model := c.currentAgent.Model()
 	if runtimeConfig.Model != nil {
 		model = *runtimeConfig.Model
@@ -916,7 +908,6 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	ctx = turnCtx
 
 	run := func() (*fantasy.AgentResult, error) {
-		slog.Debug("[PERF] coordinator: starting sessionAgent.Run", "duration", time.Since(start), "session_id", sessionID)
 		call := SessionAgentCall{
 			SessionID:           sessionID,
 			TurnID:              turnIDFromContext(ctx),

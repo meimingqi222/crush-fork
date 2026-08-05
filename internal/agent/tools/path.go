@@ -105,6 +105,10 @@ func ResolveToolPath(ctx context.Context, fallbackWorkingDir, inputPath string) 
 // tree. Both paths must be absolute. A path that resolves to workingDir itself
 // is not outside.
 func isPathOutsideWorkingDir(absPath, workingDir string) bool {
+	absPath, err := filepath.Abs(absPath)
+	if err != nil {
+		return false
+	}
 	absWorking, err := filepath.Abs(workingDir)
 	if err != nil {
 		return false

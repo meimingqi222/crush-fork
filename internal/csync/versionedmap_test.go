@@ -2,6 +2,7 @@ package csync
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -86,4 +87,85 @@ func TestVersionedMap_ConcurrentAccess(t *testing.T) {
 	// Final version should be at least the expected minimum
 	require.GreaterOrEqual(t, vm.Version(), expectedMinVersion)
 	require.Equal(t, 0, vm.Len())
+}
+
+func TestVersionedMap_WaitForChange_AlreadyChanged(t *testing.T) {
+	t.Parallel()
+
+	vm := NewVersionedMap[string, int]()
+	baseline := vm.Version()
+	vm.Set("key1", 42)
+
+	ch := vm.WaitForChange(baseline)
+	select {
+	case <-ch:
+		// Expected: channel already closed because version changed.
+	default:
+		t.Fatal("expected channel to be closed when version already changed")
+	}
+}
+
+func TestVersionedMap_WaitForChange_WakesOnSet(t *testing.T) {
+	t.Parallel()
+
+	vm := NewVersionedMap[string, int]()
+	baseline := vm.Version()
+	ch := vm.WaitForChange(baseline)
+
+	// Channel should not be closed yet.
+	select {
+	case <-ch:
+		t.Fatal("channel should not be closed before a change")
+	default:
+	}
+
+	// Trigger a change.
+	vm.Set("key1", 42)
+
+	// Channel should be closed now.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for change notification")
+	}
+}
+
+func TestVersionedMap_WaitForChange_WakesOnDel(t *testing.T) {
+	t.Parallel()
+
+	vm := NewVersionedMap[string, int]()
+	vm.Set("key1", 42)
+	baseline := vm.Version()
+	ch := vm.WaitForChange(baseline)
+
+	vm.Del("key1")
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for change notification")
+	}
+}
+
+func TestVersionedMap_WaitForChange_MultipleWaiters(t *testing.T) {
+	t.Parallel()
+
+	vm := NewVersionedMap[string, int]()
+	baseline := vm.Version()
+
+	ch1 := vm.WaitForChange(baseline)
+	ch2 := vm.WaitForChange(baseline)
+
+	vm.Set("key1", 42)
+
+	select {
+	case <-ch1:
+	case <-time.After(time.Second):
+		t.Fatal("first waiter timed out")
+	}
+	select {
+	case <-ch2:
+	case <-time.After(time.Second):
+		t.Fatal("second waiter timed out")
+	}
 }

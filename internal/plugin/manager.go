@@ -372,7 +372,6 @@ func (r *Runtime) TriggerChatMessagesTransform(ctx context.Context, input ChatMe
 	if err != nil {
 		return transformed, err
 	}
-	slog.Debug("[PERF] ChatMessagesTransform all hooks done", "session_id", input.SessionID, "msg_count", len(transformed.Messages))
 	return transformed, nil
 }
 

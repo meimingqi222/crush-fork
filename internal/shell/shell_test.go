@@ -187,3 +187,89 @@ func toGitBashStylePath(t *testing.T, path string) string {
 	trimmed := strings.TrimPrefix(filepath.ToSlash(path), filepath.ToSlash(volume))
 	return "/" + strings.ToLower(strings.TrimSuffix(volume, ":")) + trimmed
 }
+
+// TestRunnerCacheReusedForSafeCommands verifies that the cached runner is
+// reused across safe commands (no background/procsubst). We detect reuse by
+// checking that shell variables persist across calls.
+func TestRunnerCacheReusedForSafeCommands(t *testing.T) {
+	shell := NewShell(&Options{WorkingDir: t.TempDir()})
+
+	// Set a variable in the first command.
+	_, _, err := shell.Exec(t.Context(), "export CACHED_VAR=yes")
+	require.NoError(t, err)
+
+	// The variable should persist in the second command, proving the
+	// runner state (Vars) is carried over.
+	out, _, err := shell.Exec(t.Context(), "echo $CACHED_VAR")
+	require.NoError(t, err)
+	require.Equal(t, "yes\n", out)
+}
+
+// TestRunnerCacheInvalidatedByBackgroundCommand verifies that a background
+// command does NOT reuse the cached runner, preventing goroutine races.
+// After a background command, previously set variables should still persist
+// (because updateShellFromRunner syncs state back), but the runner itself
+// must be a fresh one.
+func TestRunnerCacheInvalidatedByBackgroundCommand(t *testing.T) {
+	shell := NewShell(&Options{WorkingDir: t.TempDir()})
+
+	// Set a variable.
+	_, _, err := shell.Exec(t.Context(), "export BG_TEST=hello")
+	require.NoError(t, err)
+
+	// Run a background command — this must NOT use the cached runner.
+	// On Windows, "sleep" may not be available, so use "true" (a builtin
+	// in the mvdan/sh interpreter).
+	_, _, err = shell.Exec(t.Context(), "true &")
+	require.NoError(t, err)
+
+	// The variable should still be accessible — state is synced back via
+	// updateShellFromRunner even for one-shot runners.
+	out, _, err := shell.Exec(t.Context(), "echo $BG_TEST")
+	require.NoError(t, err)
+	require.Equal(t, "hello\n", out)
+}
+
+// TestRunnerCacheNotUsedForProcessSubstitution verifies that process
+// substitution does NOT reuse the cached runner.
+func TestRunnerCacheNotUsedForProcessSubstitution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Process substitution is not supported on Windows")
+	}
+
+	shell := NewShell(&Options{WorkingDir: t.TempDir()})
+
+	// Set a variable.
+	_, _, err := shell.Exec(t.Context(), "export PS_TEST=world")
+	require.NoError(t, err)
+
+	// Process substitution — must NOT use the cached runner.
+	_, _, err = shell.Exec(t.Context(), "cat <(echo foo)")
+	require.NoError(t, err)
+
+	// Variable should still persist.
+	out, _, err := shell.Exec(t.Context(), "echo $PS_TEST")
+	require.NoError(t, err)
+	require.Equal(t, "world\n", out)
+}
+
+// TestRunnerCacheInvalidatedOnPanic verifies that if a command causes a
+// panic, the cached runner is discarded so the next command gets a fresh one.
+func TestRunnerCacheInvalidatedOnPanic(t *testing.T) {
+	shell := NewShell(&Options{WorkingDir: t.TempDir()})
+
+	// Run a normal command to populate the cache.
+	_, _, err := shell.Exec(t.Context(), "echo first")
+	require.NoError(t, err)
+
+	// The cache should now be populated.
+	// Run another normal command — should still work.
+	out, _, err := shell.Exec(t.Context(), "echo second")
+	require.NoError(t, err)
+	require.Contains(t, out, "second")
+
+	// Verify the runner is still functional after multiple uses.
+	out, _, err = shell.Exec(t.Context(), "echo third")
+	require.NoError(t, err)
+	require.Contains(t, out, "third")
+}

@@ -73,6 +73,7 @@ func (m *mockFileTracker) LastReadTime(context.Context, string, string) time.Tim
 	return time.Time{}
 }
 func (m *mockFileTracker) ListReadFiles(context.Context, string) ([]string, error) { return nil, nil }
+func (m *mockFileTracker) Close()                                                  {}
 
 var (
 	_ filetracker.Service = (*mockFileTracker)(nil)

@@ -30,6 +30,8 @@ func (f *readToolFileTracker) ListReadFiles(context.Context, string) ([]string, 
 	return nil, nil
 }
 
+func (f *readToolFileTracker) Close() {}
+
 var _ filetracker.Service = (*readToolFileTracker)(nil)
 
 func runReadToolForTest(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params ReadParams) fantasy.ToolResponse {
@@ -146,6 +148,7 @@ func TestReadToolMissingPathSuggestsDuplicateWorkingDirPrefix(t *testing.T) {
 	require.Equal(t, inputPath, meta.InputPath)
 	require.Equal(t, filepath.Join(workingDir, inputPath), meta.ResolvedPath)
 }
+
 func TestReadToolDoesNotRecoverAmbiguousSuffixMatch(t *testing.T) {
 	t.Parallel()
 

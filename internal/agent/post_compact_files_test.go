@@ -30,6 +30,8 @@ func (f *fakeFileTracker) ListReadFiles(ctx context.Context, sessionID string) (
 	return f.paths, nil
 }
 
+func (f *fakeFileTracker) Close() {}
+
 var _ filetracker.Service = (*fakeFileTracker)(nil)
 
 // writeTestFile writes content of the given size (in runes, all ASCII 'a')

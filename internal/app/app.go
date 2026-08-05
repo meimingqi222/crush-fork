@@ -631,7 +631,6 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 			stopSpinner()
 			if result.err != nil {
 				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
-					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
 					return nil
 				}
 				return fmt.Errorf("agent processing failed: %w", result.err)
@@ -818,7 +817,6 @@ func setupSubscriber[T any](
 			select {
 			case event, ok := <-subCh:
 				if !ok {
-					slog.Debug("Subscription channel closed", "name", name)
 					return
 				}
 				var msg tea.Msg = event
@@ -835,11 +833,9 @@ func setupSubscriber[T any](
 				case <-sendTimer.C:
 					slog.Debug("Message dropped due to slow consumer", "name", name)
 				case <-ctx.Done():
-					slog.Debug("Subscription cancelled", "name", name)
 					return
 				}
 			case <-ctx.Done():
-				slog.Debug("Subscription cancelled", "name", name)
 				return
 			}
 		}
@@ -866,7 +862,6 @@ func setupMessageSubscriber(
 			select {
 			case event, ok := <-subCh:
 				if !ok {
-					slog.Debug("Subscription channel closed", "name", "messages")
 					return
 				}
 				if event.Type == pubsub.CreatedEvent {
@@ -888,11 +883,9 @@ func setupMessageSubscriber(
 				case <-sendTimer.C:
 					slog.Debug("Message dropped due to slow consumer", "name", "messages")
 				case <-ctx.Done():
-					slog.Debug("Subscription cancelled", "name", "messages")
 					return
 				}
 			case <-ctx.Done():
-				slog.Debug("Subscription cancelled", "name", "messages")
 				return
 			}
 		}
@@ -950,7 +943,6 @@ func (app *App) Subscribe(program *tea.Program) {
 	app.tuiWG.Add(1)
 	tuiCtx, tuiCancel := context.WithCancel(app.globalCtx)
 	app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
-		slog.Debug("Cancelling TUI message handler")
 		tuiCancel()
 		app.tuiWG.Wait()
 		return nil
@@ -960,11 +952,9 @@ func (app *App) Subscribe(program *tea.Program) {
 	for {
 		select {
 		case <-tuiCtx.Done():
-			slog.Debug("TUI message handler shutting down")
 			return
 		case msg, ok := <-app.events:
 			if !ok {
-				slog.Debug("TUI message channel closed")
 				return
 			}
 			program.Send(msg)
@@ -1014,6 +1004,12 @@ func (app *App) Shutdown() {
 		if err := app.MemoryBackend.Close(); err != nil {
 			slog.Warn("Memory backend close failed", "error", err)
 		}
+	}
+
+	// Flush file tracker writes serially before the parallel cleanup closes
+	// the DB connection, so pending read records are not lost.
+	if app.FileTracker != nil {
+		app.FileTracker.Close()
 	}
 
 	// Now run remaining cleanup tasks in parallel.

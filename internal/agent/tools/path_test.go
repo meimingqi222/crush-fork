@@ -13,7 +13,9 @@ func TestFormatToolPath(t *testing.T) {
 
 	workingDir := filepath.Join(string(filepath.Separator), "workspace", "crush")
 	require.Equal(t, "fantasy/agent.go", FormatToolPath(filepath.Join(workingDir, "fantasy", "agent.go"), workingDir))
-	require.Equal(t, filepath.ToSlash(filepath.Join(string(filepath.Separator), "tmp", "agent.go")), FormatToolPath(filepath.Join(string(filepath.Separator), "tmp", "agent.go"), workingDir))
+	expectedOutside, err := filepath.Abs(filepath.Join(string(filepath.Separator), "tmp", "agent.go"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.ToSlash(expectedOutside), FormatToolPath(filepath.Join(string(filepath.Separator), "tmp", "agent.go"), workingDir))
 }
 
 func TestResolveToolPathUsesSessionWorkingDir(t *testing.T) {
