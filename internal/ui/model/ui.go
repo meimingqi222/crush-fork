@@ -238,6 +238,10 @@ type (
 		title     string
 		err       error
 	}
+	// sessionSummarizedMsg is returned when a Summarize call completes (or fails).
+	sessionSummarizedMsg struct {
+		err error
+	}
 	// idleRecapTickMsg fires when the idle-recap timer expires.
 	idleRecapTickMsg struct{ seq uint64 }
 	// idleRecapResultMsg carries the recap text back to the Update loop.
@@ -324,6 +328,13 @@ type UI struct {
 	// startup window from post-turn background work that still runs inside
 	// AgentCoordinator.Run after the session lock is released.
 	sessionAgentLockSeen bool
+
+	// summarizeInProgress is a UI-level re-entry guard for the Summarize command.
+	// It is set immediately when the user triggers ActionSummarize and cleared when
+	// the background Summarize call completes. This closes the race window between
+	// the goroutine launch and the agent registering its activeRequest, during which
+	// isAgentBusy() would still return false.
+	summarizeInProgress bool
 
 	header *header
 
@@ -726,6 +737,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(uiChat, initialFocus)
 		m.isCanceling = false
 		m.todoIsSpinning = false
+		m.summarizeInProgress = false
 		m.session = msg.session
 		// Recompute the sibling index/count cache for the newly viewed
 		// session. This is a no-op (zeroes the cache) when the session is
@@ -1488,6 +1500,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, util.ReportInfo("Created handoff "+msg.title))
 		if msg.sessionID != "" {
 			cmds = append(cmds, m.loadSession(msg.sessionID))
+		}
+	case sessionSummarizedMsg:
+		m.summarizeInProgress = false
+		if msg.err != nil {
+			cmds = append(cmds, util.ReportError(msg.err))
+		} else {
+			cmds = append(cmds, util.ReportInfo("Session summarized."))
 		}
 	case util.InfoMsg:
 		m.statusMsgSeq++
@@ -2930,18 +2949,21 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionSummarize:
+		if m.summarizeInProgress {
+			cmds = append(cmds, util.ReportWarn("Summarization already in progress..."))
+			break
+		}
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before summarizing session..."))
 			break
 		}
+		m.summarizeInProgress = true
+		m.dialog.CloseDialog(dialog.CommandsID)
+		cmds = append(cmds, util.ReportInfo("Summarizing session..."))
 		cmds = append(cmds, func() tea.Msg {
 			err := m.com.App.AgentCoordinator.Summarize(context.Background(), msg.SessionID, nil)
-			if err != nil {
-				return util.ReportError(err)()
-			}
-			return nil
+			return sessionSummarizedMsg{err: err}
 		})
-		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionGenerateHandoff:
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before creating a handoff..."))
