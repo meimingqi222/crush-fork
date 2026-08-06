@@ -525,8 +525,13 @@ func (c *Config) setDefaults(workingDir, projectDataDir string) {
 	// Apply defaults to LSP configurations
 	c.applyLSPDefaults()
 
-	// Add the default context paths if they are not already present
-	c.Options.ContextPaths = append(defaultContextPaths, c.Options.ContextPaths...)
+	// Add the default context paths if they are not already present.
+	// DefaultContextPaths returns a fresh copy: appending to the package
+	// level defaultContextPaths directly would return that very slice when
+	// c.Options.ContextPaths is empty (a composite literal has cap == len),
+	// and the Sort below would then reorder the shared backing array under
+	// any concurrent Init.
+	c.Options.ContextPaths = append(DefaultContextPaths(), c.Options.ContextPaths...)
 	slices.Sort(c.Options.ContextPaths)
 	c.Options.ContextPaths = slices.Compact(c.Options.ContextPaths)
 
