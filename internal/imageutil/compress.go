@@ -10,6 +10,8 @@ import (
 	"log/slog"
 
 	"github.com/disintegration/imaging"
+	// Register WebP decoder so imaging.Decode can handle image/webp.
+	_ "golang.org/x/image/webp"
 )
 
 // CompressionConfig holds the configuration for image compression.
@@ -24,7 +26,7 @@ type CompressionConfig struct {
 
 	// MaxDimension is the maximum width or height for the image.
 	// Images larger than this will be resized proportionally.
-	// Default is 2048 pixels.
+	// Default is 2000 pixels, matching the OpenAI vision model input limit.
 	MaxDimension int
 }
 
@@ -33,7 +35,7 @@ func DefaultCompressionConfig() CompressionConfig {
 	return CompressionConfig{
 		MaxSizeBytes: 1024 * 1024, // 1MB
 		JPEGQuality:  75,
-		MaxDimension: 2048,
+		MaxDimension: 2000,
 	}
 }
 
@@ -77,44 +79,64 @@ func DetectMimeType(data []byte) string {
 }
 
 // ShouldCompress checks if the image data should be compressed based on size.
+// Note: dimension-based compression is checked inside CompressImage after
+// decoding, since dimensions cannot be determined from raw bytes alone.
 func ShouldCompress(data []byte, config CompressionConfig) bool {
 	return int64(len(data)) > config.MaxSizeBytes
 }
 
-// CompressImage compresses the image if it exceeds the size threshold.
-// It converts PNG/GIF/WebP to JPEG for better compression when the image
-// exceeds the size threshold. For images with transparency, it preserves
-// PNG format.
+// CompressImage compresses the image if it exceeds the size threshold or if
+// its dimensions exceed MaxDimension. It converts PNG/GIF/WebP to JPEG for
+// better compression when the image exceeds the size threshold. For images
+// with transparency, it preserves PNG format.
+//
+// If the image dimensions exceed MaxDimension, the image is always resized
+// (even if the re-encoded result is larger than the original), because
+// oversized images are rejected by some vision model APIs (e.g. OpenAI's
+// 2000px limit).
 func CompressImage(data []byte, mimeType string, config CompressionConfig) (*CompressResult, error) {
 	originalSize := int64(len(data))
 
-	// If under threshold, return original.
-	if !ShouldCompress(data, config) {
-		return &CompressResult{
-			Data:           data,
-			MimeType:       mimeType,
-			WasCompressed:  false,
-			OriginalSize:   originalSize,
-			CompressedSize: originalSize,
-		}, nil
+	// Fast path: if under the size threshold, we still need to check
+	// dimensions. Decode the image to inspect its size, and only resize
+	// if it exceeds MaxDimension.
+	sizeOver := ShouldCompress(data, config)
+
+	if !sizeOver {
+		// Size is under threshold — check dimensions by decoding.
+		img, dimErr := decodeImage(data, mimeType)
+		if dimErr != nil {
+			// Can't decode (e.g. SVG or corrupted); return as-is.
+			slog.Debug("Could not decode image for dimension check, returning original",
+				"error", dimErr, "mime_type", mimeType)
+			return &CompressResult{
+				Data:           data,
+				MimeType:       mimeType,
+				WasCompressed:  false,
+				OriginalSize:   originalSize,
+				CompressedSize: originalSize,
+			}, nil
+		}
+
+		bounds := img.Bounds()
+		if bounds.Dx() <= config.MaxDimension && bounds.Dy() <= config.MaxDimension {
+			// Both size and dimensions are within limits — no work needed.
+			return &CompressResult{
+				Data:           data,
+				MimeType:       mimeType,
+				WasCompressed:  false,
+				OriginalSize:   originalSize,
+				CompressedSize: originalSize,
+			}, nil
+		}
+
+		// Dimensions exceed the limit — must resize even though file
+		// size is small. Fall through to the resize + re-encode path.
+		return resizeAndEncode(img, data, mimeType, originalSize, config)
 	}
 
-	// Decode the image.
-	var img image.Image
-	var err error
-
-	reader := bytes.NewReader(data)
-
-	switch mimeType {
-	case "image/jpeg":
-		img, err = jpeg.Decode(reader)
-	case "image/png":
-		img, err = png.Decode(reader)
-	default:
-		// Try generic decoding.
-		img, err = imaging.Decode(reader)
-	}
-
+	// Size exceeds threshold — decode, resize, and re-encode.
+	img, err := decodeImage(data, mimeType)
 	if err != nil {
 		slog.Warn("Failed to decode image for compression, returning original", "error", err, "mime_type", mimeType)
 		return &CompressResult{
@@ -126,12 +148,35 @@ func CompressImage(data []byte, mimeType string, config CompressionConfig) (*Com
 		}, nil
 	}
 
-	// Resize if needed.
+	return resizeAndEncode(img, data, mimeType, originalSize, config)
+}
+
+// decodeImage decodes image data using the appropriate decoder based on
+// mimeType. Falls back to generic imaging.Decode for unsupported types.
+func decodeImage(data []byte, mimeType string) (image.Image, error) {
+	reader := bytes.NewReader(data)
+	switch mimeType {
+	case "image/jpeg":
+		return jpeg.Decode(reader)
+	case "image/png":
+		return png.Decode(reader)
+	default:
+		return imaging.Decode(reader)
+	}
+}
+
+// resizeAndEncode resizes the image if needed, then re-encodes it. When the
+// resize was triggered by dimension overflow, the result is always used even
+// if it is larger than the original, because oversized images are rejected by
+// vision model APIs. When triggered only by file size, the result is used
+// only if it is actually smaller.
+func resizeAndEncode(img image.Image, originalData []byte, originalMimeType string, originalSize int64, config CompressionConfig) (*CompressResult, error) {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
+	dimensionOver := width > config.MaxDimension || height > config.MaxDimension
 
-	if width > config.MaxDimension || height > config.MaxDimension {
+	if dimensionOver {
 		img = imaging.Fit(img, config.MaxDimension, config.MaxDimension, imaging.Lanczos)
 	}
 
@@ -142,26 +187,24 @@ func CompressImage(data []byte, mimeType string, config CompressionConfig) (*Com
 	var outputMimeType string
 
 	if hasTransparency {
-		// Keep PNG for images with transparency.
 		outputMimeType = "image/png"
 		if err := png.Encode(&output, img); err != nil {
 			slog.Warn("Failed to encode PNG, returning original", "error", err)
 			return &CompressResult{
-				Data:           data,
-				MimeType:       mimeType,
+				Data:           originalData,
+				MimeType:       originalMimeType,
 				WasCompressed:  false,
 				OriginalSize:   originalSize,
 				CompressedSize: originalSize,
 			}, nil
 		}
 	} else {
-		// Convert to JPEG for better compression.
 		outputMimeType = "image/jpeg"
 		if err := jpeg.Encode(&output, img, &jpeg.Options{Quality: config.JPEGQuality}); err != nil {
 			slog.Warn("Failed to encode JPEG, returning original", "error", err)
 			return &CompressResult{
-				Data:           data,
-				MimeType:       mimeType,
+				Data:           originalData,
+				MimeType:       originalMimeType,
 				WasCompressed:  false,
 				OriginalSize:   originalSize,
 				CompressedSize: originalSize,
@@ -172,15 +215,17 @@ func CompressImage(data []byte, mimeType string, config CompressionConfig) (*Com
 	compressedData := output.Bytes()
 	compressedSize := int64(len(compressedData))
 
-	// Only use compressed data if it's actually smaller than original.
-	if compressedSize >= originalSize {
+	// If the resize was triggered by dimension overflow, always use the
+	// re-encoded result even if it is larger — the API would reject the
+	// oversized original anyway.
+	if !dimensionOver && compressedSize >= originalSize {
 		slog.Debug("Compression did not reduce size, keeping original",
 			"original_size", originalSize,
 			"compressed_size", compressedSize,
 		)
 		return &CompressResult{
-			Data:           data,
-			MimeType:       mimeType,
+			Data:           originalData,
+			MimeType:       originalMimeType,
 			WasCompressed:  false,
 			OriginalSize:   originalSize,
 			CompressedSize: originalSize,
@@ -192,6 +237,7 @@ func CompressImage(data []byte, mimeType string, config CompressionConfig) (*Com
 		"compressed_size", compressedSize,
 		"ratio", float64(compressedSize)/float64(originalSize),
 		"output_format", outputMimeType,
+		"dimension_resized", dimensionOver,
 	)
 
 	return &CompressResult{

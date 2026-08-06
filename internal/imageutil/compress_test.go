@@ -246,8 +246,89 @@ func TestDefaultCompressionConfig(t *testing.T) {
 		t.Errorf("Default JPEGQuality = %v, want 75", config.JPEGQuality)
 	}
 
-	if config.MaxDimension != 2048 {
-		t.Errorf("Default MaxDimension = %v, want 2048", config.MaxDimension)
+	if config.MaxDimension != 2000 {
+		t.Errorf("Default MaxDimension = %v, want 2000", config.MaxDimension)
+	}
+}
+
+func TestCompressImage_DimensionOverflowSmallFile(t *testing.T) {
+	// Reproduce the real-world bug: a JPEG that is under the 1MB size
+	// threshold but whose dimensions exceed MaxDimension.  Previously this
+	// image would bypass compression entirely and be rejected by the
+	// vision model API (e.g. OpenAI's 2000px limit).
+	config := DefaultCompressionConfig()
+
+	// 2600×2200 solid-color JPEG is well under 1MB but exceeds 2000px.
+	data := createTestImage(2600, 2200, false)
+
+	if int64(len(data)) > config.MaxSizeBytes {
+		t.Skipf("Test image too large (%d bytes), expected under %d", len(data), config.MaxSizeBytes)
+	}
+
+	result, err := CompressImage(data, "image/jpeg", config)
+	if err != nil {
+		t.Fatalf("CompressImage() error = %v", err)
+	}
+
+	if !result.WasCompressed {
+		t.Error("CompressImage() should have compressed image with dimensions exceeding MaxDimension")
+	}
+
+	// Verify the result decodes to a within-limit image.
+	img, err := jpeg.Decode(bytes.NewReader(result.Data))
+	if err != nil {
+		t.Fatalf("Failed to decode compressed result: %v", err)
+	}
+	bounds := img.Bounds()
+	if bounds.Dx() > config.MaxDimension {
+		t.Errorf("Compressed image width = %d, want <= %d", bounds.Dx(), config.MaxDimension)
+	}
+	if bounds.Dy() > config.MaxDimension {
+		t.Errorf("Compressed image height = %d, want <= %d", bounds.Dy(), config.MaxDimension)
+	}
+}
+
+func TestCompressImage_DimensionOverflowKeepsEvenIfLarger(t *testing.T) {
+	// A dimension-triggered resize must always use the re-encoded result,
+	// even if the re-encoded bytes are larger than the original.  This can
+	// happen when the original is a highly-optimised JPEG and the
+	// re-encode at quality 75 produces a larger file.
+	config := DefaultCompressionConfig()
+	config.JPEGQuality = 100 // Force high quality so re-encode is likely larger
+
+	// 2100×2100 solid red JPEG: small file, but dimension over limit.
+	data := createTestImage(2100, 2100, false)
+	originalSize := int64(len(data))
+
+	if int64(len(data)) > config.MaxSizeBytes {
+		t.Skipf("Test image too large (%d bytes), expected under %d", len(data), config.MaxSizeBytes)
+	}
+
+	result, err := CompressImage(data, "image/jpeg", config)
+	if err != nil {
+		t.Fatalf("CompressImage() error = %v", err)
+	}
+
+	if !result.WasCompressed {
+		t.Error("CompressImage() should have compressed image with dimensions exceeding MaxDimension")
+	}
+
+	// Even if compressed is larger, it must be used (dimension overflow).
+	if result.CompressedSize >= originalSize {
+		// This is fine - the point is that it WAS compressed despite
+		// being larger. Just log it.
+		t.Logf("Compressed result (%d bytes) is larger than original (%d bytes) but was kept due to dimension overflow",
+			result.CompressedSize, originalSize)
+	}
+
+	// Verify dimensions are within limit.
+	img, err := jpeg.Decode(bytes.NewReader(result.Data))
+	if err != nil {
+		t.Fatalf("Failed to decode compressed result: %v", err)
+	}
+	bounds := img.Bounds()
+	if bounds.Dx() > config.MaxDimension || bounds.Dy() > config.MaxDimension {
+		t.Errorf("Compressed dimensions = %dx%d, want <= %d", bounds.Dx(), bounds.Dy(), config.MaxDimension)
 	}
 }
 
