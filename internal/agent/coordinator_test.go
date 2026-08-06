@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"unsafe"
 
@@ -36,6 +37,7 @@ import (
 
 // mockSessionAgent is a minimal mock for the SessionAgent interface.
 type mockSessionAgent struct {
+	mu           sync.Mutex
 	model        Model
 	runFunc      func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error)
 	estimateFunc func(ctx context.Context, sessionID string, model Model) (int64, error)
@@ -78,7 +80,11 @@ func (m *mockSessionAgent) Cancel(sessionID string) {
 func (m *mockSessionAgent) CancelAll()                                          {}
 func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool                 { return false }
 func (m *mockSessionAgent) ActiveTurnID(sessionID string) string                { return "" }
-func (m *mockSessionAgent) IsBusy() bool                                        { return m.busy }
+func (m *mockSessionAgent) IsBusy() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.busy
+}
 func (m *mockSessionAgent) QueuedPrompts(sessionID string) int                  { return 0 }
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string         { return nil }
 func (m *mockSessionAgent) RemoveQueuedPrompt(sessionID string, index int) bool { return false }
@@ -94,11 +100,16 @@ func (m *mockSessionAgent) RemoveQueuedTurn(string, string) bool       { return 
 
 func (m *mockSessionAgent) EnqueueIRC(sessionID string, call SessionAgentCall) bool {
 	call.SessionID = sessionID
+	m.mu.Lock()
 	m.ircQueued = append(m.ircQueued, call)
-	return m.busy
+	busy := m.busy
+	m.mu.Unlock()
+	return busy
 }
 
 func (m *mockSessionAgent) QueuePrompt(sessionID string, call SessionAgentCall) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.busy {
 		return false
 	}

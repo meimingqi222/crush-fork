@@ -372,10 +372,14 @@ func TestIrcBus_Send_BusyPeer_AwaitReply_GetsRealReplyViaWaiter(t *testing.T) {
 	// Give the send time to register the waiter and block.
 	// The message should have been injected into the target's steering queue.
 	require.Eventually(t, func() bool {
+		target.mu.Lock()
+		defer target.mu.Unlock()
 		return len(target.ircQueued) == 1
 	}, time.Second, 10*time.Millisecond, "message must be injected before reply")
 
+	target.mu.Lock()
 	originalMsgID := target.ircQueued[0].PeerMessageID
+	target.mu.Unlock()
 	require.NotEmpty(t, originalMsgID, "injected message must carry PeerMessageID for reply correlation")
 
 	// Simulate the peer's own turn replying: the peer calls irc send with
@@ -501,8 +505,10 @@ func TestIrcBus_Wait_ForSpecificMessageID(t *testing.T) {
 	}, time.Second, 5*time.Millisecond, "waiter must be registered before reply")
 
 	// Simulate the peer replying.
+	target.mu.Lock()
 	require.Equal(t, 1, len(target.ircQueued))
 	originalMsgID := target.ircQueued[0].PeerMessageID
+	target.mu.Unlock()
 	require.Equal(t, msgID, originalMsgID, "PeerMessageID must match the send result's MessageID")
 	bus.Send(t.Context(), agenttools.IrcSendRequest{
 		From:    "0-Main::busy-wait-1",
