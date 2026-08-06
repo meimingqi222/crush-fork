@@ -89,3 +89,49 @@ func TestRequestUserInputToolSubmitsOutsidePlanMode(t *testing.T) {
 	require.Contains(t, resp.Content, `"status":"submitted"`)
 	require.Contains(t, resp.Content, `"selected_option":"A"`)
 }
+
+func TestRequestUserInputToolMultiSelect(t *testing.T) {
+	t.Parallel()
+
+	userInputSvc := userinput.NewService()
+	tool := NewRequestUserInputTool(userInputSvc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ctx = context.WithValue(ctx, SessionIDContextKey, "session-1")
+
+	responses := make(chan fantasy.ToolResponse, 1)
+	go func() {
+		responses <- runRequestUserInputTool(t, tool, ctx, RequestUserInputParams{
+			Questions: []RequestUserInputQuestion{{
+				Header:      "Features",
+				ID:          "features",
+				Question:    "Which features?",
+				MultiSelect: true,
+				Options: []RequestUserInputOption{
+					{Label: "A", Description: "Option A"},
+					{Label: "B", Description: "Option B"},
+					{Label: "C", Description: "Option C"},
+				},
+			}},
+		})
+	}()
+
+	requestEvent := <-userInputSvc.Subscribe(ctx)
+	req := requestEvent.Payload
+	userInputSvc.Resolve(userinput.Response{
+		RequestID:  req.ID,
+		SessionID:  req.SessionID,
+		ToolCallID: req.ToolCallID,
+		Status:     userinput.ResponseStatusSubmitted,
+		Answers: []userinput.Answer{{
+			QuestionID:      "features",
+			SelectedOptions: []string{"A", "C"},
+		}},
+	})
+
+	resp := <-responses
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, `"status":"submitted"`)
+	require.Contains(t, resp.Content, `"selected_options":["A","C"]`)
+}

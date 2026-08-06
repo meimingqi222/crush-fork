@@ -25,10 +25,11 @@ type Option struct {
 }
 
 type Question struct {
-	Header   string   `json:"header"`
-	ID       string   `json:"id"`
-	Question string   `json:"question"`
-	Options  []Option `json:"options"`
+	Header      string   `json:"header"`
+	ID          string   `json:"id"`
+	Question    string   `json:"question"`
+	Options     []Option `json:"options"`
+	MultiSelect bool     `json:"multi_select,omitempty"`
 }
 
 type CreateRequest struct {
@@ -45,9 +46,10 @@ type Request struct {
 }
 
 type Answer struct {
-	QuestionID     string `json:"question_id"`
-	SelectedOption string `json:"selected_option,omitempty"`
-	CustomInput    string `json:"custom_input,omitempty"`
+	QuestionID      string   `json:"question_id"`
+	SelectedOption  string   `json:"selected_option,omitempty"`
+	SelectedOptions []string `json:"selected_options,omitempty"`
+	CustomInput     string   `json:"custom_input,omitempty"`
 }
 
 type Response struct {

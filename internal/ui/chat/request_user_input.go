@@ -101,6 +101,9 @@ func renderRequestUserInputBody(sty *styles.Styles, params tools.RequestUserInpu
 		lines = append(lines, fmt.Sprintf("Q: %s", questionText))
 
 		summary := strings.TrimSpace(answer.SelectedOption)
+		if len(answer.SelectedOptions) > 0 {
+			summary = strings.Join(answer.SelectedOptions, ", ")
+		}
 		if custom := strings.TrimSpace(answer.CustomInput); custom != "" {
 			summary = fmt.Sprintf("Custom: %s", custom)
 		}

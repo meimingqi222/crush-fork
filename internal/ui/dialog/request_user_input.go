@@ -29,8 +29,9 @@ type RequestUserInput struct {
 	request          userinput.Request
 	current          int
 	selected         int
-	customMode       bool
+	customMode       bool // true when "Other" row has focus and textinput is active
 	customInput      textinput.Model
+	multiSelected    map[string]map[string]bool // question ID -> set of selected option labels
 	answers          map[string]userinput.Answer
 	help             help.Model
 	keyMap           requestUserInputKeyMap
@@ -39,6 +40,7 @@ type RequestUserInput struct {
 
 type requestUserInputKeyMap struct {
 	Select   key.Binding
+	Toggle   key.Binding
 	Next     key.Binding
 	Previous key.Binding
 	Close    key.Binding
@@ -49,7 +51,7 @@ func (k requestUserInputKeyMap) ShortHelp() []key.Binding {
 }
 
 func (k requestUserInputKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Select, k.Close}, {k.Previous, k.Next}}
+	return [][]key.Binding{{k.Select, k.Toggle, k.Close}, {k.Previous, k.Next}}
 }
 
 func NewRequestUserInput(com *common.Common, request userinput.Request) *RequestUserInput {
@@ -61,14 +63,23 @@ func NewRequestUserInput(com *common.Common, request userinput.Request) *Request
 	helpModel := help.New()
 	helpModel.Styles = com.Styles.DialogHelpStyles()
 
+	multiSelected := make(map[string]map[string]bool, len(request.Questions))
+	for _, q := range request.Questions {
+		if q.MultiSelect {
+			multiSelected[q.ID] = make(map[string]bool)
+		}
+	}
+
 	return &RequestUserInput{
-		com:         com,
-		request:     request,
-		answers:     make(map[string]userinput.Answer, len(request.Questions)),
-		customInput: input,
-		help:        helpModel,
+		com:           com,
+		request:       request,
+		answers:       make(map[string]userinput.Answer, len(request.Questions)),
+		customInput:   input,
+		multiSelected: multiSelected,
+		help:          helpModel,
 		keyMap: requestUserInputKeyMap{
 			Select:   key.NewBinding(key.WithKeys("enter", "ctrl+y"), key.WithHelp("enter", "confirm")),
+			Toggle:   key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "toggle")),
 			Next:     key.NewBinding(key.WithKeys("down", "ctrl+n"), key.WithHelp("↓", "next")),
 			Previous: key.NewBinding(key.WithKeys("up", "ctrl+p"), key.WithHelp("↑", "previous")),
 			Close:    CloseKey,
@@ -108,12 +119,28 @@ func (r *RequestUserInput) HandleMsg(msg tea.Msg) Action {
 			if !r.customMode {
 				options := optionsWithOther(r.currentQuestion())
 				r.selected = (r.selected + len(options) - 1) % len(options)
+				r.syncCustomFocus()
 			}
 			return nil
 		case key.Matches(msg, r.keyMap.Next):
 			if !r.customMode {
 				options := optionsWithOther(r.currentQuestion())
 				r.selected = (r.selected + 1) % len(options)
+				r.syncCustomFocus()
+			}
+			return nil
+		case key.Matches(msg, r.keyMap.Toggle):
+			if r.customMode {
+				// In custom mode, space inserts a space character.
+				var cmd tea.Cmd
+				r.customInput, cmd = r.customInput.Update(msg)
+				return ActionCmd{Cmd: cmd}
+			}
+			question := r.currentQuestion()
+			if question.MultiSelect && r.selected < len(question.Options) {
+				label := question.Options[r.selected].Label
+				selectedSet := r.multiSelected[question.ID]
+				selectedSet[label] = !selectedSet[label]
 			}
 			return nil
 		case key.Matches(msg, r.keyMap.Select):
@@ -130,11 +157,26 @@ func (r *RequestUserInput) HandleMsg(msg tea.Msg) Action {
 			}
 			question := r.currentQuestion()
 			if r.selected == len(question.Options) {
+				// "Other" row selected — focus the inline textinput.
 				r.customMode = true
 				r.customInput.SetValue("")
 				r.customInput.Focus()
 				return nil
 			}
+			if question.MultiSelect {
+				// Multi-select: Enter confirms current selections and advances.
+				selectedLabels := r.collectMultiSelected(question)
+				if len(selectedLabels) == 0 {
+					// Don't allow an empty multi-select submission.
+					return nil
+				}
+				r.answers[question.ID] = userinput.Answer{
+					QuestionID:      question.ID,
+					SelectedOptions: selectedLabels,
+				}
+				return r.advance()
+			}
+			// Single-select: select and advance.
 			selected := question.Options[r.selected]
 			r.answers[question.ID] = userinput.Answer{
 				QuestionID:     question.ID,
@@ -153,6 +195,42 @@ func (r *RequestUserInput) HandleMsg(msg tea.Msg) Action {
 	return nil
 }
 
+// syncCustomFocus is called when navigating onto or off the "Other" row.
+// When landing on "Other" without a prior custom value, we do NOT auto-focus
+// the textinput — the user presses Enter to activate it. This keeps
+// navigation smooth. If a custom value was already typed for this question,
+// we preserve and focus it so editing is seamless.
+func (r *RequestUserInput) syncCustomFocus() {
+	question := r.currentQuestion()
+	if r.selected == len(question.Options) {
+		// Navigated onto "Other" row.
+		if existing, ok := r.answers[question.ID]; ok && existing.CustomInput != "" {
+			r.customMode = true
+			r.customInput.SetValue(existing.CustomInput)
+			r.customInput.Focus()
+		}
+	} else {
+		// Navigated off "Other" row.
+		if r.customMode {
+			r.customMode = false
+			r.customInput.Blur()
+		}
+	}
+}
+
+// collectMultiSelected returns the sorted list of selected option labels for
+// a multi-select question.
+func (r *RequestUserInput) collectMultiSelected(question requestQuestion) []string {
+	selectedSet := r.multiSelected[question.ID]
+	result := make([]string, 0, len(selectedSet))
+	for _, opt := range question.Options {
+		if selectedSet[opt.Label] {
+			result = append(result, opt.Label)
+		}
+	}
+	return result
+}
+
 func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	question := r.currentQuestion()
 	title := fmt.Sprintf("%s (%d/%d)", question.Header, r.current+1, len(r.request.Questions))
@@ -169,25 +247,50 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	parts = append(parts, question.Question)
 	parts = append(parts, "")
 
-	if r.customMode {
-		parts = append(parts, r.com.Styles.Dialog.SecondaryText.Render("Provide a custom answer and press Enter to continue."))
-		parts = append(parts, "")
-		parts = append(parts, r.com.Styles.Dialog.InputPrompt.Render(r.customInput.View()))
-	} else {
-		for idx, option := range optionsWithOther(question) {
-			prefix := "○"
-			if idx == r.selected {
-				prefix = "●"
+	allOpts := optionsWithOther(question)
+	for idx, option := range allOpts {
+		isOther := idx == len(question.Options)
+		isHighlighted := idx == r.selected && !r.customMode
+		isActive := idx == r.selected && (r.customMode || isOther)
+
+		var prefix string
+		if question.MultiSelect && !isOther {
+			prefix = "☐"
+			if r.multiSelected[question.ID][option.Label] {
+				prefix = "☑"
 			}
-			parts = append(parts, fmt.Sprintf("%s %s", prefix, option.Label))
-			parts = append(parts, r.com.Styles.Dialog.SecondaryText.Render("  "+option.Description))
+		} else {
+			prefix = "○"
+		}
+		if isHighlighted || isActive {
+			prefix = "▶ " + prefix
+		} else {
+			prefix = "  " + prefix
+		}
+
+		parts = append(parts, fmt.Sprintf("%s %s", prefix, option.Label))
+		parts = append(parts, r.com.Styles.Dialog.SecondaryText.Render("    "+option.Description))
+		parts = append(parts, "")
+
+		// Inline custom input row — rendered directly under "Other".
+		if isOther && r.customMode {
+			parts = append(parts, "      "+r.com.Styles.Dialog.InputPrompt.Render(r.customInput.View()))
 			parts = append(parts, "")
 		}
-		parts = append(parts, r.help.View(r.keyMap))
 	}
+
+	// Help hint adapts to mode.
+	if question.MultiSelect {
+		parts = append(parts, r.com.Styles.Dialog.SecondaryText.Render("Space to toggle, Enter to confirm."))
+	} else {
+		parts = append(parts, r.com.Styles.Dialog.SecondaryText.Render("Enter to select."))
+	}
+	parts = append(parts, "")
+	parts = append(parts, r.help.View(r.keyMap))
 
 	content := strings.Join(parts, "\n")
 	rendered := r.com.Styles.Dialog.View.Width(dialogWidth).Render(content)
+
 	var cur *tea.Cursor
 	if r.customMode {
 		cur = realTextInputCursor(r.customInput)
@@ -197,14 +300,15 @@ func (r *RequestUserInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			// Count the visual lines of content that appear above the InputPrompt part.
 			// Use lipgloss rendering at the dialog inner width to correctly handle
 			// word-wrapped content (e.g. long question text).
-			aboveInput := strings.Join(parts[:len(parts)-1], "\n")
+			aboveInput := strings.Join(parts[:len(parts)-4], "\n")
 			linesAbove := lipgloss.Height(lipgloss.NewStyle().Width(r.dialogInnerWidth).Render(aboveInput))
 			cur.X += dialogStyle.GetBorderLeftSize() +
 				dialogStyle.GetPaddingLeft() +
 				dialogStyle.GetMarginLeft() +
 				inputStyle.GetBorderLeftSize() +
 				inputStyle.GetMarginLeft() +
-				inputStyle.GetPaddingLeft()
+				inputStyle.GetPaddingLeft() +
+				6 // indent for inline input ("      " prefix)
 			cur.Y += dialogStyle.GetBorderTopSize() +
 				dialogStyle.GetPaddingTop() +
 				dialogStyle.GetMarginTop() +

@@ -117,3 +117,50 @@ func TestServiceAllowsConcurrentRequests(t *testing.T) {
 		require.Equal(t, ResponseStatusSubmitted, resp.Status)
 	}
 }
+
+func TestServiceMultiSelectAnswer(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	responses := make(chan Response, 1)
+	go func() {
+		resp, err := svc.Request(ctx, CreateRequest{
+			SessionID:  "session-1",
+			ToolCallID: "call-1",
+			Questions: []Question{{
+				Header:      "Features",
+				ID:          "features",
+				Question:    "Pick multiple",
+				MultiSelect: true,
+				Options: []Option{
+					{Label: "A", Description: "Option A"},
+					{Label: "B", Description: "Option B"},
+					{Label: "C", Description: "Option C"},
+				},
+			}},
+		})
+		require.NoError(t, err)
+		responses <- resp
+	}()
+
+	requestEvent := <-svc.Subscribe(ctx)
+	req := requestEvent.Payload
+	svc.Resolve(Response{
+		RequestID:  req.ID,
+		SessionID:  req.SessionID,
+		ToolCallID: req.ToolCallID,
+		Status:     ResponseStatusSubmitted,
+		Answers: []Answer{{
+			QuestionID:      "features",
+			SelectedOptions: []string{"A", "C"},
+		}},
+	})
+
+	resp := <-responses
+	require.Equal(t, ResponseStatusSubmitted, resp.Status)
+	require.Len(t, resp.Answers, 1)
+	require.Equal(t, []string{"A", "C"}, resp.Answers[0].SelectedOptions)
+}

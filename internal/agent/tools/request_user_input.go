@@ -24,10 +24,11 @@ type RequestUserInputParams struct {
 }
 
 type RequestUserInputQuestion struct {
-	Header   string                   `json:"header" description:"Short section label shown in the UI"`
-	ID       string                   `json:"id" description:"Stable identifier for the question"`
-	Question string                   `json:"question" description:"Question text shown to the user"`
-	Options  []RequestUserInputOption `json:"options" description:"Two or three mutually exclusive options"`
+	Header      string                   `json:"header" description:"Short section label shown in the UI"`
+	ID          string                   `json:"id" description:"Stable identifier for the question"`
+	Question    string                   `json:"question" description:"Question text shown to the user"`
+	Options     []RequestUserInputOption `json:"options" description:"Two or three options (mutually exclusive unless multi_select is true)"`
+	MultiSelect bool                     `json:"multi_select,omitempty" description:"When true, the user can select multiple options"`
 }
 
 type RequestUserInputOption struct {
@@ -42,9 +43,10 @@ type RequestUserInputResult struct {
 }
 
 type RequestUserInputAnswer struct {
-	QuestionID     string `json:"question_id"`
-	SelectedOption string `json:"selected_option,omitempty"`
-	CustomInput    string `json:"custom_input,omitempty"`
+	QuestionID      string   `json:"question_id"`
+	SelectedOption  string   `json:"selected_option,omitempty"`
+	SelectedOptions []string `json:"selected_options,omitempty"`
+	CustomInput     string   `json:"custom_input,omitempty"`
 }
 
 func NewRequestUserInputTool(service userinput.Service) fantasy.AgentTool {
@@ -73,10 +75,11 @@ func NewRequestUserInputTool(service userinput.Service) fantasy.AgentTool {
 					})
 				}
 				questions = append(questions, userinput.Question{
-					Header:   question.Header,
-					ID:       question.ID,
-					Question: question.Question,
-					Options:  options,
+					Header:      question.Header,
+					ID:          question.ID,
+					Question:    question.Question,
+					Options:     options,
+					MultiSelect: question.MultiSelect,
 				})
 			}
 
@@ -99,9 +102,10 @@ func NewRequestUserInputTool(service userinput.Service) fantasy.AgentTool {
 			}
 			for _, answer := range response.Answers {
 				result.Answers = append(result.Answers, RequestUserInputAnswer{
-					QuestionID:     answer.QuestionID,
-					SelectedOption: answer.SelectedOption,
-					CustomInput:    answer.CustomInput,
+					QuestionID:      answer.QuestionID,
+					SelectedOption:  answer.SelectedOption,
+					SelectedOptions: answer.SelectedOptions,
+					CustomInput:     answer.CustomInput,
 				})
 			}
 

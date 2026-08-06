@@ -57,3 +57,51 @@ func TestRequestUserInputToolMessageItemRendersStructuredSummary(t *testing.T) {
 	require.Contains(t, rendered, "Q: 采用哪个方案？")
 	require.Contains(t, rendered, "A: Custom: 用你推荐的方式修改")
 }
+
+func TestRequestUserInputToolMessageItemRendersMultiSelect(t *testing.T) {
+	t.Parallel()
+
+	params, err := json.Marshal(tools.RequestUserInputParams{
+		Questions: []tools.RequestUserInputQuestion{
+			{
+				Header:      "Features",
+				ID:          "features",
+				Question:    "Which features to enable?",
+				MultiSelect: true,
+				Options: []tools.RequestUserInputOption{
+					{Label: "A", Description: "desc"},
+					{Label: "B", Description: "desc"},
+					{Label: "C", Description: "desc"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resultPayload, err := json.Marshal(tools.RequestUserInputResult{
+		Status: "submitted",
+		Answers: []tools.RequestUserInputAnswer{
+			{
+				QuestionID:      "features",
+				SelectedOptions: []string{"A", "C"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	theme := styles.DefaultStyles()
+	item := NewRequestUserInputToolMessageItem(&theme, message.ToolCall{
+		ID:       "tool-req",
+		Name:     tools.RequestUserInputToolName,
+		Input:    string(params),
+		Finished: true,
+	}, &message.ToolResult{
+		ToolCallID: "tool-req",
+		Content:    string(resultPayload),
+	}, false)
+
+	rendered := ansi.Strip(item.Render(100))
+	require.Contains(t, rendered, "Status: submitted")
+	require.Contains(t, rendered, "Q: Which features to enable?")
+	require.Contains(t, rendered, "A: A, C")
+}

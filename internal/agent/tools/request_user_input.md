@@ -16,7 +16,9 @@ Skip this tool when:
 
 <requirements>
 - Ask 1 to 3 questions.
-- Each question must provide 2 or 3 mutually exclusive options.
+- Each question must provide 2 or 3 options.
+- Set `multi_select` to `true` when the user should be able to pick multiple
+  options from the list. Omit it (or set `false`) for single-choice questions.
 - Put the recommended option first.
 - Keep labels short.
 - Use the `header` field for a compact section title.

@@ -5,6 +5,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/userinput"
 	"github.com/rivo/uniseg"
 	"github.com/stretchr/testify/require"
 )
@@ -48,4 +49,43 @@ func TestRequestUserInputTextInputCursorXAfterDeletingWideCharacter(t *testing.T
 	want := uniseg.StringWidth(input.Prompt) + uniseg.StringWidth("你")
 	require.Equal(t, want, textInputCursorX(input))
 	require.Greater(t, textInputCursorX(input), input.Cursor().X)
+}
+
+func TestRequestUserInputMultiSelect(t *testing.T) {
+	com := testCommon(t, `{"options":{"disable_provider_auto_update":true},"tools":{}}`)
+	req := userinput.Request{
+		ID:         "req-1",
+		SessionID:  "session-1",
+		ToolCallID: "call-1",
+		Questions: []userinput.Question{{
+			Header:      "Features",
+			ID:          "features",
+			Question:    "Which features?",
+			MultiSelect: true,
+			Options: []userinput.Option{
+				{Label: "A", Description: "Option A"},
+				{Label: "B", Description: "Option B"},
+				{Label: "C", Description: "Option C"},
+			},
+		}},
+	}
+	dlg := NewRequestUserInput(com, req)
+
+	// Empty Enter does not advance/submit.
+	require.Nil(t, dlg.HandleMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter})))
+	require.Equal(t, 0, dlg.current)
+	require.Len(t, dlg.answers, 0)
+
+	// Toggle option A and B.
+	require.Nil(t, dlg.HandleMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace})))
+	dlg.HandleMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	require.Nil(t, dlg.HandleMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace})))
+
+	// Confirm submits both selections.
+	action := dlg.HandleMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	resolve, ok := action.(ActionResolveUserInput)
+	require.True(t, ok)
+	require.Equal(t, userinput.ResponseStatusSubmitted, resolve.Response.Status)
+	require.Len(t, resolve.Response.Answers, 1)
+	require.Equal(t, []string{"A", "B"}, resolve.Response.Answers[0].SelectedOptions)
 }

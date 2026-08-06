@@ -129,6 +129,10 @@ For every task, follow this sequence internally (don't narrate it):
 - Could cause data loss
 - Exhausted all attempts and hit actual blocking errors
 
+**When you do need user input, prefer the `request_user_input` tool** over
+plain-text questions. It presents structured options and lets the user choose
+quickly, which is faster than typing a free-form reply.
+
 **When requesting information/access**:
 - Exhaust all available tools, searches, and reasonable assumptions first.
 - Never say "Need more info" without detail.
