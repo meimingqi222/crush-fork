@@ -76,8 +76,31 @@ tasks:
       - rm -rf tmp/onboarding
       - ./crush{exeExt} {{.CLI_ARGS}}
 
+  # Test tiers. Pick the cheapest one that can disprove your change; only the
+  # last gate before a commit needs `task test`. Note that -race costs about
+  # 4x (internal/agent: ~12s -> ~47s) and -count=1 discards Go's test cache,
+  # so unchanged packages get re-run for nothing. Neither belongs in an edit
+  # loop.
+
+  t:
+    desc: 'Fast loop: one package, filtered. Usage: task t -- ./internal/agent -run TestFoo'
+    cmds:
+      - go test {{.CLI_ARGS}}
+
+  test:pkg:
+    desc: 'One or more packages, cached, no race. Usage: task test:pkg -- ./internal/agent/...'
+    cmds:
+      - go test {{.CLI_ARGS}}
+
+  test:race:
+    desc: 'Race check, scoped. Usage: task test:race -- ./internal/agent -run TestRegistry'
+    env:
+      CGO_ENABLED: 1
+    cmds:
+      - go test -race {{.CLI_ARGS}}
+
   test:
-    desc: Run tests
+    desc: Run all tests under race (slow; pre-commit gate)
     env:
       CGO_ENABLED: 1
     cmds:

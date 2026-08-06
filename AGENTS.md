@@ -86,8 +86,8 @@ internal/
 ## Build/Test/Lint Commands
 
 - **Build**: `go build .` or `go run .`
-- **Test**: `task test` or `go test ./...` (run single test:
-  `go test ./internal/agent -run TestApplyTruncatedToolResults`)
+- **Test**: use the cheapest tier that can disprove your change. Do NOT run
+  the full suite after every edit — see "Test Tiers" below.
 - **Update Golden Files**: `go test ./... -update` (regenerates `.golden`
   files when test output changes; e.g.
   `go test ./internal/ui/diffview -update`)
@@ -96,6 +96,37 @@ internal/
 - **Modernize**: `task modernize` (runs `modernize` which makes code
   simplifications)
 - **Dev**: `task dev` (runs with profiling enabled)
+
+## Test Tiers
+
+`task test` is `go test -race -failfast ./...` over the whole repo. It is the
+**pre-commit gate, not the edit loop**. Two multipliers make it expensive:
+
+- `-race` costs roughly 4x — `internal/agent` alone is ~12s plain, ~47s raced.
+- `-count=1` discards Go's test cache. Measured on `internal/config`: 9.0s
+  cold, **0.35s cached**, 4.5s with `-count=1`. On an unchanged package
+  `-count=1` buys nothing and costs ~13x.
+
+Escalate only as far as the change requires:
+
+| Tier | Command | When |
+|---|---|---|
+| 1 | `task t -- ./internal/agent -run TestFoo` | While iterating. Seconds. |
+| 2 | `task test:pkg -- ./internal/agent/...` | Change is complete in one area. Cached, so unchanged packages are free. |
+| 3 | `task test:race -- ./internal/agent -run TestRegistry` | Only when the change touches goroutines, locks, queues, or shared mutable state. Keep it scoped. |
+| 4 | `task test` | Once, before committing. |
+
+Rules:
+
+- **Never add `-count=1` to make a run "more thorough".** It only disables
+  caching. Use it when you specifically need to defeat a cached result.
+- **Do not add `-race` reflexively.** A pure function or a text-projection
+  change cannot have a data race.
+- **Diagnose a suspected flake with one comparison, not N reruns.**
+  `git stash && task test:race -- <pkg> -run TestX && git stash pop` settles
+  "did I introduce this?" in a single run. Repeated identical runs mostly
+  burn time.
+- Run a single test with `go test ./internal/agent -run TestApplyTruncatedToolResults`.
 
 ## Code Style Guidelines
 
