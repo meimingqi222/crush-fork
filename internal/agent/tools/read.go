@@ -106,6 +106,20 @@ func NewReadTool(
 	skillList []*skills.Skill,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
+	return NewReadToolWithArchiveDir(lspManager, permissions, filetracker, workingDir, lsConfig, httpClient, "", skillList, skillsPaths...)
+}
+
+func NewReadToolWithArchiveDir(
+	lspManager *lsp.Manager,
+	permissions permission.Service,
+	filetracker filetracker.Service,
+	workingDir string,
+	lsConfig config.ToolLs,
+	httpClient *http.Client,
+	archiveDir string,
+	skillList []*skills.Skill,
+	skillsPaths ...string,
+) fantasy.AgentTool {
 	if httpClient == nil {
 		httpClient = NewSafeHTTPClient(30 * time.Second)
 	}
@@ -122,6 +136,10 @@ func NewReadTool(
 			// URLs pass through unmodified.
 			sel := parsePathSelector(params.Path)
 			params.Path = sel.filePath
+
+			if strings.HasPrefix(params.Path, "archive://") {
+				return handleArchiveRead(ctx, params.Path, sel, archiveDir, filetracker)
+			}
 
 			// Check if it's a URL.
 			if strings.HasPrefix(params.Path, "http://") || strings.HasPrefix(params.Path, "https://") {

@@ -649,13 +649,6 @@ func TestMap_TypeSafety(t *testing.T) {
 	require.Equal(t, "test", structValue.Name)
 }
 
-func TestMap_InterfaceCompliance(t *testing.T) {
-	t.Parallel()
-
-	var _ json.Marshaler = &Map[string, any]{}
-	var _ json.Unmarshaler = &Map[string, any]{}
-}
-
 func BenchmarkMap_Set(b *testing.B) {
 	m := NewMap[int, int]()
 

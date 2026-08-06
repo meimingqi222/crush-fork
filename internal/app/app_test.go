@@ -134,7 +134,10 @@ func TestSetupSubscriber_DrainAfterDrop(t *testing.T) {
 }
 
 func TestSetupSubscriber_NoTimerLeak(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	// Snapshot goroutines that existed before this test so goleak only
+	// reports goroutines leaked by this test, not by earlier tests whose
+	// async cleanup (e.g. MCP connection teardown) is still in flight.
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	synctest.Test(t, func(t *testing.T) {
 		f := newSubscriberFixture(t, 100)
 

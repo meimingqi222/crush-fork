@@ -260,6 +260,11 @@ type sessionAgent struct {
 	smallModel         *csync.Value[Model]
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
+	// providerCfg is the provider config of the backend model. It lets
+	// auxiliary calls (e.g. session title generation) build per-provider
+	// provider options via getProviderOptions. A zero value (e.g. isolated
+	// test agents) yields empty provider options, which is safe.
+	providerCfg config.ProviderConfig
 	// enhancedPromptMu protects the enhanced prompt and its context signature
 	// as one logical cache entry shared by concurrent sessions.
 	enhancedPromptMu         sync.Mutex
@@ -394,6 +399,12 @@ type SessionAgentOptions struct {
 	// SessionEvents receives live desktop events. Nil preserves the historical
 	// TUI/CLI-only behavior for tests and isolated agents.
 	SessionEvents SessionEventPublisher
+
+	// InferenceProviderConfig is the provider config backing the agent's
+	// models. It is used to build per-provider provider options (thinking
+	// level, reasoning effort) for auxiliary calls such as session title
+	// generation. Zero value yields empty provider options.
+	InferenceProviderConfig config.ProviderConfig
 }
 
 type sessionAgentRuntimeConfig struct {
@@ -449,6 +460,7 @@ func NewSessionAgent(
 		smallModel:                      csync.NewValue(opts.SmallModel),
 		systemPromptPrefix:              csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:                    csync.NewValue(opts.SystemPrompt),
+		providerCfg:                     opts.InferenceProviderConfig,
 		workingDir:                      opts.WorkingDir,
 		agentFactory:                    agentFactory,
 		refreshCallConfig:               opts.RefreshCallConfig,

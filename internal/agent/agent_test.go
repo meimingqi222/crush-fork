@@ -1003,29 +1003,16 @@ func TestGenerateTitleResetsStreamedTitleOnModelFallback(t *testing.T) {
 	testSession, err := env.sessions.Create(t.Context(), "New Session")
 	require.NoError(t, err)
 
-	streamCalls := 0
+	generateCalls := 0
 	titleModel := stubLanguageModel{
-		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-			streamCalls++
-			if streamCalls == 1 {
-				return func(yield func(fantasy.StreamPart) bool) {
-					if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-						return
-					}
-					if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "partial-"}) {
-						return
-					}
-					yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: fmt.Errorf("small model failed")})
-				}, nil
+		generate: func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+			generateCalls++
+			if generateCalls == 1 {
+				return nil, fmt.Errorf("small model failed")
 			}
-			return func(yield func(fantasy.StreamPart) bool) {
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
-				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "clean-title"}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "clean-title"}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}
@@ -1057,7 +1044,7 @@ func TestGenerateTitleResetsStreamedTitleOnModelFallback(t *testing.T) {
 	after, err := env.sessions.Get(t.Context(), testSession.ID)
 	require.NoError(t, err)
 	require.Equal(t, "clean-title", after.Title)
-	require.Equal(t, 2, streamCalls)
+	require.Equal(t, 2, generateCalls)
 }
 
 func TestGenerateTitleCleansAndTruncatesOutput(t *testing.T) {
@@ -1069,15 +1056,10 @@ func TestGenerateTitleCleansAndTruncatesOutput(t *testing.T) {
 
 	rawTitle := "\"Fix: parser bug in auth flow with very long suffix text\"\nextra line"
 	titleModel := stubLanguageModel{
-		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-			return func(yield func(fantasy.StreamPart) bool) {
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
-				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: rawTitle}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+		generate: func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: rawTitle}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}
@@ -1131,15 +1113,10 @@ func TestGenerateTitleDoesNotOverwriteSessionUsage(t *testing.T) {
 	require.NoError(t, err)
 
 	titleModel := stubLanguageModel{
-		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-			return func(yield func(fantasy.StreamPart) bool) {
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
-				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "kept-usage-title"}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+		generate: func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "kept-usage-title"}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}
@@ -1186,15 +1163,10 @@ func TestGenerateTitleRespectsSessionLockDuringUsageUpdate(t *testing.T) {
 	require.NoError(t, err)
 
 	titleModel := stubLanguageModel{
-		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-			return func(yield func(fantasy.StreamPart) bool) {
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
-				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "locked-title"}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+		generate: func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "locked-title"}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}
@@ -1254,17 +1226,12 @@ func TestRunDequeuesBeforeTitleGenerationCompletes(t *testing.T) {
 	releaseTitle := make(chan struct{})
 	var titleStartedOnce sync.Once
 	titleModel := stubLanguageModel{
-		stream: func(context.Context, fantasy.Call) (fantasy.StreamResponse, error) {
-			return func(yield func(fantasy.StreamPart) bool) {
-				titleStartedOnce.Do(func() { close(titleStarted) })
-				<-releaseTitle
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
-				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "queued-safe-title"}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+		generate: func(context.Context, fantasy.Call) (*fantasy.Response, error) {
+			titleStartedOnce.Do(func() { close(titleStarted) })
+			<-releaseTitle
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "queued-safe-title"}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}

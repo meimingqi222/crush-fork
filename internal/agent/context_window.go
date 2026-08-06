@@ -238,19 +238,33 @@ func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.Too
 	// Content in plain text so the read tool can surface it directly.
 	contentPath := filepath.Join(archiveDir, hash+".txt")
 
-	// Content-addressed: if the archive already exists, reuse it.
+	archiveReference := "archive://" + hash[:12]
+
 	if _, err := os.Stat(contentPath); err == nil {
-		return contentPath, nil
+		return archiveReference, nil
 	}
 
-	// Write content atomically with a unique temp name (pid + random) so
-	// concurrent archives of different contents never collide on the same
-	// temp file; same-content archives dedupe at the final path.
-	tmpContent := filepath.Join(archiveDir, fmt.Sprintf(".tmp-%d-%s", os.Getpid(), hash))
-	if err := os.WriteFile(tmpContent, []byte(content), 0o644); err != nil {
+	tmpFile, err := os.CreateTemp(archiveDir, ".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmpContent := tmpFile.Name()
+	defer os.Remove(tmpContent)
+	if err := tmpFile.Chmod(0o644); err != nil {
+		_ = tmpFile.Close()
+		return "", err
+	}
+	if _, err := tmpFile.WriteString(content); err != nil {
+		_ = tmpFile.Close()
+		return "", err
+	}
+	if err := tmpFile.Close(); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmpContent, contentPath); err != nil {
+		if _, statErr := os.Stat(contentPath); statErr == nil {
+			return archiveReference, nil
+		}
 		return "", err
 	}
 
@@ -266,14 +280,7 @@ func (a *sessionAgent) persistToolResultContent(sessionID string, tr message.Too
 		_ = os.WriteFile(metaPath, metaData, 0o644)
 	}
 
-	// Return a path relative to the working dir when possible so the model
-	// can read it with the read tool.
-	if a.workingDir != "" {
-		if relPath, err := filepath.Rel(a.workingDir, contentPath); err == nil && !strings.HasPrefix(relPath, "..") {
-			return relPath, nil
-		}
-	}
-	return contentPath, nil
+	return "archive://" + hash[:12], nil
 }
 
 func sanitizeTruncationPathPart(value string) string {

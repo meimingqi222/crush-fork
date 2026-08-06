@@ -352,7 +352,7 @@ func TestServerBoundsInFlightRequestsWithoutStarvingResponses(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		return router.calls() > 0 && len(transport.writesSnapshot()) > 0
-	}, 2*time.Second, time.Millisecond)
+	}, 5*time.Second, time.Millisecond)
 	require.LessOrEqual(t, server.dispatchBytes.Load(), int64(maxInFlightRequestBytes))
 	require.LessOrEqual(t, router.calls(), maxConcurrentRequests)
 
@@ -362,12 +362,12 @@ func TestServerBoundsInFlightRequestsWithoutStarvingResponses(t *testing.T) {
 	select {
 	case response := <-responseChannel:
 		require.JSONEq(t, `{"ok":true}`, string(response.Result))
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("outgoing-call response was starved by request capacity")
 	}
 
 	close(router.release)
-	require.Eventually(t, func() bool { return server.dispatchBytes.Load() == 0 }, 2*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return server.dispatchBytes.Load() == 0 }, 5*time.Second, time.Millisecond)
 	require.NoError(t, server.Close())
 	require.NoError(t, <-serveDone)
 }

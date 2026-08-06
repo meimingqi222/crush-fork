@@ -44,6 +44,9 @@ type LLMExtractor struct {
 	clock         func() time.Time
 }
 
+// Compile-time interface compliance check.
+var _ Extractor = (*LLMExtractor)(nil)
+
 // NewLLMExtractor creates a new LLMExtractor with the given dependencies.
 //   - getTranscript: retrieves a session transcript (text + message IDs).
 //   - analyzeEvents: calls an LLM to extract events from transcript text.

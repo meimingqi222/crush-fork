@@ -103,6 +103,9 @@ func TestSalvageBuffer_ConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	// Final snapshot should be non-empty without panicking.
-	_ = b.snapshot()
+	// The buffer should contain data from at least some goroutines and the
+	// final snapshot must not be empty (50 goroutines each wrote 1–50 bytes,
+	// totalling 1275 bytes, bounded to 1024).
+	final := b.snapshot()
+	require.NotEmpty(t, final, "snapshot should contain buffered data after concurrent appends")
 }

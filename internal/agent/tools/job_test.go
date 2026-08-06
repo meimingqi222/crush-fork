@@ -209,7 +209,7 @@ func TestBackgroundShell_ConcurrentAccess(t *testing.T) {
 
 	// Start a background shell
 	bgManager := shell.GetBackgroundShellManager()
-	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo 'line 1'; sleep 1; echo 'line 2'; sleep 1; echo 'line 3'; sleep 1; echo 'line 4'; sleep 1; echo 'line 5'", "")
+	bgShell, err := bgManager.Start(ctx, workingDir, nil, "echo 'line 1'; sleep 0.1; echo 'line 2'; sleep 0.1; echo 'line 3'; sleep 0.1; echo 'line 4'; sleep 0.1; echo 'line 5'", "")
 	require.NoError(t, err)
 	defer bgManager.Kill(bgShell.ID)
 

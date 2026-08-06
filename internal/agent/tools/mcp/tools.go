@@ -320,7 +320,7 @@ func updateTools(cfg *config.ConfigStore, name string, tools []*Tool) int {
 
 // filterTools removes tools that are disabled or not enabled (whitelisted) via config.
 func filterTools(cfg *config.ConfigStore, mcpName string, tools []*Tool) []*Tool {
-	mcpCfg, ok := cfg.Config().MCP[mcpName]
+	mcpCfg, ok := cfg.GetMCP(mcpName)
 	if !ok {
 		return tools
 	}

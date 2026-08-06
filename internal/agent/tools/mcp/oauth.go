@@ -178,7 +178,7 @@ func newMCPOAuthAuthorizer(name string, store *config.ConfigStore, headers map[s
 }
 
 func Authenticate(ctx context.Context, cfg *config.ConfigStore, name string) error {
-	m, ok := cfg.Config().MCP[name]
+	m, ok := cfg.GetMCP(name)
 	if !ok {
 		return fmt.Errorf("mcp %s not found", name)
 	}
@@ -470,7 +470,7 @@ func (a *mcpOAuthAuthorizer) resolveClientRegistration(ctx context.Context, m co
 }
 
 func (a *mcpOAuthAuthorizer) currentConfig() (config.MCPConfig, error) {
-	m, ok := a.store.Config().MCP[a.name]
+	m, ok := a.store.GetMCP(a.name)
 	if !ok {
 		return config.MCPConfig{}, fmt.Errorf("mcp %s not found", a.name)
 	}

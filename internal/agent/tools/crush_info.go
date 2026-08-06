@@ -327,7 +327,7 @@ func writeMCP(b *strings.Builder, states map[string]mcp.ClientInfo, cfg *config.
 		b.WriteString("\n")
 	}
 
-	configured := cfg.Config().MCP
+	configured := cfg.MCPSnapshot()
 	if len(configured) == 0 {
 		return
 	}

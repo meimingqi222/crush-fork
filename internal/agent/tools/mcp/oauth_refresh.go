@@ -86,7 +86,7 @@ func refreshTokenFromDB(ctx context.Context, serverName string) error {
 		return fmt.Errorf("no refresh token stored for %s", serverName)
 	}
 
-	m, ok := configStore.Config().MCP[serverName]
+	m, ok := configStore.GetMCP(serverName)
 	if !ok {
 		return fmt.Errorf("mcp %s not found", serverName)
 	}

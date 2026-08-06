@@ -615,14 +615,16 @@ func (a *AssistantMessageItem) invalidateCache() {
 	a.summaryBoxStart = 0
 }
 
-// invalidateContentCache clears the base content cache, prefixed render
-// cache, viewport cache, and summary cache but preserves the thinking glamour
-// cache. Use this for state changes that only affect truncation or styling,
-// not the markdown content itself (e.g. expand/collapse).
-func (a *AssistantMessageItem) invalidateContentCache() {
+// invalidateContentCacheLite clears the base content cache, prefixed render
+// cache, viewport cache, and summary cache, preserving both the thinking
+// glamour cache and the main content glamour render cache. Use this for
+// thinking/summary expand/collapse where neither the thinking markdown nor
+// the main content markdown has changed - only the box height/truncation
+// differs. This avoids a costly glamour re-render of the main content
+// (200-500ms for long messages with code blocks).
+func (a *AssistantMessageItem) invalidateContentCacheLite() {
 	a.clearCache()
 	a.invalidatePrefixedCache()
-	a.invalidateContentRenderCache()
 	a.invalidateViewportCache()
 	a.invalidateSummaryCache()
 }
@@ -864,7 +866,7 @@ func (a *AssistantMessageItem) SetMessage(msg *message.Message) tea.Cmd {
 func (a *AssistantMessageItem) ToggleExpanded() bool {
 	a.thinkingExpanded = !a.thinkingExpanded
 	// Preserve the thinking glamour cache — only truncation/boxing changes.
-	a.invalidateContentCache()
+	a.invalidateContentCacheLite()
 	return a.thinkingExpanded
 }
 
@@ -876,7 +878,7 @@ func (a *AssistantMessageItem) SetThinkingExpanded(expanded bool) {
 	}
 	a.thinkingExpanded = expanded
 	// Preserve the thinking glamour cache — only truncation/boxing changes.
-	a.invalidateContentCache()
+	a.invalidateContentCacheLite()
 }
 
 // HandleMouseClick implements MouseClickable.
@@ -895,12 +897,12 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 			switch region.name {
 			case "thinking":
 				a.thinkingExpanded = !a.thinkingExpanded
-				a.invalidateContentCache()
+				a.invalidateContentCacheLite()
 				return true, nil
 			case "summary":
 				a.summaryExpanded = !a.summaryExpanded
 				a.invalidateSummaryCache()
-				a.invalidateContentCache()
+				a.invalidateContentCacheLite()
 				return true, nil
 			}
 		}

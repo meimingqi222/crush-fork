@@ -23,6 +23,13 @@ type SummaryMaterializer struct {
 	maxEvents int
 }
 
+// Compile-time interface compliance checks.
+var (
+	_ Materializer = (*SummaryMaterializer)(nil)
+	_ Materializer = (*MemoryMDMaterializer)(nil)
+	_ Materializer = (*SkillsMaterializer)(nil)
+)
+
 // NewSummaryMaterializer creates a SummaryMaterializer.
 //
 //   - db: SQLite database for watermark tracking

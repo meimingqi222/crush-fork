@@ -319,6 +319,18 @@ func (s *ConfigStore) MCPSnapshot() map[string]MCPConfig {
 	return result
 }
 
+// GetMCP returns a clone of the MCPConfig for the given server name.
+// It is safe for concurrent use with AddMCP/RemoveMCP.
+func (s *ConfigStore) GetMCP(name string) (MCPConfig, bool) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	cfg, ok := s.config.MCP[name]
+	if !ok {
+		return MCPConfig{}, false
+	}
+	return CloneMCPConfig(cfg), true
+}
+
 // CloneMCPConfig returns a detached copy suitable for asynchronous lifecycle
 // work. MCP OAuth metadata contains nested mutable pointers and slices, so a
 // shallow struct copy is not safe while token refresh is active.

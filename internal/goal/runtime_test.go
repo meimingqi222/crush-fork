@@ -4,15 +4,40 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
+// fakeClock is a deterministic wall clock for exercising wall-clock accounting
+// without sleeping for real wall time.
+type fakeClock struct {
+	mu sync.Mutex
+	t  int64
+}
+
+func (c *fakeClock) now() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(seconds int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t += seconds
+}
+
 func newRuntimeTestSession(t *testing.T) (session.Service, *Runtime, string) {
+	t.Helper()
+	svc, runtime, _, sessID := newRuntimeTestSessionWithClock(t)
+	return svc, runtime, sessID
+}
+
+func newRuntimeTestSessionWithClock(t *testing.T) (session.Service, *Runtime, *fakeClock, string) {
 	t.Helper()
 	conn, err := db.Connect(context.Background(), t.TempDir())
 	require.NoError(t, err)
@@ -21,9 +46,11 @@ func newRuntimeTestSession(t *testing.T) (session.Service, *Runtime, string) {
 	})
 	svc := session.NewService(db.New(conn), conn)
 	runtime := NewRuntime(svc)
+	clock := &fakeClock{t: 1_000_000}
+	runtime.now = clock.now
 	sess, err := svc.Create(context.Background(), "runtime-test")
 	require.NoError(t, err)
-	return svc, runtime, sess.ID
+	return svc, runtime, clock, sess.ID
 }
 
 func TestGoalIDJSONRoundTrip(t *testing.T) {
@@ -225,22 +252,22 @@ func TestPostTurnWithIntegersBackwardCompatible(t *testing.T) {
 func TestWallClockPausedTimeNotCounted(t *testing.T) {
 	t.Parallel()
 
-	svc, runtime, sessionID := newRuntimeTestSession(t)
+	svc, runtime, clock, sessionID := newRuntimeTestSessionWithClock(t)
 	ctx := context.Background()
 
 	_, err := runtime.CreateGoal(ctx, sessionID, "Test goal", 1000)
 	require.NoError(t, err)
 
 	// Let some active time elapse, then pause.
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	paused, err := runtime.PauseGoal(ctx, sessionID)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, paused.TimeSeconds, int64(1))
 
 	pausedTime := paused.TimeSeconds
 
-	// Sleep while paused; time should not increase.
-	time.Sleep(700 * time.Millisecond)
+	// Advance the clock while paused; time should not be counted.
+	clock.advance(1)
 	loaded, err := svc.Get(ctx, sessionID)
 	require.NoError(t, err)
 	require.Equal(t, pausedTime, loaded.Goal.TimeSeconds)
@@ -248,7 +275,7 @@ func TestWallClockPausedTimeNotCounted(t *testing.T) {
 	// Resume and let more active time elapse.
 	_, err = runtime.ResumeGoal(ctx, sessionID)
 	require.NoError(t, err)
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	completed, err := runtime.CompleteGoal(ctx, sessionID)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, completed.TimeSeconds, pausedTime+int64(1))
@@ -257,19 +284,19 @@ func TestWallClockPausedTimeNotCounted(t *testing.T) {
 func TestReplaceGoalSettlesActiveTime(t *testing.T) {
 	t.Parallel()
 
-	svc, runtime, sessionID := newRuntimeTestSession(t)
+	svc, runtime, clock, sessionID := newRuntimeTestSessionWithClock(t)
 	ctx := context.Background()
 
 	_, err := runtime.CreateGoal(ctx, sessionID, "Original goal", 1000)
 	require.NoError(t, err)
 
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	replaced, err := runtime.ReplaceGoal(ctx, sessionID, "Replaced goal", 1000)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, replaced.TimeSeconds, int64(1))
 
 	// Ensure the replaced goal keeps timing from the new active period.
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	loaded, err := svc.Get(ctx, sessionID)
 	require.NoError(t, err)
 	require.Equal(t, replaced.ID, loaded.Goal.ID)
@@ -279,13 +306,13 @@ func TestReplaceGoalSettlesActiveTime(t *testing.T) {
 func TestDropGoalSettlesActiveTime(t *testing.T) {
 	t.Parallel()
 
-	svc, runtime, sessionID := newRuntimeTestSession(t)
+	svc, runtime, clock, sessionID := newRuntimeTestSessionWithClock(t)
 	ctx := context.Background()
 
 	_, err := runtime.CreateGoal(ctx, sessionID, "Test goal", 1000)
 	require.NoError(t, err)
 
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	_, err = runtime.DropGoal(ctx, sessionID)
 	require.NoError(t, err)
 
@@ -298,14 +325,14 @@ func TestDropGoalSettlesActiveTime(t *testing.T) {
 func TestSetBudgetGoalTransitionsStatusAndTime(t *testing.T) {
 	t.Parallel()
 
-	svc, runtime, sessionID := newRuntimeTestSession(t)
+	svc, runtime, clock, sessionID := newRuntimeTestSessionWithClock(t)
 	ctx := context.Background()
 
 	_, err := runtime.CreateGoal(ctx, sessionID, "Test goal", 1000)
 	require.NoError(t, err)
 
 	// Spend some active time then exhaust the budget.
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	_, err = runtime.SetBudgetGoal(ctx, sessionID, 0)
 	require.NoError(t, err)
 
@@ -331,13 +358,13 @@ func TestSetBudgetGoalTransitionsStatusAndTime(t *testing.T) {
 func TestPauseActiveGoalOnLoad(t *testing.T) {
 	t.Parallel()
 
-	svc, runtime, sessionID := newRuntimeTestSession(t)
+	svc, runtime, clock, sessionID := newRuntimeTestSessionWithClock(t)
 	ctx := context.Background()
 
 	_, err := runtime.CreateGoal(ctx, sessionID, "Test goal", 1000)
 	require.NoError(t, err)
 
-	time.Sleep(1200 * time.Millisecond)
+	clock.advance(2)
 	paused, notice, err := runtime.PauseActiveGoalOnLoad(ctx, sessionID, false)
 	require.NoError(t, err)
 	require.NotEmpty(t, notice)

@@ -16,6 +16,7 @@ Append `:<selector>` to the path for file reads:
 - `file.ts:50-` — from line 50 to end of file
 - `file.ts:raw` — verbatim output (no line numbers, no anchors, no wrapping)
 - `file.ts:50-100:raw` — combined (order-independent)
+- `archive://<id>` — read an archived oversized tool result by its hexadecimal archive ID (the first 12 characters are sufficient). Selectors such as `archive://<id>:50` and `archive://<id>:raw` are supported.
 
 When a line selector is present, output includes LINE#HASH anchors for use with the edit tool's operations[] parameter.
 </selectors>

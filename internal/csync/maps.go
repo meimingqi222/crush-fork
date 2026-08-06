@@ -13,6 +13,12 @@ type Map[K comparable, V any] struct {
 	mu    sync.RWMutex
 }
 
+// Compile-time interface compliance checks.
+var (
+	_ json.Marshaler   = &Map[string, any]{}
+	_ json.Unmarshaler = &Map[string, any]{}
+)
+
 // NewMap creates a new thread-safe map with the specified key and value types.
 func NewMap[K comparable, V any]() *Map[K, V] {
 	return &Map[K, V]{

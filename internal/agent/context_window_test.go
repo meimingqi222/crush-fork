@@ -167,7 +167,7 @@ func TestTruncateOversizedToolResults(t *testing.T) {
 	// Must include truncation notice.
 	assert.Contains(t, truncated, "characters omitted")
 	assert.Contains(t, truncated, "This excerpt is incomplete")
-	assert.Contains(t, truncated, ".crush/archive/")
+	assert.Contains(t, truncated, "archive://")
 	assert.Contains(t, truncated, "Use the read tool")
 	assert.Contains(t, truncated, "offset/limit")
 	assert.Contains(t, truncated, "grep")
@@ -215,7 +215,7 @@ func TestTruncateOversizedToolResults_UnicodeSafe(t *testing.T) {
 	truncated := results[0].Content
 
 	assert.True(t, utf8.ValidString(truncated), "truncated content must remain valid UTF-8")
-	assert.Contains(t, truncated, ".crush/archive/")
+	assert.Contains(t, truncated, "archive://")
 	assert.Contains(t, truncated, "This excerpt is incomplete")
 	assert.Contains(t, truncated, "do not guess")
 	assert.LessOrEqual(t, len([]rune(truncated)), contextWindowToolResultMaxChars)
@@ -235,7 +235,7 @@ func TestEnforceStepToolResultBudget_TruncatesOversizedStepAggregate(t *testing.
 
 	assert.True(t, utf8.ValidString(truncated.Content))
 	assert.Contains(t, truncated.Content, "This excerpt is incomplete")
-	assert.Contains(t, truncated.Content, ".crush/archive/")
+	assert.Contains(t, truncated.Content, "archive://")
 	assert.LessOrEqual(t, len([]rune(truncated.Content)), 5_000)
 	assert.Equal(t, contextWindowStepToolResultCharsLimit, used)
 
@@ -349,7 +349,7 @@ func TestEnforceStepToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFullOut
 	truncated := agent.enforceStepToolResultBudget("sess", result, &used)
 
 	assert.Contains(t, truncated.Content, "Step tool-result budget exhausted")
-	assert.Contains(t, truncated.Content, ".crush/archive/")
+	assert.Contains(t, truncated.Content, "archive://")
 	assert.Contains(t, truncated.Content, "The full output was saved")
 	assert.Contains(t, truncated.Content, "Use the read tool with offset/limit or grep")
 	assert.True(t, strings.HasPrefix(truncated.Content, strings.Repeat("tail", 500)))
@@ -380,7 +380,7 @@ func TestEnforceMessageToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFull
 	require.Len(t, budgeted, 2)
 	assert.Equal(t, results[0].Content, budgeted[0].Content)
 	assert.Contains(t, budgeted[1].Content, "Message tool-result budget exhausted")
-	assert.Contains(t, budgeted[1].Content, ".crush/archive/")
+	assert.Contains(t, budgeted[1].Content, "archive://")
 	assert.Contains(t, budgeted[1].Content, "The full output was saved")
 	assert.Contains(t, budgeted[1].Content, "Use the read tool with offset/limit or grep")
 	assert.True(t, strings.HasPrefix(budgeted[1].Content, strings.Repeat("tail", 500)))

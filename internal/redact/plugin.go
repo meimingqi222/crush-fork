@@ -71,12 +71,16 @@ func (p *redactPlugin) Init(ctx context.Context, input plugin.PluginInput) (plug
 		},
 
 		ToolAfterExecute: func(ctx context.Context, input plugin.ToolAfterExecuteInput) (*plugin.ToolAfterExecuteOutput, error) {
-			cache := make(map[string]string)
-			redacted := RedactString(input.Result, p.patterns, cache)
+			// Route the result through the shared dedup cache so this full
+			// regex scan is stored once; the same text is redacted again by
+			// OnToolResult (redactSecrets) and the next ChatMessagesTransform,
+			// which then become cache hits instead of re-scanning 3x.
+			localCache := make(map[string]string, 64)
+			redacted := p.redactStringCached(input.Result, localCache)
 			changed := redacted != input.Result
 
 			if input.Metadata != nil {
-				redactedMeta := RedactDeep(input.Metadata, p.patterns, cache)
+				redactedMeta := RedactDeep(input.Metadata, p.patterns, localCache)
 				if m, ok := redactedMeta.(map[string]interface{}); ok {
 					return &plugin.ToolAfterExecuteOutput{
 						Result:        redacted,

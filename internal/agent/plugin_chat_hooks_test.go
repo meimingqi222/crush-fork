@@ -282,30 +282,25 @@ func TestSessionAgentRunSkipsTitleGenerationForNonInteractiveCalls(t *testing.T)
 
 	var titlePrompt string
 	titleModel := stubLanguageModel{
-		stream: func(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-			return func(yield func(fantasy.StreamPart) bool) {
-				titlePrompt = ""
-				for _, msg := range call.Prompt {
-					if msg.Role != fantasy.MessageRoleUser {
-						continue
-					}
-					for _, part := range msg.Content {
-						if textPart, ok := part.(fantasy.TextPart); ok {
-							titlePrompt = textPart.Text
-							break
-						}
-					}
-					if titlePrompt != "" {
+		generate: func(_ context.Context, call fantasy.Call) (*fantasy.Response, error) {
+			titlePrompt = ""
+			for _, msg := range call.Prompt {
+				if msg.Role != fantasy.MessageRoleUser {
+					continue
+				}
+				for _, part := range msg.Content {
+					if textPart, ok := part.(fantasy.TextPart); ok {
+						titlePrompt = textPart.Text
 						break
 					}
 				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
+				if titlePrompt != "" {
+					break
 				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "captured title"}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+			}
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "captured title"}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}
@@ -368,30 +363,25 @@ func TestSessionAgentRunRegeneratesMissingTitleOnLaterInteractiveTurn(t *testing
 
 	var titlePrompt string
 	titleModel := stubLanguageModel{
-		stream: func(_ context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
-			return func(yield func(fantasy.StreamPart) bool) {
-				titlePrompt = ""
-				for _, msg := range call.Prompt {
-					if msg.Role != fantasy.MessageRoleUser {
-						continue
-					}
-					for _, part := range msg.Content {
-						if textPart, ok := part.(fantasy.TextPart); ok {
-							titlePrompt = textPart.Text
-							break
-						}
-					}
-					if titlePrompt != "" {
+		generate: func(_ context.Context, call fantasy.Call) (*fantasy.Response, error) {
+			titlePrompt = ""
+			for _, msg := range call.Prompt {
+				if msg.Role != fantasy.MessageRoleUser {
+					continue
+				}
+				for _, part := range msg.Content {
+					if textPart, ok := part.(fantasy.TextPart); ok {
+						titlePrompt = textPart.Text
 						break
 					}
 				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: "title"}) {
-					return
+				if titlePrompt != "" {
+					break
 				}
-				if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: "title", Delta: "captured title"}) {
-					return
-				}
-				yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop})
+			}
+			return &fantasy.Response{
+				Content:      fantasy.ResponseContent{fantasy.TextContent{Text: "captured title"}},
+				FinishReason: fantasy.FinishReasonStop,
 			}, nil
 		},
 	}

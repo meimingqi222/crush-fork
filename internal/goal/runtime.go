@@ -76,6 +76,10 @@ type Runtime struct {
 	// when creating or replacing goals. If nil, the package-level defaults
 	// (50 / 8) are used.
 	config *RuntimeConfig
+
+	// now returns the current unix timestamp in seconds. Tests replace it
+	// with a fake clock to drive wall-clock accounting deterministically.
+	now func() int64
 }
 
 // RuntimeConfig holds configurable goal runtime parameters.
@@ -132,6 +136,7 @@ func NewRuntime(sessions session.Service) *Runtime {
 		snapshots:       make(map[string]turnSnapshot),
 		wallClocks:      make(map[string]wallClock),
 		pendingSubagent: make(map[string][]SubagentTaskUpdate),
+		now:             func() int64 { return time.Now().Unix() },
 	}
 }
 
@@ -185,7 +190,7 @@ func (r *Runtime) ApplyPendingSubagentUpdates(ctx context.Context, parentSession
 		return nil
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	goal := sess.Goal
 	tasks := goal.Tasks
 	if tasks == nil {
@@ -312,7 +317,7 @@ func (r *Runtime) PostTurn(ctx context.Context, sessionID string, currentUsage T
 		max(0, currentUsage.Output-baseline.Output) +
 		max(0, currentUsage.CacheWrite-baseline.CacheWrite)
 
-	now := time.Now().Unix()
+	now := r.now()
 	goal.TokensUsed += delta
 	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Iterations++
@@ -382,7 +387,7 @@ func (r *Runtime) CreateGoal(ctx context.Context, sessionID, objective string, b
 		return session.Goal{}, errors.New("a goal is already active; drop or complete it first")
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	goal = session.Goal{
 		ID:            session.NewGoalID(),
 		Text:          objective,
@@ -422,7 +427,7 @@ func (r *Runtime) ReplaceGoal(ctx context.Context, sessionID, objective string, 
 	}
 
 	oldGoal := sess.Goal
-	now := time.Now().Unix()
+	now := r.now()
 
 	preservedTokens := int64(0)
 	preservedTime := int64(0)
@@ -471,7 +476,7 @@ func (r *Runtime) PauseGoal(ctx context.Context, sessionID string) (session.Goal
 		return session.Goal{}, errors.New("no active goal to pause")
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Status = session.GoalStatusPaused
 	goal.UpdatedAt = now
@@ -500,7 +505,7 @@ func (r *Runtime) ResumeGoal(ctx context.Context, sessionID string) (session.Goa
 		return session.Goal{}, errors.New("no paused or budget-limited goal to resume")
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	goal.Status = session.GoalStatusActive
 	goal.UpdatedAt = now
 	r.startWallClock(sessionID, goal.ID, now)
@@ -529,7 +534,7 @@ func (r *Runtime) CompleteGoal(ctx context.Context, sessionID string) (session.G
 		return session.Goal{}, err
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Status = session.GoalStatusComplete
 	goal.UpdatedAt = now
@@ -562,7 +567,7 @@ func (r *Runtime) AddGoalTask(ctx context.Context, sessionID, content string) (s
 			return session.Goal{}, fmt.Errorf("duplicate task %q", content)
 		}
 	}
-	now := time.Now().Unix()
+	now := r.now()
 	sess.Goal.Tasks = append(sess.Goal.Tasks, session.Task{
 		ID:        content,
 		Content:   content,
@@ -602,7 +607,7 @@ func (r *Runtime) CompleteGoalTask(ctx context.Context, sessionID, contentOrInde
 	if idx < 0 {
 		return session.Goal{}, fmt.Errorf("no task found matching %q", contentOrIndex)
 	}
-	now := time.Now().Unix()
+	now := r.now()
 	wasCompleted := tasks[idx].Status == session.TaskStatusCompleted
 	tasks[idx].Status = session.TaskStatusCompleted
 	if !wasCompleted {
@@ -635,7 +640,7 @@ func (r *Runtime) DropGoal(ctx context.Context, sessionID string) (session.Goal,
 		return session.Goal{}, errors.New("no goal to drop")
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	if goal.IsActive() {
 		r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	}
@@ -671,7 +676,7 @@ func (r *Runtime) SetBudgetGoal(ctx context.Context, sessionID string, budget in
 		goal.Status = session.GoalStatusActive
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	goal.UpdatedAt = now
 
 	if wasActive && !goal.IsActive() {
@@ -709,7 +714,7 @@ func (r *Runtime) PauseActiveGoalOnLoad(ctx context.Context, sessionID string, p
 		return goal, "", nil
 	}
 
-	now := time.Now().Unix()
+	now := r.now()
 	r.settleWallClockToNow(sessionID, goal.ID, &goal, now)
 	goal.Status = session.GoalStatusPaused
 	goal.UpdatedAt = now

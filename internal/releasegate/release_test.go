@@ -276,15 +276,22 @@ func TestGUIACPWarmSnapshotP95(t *testing.T) {
 	messages := message.NewService(db.New(connection))
 	current, err := sessions.Create(t.Context(), "release snapshot")
 	require.NoError(t, err)
+
+	// Use 1 000 messages and 20 iterations in the default (non-full-soak)
+	// profile. The full soak (10 000 messages, 100 iterations) is available
+	// via CRUSH_GUI_SOAK_FULL=1.
+	seedCount := 1000
+	if os.Getenv(fullSoakEnvironment) == "1" {
+		seedCount = 10000
+	}
 	_, err = connection.ExecContext(t.Context(), `
 		WITH RECURSIVE sequence(value) AS (
-			SELECT 0 UNION ALL SELECT value + 1 FROM sequence WHERE value < 9999
-		)
+			SELECT 0 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?)
 		INSERT INTO messages
 			(id, session_id, role, parts, model, provider, created_at, updated_at)
 		SELECT printf('release-message-%08d', value), ?, 'assistant', '[]',
 			'mock-model', 'mock-provider', value, value
-		FROM sequence`, current.ID)
+		FROM sequence`, seedCount-1, current.ID)
 	require.NoError(t, err)
 	hub := sessionevent.NewHub(sessionevent.Config{})
 	defer hub.Close()
@@ -292,7 +299,11 @@ func TestGUIACPWarmSnapshotP95(t *testing.T) {
 	_, err = service.Snapshot(t.Context(), current.ID)
 	require.NoError(t, err)
 
-	durations := make([]time.Duration, 100)
+	iterations := 20
+	if os.Getenv(fullSoakEnvironment) == "1" {
+		iterations = 100
+	}
+	durations := make([]time.Duration, iterations)
 	for index := range durations {
 		started := time.Now()
 		snapshot, snapshotErr := service.Snapshot(t.Context(), current.ID)
@@ -301,7 +312,7 @@ func TestGUIACPWarmSnapshotP95(t *testing.T) {
 		require.Len(t, snapshot.Messages, sessionevent.SnapshotMessageLimit)
 	}
 	slices.Sort(durations)
-	p95 := durations[94]
+	p95 := durations[(len(durations)-1)*95/100]
 	require.Less(t, p95, 150*time.Millisecond)
 	t.Logf("warm snapshot p95=%s", p95)
 }

@@ -1959,6 +1959,47 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestTitleProviderOptionsUsesLowestReasoningLevel(t *testing.T) {
+	// Title generation must use the lowest advertised reasoning level even
+	// when the user configured a higher effort and provider options carry an
+	// explicit reasoning value, because getProviderOptions otherwise lets
+	// those override the model's default.
+	model := Model{
+		CatwalkCfg: catwalk.Model{
+			ID:              "claude-opus-4-7",
+			CanReason:       true,
+			ReasoningLevels: []string{"minimal", "low", "medium", "high"},
+			Options: catwalk.ModelOptions{
+				ProviderOptions: map[string]any{"effort": "high"},
+			},
+		},
+		ModelCfg: config.SelectedModel{
+			Provider:        "test",
+			ReasoningEffort: "high", // user's explicit preference
+			ProviderOptions: map[string]any{"reasoning_effort": "high"},
+		},
+	}
+	providerCfg := config.ProviderConfig{
+		ID:              "test",
+		Type:            catwalk.Type(anthropic.Name),
+		ProviderOptions: map[string]any{"thinking": "high"},
+	}
+
+	opts := titleProviderOptions(model, providerCfg)
+
+	raw, ok := opts[anthropic.Name]
+	require.True(t, ok, "options should be keyed under anthropic.Name")
+	parsed, ok := raw.(*anthropic.ProviderOptions)
+	require.True(t, ok)
+	require.NotNil(t, parsed.Effort)
+	assert.Equal(t, anthropic.Effort("minimal"), *parsed.Effort)
+
+	// The shared option maps must not be mutated by the stripping step.
+	assert.Contains(t, model.CatwalkCfg.Options.ProviderOptions, "effort")
+	assert.Contains(t, model.ModelCfg.ProviderOptions, "reasoning_effort")
+	assert.Contains(t, providerCfg.ProviderOptions, "thinking")
+}
+
 func TestTryFallbackPayloadFromOutput(t *testing.T) {
 	t.Parallel()
 

@@ -20,7 +20,7 @@ import (
 
 // Constants for multi-click detection.
 const (
-	doubleClickThreshold = 400 * time.Millisecond // 0.4s is typical double-click threshold
+	doubleClickThreshold = 250 * time.Millisecond // Reduced from 400ms for faster expand/collapse response
 	clickTolerance       = 2                      // x,y tolerance for double/tripple click
 )
 
@@ -614,6 +614,30 @@ func (m *Chat) ScrollToIndex(index int) {
 	m.follow = m.AtBottom() // Disable follow mode if user scrolls up
 }
 
+// adjustOffsetForHeightChange compensates for an item height reduction
+// after a collapse/toggle. Only when the collapsed item is entirely above
+// the viewport origin (its bottom edge was at or above the current offset)
+// does the viewport offset need to decrease by heightDiff to keep the
+// content below visually stable. When the item is partially or fully inside
+// the viewport, the content below naturally shifts up and no offset change
+// is needed.
+func (m *Chat) adjustOffsetForHeightChange(itemIdx, heightDiff int) {
+	if heightDiff <= 0 {
+		return
+	}
+	itemTop := m.list.ItemStartOffset(itemIdx)
+	itemOldBottom := itemTop + m.list.ItemHeight(itemIdx) + heightDiff
+	currentOffset := m.list.Offset()
+	// Only adjust if the item was entirely above the viewport top.
+	if itemOldBottom <= currentOffset {
+		newOffset := max(0, currentOffset-heightDiff)
+		if newOffset != currentOffset {
+			m.list.SetOffset(newOffset)
+			m.follow = m.AtBottom()
+		}
+	}
+}
+
 // ScrollToTopAndAnimate scrolls the chat view to the top and returns a command to restart
 // any paused animations that are now visible.
 func (m *Chat) ScrollToTopAndAnimate() tea.Cmd {
@@ -1056,6 +1080,8 @@ func (m *Chat) HandleDelayedClick(msg DelayedClickMsg) (bool, tea.Cmd) {
 	// Execute the click action (e.g., expansion).
 	selectedItem := m.list.SelectedItem()
 	if clickable, ok := selectedItem.(list.MouseClickable); ok {
+		selectedIdx := m.list.Selected()
+		oldHeight := m.list.ItemHeight(selectedIdx)
 		handled, cmd := clickable.HandleMouseClick(ansi.MouseButton1, msg.X, msg.Y)
 		// If HandleMouseClick already handled the click (e.g., toggled a
 		// specific region like thinking/summary), skip the generic toggle.
@@ -1067,6 +1093,14 @@ func (m *Chat) HandleDelayedClick(msg DelayedClickMsg) (bool, tea.Cmd) {
 				if !expandable.ToggleExpanded() {
 					m.ScrollToIndex(m.list.Selected())
 				}
+			}
+		} else {
+			// HandleMouseClick handled the click (e.g., thinking/summary
+			// toggle). Adjust the viewport to keep content visible.
+			newHeight := m.list.ItemHeight(selectedIdx)
+			heightDiff := oldHeight - newHeight
+			if heightDiff > 0 {
+				m.adjustOffsetForHeightChange(selectedIdx, heightDiff)
 			}
 		}
 		if m.AtBottom() {

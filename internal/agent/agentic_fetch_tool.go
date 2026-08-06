@@ -177,7 +177,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				tools.NewGlobTool(tmpDir),
 				tools.NewGrepTool(tmpDir, c.cfg.Config().Tools.Grep),
 				tools.NewSourcegraphTool(client),
-				tools.NewReadTool(c.lspManager, c.permissions, c.filetracker, tmpDir, c.cfg.Config().Tools.Ls, nil, nil),
+				tools.NewReadToolWithArchiveDir(c.lspManager, c.permissions, c.filetracker, tmpDir, c.cfg.Config().Tools.Ls, nil, archiveDirectory(dataDirectory, tmpDir), nil),
 				tools.NewYieldTool(c.messages),
 			}
 

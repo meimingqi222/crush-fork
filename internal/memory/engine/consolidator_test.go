@@ -342,11 +342,6 @@ func TestConsolidator_EventKinds(t *testing.T) {
 	}
 }
 
-func TestLLMConsolidator_ImplementsConsolidator(t *testing.T) {
-	t.Parallel()
-	var _ Consolidator = (*LLMConsolidator)(nil)
-}
-
 func TestEngine_TriggerConsolidation(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t)

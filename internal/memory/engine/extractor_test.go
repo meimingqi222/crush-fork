@@ -262,11 +262,6 @@ func TestExtractor_EventTypes(t *testing.T) {
 	}
 }
 
-func TestLLMExtractor_ImplementsExtractor(t *testing.T) {
-	t.Parallel()
-	var _ Extractor = (*LLMExtractor)(nil)
-}
-
 func TestEngine_AfterTurnIdleWithExtractor(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t)

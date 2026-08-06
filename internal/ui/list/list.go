@@ -798,6 +798,27 @@ func (l *List) ItemHeight(index int) int {
 	return item.height
 }
 
+// ItemStartOffset returns the content-line offset of the top of the item at
+// the given index (i.e., the sum of heights of all items before it, plus
+// gaps). Returns 0 when index <= 0 or index >= len(items), mirroring
+// ItemHeight's out-of-range convention.
+func (l *List) ItemStartOffset(index int) int {
+	if index <= 0 || index >= len(l.items) {
+		return 0
+	}
+	offset := 0
+	for i := 0; i < index; i++ {
+		item := l.getItem(i)
+		if item.height > 0 {
+			offset += item.height
+		}
+		if l.gap > 0 {
+			offset += l.gap
+		}
+	}
+	return offset
+}
+
 // ItemIndexAtPosition returns the item at the given viewport-relative y
 // coordinate. Returns the item index and the y offset within that item. It
 // returns -1, -1 if no item is found.

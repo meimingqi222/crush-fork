@@ -71,7 +71,7 @@ func waitForLSPDiagnostics(
 	wg.Wait()
 }
 
-// notifyLSPs notifies LSP servers that a file has changed and waits for
+// notifyLSPs notifies LSP servers that a file has changed and waits briefly for
 // updated diagnostics. Use this after edit operations.
 func notifyLSPs(
 	ctx context.Context,
@@ -90,8 +90,12 @@ func notifyLSPs(
 		}
 		_ = client.OpenFileOnDemand(ctx, filepath)
 		_ = client.NotifyChange(ctx, filepath)
-		client.WaitForDiagnostics(ctx, 5*time.Second)
 	}
+
+	// Wait for updated diagnostics in parallel with a short bound so the
+	// getDiagnostics call that follows returns fresh results without blocking
+	// the step loop up to 5s per LSP client on multi-step write loops.
+	waitForLSPDiagnostics(ctx, manager, filepath, 300*time.Millisecond)
 }
 
 func getDiagnostics(filePath string, manager *lsp.Manager) string {

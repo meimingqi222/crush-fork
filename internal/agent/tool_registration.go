@@ -21,6 +21,16 @@ type registeredTool struct {
 	metadata agenttools.ToolMetadata
 }
 
+func archiveDirectory(dataDirectory, workingDir string) string {
+	if dataDirectory != "" {
+		return filepath.Join(dataDirectory, "archive")
+	}
+	if workingDir != "" {
+		return filepath.Join(workingDir, contextWindowArchiveDir)
+	}
+	return ""
+}
+
 func enableNativeToolParallelism(tool fantasy.AgentTool, metadata agenttools.ToolMetadata) {
 	if tool == nil || tool.Info().Parallel {
 		return
@@ -126,7 +136,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		agenttools.NewJobTool(),
 		agenttools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		editTool,
-		agenttools.NewReadTool(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, discoveredSkills, c.cfg.Config().Options.SkillsPaths...),
+		agenttools.NewReadToolWithArchiveDir(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, archiveDirectory(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()), discoveredSkills, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
 		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
 		agenttools.NewSourcegraphTool(nil),

@@ -285,13 +285,6 @@ func TestSkillsMaterializer_EmptyStore(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "should not write file with no procedure events")
 }
 
-func TestMaterializer_ImplementsInterface(t *testing.T) {
-	t.Parallel()
-	var _ Materializer = (*SummaryMaterializer)(nil)
-	var _ Materializer = (*MemoryMDMaterializer)(nil)
-	var _ Materializer = (*SkillsMaterializer)(nil)
-}
-
 func TestEngine_TriggerMaterialization(t *testing.T) {
 	t.Parallel()
 	db := setupTestDB(t)

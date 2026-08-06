@@ -39,6 +39,9 @@ type LLMConsolidator struct {
 	clock         func() time.Time
 }
 
+// Compile-time interface compliance check.
+var _ Consolidator = (*LLMConsolidator)(nil)
+
 // NewLLMConsolidator creates a new LLMConsolidator with the given dependencies.
 //   - getExisting: returns existing consolidated events for Supersedes detection.
 //   - analyzeEvents: calls an LLM to consolidate episodic events into semantic/

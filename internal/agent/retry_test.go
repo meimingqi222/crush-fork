@@ -11,10 +11,14 @@ import (
 )
 
 type stubLanguageModel struct {
-	stream func(context.Context, fantasy.Call) (fantasy.StreamResponse, error)
+	stream   func(context.Context, fantasy.Call) (fantasy.StreamResponse, error)
+	generate func(context.Context, fantasy.Call) (*fantasy.Response, error)
 }
 
-func (m stubLanguageModel) Generate(context.Context, fantasy.Call) (*fantasy.Response, error) {
+func (m stubLanguageModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
+	if m.generate != nil {
+		return m.generate(ctx, call)
+	}
 	panic("unexpected Generate call")
 }
 

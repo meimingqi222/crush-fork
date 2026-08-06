@@ -6,21 +6,29 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"math/rand/v2"
 	"testing"
 )
 
 // createTestImage creates a test image with the specified dimensions.
 func createTestImage(width, height int, withAlpha bool) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	pix := img.Pix
+	stride := img.Stride
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
+			i := y*stride + x*4
 			if withAlpha {
-				// Semi-transparent red
-				img.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 128})
+				pix[i] = 255 // R
+				pix[i+1] = 0
+				pix[i+2] = 0
+				pix[i+3] = 128
 			} else {
-				// Solid red
-				img.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 255})
+				pix[i] = 255
+				pix[i+1] = 0
+				pix[i+2] = 0
+				pix[i+3] = 255
 			}
 		}
 	}
@@ -142,26 +150,29 @@ func TestCompressImage_NoCompressionNeeded(t *testing.T) {
 func TestCompressImage_JPEGCompression(t *testing.T) {
 	config := DefaultCompressionConfig()
 
-	// Create a large JPEG image with quality 100 (which creates a large file)
-	img := image.NewRGBA(image.Rect(0, 0, 2000, 2000))
-	for y := 0; y < 2000; y++ {
-		for x := 0; x < 2000; x++ {
-			// Use varying colors to make compression more effective
-			img.Set(x, y, color.RGBA{
-				R: uint8((x + y) % 256),
-				G: uint8((x * 2) % 256),
-				B: uint8((y * 2) % 256),
-				A: 255,
-			})
+	// Create a JPEG image with random noise that exceeds the compression
+	// threshold. 1000x1000 with high-entropy pixels at quality 100 produces
+	// ~2 MB, well above the 1 MB MaxSizeBytes limit. Using direct pixel
+	// access instead of img.Set avoids 1M color-model conversions.
+	size := 1000
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	pix := img.Pix
+	stride := img.Stride
+	rng := rand.New(rand.NewPCG(42, 42))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			i := y*stride + x*4
+			pix[i] = uint8(rng.IntN(256))
+			pix[i+1] = uint8(rng.IntN(256))
+			pix[i+2] = uint8(rng.IntN(256))
+			pix[i+3] = 255
 		}
 	}
 
 	var buf bytes.Buffer
-	// Encode with high quality to create a large file
 	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 100})
 	data := buf.Bytes()
 
-	// Skip test if image isn't large enough
 	if int64(len(data)) <= config.MaxSizeBytes {
 		t.Skip("Test image not large enough to trigger compression")
 	}
@@ -171,7 +182,6 @@ func TestCompressImage_JPEGCompression(t *testing.T) {
 		t.Fatalf("CompressImage() error = %v", err)
 	}
 
-	// If compression happened, verify it reduced size
 	if result.WasCompressed {
 		if result.MimeType != "image/jpeg" {
 			t.Errorf("CompressImage() mimeType = %v, want image/jpeg", result.MimeType)
@@ -185,17 +195,23 @@ func TestCompressImage_JPEGCompression(t *testing.T) {
 func TestCompressImage_PreserveTransparency(t *testing.T) {
 	config := DefaultCompressionConfig()
 
-	// Create a PNG image with transparency - use varying colors for better test
-	img := image.NewRGBA(image.Rect(0, 0, 2000, 2000))
-	for y := 0; y < 2000; y++ {
-		for x := 0; x < 2000; x++ {
-			// Semi-transparent with varying colors
-			img.Set(x, y, color.RGBA{
-				R: uint8((x + y) % 256),
-				G: uint8((x * 2) % 256),
-				B: uint8((y * 2) % 256),
-				A: 128, // Semi-transparent
-			})
+	// Create a PNG with random noise and semi-transparency. 600x600 with
+	// high-entropy pixels produces ~1.1 MB, exceeding the 1 MB threshold so
+	// the test actually exercises the compression path (the previous
+	// 2000x2000 low-entropy pattern compressed to only 51 KB and was always
+	// skipped).
+	size := 600
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	pix := img.Pix
+	stride := img.Stride
+	rng := rand.New(rand.NewPCG(42, 42))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			i := y*stride + x*4
+			pix[i] = uint8(rng.IntN(256))
+			pix[i+1] = uint8(rng.IntN(256))
+			pix[i+2] = uint8(rng.IntN(256))
+			pix[i+3] = 128
 		}
 	}
 
@@ -203,7 +219,6 @@ func TestCompressImage_PreserveTransparency(t *testing.T) {
 	png.Encode(&buf, img)
 	data := buf.Bytes()
 
-	// Skip test if image isn't large enough
 	if int64(len(data)) <= config.MaxSizeBytes {
 		t.Skip("Test image not large enough to trigger compression")
 	}
@@ -213,7 +228,6 @@ func TestCompressImage_PreserveTransparency(t *testing.T) {
 		t.Fatalf("CompressImage() error = %v", err)
 	}
 
-	// If compression happened, PNG format should be preserved for transparency
 	if result.WasCompressed {
 		if result.MimeType != "image/png" {
 			t.Errorf("CompressImage() mimeType = %v, want image/png (for transparency)", result.MimeType)
@@ -238,18 +252,22 @@ func TestDefaultCompressionConfig(t *testing.T) {
 }
 
 func TestHasAlpha(t *testing.T) {
-	// Test image with alpha
+	// Test image with alpha.
 	imgWithAlpha := image.NewRGBA(image.Rect(0, 0, 10, 10))
 	imgWithAlpha.Set(0, 0, color.RGBA{R: 255, G: 0, B: 0, A: 128})
 	if !hasAlpha(imgWithAlpha) {
 		t.Error("hasAlpha() should return true for image with semi-transparent pixels")
 	}
 
-	// Test image without alpha
+	// Test image without alpha.
 	imgNoAlpha := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	pix := imgNoAlpha.Pix
+	stride := imgNoAlpha.Stride
 	for y := 0; y < 10; y++ {
 		for x := 0; x < 10; x++ {
-			imgNoAlpha.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 255})
+			i := y*stride + x*4
+			pix[i] = 255
+			pix[i+3] = 255
 		}
 	}
 	if hasAlpha(imgNoAlpha) {
