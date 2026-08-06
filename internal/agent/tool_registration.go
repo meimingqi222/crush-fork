@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -173,7 +174,12 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		)
 	}
 	if isSubagent {
-		var yieldOpts []agenttools.YieldOption
+		yieldOpts := []agenttools.YieldOption{
+			agenttools.WithPayloadProjector(func(payload json.RawMessage, schema any) string {
+				schemaMap, _ := schema.(map[string]any)
+				return projectYieldPayload(payload, schemaMap)
+			}),
+		}
 		if agent.OutputSchema != nil {
 			yieldOpts = append(yieldOpts, agenttools.WithOutputSchema(agent.OutputSchema))
 		}

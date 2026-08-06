@@ -2473,8 +2473,8 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 	if len(lines) > 0 {
 		content += "\n" + strings.Join(lines, "\n")
 	}
-	if details := subagentSessionDetailsForModel(orderedResults); details != "" {
-		content += "\n\nChild sessions:\n" + details
+	if details := subagentLocatorsForModel(orderedResults); details != "" {
+		content += "\n\nSubagents:\n" + details
 	}
 	if details := subagentOutputDetailsForModel(orderedResults); details != "" {
 		content += "\n\nTask outputs:\n" + details
@@ -2549,10 +2549,7 @@ func reduceResultToChildSession(result subagentResult) message.ToolResultReducer
 }
 
 func withSubagentOutputMetadata(result subagentResult) subagentResult {
-	content := strings.TrimSpace(result.Content)
-	if content == "" {
-		content = strings.TrimSpace(result.Yield.Data)
-	}
+	content := subagentResultText(result)
 	result.OutputChars = len([]rune(content))
 	if content == "" {
 		result.Preview = ""
@@ -2565,6 +2562,15 @@ func withSubagentOutputMetadata(result subagentResult) subagentResult {
 	return result
 }
 
+// SubagentTaskRef returns a short, model-friendly alias for one task's result
+// within a single parent "agent" tool call (e.g. "call-1-2-explore"). It is
+// only a result alias scoped to that one tool call: the tool-call prefix and
+// task index are not stable across turns or reconstructible from a later
+// call, so it must not be treated as a durable identity. Durable identity is
+// the AgentRegistry agent ID (see AgentRef.ID); canonical session identity
+// for persistence/recovery is the child session ID (see
+// session.CreateAgentToolSessionID), which is DB/UI-facing and must not be
+// surfaced to the model (see subAgentNoContentText).
 func SubagentTaskRef(index int, taskID string, toolCallID string) string {
 	slug := subagentTaskRefSlug(taskID)
 	if slug == "" {
@@ -2875,7 +2881,7 @@ func (c *coordinator) ensureSubagentYield(ctx context.Context, params subAgentPa
 	}
 	content := c.subAgentResponseText(ctx, childSessionID, result)
 	if strings.TrimSpace(content) == "" {
-		content = subAgentNoContentText(childSessionID)
+		content = subAgentNoContentText(params.AgentID)
 	}
 
 	// Fallback completion: if the subagent has an output schema but never
@@ -3257,12 +3263,14 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		yieldResult, hasYield = c.latestSubagentYield(ctx, subSession.ID)
 	}
 	content := c.subAgentResponseText(ctx, subSession.ID, result)
-	if hasYield && strings.TrimSpace(yieldResult.Data) != "" {
-		content = yieldResult.Data
+	if hasYield {
+		if text := yieldContentText(yieldResult); text != "" {
+			content = text
+		}
 	}
 	if content == "" {
 		slog.Warn("Sub-agent returned empty response", "session", subSession.ID, "prompt", params.Prompt)
-		content = subAgentNoContentText(subSession.ID)
+		content = subAgentNoContentText(params.AgentID)
 	}
 	if parentSession.PermissionMode == session.PermissionModeAuto && !params.SkipHandoffReview {
 		review, reviewErr := c.reviewHandoffText(ctx, parentSession, params.SessionTitle, content, params.Prompt, true)
@@ -3599,7 +3607,7 @@ func (c *coordinator) applyMergeBackResult(response *fantasy.ToolResponse, err *
 
 	content := response.Content
 	if content == "" {
-		content = subAgentNoContentText(childSessionID)
+		content = subAgentNoContentText(params.AgentID)
 	}
 	mergedContent := fmt.Sprintf("%s\n\n<merge_back result=\"failure\">\n%s\n</merge_back>", content, mergeResult.Message)
 	*response = withSubtaskToolResponseMetadata(
@@ -3712,27 +3720,34 @@ func subagentReducerMessages(results []subagentResult) []string {
 	return messages
 }
 
-func subagentSessionDetailsForModel(results []subagentResult) string {
+// subagentLocatorsForModel renders the per-task control-plane locators the
+// parent model may use to fetch full output or continue a subagent. It
+// deliberately omits the child session ID: that value is the internal
+// canonical key "messageID$$toolCallID" (see
+// session.CreateAgentToolSessionID), which carries no extra meaning for the
+// model and invites transcription errors on its "$$" separator. The stable
+// registry agent ID and the per-call task ref are the model-facing handles
+// (docs/refactor-subagent-result-contract.md §2.2, §2.4, §3.1).
+func subagentLocatorsForModel(results []subagentResult) string {
 	lines := make([]string, 0, len(results))
 	for _, result := range results {
-		sessionID := strings.TrimSpace(result.ChildSessionID)
-		if sessionID == "" {
+		agentID := strings.TrimSpace(result.AgentID)
+		taskRef := strings.TrimSpace(result.TaskRef)
+		if agentID == "" && taskRef == "" {
 			continue
 		}
 		label := strings.TrimSpace(result.Task.Description)
 		if label == "" {
 			label = result.Task.Name
 		}
-		identifier := sessionID
-		if strings.TrimSpace(result.AgentID) != "" {
-			identifier = fmt.Sprintf("%s (agent %s)", sessionID, strings.TrimSpace(result.AgentID))
+		parts := make([]string, 0, 2)
+		if agentID != "" {
+			parts = append(parts, fmt.Sprintf("agent_id=%s", agentID))
 		}
-		taskRef := strings.TrimSpace(result.TaskRef)
 		if taskRef != "" {
-			lines = append(lines, fmt.Sprintf("- %s (%s): %s; task_ref=%s", label, result.Status, identifier, taskRef))
-			continue
+			parts = append(parts, fmt.Sprintf("task_ref=%s", taskRef))
 		}
-		lines = append(lines, fmt.Sprintf("- %s (%s): %s", label, result.Status, identifier))
+		lines = append(lines, fmt.Sprintf("- %s (%s): %s", label, result.Status, strings.Join(parts, "; ")))
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
@@ -3746,14 +3761,7 @@ func subagentOutputDetailsForModel(results []subagentResult) string {
 	// single huge task cannot monopolize the aggregate.
 	candidates := make([]int, 0, len(results))
 	for i, result := range results {
-		content := strings.TrimSpace(result.Content)
-		if content == "" {
-			content = strings.TrimSpace(result.Yield.Data)
-		}
-		if content == "" {
-			content = strings.TrimSpace(result.Preview)
-		}
-		if content != "" {
+		if subagentResultText(result) != "" {
 			candidates = append(candidates, i)
 		}
 	}
@@ -3773,14 +3781,7 @@ func subagentOutputDetailsForModel(results []subagentResult) string {
 	remaining := subagentOutputAggregateCharsLimit
 	truncatedTail := false
 	for _, result := range results {
-		content := strings.TrimSpace(result.Content)
-		if content == "" {
-			content = strings.TrimSpace(result.Yield.Data)
-		}
-		if content == "" {
-			content = strings.TrimSpace(result.Preview)
-		}
-		content = compactText(content)
+		content := compactText(subagentResultText(result))
 		if content == "" {
 			continue
 		}
@@ -4281,12 +4282,22 @@ func (c *coordinator) subAgentResponseText(ctx context.Context, sessionID string
 	return ""
 }
 
-func subAgentNoContentText(sessionID string) string {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return "Subagent completed with no textual response. Open the child session from this Agent tool call to inspect tool outputs and details."
+// subAgentNoContentText builds the model-visible fallback text for a subagent
+// that produced no textual output. It must never leak the internal
+// "messageID$$toolCallID" child session ID (see
+// session.CreateAgentToolSessionID) into model-visible text -- that composite
+// key is a DB/recovery identity, not something a model can reliably quote
+// back. When the subagent was registered in the AgentRegistry, agentID is its
+// stable registry ID and is safe to surface as a locator via send_message.
+// Ephemeral subagents that are never registered (e.g. agentic_fetch's
+// one-off helper) pass an empty agentID; in that case the text carries no
+// locator at all rather than falling back to the session ID.
+func subAgentNoContentText(agentID string) string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return "Subagent completed with no textual response."
 	}
-	return fmt.Sprintf("Subagent completed with no textual response. Open child session %s from this Agent tool call to inspect tool outputs and details.", sessionID)
+	return fmt.Sprintf("Subagent completed with no textual response. Continue or inspect it with send_message(agent_id=%q).", agentID)
 }
 
 // backgroundAgentLookup returns a lookup function for background agent status.

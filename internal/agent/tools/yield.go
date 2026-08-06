@@ -39,13 +39,27 @@ type YieldParams struct {
 type YieldOption func(*yieldConfig)
 
 type yieldConfig struct {
-	outputSchema any
+	outputSchema     any
+	payloadProjector func(payload json.RawMessage, schema any) string
 }
 
 // WithOutputSchema sets the JSON schema used to validate the payload field.
 func WithOutputSchema(schema any) YieldOption {
 	return func(cfg *yieldConfig) {
 		cfg.outputSchema = schema
+	}
+}
+
+// WithPayloadProjector sets the deterministic payload-to-text projector used
+// to fill the tool response's Content when the model only submits a payload
+// (no data). The projector must be a pure function -- it must not call a
+// model. Package agent supplies the canonical implementation
+// (projectYieldPayload) when registering this tool for subagents; the
+// indirection exists because internal/agent imports internal/agent/tools,
+// so the projector cannot live here without an import cycle.
+func WithPayloadProjector(projector func(payload json.RawMessage, schema any) string) YieldOption {
+	return func(cfg *yieldConfig) {
+		cfg.payloadProjector = projector
 	}
 }
 
@@ -184,6 +198,12 @@ func NewYieldTool(messages message.Service, opts ...YieldOption) fantasy.AgentTo
 			summary := data
 			if summary == "" && errVal != "" {
 				summary = errVal
+			}
+			if summary == "" && len(payload) > 0 && cfg.payloadProjector != nil {
+				// Deterministic runtime-generated text, not model-provided
+				// data: it fills Content only, Data stays empty so the two
+				// are never confused downstream.
+				summary = cfg.payloadProjector(payload, cfg.outputSchema)
 			}
 
 			response := fantasy.NewTextResponse(summary)

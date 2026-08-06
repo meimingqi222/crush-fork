@@ -120,6 +120,51 @@ func TestYieldToolRejectsEmptyData(t *testing.T) {
 	require.Contains(t, resp.Content, "data or payload is required")
 }
 
+func TestYieldToolProjectsPayloadIntoContentWhenDataIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	// Content == "" while Data stays empty: the runtime-generated projection
+	// fills the tool response's displayed Content, but must never be written
+	// back into Yield.Data, or model-provided and runtime-generated text
+	// become indistinguishable downstream.
+	tool := NewYieldTool(nil, WithPayloadProjector(func(payload json.RawMessage, _ any) string {
+		return "projected: " + string(payload)
+	}))
+
+	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  YieldToolName,
+		Input: `{"status":"completed","payload":{"summary":"findings"}}`,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, resp.Content)
+	require.Contains(t, resp.Content, "projected:")
+
+	yield, ok := message.ParseToolResultYield(resp.Metadata)
+	require.True(t, ok)
+	require.Empty(t, yield.Data)
+	require.JSONEq(t, `{"summary":"findings"}`, string(yield.Payload))
+}
+
+func TestYieldToolWithoutPayloadProjectorLeavesContentEmpty(t *testing.T) {
+	t.Parallel()
+
+	// No projector configured (e.g. a caller that never wires one): payload-
+	// only yields must still succeed, just without projected Content. This
+	// guards the pre-existing default behavior for callers that don't opt
+	// in.
+	tool := NewYieldTool(nil)
+
+	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  YieldToolName,
+		Input: `{"status":"completed","payload":{"summary":"findings"}}`,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError, resp.Content)
+	require.Empty(t, resp.Content)
+}
+
 func TestYieldToolRejectsInvalidStatus(t *testing.T) {
 	t.Parallel()
 

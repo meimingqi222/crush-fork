@@ -610,6 +610,48 @@ func TestRunSubAgent(t *testing.T) {
 		assert.Equal(t, "detailed subagent report via yield", resp.Content)
 	})
 
+	t.Run("projects payload-only yield into readable content on the single subagent path", func(t *testing.T) {
+		t.Parallel()
+
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			_, err := env.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
+				Role: message.Tool,
+				Parts: []message.ContentPart{
+					message.ToolResult{Name: agenttools.YieldToolName}.WithYield(message.ToolResultYield{
+						Status:  string(message.ToolResultSubtaskStatusCompleted),
+						Payload: json.RawMessage(`{"summary":"payload-only findings summary","files":[{"path":"foo.go","description":"does the thing"}]}`),
+					}),
+				},
+			})
+			require.NoError(t, err)
+			// No text response and no yield.Data -- the model relied entirely
+			// on the structured payload, which is a fully compliant Explore
+			// yield.
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "test",
+			SessionTitle:    "Test",
+			SubagentType:    config.AgentGeneral,
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Contains(t, resp.Content, "payload-only findings summary")
+		assert.NotContains(t, resp.Content, "no textual response")
+	})
+
 	t.Run("missing finish policy warns when finish is absent", func(t *testing.T) {
 		t.Parallel()
 
@@ -665,6 +707,38 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, resp.IsError)
 		assert.Contains(t, resp.Content, "Subagent completed with no textual response")
+		// Locator-hygiene regression: the composite "messageID$$toolCallID"
+		// child session ID must never appear in model-visible text.
+		assert.NotContains(t, resp.Content, "$$")
+	})
+
+	t.Run("no-content guidance references the registry agent ID, not the child session ID", func(t *testing.T) {
+		t.Parallel()
+
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgentDirect(t.Context(), subAgentParams{
+			Agent:           agent,
+			SessionID:       parentSession.ID,
+			AgentMessageID:  "msg-1",
+			ParentMessageID: "msg-1",
+			ToolCallID:      "call-1",
+			Prompt:          "test",
+			SessionTitle:    "Test",
+			AgentID:         "0-Main::explore-ab12",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Contains(t, resp.Content, `send_message(agent_id="0-Main::explore-ab12")`)
+		assert.NotContains(t, resp.Content, "$$")
 	})
 
 	t.Run("does not fall back to earlier assistant text when latest assistant is empty", func(t *testing.T) {
@@ -709,6 +783,7 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, resp.IsError)
 		assert.Contains(t, resp.Content, "Subagent completed with no textual response")
+		assert.NotContains(t, resp.Content, "$$")
 	})
 
 	t.Run("session setup callback is invoked", func(t *testing.T) {
@@ -995,6 +1070,25 @@ func TestSubagentTaskRef(t *testing.T) {
 			require.Equal(t, tt.want, SubagentTaskRef(tt.index, tt.taskID, tt.toolCallID))
 		})
 	}
+}
+
+func TestSubAgentNoContentText(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty agent ID yields no locator", func(t *testing.T) {
+		t.Parallel()
+		got := subAgentNoContentText("")
+		require.Equal(t, "Subagent completed with no textual response.", got)
+		require.NotContains(t, got, "$$")
+		require.NotContains(t, got, "send_message")
+	})
+
+	t.Run("agent ID yields a send_message locator, never a session ID", func(t *testing.T) {
+		t.Parallel()
+		got := subAgentNoContentText("0-Main::explore-ab12")
+		require.Contains(t, got, `send_message(agent_id="0-Main::explore-ab12")`)
+		require.NotContains(t, got, "$$")
+	})
 }
 
 func TestCollectTaskGraphArtifactsExtractsFilesAndShells(t *testing.T) {
@@ -2401,4 +2495,70 @@ func TestFormatToolCallSummary(t *testing.T) {
 	result := formatToolCallSummary("bash", longInput, 80)
 	assert.Contains(t, result, "…")
 	assert.True(t, len([]rune(result)) < 100)
+}
+
+// TestSubagentOutputDetailsForModel_PayloadOnlyYield covers the batch
+// (fan-out) rendering path -- subagentOutputDetailsForModel is what
+// runSubagents embeds under the "Task outputs:" header
+// (docs/refactor-subagent-result-contract.md breakpoint B4). A payload-only
+// yield must appear there with its summary, not be dropped as content-less.
+func TestSubagentOutputDetailsForModel_PayloadOnlyYield(t *testing.T) {
+	t.Parallel()
+
+	result := subagentResult{
+		Task:   subagentTask{Name: "explore-1", Description: "Explore the auth flow"},
+		Status: message.ToolResultSubtaskStatusCompleted,
+		Yield: message.ToolResultYield{
+			Status:  string(message.ToolResultSubtaskStatusCompleted),
+			Payload: json.RawMessage(`{"summary":"Found the auth bug in middleware.go","files":[{"path":"middleware.go","description":"missing nil check"}]}`),
+		},
+	}
+
+	details := subagentOutputDetailsForModel([]subagentResult{result})
+	require.NotEmpty(t, details)
+	assert.Contains(t, details, "Found the auth bug in middleware.go")
+	assert.NotContains(t, details, "no textual response")
+
+	// This is exactly what runSubagents prepends before embedding the
+	// result in the parent tool response content.
+	content := "Task outputs:\n" + details
+	assert.Contains(t, content, "Task outputs:")
+	assert.Contains(t, content, "Found the auth bug in middleware.go")
+}
+
+// TestSubagentOutputDetailsForModel_LargePayloadPreservesSummary verifies
+// that when a projected payload exceeds the per-task output budget, the
+// truncation (applied by ellipsizeText, unchanged by this refactor) cuts
+// from the supplementary fields at the tail rather than the summary at the
+// front -- projectYieldPayload always places summary first for exactly this
+// reason.
+func TestSubagentOutputDetailsForModel_LargePayloadPreservesSummary(t *testing.T) {
+	t.Parallel()
+
+	const summary = "Explore completed: found the auth bug in middleware.go."
+	huge := strings.Repeat("large supplementary finding detail. ", 5000)
+	payload, err := json.Marshal(map[string]any{
+		"summary":      summary,
+		"architecture": huge,
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(payload), subagentOutputPerTaskCharsLimit)
+
+	result := subagentResult{
+		Task:   subagentTask{Name: "explore-1", Description: "Explore auth bug"},
+		Status: message.ToolResultSubtaskStatusCompleted,
+		Yield: message.ToolResultYield{
+			Status:  string(message.ToolResultSubtaskStatusCompleted),
+			Payload: payload,
+		},
+	}
+
+	details := subagentOutputDetailsForModel([]subagentResult{result})
+	require.NotEmpty(t, details)
+	assert.Contains(t, details, summary)
+	assert.Contains(t, details, "[truncated")
+
+	idx := strings.Index(details, summary)
+	require.GreaterOrEqual(t, idx, 0)
+	assert.Less(t, idx, 100, "summary should appear near the front of the rendered line, not lost to truncation")
 }
