@@ -58,6 +58,10 @@ func (m *mockIrcSender) Broadcast(ctx context.Context, from, body string, expect
 	return m.broadcastFunc(ctx, from, body, expectReply, replyTo)
 }
 
+func (m *mockIrcSender) Wait(ctx context.Context, req IrcWaitRequest) IrcWaitResult {
+	return IrcWaitResult{TimedOut: true}
+}
+
 func ircCtx(selfID string) context.Context {
 	return toolruntime.WithIrcAgentID(context.Background(), selfID)
 }

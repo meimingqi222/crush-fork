@@ -254,7 +254,6 @@ type SessionAgent interface {
 	// their own busy check and this call) is reported back as false rather
 	// than silently starting a real turn with an under-populated context.
 	QueuePrompt(sessionID string, call SessionAgentCall) bool
-	RespondAsBackground(ctx context.Context, from, message string) (string, error)
 }
 
 type Model struct {
@@ -3840,56 +3839,6 @@ func (a *sessionAgent) shouldAutoSummarizeWithCooldown(model Model, contextUsed,
 		}
 	}
 	return shouldAutoSummarize(model, contextUsed, maxOutputTokens)
-}
-
-func (a *sessionAgent) RespondAsBackground(ctx context.Context, from, message string) (string, error) {
-	prompt := fmt.Sprintf("<irc>\nYou received an IRC message from agent `%s`.\n\nReply briefly and directly using the conversation context already available to you. Do **not** call any tools. The reply you write is delivered back to `%s` as your answer.\n\nMessage:\n%s\n</irc>", from, from, message)
-
-	bgModel := a.largeModel.Get()
-	systemPrompt := a.systemPrompt.Get()
-	var providerOpts fantasy.ProviderOptions
-	if a.backgroundModel != nil {
-		bgModel = a.backgroundModel.model
-		providerOpts = getProviderOptions(bgModel, a.backgroundModel.provider)
-	} else {
-		providerOpts = getProviderOptions(bgModel, config.ProviderConfig{})
-	}
-
-	noThink := false
-	bgModel.ModelCfg.Think = &noThink
-
-	agent := fantasy.NewAgent(
-		bgModel.Model,
-		fantasy.WithSystemPrompt(systemPrompt),
-		fantasy.WithMaxOutputTokens(512),
-		fantasy.WithUserAgent("crush-irc-bg"),
-	)
-
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	resp, err := agent.Generate(
-		callCtx,
-		fantasy.AgentCall{
-			Prompt:          prompt,
-			ProviderOptions: providerOpts,
-			PrepareStep: func(callCtx context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-				prepared.Messages = options.Messages
-				return callCtx, prepared, nil
-			},
-		},
-	)
-	if err != nil {
-		return "", fmt.Errorf("irc background response failed: %w", err)
-	}
-	if resp == nil {
-		return "", nil
-	}
-	reply := resp.Response.Content.Text()
-	if len([]rune(reply)) > 500 {
-		reply = string([]rune(reply)[:500]) + "…"
-	}
-	return reply, nil
 }
 
 // cacheBreakpointInterval controls how often we place Anthropic/Bedrock cache

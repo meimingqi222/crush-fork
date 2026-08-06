@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/toolruntime"
@@ -19,11 +20,12 @@ type IrcOp string
 
 const (
 	IrcOpSend IrcOp = "send"
+	IrcOpWait IrcOp = "wait"
 	IrcOpList IrcOp = "list"
 )
 
 type IrcParams struct {
-	Op      IrcOp  `json:"op" description:"Operation: send a message or list visible peers"`
+	Op      IrcOp  `json:"op" description:"Operation: send a message, wait for a reply, or list visible peers"`
 	To      string `json:"to,omitempty" description:"Recipient agent ID or 'all' to broadcast; omit for list"`
 	Message string `json:"message,omitempty" description:"Message body to send (required for send)"`
 	// AwaitReply is a pointer so "omitted" and "explicitly false" can be
@@ -33,11 +35,17 @@ type IrcParams struct {
 	// "use the default"; a non-nil value is always honored as-is.
 	AwaitReply *bool `json:"await_reply,omitempty" description:"Wait for a reply from the recipient. Omit to use the default (true for a DM, false for a broadcast); pass true or false to force that behavior explicitly."`
 	// ReplyTo correlates this send with an earlier inbound message's ID,
-	// telling the recipient (and, once the phase-2 waiter lands -- see
-	// docs/refactor-irc.md §8 phase 2 -- any sender blocked on op=wait)
-	// which message this is answering. Optional; only meaningful when
-	// replying to a peer message you received.
+	// telling the recipient (and any sender blocked on op=wait) which
+	// message this is answering. Optional; only meaningful when replying
+	// to a peer message you received.
 	ReplyTo string `json:"reply_to,omitempty" description:"Message ID this send replies to, if any (from a message you previously received)"`
+	// MessageID is used with op=wait to wait for a reply to a specific
+	// message you sent. Optional with op=wait: if omitted, the wait is for
+	// any inbound message from the peer specified in `to`.
+	MessageID string `json:"message_id,omitempty" description:"With op=wait: the message ID whose reply you are waiting for. Omit to wait for any message from the peer."`
+	// Timeout is used with op=wait to set the maximum wait duration in
+	// seconds. Defaults to 60 if omitted.
+	Timeout int `json:"timeout,omitempty" description:"With op=wait: maximum seconds to wait. Default 60."`
 }
 
 type IrcReply struct {
@@ -88,18 +96,18 @@ type IrcSendResult struct {
 	Outcome   string
 	// Reply is the recipient's actual reply text, when one was produced
 	// synchronously (an idle/parked peer's real revived turn) or via the
-	// phase-1 legacy fallback for a busy peer with ExpectReply set (see the
-	// bus implementation's doc comment for why that fallback exists and
-	// when it goes away). Empty when no reply is available yet.
+	// phase-2 waiter (a busy peer's reply from its own turn, blocked on
+	// by the sender when await_reply was true). Empty when no reply is
+	// available yet (e.g. timeout, or await_reply was false).
 	Reply string
 	Error string
 }
 
 // IrcSender delivers IRC messages via the coordinator-owned bus
-// (docs/refactor-irc.md §3, phase 1). It replaces the old package-level
-// IrcResponder singleton: that global crossed coordinators, tests, and
-// concurrent sessions, whereas a sender is constructed per-coordinator and
-// injected into NewIrcTool like the registry already is.
+// (docs/refactor-irc.md §3). It replaces the old package-level IrcResponder
+// singleton: that global crossed coordinators, tests, and concurrent
+// sessions, whereas a sender is constructed per-coordinator and injected
+// into NewIrcTool like the registry already is.
 //
 // Send/Broadcast never select a provider or construct an agent turn
 // themselves -- delivery to a peer that needs a real turn (an idle or
@@ -113,6 +121,31 @@ type IrcSender interface {
 	// attempted target; parked/self peers are simply absent, not reported
 	// as failures.
 	Broadcast(ctx context.Context, from, body string, expectReply bool, replyTo string) []IrcSendResult
+	// Wait blocks on a reply for a specific message ID, or for any inbound
+	// message from a specific peer, up to the given timeout
+	// (docs/refactor-irc.md §5, phase 2). The caller's steering signal is
+	// consulted so a wait can be interrupted by an inbound message (§5.3
+	// deadlock prevention).
+	Wait(ctx context.Context, req IrcWaitRequest) IrcWaitResult
+}
+
+// IrcWaitRequest is the input for op=wait. Either MessageID or From (or
+// both) may be set: MessageID waits for a specific reply correlated by
+// reply_to; From waits for any inbound message from that peer.
+type IrcWaitRequest struct {
+	MessageID string
+	From      string
+	Timeout   time.Duration
+}
+
+// IrcWaitResult is the output of op=wait. Exactly one of Reply, TimedOut,
+// or Interrupted is meaningful per call.
+type IrcWaitResult struct {
+	MessageID   string
+	From        string
+	Reply       string
+	TimedOut    bool
+	Interrupted bool
 }
 
 func NewIrcTool(registry IrcRegistry, sender IrcSender) fantasy.AgentTool {
@@ -124,14 +157,16 @@ func NewIrcTool(registry IrcRegistry, sender IrcSender) fantasy.AgentTool {
 			if selfID == "" {
 				return fantasy.NewTextResponse("Failed: IRC is not available in the current context because you are running as a standalone primary agent. If you want to communicate with the user, please output your response directly in the chat text body instead of calling this tool."), nil
 			}
-			switch params.Op {
-			case IrcOpSend:
-				return executeIrcSend(ctx, sender, selfID, params)
-			case IrcOpList:
-				return executeIrcList(registry, selfID)
-			default:
-				return fantasy.NewTextResponse(fmt.Sprintf("Failed: unknown op %q; use send or list", params.Op)), nil
-			}
+		switch params.Op {
+		case IrcOpSend:
+			return executeIrcSend(ctx, sender, selfID, params)
+		case IrcOpWait:
+			return executeIrcWait(ctx, sender, selfID, params)
+		case IrcOpList:
+			return executeIrcList(registry, selfID)
+		default:
+			return fantasy.NewTextResponse(fmt.Sprintf("Failed: unknown op %q; use send, wait, or list", params.Op)), nil
+		}
 		},
 	)
 }
@@ -266,6 +301,50 @@ func executeIrcList(registry IrcRegistry, selfID string) (fantasy.ToolResponse, 
 	}
 
 	return fantasy.NewTextResponse(result.String()), nil
+}
+
+// executeIrcWait implements op=wait: block on a reply to a specific message
+// ID, or on any inbound message from a specific peer, up to a timeout
+// (docs/refactor-irc.md §5, phase 2). The wait is interruptible by the
+// caller's steering signal (§5.3: a blocked agent that receives an inbound
+// message must wake up so the ring can unwind in one step, not by timeout).
+func executeIrcWait(ctx context.Context, sender IrcSender, selfID string, params IrcParams) (fantasy.ToolResponse, error) {
+	if sender == nil {
+		return fantasy.NewTextResponse("Failed: the IRC message bus is not available in the current context."), nil
+	}
+
+	timeout := time.Duration(params.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+
+	req := IrcWaitRequest{
+		MessageID: strings.TrimSpace(params.MessageID),
+		From:      strings.TrimSpace(params.To),
+		Timeout:   timeout,
+	}
+	if req.MessageID == "" && req.From == "" {
+		return fantasy.NewTextResponse("Failed: op=wait requires either message_id (to wait for a specific reply) or to (to wait for any message from that peer)."), nil
+	}
+
+	result := sender.Wait(ctx, req)
+	return fantasy.NewTextResponse(formatWaitResult(result)), nil
+}
+
+func formatWaitResult(result IrcWaitResult) string {
+	if result.Interrupted {
+		return "Wait interrupted by an incoming message. Check your steering queue and respond if needed."
+	}
+	if result.TimedOut {
+		if result.MessageID != "" {
+			return fmt.Sprintf("Timed out waiting for a reply to message %s. The message was delivered; a late reply may still arrive -- use op=wait again to check.", result.MessageID)
+		}
+		return fmt.Sprintf("Timed out waiting for a message from %s.", result.From)
+	}
+	if result.Reply != "" {
+		return fmt.Sprintf("Reply from %s: %s", result.From, truncateReply(result.Reply, 500))
+	}
+	return "Wait completed with no reply."
 }
 
 func truncateReply(text string, maxRunes int) string {

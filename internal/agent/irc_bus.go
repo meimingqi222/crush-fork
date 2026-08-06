@@ -14,18 +14,16 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
-// This file implements docs/refactor-irc.md's phase 1: a coordinator-owned
-// message bus that replaces the tools.SetIrcResponder global singleton. It
-// resolves addresses against the AgentRegistry, decides how to reach a peer
-// given its current status, and reports a delivery outcome -- it
-// deliberately does NOT select a provider or construct an agent turn itself.
-// Turns are always started through the coordinator's existing entry points
-// (resumeSubagent for idle/parked subagents; SessionAgent.EnqueueIRC, which
-// rides the steering queue, for running peers and the idle primary agent).
-//
-// Phase 2 (not implemented here) adds a real waiter so a sender can block on
-// a specific reply by message ID -- see IRCMessage.ReplyTo and the
-// await_reply legacy fallback below for what phase 1 does in its place.
+// This file implements docs/refactor-irc.md's IRC message bus (phases 1+2):
+// a coordinator-owned bus that replaces the tools.SetIrcResponder global
+// singleton. It resolves addresses against the AgentRegistry, decides how to
+// reach a peer given its current status, reports a delivery outcome, and --
+// in phase 2 -- provides a real waiter so a sender can block on a specific
+// reply by message ID. It deliberately does NOT select a provider or
+// construct an agent turn itself. Turns are always started through the
+// coordinator's existing entry points (resumeSubagent for idle/parked
+// subagents; SessionAgent.EnqueueIRC, which rides the steering queue, for
+// running peers and the idle primary agent).
 
 // IRCMessage is the message envelope handed between the bus and its
 // delivery paths (docs/refactor-irc.md §3.2).
@@ -66,9 +64,9 @@ const (
 
 // IRCDeliveryReceipt is the bus's outcome for a single target. Reply is
 // populated only when a real answer was available synchronously (a
-// woken/revived peer's actual turn output, or the phase-1 legacy fallback
-// documented on ircBus.legacyReply) -- it is never a fabricated stand-in for
-// "no reply yet".
+// woken/revived peer's actual turn output) -- it is never a fabricated
+// stand-in for "no reply yet". For a busy (running) peer whose reply arrives
+// asynchronously from its own turn, use Wait to block on the reply.
 type IRCDeliveryReceipt struct {
 	MessageID string
 	To        string
@@ -89,27 +87,110 @@ const (
 	ircMaxBroadcastFanout = 25
 	// ircMaxMessageBytes caps a single message body.
 	ircMaxMessageBytes = 8192
+	// defaultIRCWaitTimeout is the maximum time Send blocks waiting for a
+	// reply from a busy peer when await_reply is true (docs/refactor-irc.md
+	// §5.2). A timeout is not a delivery failure -- the message has been
+	// injected; the sender can still receive a late reply via op=wait.
+	defaultIRCWaitTimeout = 60 * time.Second
 )
 
-// ircBus is the coordinator-owned IRC message bus (docs/refactor-irc.md §3,
-// phase 1). One instance per coordinator; injected into NewIrcTool in place
-// of the old package-level IrcResponder singleton.
+// ircBus is the coordinator-owned IRC message bus (docs/refactor-irc.md §3).
+// One instance per coordinator; injected into NewIrcTool in place of the old
+// package-level IrcResponder singleton.
 type ircBus struct {
 	c       *coordinator
 	wakeSem chan struct{}
+	// waiters maps a request message ID to the channel that will receive
+	// the matching reply (docs/refactor-irc.md §5, phase 2). A sender
+	// registers a waiter before delivering a message with ExpectReply; the
+	// peer's reply (an irc send with reply_to=<request ID>) correlates via
+	// deliverReply and closes the channel. Entries are cleaned up on
+	// timeout, cancellation, or reply delivery.
+	waiters   map[string]chan IRCMessage
+	waitersMu sync.Mutex
 }
 
 func newIRCBus(c *coordinator) *ircBus {
 	return &ircBus{
-		c:       c,
-		wakeSem: make(chan struct{}, ircMaxConcurrentWakes),
+		c:         c,
+		wakeSem:   make(chan struct{}, ircMaxConcurrentWakes),
+		waiters:   make(map[string]chan IRCMessage),
 	}
 }
 
 // Send implements tools.IrcSender for a single DM.
 func (b *ircBus) Send(ctx context.Context, req tools.IrcSendRequest) tools.IrcSendResult {
 	msg := b.newMessage(req.From, req.To, req.Body, req.ReplyTo, req.ExpectReply)
-	return toIrcSendResult(b.deliverOne(ctx, msg))
+	receipt := b.deliverOne(ctx, msg)
+
+	// If the sender expects a reply and the peer's reply isn't already
+	// available synchronously (woken/revived peers produce one in-line),
+	// register a waiter and block until the peer's own turn sends a reply
+	// with reply_to=<our message ID>, the timeout fires, or the sender's
+	// context is cancelled (docs/refactor-irc.md §5).
+	if req.ExpectReply && receipt.Outcome == IRCInjected && receipt.Reply == "" {
+		reply, ok := b.waitForReply(ctx, msg.ID, defaultIRCWaitTimeout)
+		if ok {
+			receipt.Reply = reply.Body
+		}
+		// If !ok, the receipt already carries IRCInjected and no reply;
+		// the sender sees "delivered, no reply yet" which is the correct
+		// semantic for a timeout (§5.2: "超时返回已投递但尚未收到回复").
+	}
+	return toIrcSendResult(receipt)
+}
+
+// Wait implements tools.IrcSender for op=wait: block on a specific message
+// ID's reply, an inbound message from a specific peer, or a timeout --
+// whichever comes first. The caller's steering signal is checked so a wait
+// can be interrupted by an inbound message (docs/refactor-irc.md §5.3).
+func (b *ircBus) Wait(ctx context.Context, req tools.IrcWaitRequest) tools.IrcWaitResult {
+	// If a specific message_id is given, wait on its registered waiter.
+	if req.MessageID != "" {
+		reply, ok := b.waitForReply(ctx, req.MessageID, req.Timeout)
+		if ok {
+			return tools.IrcWaitResult{
+				MessageID: req.MessageID,
+				From:      reply.From,
+				Reply:     reply.Body,
+				TimedOut:  false,
+			}
+		}
+		return tools.IrcWaitResult{
+			MessageID: req.MessageID,
+			TimedOut:  true,
+		}
+	}
+	// Without a message_id, wait for any inbound message from the specified
+	// peer. This uses the steering signal: the caller's tool execution
+	// context carries one, and an inbound IRC message enqueued via
+	// EnqueueIRC will be visible at the next PrepareStep drain. The wait
+	// returns when the steering signal fires (meaning a message arrived) or
+	// the timeout expires.
+	if req.From != "" {
+		steerSig := tools.GetSteeringSignalFromContext(ctx)
+		timer := time.NewTimer(req.Timeout)
+		defer timer.Stop()
+		if steerSig != nil {
+			select {
+			case <-steerSig.Done():
+				return tools.IrcWaitResult{From: req.From, Interrupted: true}
+			case <-timer.C:
+				return tools.IrcWaitResult{From: req.From, TimedOut: true}
+			case <-ctx.Done():
+				return tools.IrcWaitResult{From: req.From, TimedOut: true}
+			}
+		}
+		// No steering signal available (e.g. outside a session run);
+		// just wait for the timeout.
+		select {
+		case <-timer.C:
+			return tools.IrcWaitResult{From: req.From, TimedOut: true}
+		case <-ctx.Done():
+			return tools.IrcWaitResult{From: req.From, TimedOut: true}
+		}
+	}
+	return tools.IrcWaitResult{TimedOut: true}
 }
 
 // Broadcast implements tools.IrcSender. Parked peers are excluded from the
@@ -170,6 +251,19 @@ func (b *ircBus) newMessage(from, to, body, replyTo string, expectReply bool) IR
 func (b *ircBus) deliverOne(ctx context.Context, msg IRCMessage) IRCDeliveryReceipt {
 	receipt := IRCDeliveryReceipt{MessageID: msg.ID, To: msg.To}
 
+	// Reply correlation (docs/refactor-irc.md §5, phase 2): if this message
+	// is a reply (reply_to is set), check whether the original sender is
+	// blocked in a waiter on that message ID. If so, deliver the reply to
+	// the waiter and return a receipt without further routing -- the reply
+	// has reached its intended recipient (the blocked sender). If no waiter
+	// is registered (the sender timed out, or this is an unsolicited
+	// reply), fall through to normal delivery so the reply still reaches
+	// the target as a regular message.
+	if msg.ReplyTo != "" && b.deliverReply(msg) {
+		receipt.Outcome = IRCInjected
+		return receipt
+	}
+
 	if len(msg.Body) > ircMaxMessageBytes {
 		receipt.Outcome = IRCFailed
 		receipt.Error = fmt.Sprintf("message exceeds %d byte limit", ircMaxMessageBytes)
@@ -212,9 +306,12 @@ func (b *ircBus) deliverOne(ctx context.Context, msg IRCMessage) IRCDeliveryRece
 			return receipt
 		}
 		receipt.Outcome = b.c.deliverIRCViaSteering(agent, sessionID, msg)
-		if msg.ExpectReply && receipt.Outcome == IRCInjected {
-			receipt.Reply = b.legacyReply(ctx, msg)
-		}
+		// Reply handling for a running peer is done by the caller (Send),
+		// which registers a waiter and blocks on the peer's own turn to
+		// produce a real reply via irc send reply_to=<msg.ID>
+		// (docs/refactor-irc.md §5, phase 2). The legacy
+		// RespondAsBackground fallback has been deleted -- see the §6
+		// rationale for why no automatic reply path should exist.
 		return receipt
 
 	case AgentStatusIdle:
@@ -315,37 +412,76 @@ func (b *ircBus) resolveMainSessionID(msg IRCMessage) (string, error) {
 	return "", fmt.Errorf("cannot resolve a session to deliver to %q", msg.To)
 }
 
-// legacyReply is the phase-1 fallback for await_reply=true against a busy
-// (running) peer. docs/refactor-irc.md's phase 2 adds a real waiter that
-// blocks on the injected message's actual reply (a real `irc send
-// reply_to=...` from the peer's own turn); until that lands, a running
-// peer's steering-queue injection has no synchronous answer to return; so
-// this falls back to the old RespondAsBackground one-shot, no-tools,
-// no-session-history background generation -- clearly worse than a real
-// answer, but strictly better than an unconditional "reply pending" for
-// callers that depend on the old behavior of the responder always
-// producing something.
-//
-// This does NOT double-inject: it never touches the target's real session
-// or agent context (RespondAsBackground builds its own throwaway prompt and
-// discards the fantasy.Agent it constructs), so it is a purely additional,
-// non-authoritative side channel alongside the real steering-queue
-// injection above, not a substitute for it.
-//
-// TODO(docs/refactor-irc.md phase 2): once the waiter lands, delete this
-// method and the call site that invokes it, and route awaited replies
-// through the waiter instead.
-func (b *ircBus) legacyReply(ctx context.Context, msg IRCMessage) string {
-	ref, ok := b.c.agentRegistry.FullSnapshot(msg.To)
-	if !ok || ref.Agent == nil {
-		return ""
+// registerWaiter creates a reply channel for messageID and returns it. The
+// caller must call cancelWaiter(messageID) when done (on timeout, success,
+// or cancellation) to avoid leaking the entry. Returns nil if a waiter for
+// this messageID already exists (duplicate send -- the first sender owns the
+// waiter).
+func (b *ircBus) registerWaiter(messageID string) chan IRCMessage {
+	b.waitersMu.Lock()
+	defer b.waitersMu.Unlock()
+	if _, exists := b.waiters[messageID]; exists {
+		return nil
 	}
-	reply, err := ref.Agent.RespondAsBackground(ctx, msg.From, msg.Body)
-	if err != nil {
-		slog.Warn("IRC legacy background reply failed", "message_id", msg.ID, "to", msg.To, "error", err)
-		return ""
+	ch := make(chan IRCMessage, 1)
+	b.waiters[messageID] = ch
+	return ch
+}
+
+// cancelWaiter removes and discards a registered waiter. Safe to call after
+// the reply was already delivered (double-cancel is a no-op).
+func (b *ircBus) cancelWaiter(messageID string) {
+	b.waitersMu.Lock()
+	defer b.waitersMu.Unlock()
+	delete(b.waiters, messageID)
+}
+
+// deliverReply correlates an inbound reply (a message whose ReplyTo is set)
+// to a registered waiter and delivers it. Returns true if a waiter was found
+// and notified, false if no waiter is registered for this ReplyTo (e.g. the
+// sender already timed out, or the reply arrived unsolicited).
+func (b *ircBus) deliverReply(msg IRCMessage) bool {
+	if msg.ReplyTo == "" {
+		return false
 	}
-	return reply
+	b.waitersMu.Lock()
+	ch, ok := b.waiters[msg.ReplyTo]
+	if ok {
+		delete(b.waiters, msg.ReplyTo)
+	}
+	b.waitersMu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- msg:
+	default:
+		// Channel already has a value (duplicate reply) -- drop silently.
+	}
+	return true
+}
+
+// waitForReply blocks until a reply correlated to messageID arrives, the
+// timeout fires, or ctx is cancelled. Returns the reply message and true on
+// success, or zero-value and false on timeout/cancellation.
+func (b *ircBus) waitForReply(ctx context.Context, messageID string, timeout time.Duration) (IRCMessage, bool) {
+	ch := b.registerWaiter(messageID)
+	if ch == nil {
+		return IRCMessage{}, false
+	}
+	defer b.cancelWaiter(messageID)
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case reply := <-ch:
+		return reply, true
+	case <-timer.C:
+		return IRCMessage{}, false
+	case <-ctx.Done():
+		return IRCMessage{}, false
+	}
 }
 
 // notifyPendingIRC is the "UI relay" half of docs/refactor-irc.md §4.1(b):

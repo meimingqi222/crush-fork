@@ -115,10 +115,6 @@ func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOp
 	return nil
 }
 
-func (m *mockSessionAgent) RespondAsBackground(_ context.Context, _, _ string) (string, error) {
-	return "mock irc reply", nil
-}
-
 // newTestCoordinator creates a minimal coordinator for unit testing runSubAgent.
 func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCfg config.ProviderConfig) *coordinator {
 	cfg, err := config.Init(env.workingDir, "", false)
