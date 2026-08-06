@@ -42,6 +42,14 @@ type mockSessionAgent struct {
 	summarizeErr error
 	summarized   []string
 	cancelled    []string
+	// busy backs IsBusy() and QueuePrompt's own busy check; defaults to
+	// false so existing callers are unaffected. Set it directly to simulate
+	// a running turn, e.g. for AgentRegistry.EffectiveStatus derivation
+	// tests or resumeSubagent's "running" dispatch branch.
+	busy bool
+	// queuedPrompts records calls handed to QueuePrompt while busy==true,
+	// for tests asserting a follow-up was queued rather than run.
+	queuedPrompts []SessionAgentCall
 }
 
 func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -66,7 +74,7 @@ func (m *mockSessionAgent) Cancel(sessionID string) {
 func (m *mockSessionAgent) CancelAll()                                          {}
 func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool                 { return false }
 func (m *mockSessionAgent) ActiveTurnID(sessionID string) string                { return "" }
-func (m *mockSessionAgent) IsBusy() bool                                        { return false }
+func (m *mockSessionAgent) IsBusy() bool                                        { return m.busy }
 func (m *mockSessionAgent) QueuedPrompts(sessionID string) int                  { return 0 }
 func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string         { return nil }
 func (m *mockSessionAgent) RemoveQueuedPrompt(sessionID string, index int) bool { return false }

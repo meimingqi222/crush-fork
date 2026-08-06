@@ -69,8 +69,10 @@ func TestIrcTool_SendDM(t *testing.T) {
 	}
 
 	responderCalled := false
-	SetIrcResponder(func(ctx context.Context, from, message string) (string, error) {
+	SetIrcResponder(func(ctx context.Context, from, to, message string) (string, error) {
 		responderCalled = true
+		require.Equal(t, "0-Main", from)
+		require.Equal(t, "0-Main::task1", to)
 		require.Contains(t, message, "[IRC `0-Main` → you]")
 		require.Contains(t, message, "What files changed?")
 		return "3 files modified", nil
@@ -89,6 +91,70 @@ func TestIrcTool_SendDM(t *testing.T) {
 	require.True(t, responderCalled)
 	require.Contains(t, resp.Content, "delivered to 1 peer")
 	require.Contains(t, resp.Content, "3 files modified")
+}
+
+// TestIrcTool_SendDM_ExplicitAwaitReplyFalse guards against the *bool
+// regression this test file used to be blind to: a plain bool AwaitReply
+// could not distinguish "not passed" (default: wait for a DM) from
+// "explicitly false" (never wait), so DMs always ended up waiting. With
+// *bool, an explicit false must be honored and the responder must not run.
+func TestIrcTool_SendDM_ExplicitAwaitReplyFalse(t *testing.T) {
+	registry := &mockIrcRegistry{
+		peers: map[string]IrcPeerInfo{
+			"0-Main::task1": {ID: "0-Main::task1", DisplayName: "Explore", Kind: "sub", Status: "running"},
+		},
+	}
+
+	responderCalled := false
+	SetIrcResponder(func(ctx context.Context, from, to, message string) (string, error) {
+		responderCalled = true
+		return "should not be called", nil
+	})
+	defer SetIrcResponder(nil)
+
+	tool := NewIrcTool(registry)
+
+	resp, err := tool.Run(ircCtx("0-Main"), fantasy.ToolCall{
+		ID:    "call-2b",
+		Name:  IrcToolName,
+		Input: `{"op":"send","to":"0-Main::task1","message":"fyi only","await_reply":false}`,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.False(t, responderCalled, "responder must not run when await_reply is explicitly false")
+	require.Contains(t, resp.Content, "delivered to 1 peer")
+	require.NotContains(t, resp.Content, "Replies")
+}
+
+// TestIrcTool_SendBroadcast_ExplicitAwaitReplyTrue is the mirror case: a
+// broadcast normally does not wait, but an explicit true must override that
+// default and invoke the responder for every target.
+func TestIrcTool_SendBroadcast_ExplicitAwaitReplyTrue(t *testing.T) {
+	registry := &mockIrcRegistry{
+		peers: map[string]IrcPeerInfo{
+			"0-Main::task1": {ID: "0-Main::task1", DisplayName: "Explore", Kind: "sub", Status: "running"},
+			"0-Main::task2": {ID: "0-Main::task2", DisplayName: "Fix", Kind: "sub", Status: "running"},
+		},
+	}
+
+	calls := 0
+	SetIrcResponder(func(ctx context.Context, from, to, message string) (string, error) {
+		calls++
+		return "ack", nil
+	})
+	defer SetIrcResponder(nil)
+
+	tool := NewIrcTool(registry)
+
+	resp, err := tool.Run(ircCtx("0-Main"), fantasy.ToolCall{
+		ID:    "call-3b",
+		Name:  IrcToolName,
+		Input: `{"op":"send","to":"all","message":"status?","await_reply":true}`,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.IsError)
+	require.Equal(t, 2, calls)
+	require.Contains(t, resp.Content, "Replies")
 }
 
 func TestIrcTool_SendBroadcast(t *testing.T) {

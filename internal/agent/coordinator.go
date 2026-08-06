@@ -351,15 +351,19 @@ func NewCoordinator(
 		}
 	}()
 
-	tools.SetIrcResponder(func(ctx context.Context, targetID, message string) (string, error) {
-		ref, ok := c.agentRegistry.Get(targetID)
+	// Bug fix (docs/refactor-irc.md §2.1(a)): "from" here must be the actual
+	// sender's agent ID, not the recipient's. It used to be called with the
+	// recipient ID in both the sender and recipient slots, so every
+	// recipient's prompt claimed the message came from itself.
+	tools.SetIrcResponder(func(ctx context.Context, from, to, message string) (string, error) {
+		ref, ok := c.agentRegistry.Get(to)
 		if !ok {
-			return "", fmt.Errorf("agent %q not found in registry", targetID)
+			return "", fmt.Errorf("agent %q not found in registry", to)
 		}
 		if ref.Agent == nil {
-			return "", fmt.Errorf("agent %q has no active agent instance", targetID)
+			return "", fmt.Errorf("agent %q has no active agent instance", to)
 		}
-		return ref.Agent.RespondAsBackground(ctx, targetID, message)
+		return ref.Agent.RespondAsBackground(ctx, from, message)
 	})
 
 	return c, nil

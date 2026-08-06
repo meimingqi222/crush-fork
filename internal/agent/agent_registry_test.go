@@ -82,6 +82,87 @@ func TestAgentRegistry_SetStatus(t *testing.T) {
 	require.Equal(t, AgentStatusCompleted, got.Status)
 }
 
+// TestAgentRegistry_EffectiveStatus_ReflectsBusyAgent guards against the
+// bug described in docs/refactor-irc.md §2.1(c): the primary agent is
+// registered once at startup as Idle and nothing ever calls SetStatus on it
+// again, so peers querying the registry always saw it as idle regardless of
+// whether a turn was actually running. EffectiveStatus (and, transitively,
+// the IRC-facing adapter and peer roster) must derive Running from the
+// attached SessionAgent's IsBusy() instead of trusting the stale stored
+// status.
+func TestAgentRegistry_EffectiveStatus_ReflectsBusyAgent(t *testing.T) {
+	t.Parallel()
+
+	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	mainAgent := &mockSessionAgent{}
+	r.Register(AgentRef{ID: "0-Main", DisplayName: "Main", Kind: AgentKindMain, Status: AgentStatusIdle, Agent: mainAgent})
+
+	status, ok := r.EffectiveStatus("0-Main")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusIdle, status, "idle stored status with a non-busy agent stays idle")
+
+	mainAgent.busy = true
+	status, ok = r.EffectiveStatus("0-Main")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusRunning, status, "a busy agent must be reported as running even though its stored status is idle")
+
+	mainAgent.busy = false
+	status, ok = r.EffectiveStatus("0-Main")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusIdle, status, "status reverts to idle once the agent stops being busy")
+
+	_, ok = r.EffectiveStatus("nonexistent")
+	require.False(t, ok)
+}
+
+// TestAgentRegistry_EffectiveStatus_LeavesTerminalStatusesAlone ensures the
+// derivation never resurrects a finished agent: Aborted/Completed must be
+// returned as-is even if a stale Agent reference reports busy.
+func TestAgentRegistry_EffectiveStatus_LeavesTerminalStatusesAlone(t *testing.T) {
+	t.Parallel()
+
+	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	r.Register(AgentRef{ID: "done", DisplayName: "Done", Kind: AgentKindSub, Status: AgentStatusCompleted, Agent: &mockSessionAgent{busy: true}})
+	r.Register(AgentRef{ID: "dead", DisplayName: "Dead", Kind: AgentKindSub, Status: AgentStatusAborted, Agent: &mockSessionAgent{busy: true}})
+
+	status, ok := r.EffectiveStatus("done")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusCompleted, status)
+
+	status, ok = r.EffectiveStatus("dead")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusAborted, status)
+}
+
+// TestAgentRegistry_AsIrcRegistry_ReflectsBusyMainAgent is the IRC-facing
+// regression counterpart of TestAgentRegistry_EffectiveStatus_ReflectsBusyAgent:
+// `irc list` (and a DM's reachability check) must see the primary agent as
+// running while it is busy, not permanently idle.
+func TestAgentRegistry_AsIrcRegistry_ReflectsBusyMainAgent(t *testing.T) {
+	t.Parallel()
+
+	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	mainAgent := &mockSessionAgent{busy: true}
+	r.Register(AgentRef{ID: "0-Main", DisplayName: "Main", Kind: AgentKindMain, Status: AgentStatusIdle, Agent: mainAgent})
+	r.Register(AgentRef{ID: "0-Main::t1", DisplayName: "Explore", Kind: AgentKindSub, Status: AgentStatusRunning, ParentID: "0-Main"})
+
+	irc := r.AsIrcRegistry()
+
+	peer, ok := irc.Get("0-Main")
+	require.True(t, ok)
+	require.Equal(t, "running", peer.Status)
+
+	visible := irc.ListVisibleTo("0-Main::t1")
+	var found bool
+	for _, p := range visible {
+		if p.ID == "0-Main" {
+			found = true
+			require.Equal(t, "running", p.Status)
+		}
+	}
+	require.True(t, found, "main agent should be visible to its subagent")
+}
+
 func TestAgentRegistry_AsIrcRegistry(t *testing.T) {
 	t.Parallel()
 

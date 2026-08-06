@@ -4,11 +4,14 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/toolruntime"
+	"github.com/google/uuid"
 )
 
 //go:embed irc.md
@@ -24,10 +27,15 @@ const (
 )
 
 type IrcParams struct {
-	Op         IrcOp  `json:"op" description:"Operation: send a message or list visible peers"`
-	To         string `json:"to,omitempty" description:"Recipient agent ID or 'all' to broadcast; omit for list"`
-	Message    string `json:"message,omitempty" description:"Message body to send (required for send)"`
-	AwaitReply bool   `json:"await_reply,omitempty" description:"Wait for a reply from the recipient (default: true for DM, false for broadcast)"`
+	Op      IrcOp  `json:"op" description:"Operation: send a message or list visible peers"`
+	To      string `json:"to,omitempty" description:"Recipient agent ID or 'all' to broadcast; omit for list"`
+	Message string `json:"message,omitempty" description:"Message body to send (required for send)"`
+	// AwaitReply is a pointer so "omitted" and "explicitly false" can be
+	// told apart: a bare bool defaults to its zero value (false) whether
+	// the caller passed nothing or passed false, which previously made
+	// await_reply=false unreachable for DMs (see executeIrcSend). nil means
+	// "use the default"; a non-nil value is always honored as-is.
+	AwaitReply *bool `json:"await_reply,omitempty" description:"Wait for a reply from the recipient. Omit to use the default (true for a DM, false for a broadcast); pass true or false to force that behavior explicitly."`
 }
 
 type IrcReply struct {
@@ -43,7 +51,13 @@ type IrcPeerInfo struct {
 	ParentID    string `json:"parent_id,omitempty"`
 }
 
-type IrcResponder func(ctx context.Context, from, message string) (string, error)
+// IrcResponder generates a reply on behalf of the recipient (to). from is
+// the sending agent's ID and must be threaded through to whatever generates
+// the reply so the recipient's prompt correctly attributes the message (see
+// docs/refactor-irc.md §2.1(a) -- a prior version of this callback only took
+// one agent ID and the caller wired it up backwards, so recipients were told
+// they'd received a message from themselves).
+type IrcResponder func(ctx context.Context, from, to, message string) (string, error)
 
 type IrcRegistry interface {
 	Get(id string) (IrcPeerInfo, bool)
@@ -82,11 +96,14 @@ func executeIrcSend(ctx context.Context, registry IrcRegistry, selfID string, pa
 		return fantasy.NewTextResponse("Failed: to is required for send; use an agent ID or 'all'"), nil
 	}
 
-	awaitReply := params.AwaitReply
-	if to == "all" && !params.AwaitReply {
-		awaitReply = false
-	} else if to != "all" && !params.AwaitReply {
-		awaitReply = true
+	// Default: wait for a DM's reply, but not a broadcast's. An explicit
+	// await_reply (true or false) always overrides the default -- this is
+	// the whole point of AwaitReply being *bool rather than bool: a bare
+	// bool cannot distinguish "not passed" from "passed as false", which
+	// used to make await_reply=false unreachable for DMs.
+	awaitReply := to != "all"
+	if params.AwaitReply != nil {
+		awaitReply = *params.AwaitReply
 	}
 
 	var targets []IrcPeerInfo
@@ -117,20 +134,35 @@ func executeIrcSend(ctx context.Context, registry IrcRegistry, selfID string, pa
 	responder := getIrcResponder()
 
 	for _, target := range targets {
+		// messageID exists purely for log correlation right now -- there is
+		// no persisted IRCMessage envelope yet (that lands with the message
+		// bus in docs/refactor-irc.md's phase 1). It still lets "sent" and
+		// "delivered/failed" log lines for the same send be joined.
+		messageID := uuid.New().String()[:8]
 		deliveredMsg := fmt.Sprintf("[IRC `%s` → you]\n\n%s", selfID, message)
+		slog.Debug("IRC message send started",
+			"message_id", messageID, "from", selfID, "to", target.ID, "await_reply", awaitReply)
 
 		if awaitReply && responder != nil {
-			replyText, err := responder(ctx, target.ID, deliveredMsg)
+			start := time.Now()
+			replyText, err := responder(ctx, selfID, target.ID, deliveredMsg)
+			elapsed := time.Since(start)
 			if err != nil {
+				slog.Warn("IRC message delivery failed",
+					"message_id", messageID, "from", selfID, "to", target.ID, "elapsed", elapsed, "error", err)
 				failed = append(failed, fmt.Sprintf("%s: %s", target.ID, err.Error()))
 				continue
 			}
+			slog.Debug("IRC message delivered with reply",
+				"message_id", messageID, "from", selfID, "to", target.ID, "elapsed", elapsed, "reply_chars", len([]rune(replyText)))
 			delivered = append(delivered, target.ID)
 			replies = append(replies, IrcReply{
 				From: target.ID,
 				Text: replyText,
 			})
 		} else {
+			slog.Debug("IRC message delivered without waiting for a reply",
+				"message_id", messageID, "from", selfID, "to", target.ID)
 			delivered = append(delivered, target.ID)
 		}
 	}

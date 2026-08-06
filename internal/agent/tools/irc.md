@@ -9,9 +9,9 @@ This tool lets you communicate with other running agents in real time. Use it to
 Parameters:
 - `to` (required): The agent ID of the recipient, or `"all"` to broadcast to every visible peer.
 - `message` (required): The message body. Keep it concise and focused.
-- `await_reply` (optional): Whether to wait for a reply. Defaults to `true` for DMs, `false` for broadcasts.
+- `await_reply` (optional): Whether to wait for a reply. Omit it to get the default (`true` for DMs, `false` for broadcasts); pass `true` or `false` explicitly to override that default in either direction — for example, `await_reply: false` on a DM sends a fire-and-forget notification with no reply.
 
-When `await_reply` is `true`, the recipient generates a brief reply based on its current context. The reply does not trigger any tool calls — it is a direct text response.
+When a reply is generated, it is **not** the recipient's real work turn — it comes from a short-lived, no-tools, low-context background response, not from the recipient's own session history, in-progress tool state, or current reasoning. Treat it as a best-effort acknowledgment, not as authoritative evidence of what the recipient has done or is doing. Do not rely on it to confirm file changes, task completion, or the recipient's actual progress — verify those independently (e.g. by reading files or checking `irc list` status) when it matters.
 
 ### `list` — List currently visible peers
 
