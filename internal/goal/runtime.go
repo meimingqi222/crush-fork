@@ -140,6 +140,17 @@ func NewRuntime(sessions session.Service) *Runtime {
 	}
 }
 
+// SetClock replaces the runtime's clock function. Intended for tests that
+// need deterministic wall-clock behavior (the default uses real time, which
+// causes ReplaceGoal's settleWallClockToNow to add non-deterministic elapsed
+// seconds). The provided function must return a monotonically non-decreasing
+// unix timestamp in seconds.
+func (r *Runtime) SetClock(now func() int64) {
+	if now != nil {
+		r.now = now
+	}
+}
+
 // DeleteSession removes the in-memory goal state for a deleted session.
 func (r *Runtime) DeleteSession(sessionID string) {
 	r.mu.Lock()

@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newGoalSessionService(t *testing.T) (session.Service, *goal.Runtime) {
+func newGoalSessionService(t *testing.T) (session.Service, *goal.Runtime, *int64) {
 	t.Helper()
 	conn, err := db.Connect(context.Background(), t.TempDir())
 	require.NoError(t, err)
@@ -20,7 +20,13 @@ func newGoalSessionService(t *testing.T) (session.Service, *goal.Runtime) {
 		require.NoError(t, conn.Close())
 	})
 	svc := session.NewService(db.New(conn), conn)
-	return svc, goal.NewRuntime(svc)
+	runtime := goal.NewRuntime(svc)
+	// Use a fixed clock so wall-clock-dependent operations (ReplaceGoal's
+	// settleWallClockToNow) are deterministic and don't add real elapsed
+	// seconds to TimeSeconds between Save and ReplaceGoal.
+	var clockVal int64 = 1_000_000
+	runtime.SetClock(func() int64 { return clockVal })
+	return svc, runtime, &clockVal
 }
 
 func runGoalTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params GoalParams) fantasy.ToolResponse {
@@ -42,7 +48,7 @@ func parseGoalMetadata(t *testing.T, resp fantasy.ToolResponse) GoalResponseMeta
 func TestGoalToolCreateSetsIDAndBudget(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "goal-create")
 	require.NoError(t, err)
 
@@ -68,7 +74,7 @@ func TestGoalToolCreateSetsIDAndBudget(t *testing.T) {
 func TestGoalToolReplacePreservesStatsAndGeneratesNewID(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "goal-replace")
 	require.NoError(t, err)
 
@@ -104,7 +110,7 @@ func TestGoalToolReplacePreservesStatsAndGeneratesNewID(t *testing.T) {
 func TestGoalToolCreateRejectsPlanMode(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "goal-plan-blocked")
 	require.NoError(t, err)
 	_, err = sessions.UpdateCollaborationMode(context.Background(), sess.ID, session.CollaborationModePlan)
@@ -124,7 +130,7 @@ func TestGoalToolCreateRejectsPlanMode(t *testing.T) {
 func TestGoalToolReplaceWithoutGoalActsLikeCreate(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "goal-replace-empty")
 	require.NoError(t, err)
 

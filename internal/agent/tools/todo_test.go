@@ -40,7 +40,7 @@ func parseTodoMetadata(t *testing.T, resp fantasy.ToolResponse) TodoResponseMeta
 func TestTodoTool_InitAndCompleteWithEvidence(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "todo-init")
 	require.NoError(t, err)
 
@@ -87,7 +87,7 @@ func TestTodoTool_InitAndCompleteWithEvidence(t *testing.T) {
 func TestTodoTool_NoProgressDrivenByDropAndDone(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "todo-no-progress")
 	require.NoError(t, err)
 
@@ -121,7 +121,7 @@ func TestTodoTool_NoProgressDrivenByDropAndDone(t *testing.T) {
 func TestTodoTool_DropCompletedIsRejected(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "todo-drop-completed")
 	require.NoError(t, err)
 
@@ -140,7 +140,7 @@ func TestTodoTool_DropCompletedIsRejected(t *testing.T) {
 func TestTodoTool_DropRequiresReason(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "todo-drop-reason")
 	require.NoError(t, err)
 
@@ -158,7 +158,7 @@ func TestTodoTool_DropRequiresReason(t *testing.T) {
 func TestTodoTool_InitRejectsExistingTasks(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "todo-init-twice")
 	require.NoError(t, err)
 
@@ -176,7 +176,7 @@ func TestTodoTool_InitRejectsExistingTasks(t *testing.T) {
 func TestTodoTool_InitRejectsDuplicateItems(t *testing.T) {
 	t.Parallel()
 
-	sessions, runtime := newGoalSessionService(t)
+	sessions, runtime, _ := newGoalSessionService(t)
 	sess, err := sessions.Create(context.Background(), "todo-init-dup")
 	require.NoError(t, err)
 
