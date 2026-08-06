@@ -88,6 +88,15 @@ func (m *mockSessionAgent) PrioritizeQueuedPrompt(sessionID string, index int) b
 func (m *mockSessionAgent) EnqueueSteer(string, SessionAgentCall) bool { return false }
 func (m *mockSessionAgent) RemoveQueuedTurn(string, string) bool       { return false }
 
+func (m *mockSessionAgent) QueuePrompt(sessionID string, call SessionAgentCall) bool {
+	if !m.busy {
+		return false
+	}
+	call.SessionID = sessionID
+	m.queuedPrompts = append(m.queuedPrompts, call)
+	return true
+}
+
 func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions) error {
 	if m.summarizeErr != nil {
 		return m.summarizeErr

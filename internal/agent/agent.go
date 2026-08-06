@@ -218,6 +218,16 @@ type SessionAgent interface {
 	PrioritizeQueuedPrompt(sessionID string, index int) bool
 	EnqueueSteer(sessionID string, call SessionAgentCall) bool
 	RemoveQueuedTurn(sessionID, turnID string) bool
+	// QueuePrompt enqueues call for sessionID and returns true, but only if
+	// the session is currently busy; it returns false without enqueueing
+	// when the session is idle. Unlike Run, it never executes call itself,
+	// which is the point: callers that must guarantee they never trigger a
+	// synchronous run (e.g. resuming a subagent addressed by send_message
+	// while it is mid-turn -- see docs/refactor-subagent-continuation.md's
+	// R1) call this instead of Run so a lost race (session finished between
+	// their own busy check and this call) is reported back as false rather
+	// than silently starting a real turn with an under-populated context.
+	QueuePrompt(sessionID string, call SessionAgentCall) bool
 	RespondAsBackground(ctx context.Context, from, message string) (string, error)
 }
 

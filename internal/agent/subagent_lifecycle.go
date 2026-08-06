@@ -8,11 +8,16 @@ import (
 
 // defaultSubagentAdoptTTL is how long a successfully completed subagent's
 // SessionAgent instance is kept live (adoptable) after it returns. Within
-// this window a follow-up agent tool call with ExistingSessionID can reuse
-// the in-memory SessionAgent (warm revive) instead of rebuilding one from
-// the SQLite history (cold revive). After the TTL fires the entry is parked:
-// childSessionAgents and agentRegistry entries are removed, leaving only the
-// persisted session messages for future cold revives.
+// this window a follow-up addressed to the subagent (via send_message,
+// currently -- see coordinator.resumeSubagent) can reuse the in-memory
+// SessionAgent (warm revive) instead of rebuilding one from the SQLite
+// history (cold revive). After the TTL fires the entry is parked: the
+// childSessionAgents entry is deleted and the AgentRegistry entry is
+// demoted to AgentStatusParked (its live SessionAgent reference cleared,
+// but the entry itself kept -- see AgentRegistry.SetParked), leaving the
+// persisted session messages plus enough of the original spawn contract
+// (ProfileName/Role/Isolation/ParentSessionID on the AgentRef) for a future
+// cold revive to rebuild the SessionAgent from scratch.
 const defaultSubagentAdoptTTL = 5 * time.Minute
 
 // subagentLifecycleManager manages the keep-alive window for completed
@@ -26,9 +31,12 @@ const defaultSubagentAdoptTTL = 5 * time.Minute
 //     entries. Used when the same child session is about to be reused by a
 //     new agent tool call (runSubAgentDirect re-entry) so the stale timer
 //     does not later delete the freshly-stored SessionAgent.
-//   - Park: cancels the timer and removes entries from childSessionAgents
-//     and the AgentRegistry. Invoked when the TTL fires, or proactively when
-//     the parent session is torn down.
+//   - Park: cancels the timer, removes the childSessionAgents entry, and
+//     demotes the AgentRegistry entry to AgentStatusParked (see
+//     AgentRegistry.SetParked) rather than unregistering it. Invoked when
+//     the TTL fires, or proactively when the parent session is torn down.
+//     The registry entry survives so the subagent stays addressable and
+//     cold-revivable; only its in-memory SessionAgent is released.
 //
 // The manager itself does not own the SessionAgent instances; it only
 // schedules their removal. childSessionAgents (a sync.Map on the coordinator)
@@ -94,8 +102,11 @@ func (m *subagentLifecycleManager) Revoke(childSessionID string) {
 	m.mu.Unlock()
 }
 
-// Park cancels the timer and removes the childSessionAgents and AgentRegistry
-// entries. This is the normal eviction path when the TTL fires.
+// Park cancels the timer, removes the childSessionAgents entry, and demotes
+// the AgentRegistry entry to AgentStatusParked (releasing its in-memory
+// SessionAgent reference, but keeping the entry itself so the subagent
+// stays addressable and cold-revivable -- see AgentRegistry.SetParked).
+// This is the normal eviction path when the TTL fires.
 func (m *subagentLifecycleManager) Park(childSessionID string) {
 	if m == nil || childSessionID == "" {
 		return
@@ -111,7 +122,7 @@ func (m *subagentLifecycleManager) Park(childSessionID string) {
 		m.childSessionApps.Delete(childSessionID)
 	}
 	if m.registry != nil && entry.agentID != "" {
-		m.registry.Unregister(entry.agentID)
+		m.registry.SetParked(entry.agentID)
 	}
 	slog.Debug("Subagent lifecycle TTL expired, parked agent",
 		"child_session_id", childSessionID,

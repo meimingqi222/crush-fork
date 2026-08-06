@@ -66,6 +66,7 @@ var (
 	errLargeModelNotFound              = fmt.Errorf("%w: large model not found in provider config", ErrUnresolvedModel)
 	errSmallModelNotFound              = fmt.Errorf("%w: small model not found in provider config", ErrUnresolvedModel)
 	errTargetModelNotFound             = errors.New("target model not found in provider config")
+	errSubagentNotFound                = errors.New("subagent not found")
 )
 
 // ErrUnresolvedModel indicates that the configured large or small model could
@@ -175,8 +176,10 @@ type coordinator struct {
 	agentRegistry *AgentRegistry
 
 	// lifecycle manages the keep-alive window for completed subagents so a
-	// follow-up agent tool call with ExistingSessionID can reuse the live
-	// SessionAgent instance instead of rebuilding one from disk history.
+	// follow-up delivered via send_message/resumeSubagent can reuse the
+	// live SessionAgent instance (warm revive) instead of rebuilding one
+	// from disk history (cold revive) once the window lapses and the entry
+	// is parked.
 	lifecycle *subagentLifecycleManager
 
 	// mainAgentID is the ID of the main (coder) agent in the registry.
@@ -550,6 +553,7 @@ func (c *coordinator) onSessionDeleted(ctx context.Context, sessionID string) {
 	c.clearResponsesSession(sessionID)
 	c.clearTranscriptTurnCountForSession(sessionID)
 	c.backgroundAgents.RemoveForSession(sessionID)
+	c.removeSubagentsForParentSession(sessionID)
 	if c.memoryBackend != nil {
 		if err := c.memoryBackend.OnSessionDeleted(ctx, sessionID); err != nil {
 			slog.Warn("Memory backend OnSessionDeleted failed", "error", err, "session_id", sessionID)
@@ -563,6 +567,45 @@ func (c *coordinator) onSessionDeleted(ctx context.Context, sessionID string) {
 // interface used by UI and test mocks.
 func (c *coordinator) OnSessionDeleted(ctx context.Context, sessionID string) {
 	c.onSessionDeleted(ctx, sessionID)
+}
+
+// removeSubagentsForParentSession fully unregisters every subagent (running,
+// idle, parked, or aborted) spawned by parentSessionID (R5 in
+// docs/refactor-subagent-continuation.md). Parked entries are meant to be
+// cheap and long-lived, but only for as long as their parent session exists
+// to eventually address them -- resumeSubagent addressing always happens
+// from within a live parent session's turn. Once the parent is deleted
+// there is no way to reach them, so leaving the registry entries (and any
+// still-live SessionAgent instance or pending lifecycle timer) around from
+// here on would be a pure leak. This is the AgentRegistry counterpart to
+// backgroundAgents.RemoveForSession, called alongside it in
+// onSessionDeleted.
+//
+// Crash/quit paths need no equivalent cleanup: onSessionDeleted only fires
+// on explicit deletion (see its doc comment), but AgentRegistry is an
+// in-memory-only singleton in phase 1 (no SQLite persistence yet -- that is
+// phase 3), so a crash or Ctrl+C already wipes it by construction on the
+// next process start. A cancelled (not deleted) turn is not this function's
+// concern either: it already ends in a normal Aborted terminal entry via
+// runSubagents'/resumeSubagent's own finalize paths, which is a single
+// bounded, diagnosable entry -- not the unbounded leak this function
+// exists to prevent.
+func (c *coordinator) removeSubagentsForParentSession(parentSessionID string) {
+	if c.agentRegistry == nil || parentSessionID == "" {
+		return
+	}
+	for _, ref := range c.agentRegistry.ListSnapshot() {
+		if ref.Kind != AgentKindSub || ref.ParentSessionID != parentSessionID {
+			continue
+		}
+		if ref.SessionID != "" {
+			if c.lifecycle != nil {
+				c.lifecycle.Revoke(ref.SessionID)
+			}
+			c.childSessionAgents.Delete(ref.SessionID)
+		}
+		c.agentRegistry.Unregister(ref.ID)
+	}
 }
 
 // memoryEngineHooks returns lifecycle callbacks for the session agent
@@ -2013,8 +2056,18 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 
 // subAgentParams holds the parameters for running a sub-agent.
 type subAgentParams struct {
-	Agent                     SessionAgent
-	SessionID                 string
+	Agent     SessionAgent
+	SessionID string
+	// ExistingSessionID continues a previously spawned child session
+	// instead of creating a new one (see runSubAgentDirect's ExistingSessionID
+	// branch: it loads the child session from SQLite and skips the handoff
+	// prefix rebuild -- R4 in docs/refactor-subagent-continuation.md). It is
+	// an internal field only: the LLM-facing agent tool (AgentParams in
+	// agent_tool.go) has no way to set it, by design (see that doc's §3.1 --
+	// follow-up delegation goes through send_message/irc, not a second
+	// agent-tool spawn). Its one production writer is
+	// coordinator.resumeSubagent, which sets it to the target AgentRef's
+	// child SessionID for both warm (idle) and cold (parked) revive.
 	ExistingSessionID         string
 	AgentMessageID            string
 	ParentMessageID           string
@@ -2250,6 +2303,12 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		// entry out from under it.
 		uniqueName := idAllocator.Alloc(t.Name)
 		agentID := fmt.Sprintf("%s::%s-%s", c.mainAgentID, uniqueName, generateAgentID())
+		// Resolved before Register so the AgentRef carries the isolation
+		// that will actually be used, not just the raw per-task override --
+		// resumeSubagent needs this to know whether a parked revive must
+		// downgrade away from worktree isolation (R3 in
+		// docs/refactor-subagent-continuation.md).
+		taskIsolation := resolveTaskIsolation(t.Isolation, batchDefaultIsolation, agentCfg.Isolation)
 		c.agentRegistry.Register(AgentRef{
 			ID:          agentID,
 			DisplayName: description,
@@ -2257,7 +2316,14 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			ParentID:    c.mainAgentID,
 			Status:      AgentStatusRunning,
 			Agent:       subAgent,
-			SessionID:   params.SessionID,
+			// SessionID (the child session) is not known until
+			// runSubAgentDirect creates it below; the finalize loop fills
+			// it in via agentRegistry.SetSessionID once the run reports
+			// result.ChildSessionID.
+			ProfileName:     subagentType,
+			ParentSessionID: params.SessionID,
+			Role:            t.Role,
+			Isolation:       taskIsolation,
 		})
 		bridge.MarkInProgress(t.Name)
 
@@ -2298,7 +2364,7 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 			Role:               t.Role,
 			DelegationMailbox:  params.ToolCallID,
 			AgentMemory:        agentCfg.Memory,
-			AgentIsolation:     resolveTaskIsolation(t.Isolation, batchDefaultIsolation, agentCfg.Isolation),
+			AgentIsolation:     taskIsolation,
 			AgentBackground:    agentCfg.Background,
 			SkipHandoffReview:  true,
 			IrcAgentID:         agentID,
@@ -2384,8 +2450,17 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		orderedResults[idx] = result
 	}
 
-	// Finalize: write metadata, mark bridge results, update registry status,
-	// and unregister each subagent.
+	// Finalize: write metadata, mark bridge results, and update each
+	// subagent's registry status. Completed/warned subagents stay
+	// addressable (Idle, then Parked once the lifecycle TTL fires);
+	// failed/canceled/blocked ones move straight to Aborted. Neither branch
+	// unregisters the entry anymore (see C9 in
+	// docs/refactor-subagent-continuation.md §7): a real follow-up delivery
+	// path now exists (coordinator.resumeSubagent, reached via
+	// send_message's AgentRegistry fallback -- see
+	// backgroundAgentMessenger), so the entry must survive to remain
+	// addressable/diagnosable instead of vanishing from every roster the
+	// moment the run ends.
 	for i := range orderedResults {
 		t := prepared[i].Task
 		result := orderedResults[i]
@@ -2402,12 +2477,16 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 		bridge.MarkResult(t.Name, result.Status, result.Content)
 
 		if prepared[i].AgentID != "" {
+			if result.ChildSessionID != "" {
+				c.agentRegistry.SetSessionID(prepared[i].AgentID, result.ChildSessionID)
+			}
 			switch result.Status {
 			case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings:
 				// Keep the registry entry Idle and arm a keep-alive timer so
-				// a follow-up agent tool call with ExistingSessionID can
+				// a follow-up delivered via send_message/resumeSubagent can
 				// reuse the live SessionAgent (warm revive). The lifecycle
-				// manager parks the entry when the TTL fires.
+				// manager parks (not unregisters) the entry when the TTL
+				// fires.
 				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusIdle)
 				if c.lifecycle != nil && result.ChildSessionID != "" {
 					c.lifecycle.Adopt(result.ChildSessionID, prepared[i].AgentID, defaultSubagentAdoptTTL)
@@ -2416,8 +2495,11 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 				message.ToolResultSubtaskStatusFailed,
 				message.ToolResultSubtaskStatusBlocked:
 				// Failed/canceled subagents have no revive value: revoke any
-				// pending keep-alive timer, clear the childSessionAgents
-				// entry and unregister immediately.
+				// pending keep-alive timer and clear the childSessionAgents
+				// entry, but keep the registry entry (Aborted) around for
+				// diagnosis instead of unregistering it -- resumeSubagent
+				// reports a clear "cannot be resumed" error for these
+				// rather than the address silently disappearing.
 				c.agentRegistry.SetStatus(prepared[i].AgentID, AgentStatusAborted)
 				if c.lifecycle != nil && result.ChildSessionID != "" {
 					c.lifecycle.Revoke(result.ChildSessionID)
@@ -2425,7 +2507,6 @@ func (c *coordinator) runSubagents(ctx context.Context, params subagentBatchPara
 				if result.ChildSessionID != "" {
 					c.childSessionAgents.Delete(result.ChildSessionID)
 				}
-				c.agentRegistry.Unregister(prepared[i].AgentID)
 			}
 		}
 	}
@@ -3344,6 +3425,234 @@ func (c *coordinator) runSubAgentDirect(ctx context.Context, params subAgentPara
 		keepAlive = true
 	}
 	return response, nil
+}
+
+// resolveSubagentRef resolves nameOrID against the AgentRegistry for
+// send_message's fallback addressing path (see backgroundAgentMessenger):
+// entries the backgroundAgentRegistry doesn't know about are looked up
+// here. Resolution order is an exact ID match first, then a unique
+// DisplayName match among subagents (AgentKindSub only -- the primary agent
+// is not a valid send_message target).
+//
+// A DisplayName collision across two or more subagents is reported as an
+// error rather than resolved by "the newest one wins" (R2 in
+// docs/refactor-subagent-continuation.md): crush's subagent names come from
+// the LLM's own task naming and collide often enough that silently picking
+// one risks delivering a follow-up to the wrong agent.
+func (c *coordinator) resolveSubagentRef(nameOrID string) (AgentRef, error) {
+	nameOrID = strings.TrimSpace(nameOrID)
+	if nameOrID == "" || c.agentRegistry == nil {
+		return AgentRef{}, errSubagentNotFound
+	}
+	if ref, ok := c.agentRegistry.FullSnapshot(nameOrID); ok && ref.Kind == AgentKindSub {
+		return ref, nil
+	}
+	var matches []AgentRef
+	for _, ref := range c.agentRegistry.ListSnapshot() {
+		if ref.Kind == AgentKindSub && ref.DisplayName == nameOrID {
+			matches = append(matches, ref)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return AgentRef{}, errSubagentNotFound
+	case 1:
+		return matches[0], nil
+	default:
+		ids := make([]string, len(matches))
+		for i, m := range matches {
+			ids[i] = m.ID
+		}
+		return AgentRef{}, fmt.Errorf(
+			"multiple subagents are named %q; address one by its ID instead: %s",
+			nameOrID, strings.Join(ids, ", "),
+		)
+	}
+}
+
+// resumeSubagent revives a completed foreground subagent to handle a
+// follow-up prompt (docs/refactor-subagent-continuation.md §4 phase 1, step
+// 3). Two revival tiers, selected by ref.Status:
+//
+//   - warm (AgentStatusIdle): the SessionAgent instance is still tracked in
+//     childSessionAgents (the lifecycle manager's TTL window has not
+//     lapsed) and is reused as-is.
+//   - cold (AgentStatusParked, or a warm entry that raced to parked between
+//     the caller's status check and this call): the SessionAgent instance
+//     was released, so a fresh one is rebuilt from the ref's saved
+//     profile/role via buildSubAgentForType -- the same construction path
+//     spawn uses, so tool/permission derivation (DeriveSubagentPermissions,
+//     invoked inside buildAgent) stays identical.
+//
+// Both tiers funnel into runSubAgentDirect with ExistingSessionID set to
+// the child session, which loads the persisted conversation from SQLite
+// instead of creating a new one and skips the handoff-prefix rebuild (R4:
+// the history is already in the session, so re-injecting a handoff summary
+// would duplicate context).
+//
+// ref must be a value snapshot (AgentRegistry.FullSnapshot/ListSnapshot),
+// never a live *AgentRef: reading Status/Agent off the registry's stored
+// pointer without the lock races with concurrent SetStatus/SetParked
+// writes from other goroutines (see the agentSnapshot doc comment in
+// agent_registry.go for the same argument applied to the IRC-facing path).
+func (c *coordinator) resumeSubagent(ctx context.Context, ref AgentRef, prompt string) (response fantasy.ToolResponse, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("Subagent resume panicked", "agent_id", ref.ID, "panic", recovered)
+			err = fmt.Errorf("subagent resume panicked: %v", recovered)
+		}
+	}()
+
+	if strings.TrimSpace(ref.SessionID) == "" {
+		return fantasy.ToolResponse{}, fmt.Errorf("subagent %q has no child session to resume", ref.ID)
+	}
+
+	var agent SessionAgent
+	if ref.Status == AgentStatusIdle {
+		// Warm revive: reuse the live instance if it is still tracked.
+		if live, ok := c.childSessionAgents.Load(ref.SessionID); ok {
+			agent, _ = live.(SessionAgent)
+		}
+	}
+
+	isolation := ref.Isolation
+	var coldNote string
+	if agent == nil {
+		// Cold revive: either genuinely parked, or a warm entry that raced
+		// to parked/evicted between the caller's status check and here.
+		// Falling through to a rebuild instead of failing keeps that race
+		// harmless for the caller.
+		var buildErr error
+		agent, _, buildErr = c.buildSubAgentForType(ctx, ref.ProfileName, ref.Role)
+		if buildErr != nil {
+			c.agentRegistry.SetStatus(ref.ID, AgentStatusAborted)
+			return fantasy.ToolResponse{}, fmt.Errorf("rebuild subagent %q: %w", ref.ID, buildErr)
+		}
+	}
+
+	// R3: applies to warm and cold revive alike. runSubAgentDirect defers
+	// cleanupWorktreeIfNeeded for every worktree-isolated run (see its
+	// merge-back defer), so the original worktree is merged back and removed
+	// when the *first* run ends -- long before either revive tier can
+	// happen, and regardless of whether the entry was later parked. Re-running
+	// with isolation still set to "worktree" would silently create a second,
+	// unrelated worktree. Share the parent workspace instead and say so.
+	//
+	// docs/refactor-subagent-continuation.md R3 scopes this to parked only;
+	// that scoping assumed the worktree survives until park, which it does
+	// not.
+	if strings.EqualFold(strings.TrimSpace(isolation), "worktree") {
+		isolation = "none"
+		coldNote = "\n\n[This subagent originally ran in an isolated git worktree. " +
+			"That worktree was merged back and removed after its last run, " +
+			"so this continuation runs in the shared parent workspace instead.]"
+	}
+
+	toolCallID := strings.TrimSpace(tools.GetToolCallIDFromContext(ctx))
+	if toolCallID == "" {
+		toolCallID = fmt.Sprintf("resume::%s::%s", ref.ID, generateAgentID())
+	}
+
+	params := subAgentParams{
+		Agent:             agent,
+		SessionID:         ref.ParentSessionID,
+		ExistingSessionID: ref.SessionID,
+		ParentMessageID:   tools.GetMessageFromContext(ctx),
+		ToolCallID:        toolCallID,
+		Prompt:            prompt,
+		SessionTitle:      ref.DisplayName,
+		SubagentType:      ref.ProfileName,
+		Role:              ref.Role,
+		AgentIsolation:    isolation,
+		SkipHandoffReview: true,
+		IrcAgentID:        ref.ID,
+		AgentID:           ref.ID,
+	}
+
+	response, err = c.runSubAgentDirect(ctx, params)
+	if err != nil {
+		c.agentRegistry.SetStatus(ref.ID, AgentStatusAborted)
+		return response, err
+	}
+
+	// runSubAgentDirect does not itself update the AgentRegistry status (the
+	// batch path in runSubagents normally does that in its finalize loop,
+	// which resumeSubagent bypasses by calling runSubAgentDirect directly)
+	// -- mirror that finalize step here so a resumed subagent ends up
+	// Idle/Aborted exactly like a freshly spawned one does.
+	result := subagentResultFromResponse(subagentTask{Name: ref.DisplayName}, response)
+	switch result.Status {
+	case message.ToolResultSubtaskStatusCompleted, message.ToolResultSubtaskStatusCompletedWithWarnings:
+		c.agentRegistry.SetStatus(ref.ID, AgentStatusIdle)
+		// runSubAgentDirect already called lifecycle.Adopt on this success
+		// path (params.AgentID is set), so no need to re-arm it here.
+	default:
+		c.agentRegistry.SetStatus(ref.ID, AgentStatusAborted)
+		if c.lifecycle != nil {
+			c.lifecycle.Revoke(ref.SessionID)
+		}
+	}
+
+	if coldNote != "" {
+		response.Content += coldNote
+	}
+	return response, nil
+}
+
+// queueSubagentFollowUp delivers a follow-up prompt to a subagent that is
+// still actively running its current turn (R1 in
+// docs/refactor-subagent-continuation.md). It must not call
+// runSubAgentDirect / Run in a way that could execute a second concurrent
+// turn against the same child session; instead it uses
+// SessionAgent.QueuePrompt, which enqueues and returns false without
+// running anything if the session is not actually busy. The in-flight
+// Run() drains its own queue once the current turn ends (see the tail of
+// sessionAgent.Run), so no extra wake-up is needed here.
+//
+// If the session raced to idle between the caller's status check and here
+// (QueuePrompt returns false), this falls back to resumeSubagent's warm
+// path instead of silently dropping the prompt or -- worse -- running it
+// with a bare, coordinator-less context.
+func (c *coordinator) queueSubagentFollowUp(ctx context.Context, ref AgentRef, prompt string) (fantasy.ToolResponse, error) {
+	live, ok := c.childSessionAgents.Load(ref.SessionID)
+	agent, _ := live.(SessionAgent)
+	if !ok || agent == nil {
+		return c.resumeSubagent(ctx, ref, prompt)
+	}
+
+	model := agent.Model()
+	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
+	if !ok {
+		return fantasy.ToolResponse{}, errModelProviderNotConfigured
+	}
+	resolvedAgentCfg, cfgErr := c.subagentConfig(ref.ProfileName)
+	if cfgErr != nil {
+		resolvedAgentCfg = config.Agent{ID: ref.ProfileName, Description: ref.DisplayName}
+	}
+	maxTokens := model.CatwalkCfg.DefaultMaxTokens
+	if model.ModelCfg.MaxTokens != 0 {
+		maxTokens = model.ModelCfg.MaxTokens
+	}
+
+	queued := agent.QueuePrompt(ref.SessionID, SessionAgentCall{
+		Prompt:           prompt,
+		MaxOutputTokens:  maxTokens,
+		ProviderOptions:  getProviderOptions(model, providerCfg, resolvedAgentCfg),
+		Temperature:      model.ModelCfg.Temperature,
+		TopP:             model.ModelCfg.TopP,
+		TopK:             model.ModelCfg.TopK,
+		FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
+		PresencePenalty:  model.ModelCfg.PresencePenalty,
+		NonInteractive:   true,
+	})
+	if queued {
+		return fantasy.NewTextResponse(fmt.Sprintf(
+			"Follow-up queued for subagent %s; it will run once the current turn finishes.", ref.ID,
+		)), nil
+	}
+	// Lost the race: the run finished between the status check that routed
+	// the caller here and QueuePrompt's own busy check.
+	return c.resumeSubagent(ctx, ref, prompt)
 }
 
 func withAgentPolicyContext(ctx context.Context, agentCfg config.Agent) context.Context {
@@ -4319,29 +4628,72 @@ func (c *coordinator) backgroundAgentLookup() toolruntime.BackgroundAgentLookup 
 	}
 }
 
+// backgroundAgentMessenger returns the follow-up delivery function wired
+// into send_message via toolruntime.WithBackgroundAgentMessenger. It first
+// tries the backgroundAgentRegistry (unchanged); a miss there falls
+// through to the foreground AgentRegistry (docs/refactor-subagent-
+// continuation.md §4 phase 1, step 4), so a single send_message(agent_id=…)
+// call reaches background agents and foreground subagents (running, idle,
+// parked, aborted) alike.
 func (c *coordinator) backgroundAgentMessenger() toolruntime.BackgroundAgentMessenger {
 	return func(ctx context.Context, agentAddress, prompt string) (string, bool, error) {
-		resolvedID, ok := c.backgroundAgents.ResolveAddress(strings.TrimSpace(agentAddress))
+		address := strings.TrimSpace(agentAddress)
+		if resolvedID, ok := c.backgroundAgents.ResolveAddress(address); ok {
+			entry, ok := c.backgroundAgents.Get(resolvedID)
+			if !ok {
+				return "", false, nil
+			}
+			depth, err := c.backgroundAgents.Enqueue(resolvedID, backgroundAgentCommand{
+				Prompt:         strings.TrimSpace(prompt),
+				SessionID:      tools.GetSessionFromContext(ctx),
+				AgentMessageID: tools.GetMessageFromContext(ctx),
+				ToolCallID:     tools.GetToolCallIDFromContext(ctx),
+			})
+			if err != nil {
+				return "", true, err
+			}
+			if entry.Status == backgroundAgentStatusRunning || depth > 1 {
+				return "queued", true, nil
+			}
+			return "started", true, nil
+		}
+
+		// c.agentRegistry is nil in a handful of narrow unit-test
+		// coordinators that hand-construct subAgentParams directly; treat
+		// that as "not found" rather than panicking.
+		if c.agentRegistry == nil {
+			return "", false, nil
+		}
+		ref, resolveErr := c.resolveSubagentRef(address)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, errSubagentNotFound) {
+				return "", false, nil
+			}
+			return "", true, resolveErr // Ambiguous DisplayName -- see resolveSubagentRef.
+		}
+
+		status, ok := c.agentRegistry.EffectiveStatus(ref.ID)
 		if !ok {
 			return "", false, nil
 		}
-		entry, ok := c.backgroundAgents.Get(resolvedID)
-		if !ok {
+		switch status {
+		case AgentStatusRunning:
+			resp, err := c.queueSubagentFollowUp(ctx, ref, prompt)
+			if err != nil {
+				return "", true, err
+			}
+			return resp.Content, true, nil
+		case AgentStatusIdle, AgentStatusParked:
+			resp, err := c.resumeSubagent(ctx, ref, prompt)
+			if err != nil {
+				return "", true, err
+			}
+			return resp.Content, true, nil
+		case AgentStatusAborted:
+			return "", true, fmt.Errorf("subagent %q failed and cannot be resumed; spawn a new one", address)
+		default:
 			return "", false, nil
 		}
-		depth, err := c.backgroundAgents.Enqueue(resolvedID, backgroundAgentCommand{
-			Prompt:         strings.TrimSpace(prompt),
-			SessionID:      tools.GetSessionFromContext(ctx),
-			AgentMessageID: tools.GetMessageFromContext(ctx),
-			ToolCallID:     tools.GetToolCallIDFromContext(ctx),
-		})
-		if err != nil {
-			return "", true, err
-		}
-		if entry.Status == backgroundAgentStatusRunning || depth > 1 {
-			return "queued", true, nil
-		}
-		return "started", true, nil
 	}
 }
 

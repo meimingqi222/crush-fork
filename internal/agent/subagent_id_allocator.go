@@ -12,10 +12,17 @@ import (
 // parent LLM fans out multiple tasks that happen to share a name.
 //
 // The allocator is not persisted across runs: each runSubagents call creates a
-// fresh allocator. Cross-run deduplication is handled by the
-// SubagentLifecycleManager, which keeps completed child sessions adoptable for
-// a TTL window so a follow-up agent tool call with ExistingSessionID can reuse
-// the live SessionAgent instance instead of rebuilding one from disk.
+// fresh allocator. Cross-run reuse is out of scope for this allocator; it is
+// the registry entry, not the allocated name, that carries a subagent's
+// identity forward. SubagentLifecycleManager keeps a finished subagent's entry
+// Idle with its SessionAgent adoptable for a TTL window, then demotes it to
+// Parked rather than removing it (see subagent_lifecycle.go). Either state is
+// revivable: coordinator.resumeSubagent reuses the live instance (warm) or
+// rebuilds one from the entry's saved profile (cold), passing the child session
+// as subAgentParams.ExistingSessionID. ExistingSessionID stays an internal
+// field with no LLM-facing assignment point -- follow-up delivery is addressed
+// by registry ID through send_message / IRC, never through the agent tool,
+// which remains spawn-only (see docs/refactor-subagent-continuation.md §3.1).
 type subagentIDAllocator struct {
 	mu   sync.Mutex
 	seen map[string]int

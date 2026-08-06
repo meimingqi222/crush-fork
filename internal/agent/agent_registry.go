@@ -12,8 +12,18 @@ import (
 type AgentStatus string
 
 const (
-	AgentStatusRunning   AgentStatus = "running"
-	AgentStatusIdle      AgentStatus = "idle"
+	AgentStatusRunning AgentStatus = "running"
+	AgentStatusIdle    AgentStatus = "idle"
+	// AgentStatusParked marks a subagent whose SessionAgent instance has
+	// been released (see AgentRegistry.SetParked) but whose registry entry
+	// is kept around so it can be cold-revived: the child session's
+	// conversation history is still in SQLite, and ProfileName/Role/
+	// Isolation/ParentSessionID carry enough of the original spawn contract
+	// to rebuild a SessionAgent from it. See
+	// docs/refactor-subagent-continuation.md §3.2 for the full state
+	// machine (running -> idle -> parked, with idle/parked both revivable
+	// by an addressed message).
+	AgentStatusParked    AgentStatus = "parked"
 	AgentStatusCompleted AgentStatus = "completed"
 	AgentStatusAborted   AgentStatus = "aborted"
 )
@@ -32,8 +42,24 @@ type AgentRef struct {
 	ParentID    string
 	Status      AgentStatus
 	Agent       SessionAgent
-	SessionID   string
-	CreatedAt   time.Time
+	// SessionID is the subagent's child session ID, populated once it is
+	// known (see SetSessionID -- spawn time only knows the parent session;
+	// the child session is created inside runSubAgentDirect, after
+	// Register). Empty until then. This is what resumeSubagent passes as
+	// subAgentParams.ExistingSessionID to warm/cold-revive the subagent.
+	SessionID string
+	CreatedAt time.Time
+
+	// The following are populated at spawn time (see runSubagents'
+	// registration in coordinator.go) and are the runtime contract cold
+	// revive needs to rebuild a SessionAgent after the entry is parked and
+	// its in-memory instance released -- see
+	// docs/refactor-subagent-continuation.md §3.4. They are meaningless for
+	// AgentKindMain refs.
+	ProfileName     string // Subagent profile ID, passed to buildSubAgentForType on revive.
+	ParentSessionID string // Parent session ID, for permission derivation and cost accounting.
+	Role            string // Spawn-time role override, preserved across revives.
+	Isolation       string // Resolved isolation ("worktree", "session", "none", or "") at spawn time.
 }
 
 type RegistryListener func()
@@ -233,6 +259,81 @@ func (r *AgentRegistry) SetStatus(id string, status AgentStatus) {
 	if changed {
 		r.fireListeners(snapshot)
 	}
+}
+
+// SetParked demotes id to AgentStatusParked and releases its in-memory
+// SessionAgent reference. This is the park-as-status replacement for the
+// old Unregister-on-park behavior (see subagentLifecycleManager.Park):
+// parked entries stay addressable by ID/DisplayName and are cold-revived
+// from SQLite by coordinator.resumeSubagent, so the entry must survive, but
+// the live SessionAgent instance must not -- keeping it around after park
+// would defeat the point of releasing memory for long-lived parent
+// sessions, and (more subtly) would leave a SessionAgent reachable through
+// the registry that no other code owns or drains. No-op for unknown ids.
+func (r *AgentRegistry) SetParked(id string) {
+	r.mu.Lock()
+	snapshot := r.snapshotListeners()
+	changed := false
+	if ref, ok := r.refs[id]; ok {
+		if ref.Status != AgentStatusParked {
+			ref.Status = AgentStatusParked
+			changed = true
+		}
+		if ref.Agent != nil {
+			ref.Agent = nil
+			changed = true
+		}
+	}
+	r.mu.Unlock()
+	if changed {
+		r.fireListeners(snapshot)
+	}
+}
+
+// SetSessionID records id's child session ID once it becomes known. No-op
+// for unknown ids. Does not fire listeners: the child session ID is
+// revival bookkeeping, not an observable status/roster change peers or the
+// UI need to react to.
+func (r *AgentRegistry) SetSessionID(id, sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ref, ok := r.refs[id]; ok {
+		ref.SessionID = sessionID
+	}
+}
+
+// FullSnapshot returns a lock-safe copy of id's complete ref, including the
+// revival fields (ProfileName, ParentSessionID, Role, Isolation, SessionID)
+// that agentSnapshot omits because peer-facing code (the IRC roster) never
+// needs them. Callers that read fields beyond the peer-safe subset --
+// resumeSubagent and send_message addressing being the motivating examples
+// -- must use this rather than Get: refs are stored by pointer and
+// SetStatus/SetParked/SetSessionID mutate them in place, so reading fields
+// off a *AgentRef returned by Get races with a concurrent writer.
+func (r *AgentRegistry) FullSnapshot(id string) (AgentRef, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ref, ok := r.refs[id]
+	if !ok {
+		return AgentRef{}, false
+	}
+	return *ref, true
+}
+
+// ListSnapshot returns lock-safe copies of every ref, parked entries
+// included (unlike ListVisibleTo/snapshotVisibleTo, which stay
+// running/idle-only in phase 1 -- see
+// docs/refactor-subagent-continuation.md §4 phase 2 item 1). Used for
+// addressing: resolving a send_message agent_id/DisplayName needs to find
+// parked and aborted subagents too, not just the IRC-visible ones.
+func (r *AgentRegistry) ListSnapshot() []AgentRef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]AgentRef, 0, len(r.refs))
+	for _, ref := range r.refs {
+		result = append(result, *ref)
+	}
+	return result
 }
 
 func (r *AgentRegistry) OnChange(listener RegistryListener) func() {

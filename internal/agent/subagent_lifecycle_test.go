@@ -95,6 +95,40 @@ func TestSubagentLifecycleManager_ReAdoptReplacesTimer(t *testing.T) {
 	require.False(t, m.IsAdopted("child-4"), "re-adopted short TTL should have fired")
 }
 
+// TestSubagentLifecycleManager_ParkDemotesRegistryEntryInsteadOfRemovingIt
+// is test 1 from docs/refactor-subagent-continuation.md §6: park must
+// downgrade the AgentRegistry entry to AgentStatusParked (releasing its
+// SessionAgent reference) rather than unregistering it, and must still
+// clear the childSessionAgents entry exactly as before.
+func TestSubagentLifecycleManager_ParkDemotesRegistryEntryInsteadOfRemovingIt(t *testing.T) {
+	t.Parallel()
+
+	registry := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	registry.Register(AgentRef{
+		ID:          "sub-1",
+		DisplayName: "Explore",
+		Kind:        AgentKindSub,
+		Status:      AgentStatusIdle,
+		Agent:       &mockSessionAgent{},
+		SessionID:   "child-1",
+	})
+
+	childApps := &sync.Map{}
+	childApps.Store("child-1", &mockSessionAgent{})
+	m := newSubagentLifecycleManager(registry, childApps)
+
+	m.Adopt("child-1", "sub-1", time.Hour)
+	m.Park("child-1")
+
+	_, ok := childApps.Load("child-1")
+	require.False(t, ok, "childSessionAgents entry must be cleared on park")
+
+	ref, ok := registry.Get("sub-1")
+	require.True(t, ok, "registry entry must survive park, not be unregistered")
+	require.Equal(t, AgentStatusParked, ref.Status)
+	require.Nil(t, ref.Agent, "SetParked must release the in-memory SessionAgent reference")
+}
+
 func TestSubagentLifecycleManager_NilSafe(t *testing.T) {
 	var m *subagentLifecycleManager
 	// All methods must be nil-safe.

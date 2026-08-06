@@ -54,6 +54,18 @@ func (a *sessionAgent) EnqueueSteer(sessionID string, call SessionAgentCall) boo
 	return true
 }
 
+// QueuePrompt enqueues call for sessionID's message queue and reports true,
+// but only when the session is currently busy; see the SessionAgent
+// interface doc comment for why this exists as a distinct method from Run.
+func (a *sessionAgent) QueuePrompt(sessionID string, call SessionAgentCall) bool {
+	if !a.IsSessionBusy(sessionID) {
+		return false
+	}
+	call.SessionID = sessionID
+	a.enqueueQueuedCall(sessionID, call)
+	return true
+}
+
 func (a *sessionAgent) RemoveQueuedTurn(sessionID, turnID string) bool {
 	a.queueMu.Lock()
 	defer a.queueMu.Unlock()

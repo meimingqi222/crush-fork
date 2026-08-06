@@ -55,10 +55,21 @@ func NewSendMessageTool(service mailbox.Service) fantasy.AgentTool {
 				if !found {
 					return fantasy.NewTextResponse(fmt.Sprintf("Failed: Background agent %q not found. Please ensure that the agent ID or name is correct and currently active.", agentID)), nil
 				}
-				if disposition == "queued" {
+				switch disposition {
+				case "queued":
 					return fantasy.NewTextResponse(fmt.Sprintf("Follow-up prompt queued for background agent %s.", agentID)), nil
+				case "started":
+					return fantasy.NewTextResponse(fmt.Sprintf("Follow-up prompt sent to background agent %s.", agentID)), nil
+				default:
+					// The AgentRegistry fallback path (foreground subagents:
+					// idle/parked revive, running-turn queueing) returns the
+					// subagent's own response text as the disposition
+					// instead of one of the two background-agent sentinels
+					// above, since a synchronous revive has an actual
+					// answer to show rather than just an accepted/queued
+					// acknowledgement. See coordinator.backgroundAgentMessenger.
+					return fantasy.NewTextResponse(disposition), nil
 				}
-				return fantasy.NewTextResponse(fmt.Sprintf("Follow-up prompt sent to background agent %s.", agentID)), nil
 			}
 
 			if mailboxID == "" {

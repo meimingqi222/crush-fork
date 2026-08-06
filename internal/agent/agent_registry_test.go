@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -279,4 +280,108 @@ func TestRenderIrcPeerRoster(t *testing.T) {
 		require.NotContains(t, result, "Done")
 		require.NotContains(t, result, "Dead")
 	})
+}
+
+// TestAgentRegistry_EffectiveStatus_ParkedStaysParked is test 7 from
+// docs/refactor-subagent-continuation.md §6: a parked entry's effective
+// status must be reported as Parked, never derived into Running/Idle, even
+// though effectiveStatus's Idle/Running derivation switch would run for any
+// ref that still carried a non-nil Agent. SetParked clearing Agent to nil
+// takes the fast path (agent == nil -> return status unchanged); this test
+// also covers the (currently unreachable in production, since SetParked
+// always clears Agent) defensive case of a Parked status with a non-nil
+// Agent, to guard the "default: return status" branch independently of
+// that invariant.
+func TestAgentRegistry_EffectiveStatus_ParkedStaysParked(t *testing.T) {
+	t.Parallel()
+
+	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	r.Register(AgentRef{ID: "parked-clean", DisplayName: "Parked", Kind: AgentKindSub, Status: AgentStatusIdle, Agent: &mockSessionAgent{busy: true}})
+	r.SetParked("parked-clean")
+
+	status, ok := r.EffectiveStatus("parked-clean")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusParked, status)
+
+	ref, ok := r.Get("parked-clean")
+	require.True(t, ok)
+	require.Nil(t, ref.Agent, "SetParked must clear the live SessionAgent reference")
+
+	// Defensive case: even if a live Agent were still attached to a Parked
+	// ref, effectiveStatus's default branch must return the stored status
+	// unchanged rather than deriving Running/Idle from IsBusy().
+	r.Register(AgentRef{ID: "parked-with-agent", DisplayName: "Parked2", Kind: AgentKindSub, Status: AgentStatusParked, Agent: &mockSessionAgent{busy: true}})
+	status, ok = r.EffectiveStatus("parked-with-agent")
+	require.True(t, ok)
+	require.Equal(t, AgentStatusParked, status)
+}
+
+// TestAgentRegistry_ListVisibleTo_ExcludesParked is the second half of test
+// 7: phase 1 keeps parked subagents out of the IRC-visible roster (phase 2
+// is what makes them addressable there -- see
+// docs/refactor-subagent-continuation.md §4 phase 2 item 1). This also
+// guards against a panic: ListVisibleTo/snapshotVisibleTo must not try to
+// call IsBusy() on a parked ref's (now nil) Agent.
+func TestAgentRegistry_ListVisibleTo_ExcludesParked(t *testing.T) {
+	t.Parallel()
+
+	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	r.Register(AgentRef{ID: "main", DisplayName: "Main", Kind: AgentKindMain, Status: AgentStatusRunning})
+	r.Register(AgentRef{ID: "sub-idle", DisplayName: "Idle", Kind: AgentKindSub, Status: AgentStatusIdle, Agent: &mockSessionAgent{}})
+	r.Register(AgentRef{ID: "sub-parked", DisplayName: "Parked", Kind: AgentKindSub, Status: AgentStatusIdle, Agent: &mockSessionAgent{}})
+	require.NotPanics(t, func() { r.SetParked("sub-parked") })
+
+	visible := r.ListVisibleTo("main")
+	ids := make(map[string]bool)
+	for _, ref := range visible {
+		ids[ref.ID] = true
+	}
+	require.True(t, ids["sub-idle"])
+	require.False(t, ids["sub-parked"], "parked subagents must stay out of the phase-1 roster")
+
+	snaps := r.snapshotVisibleTo("main")
+	snapIDs := make(map[string]bool)
+	for _, snap := range snaps {
+		snapIDs[snap.ID] = true
+	}
+	require.True(t, snapIDs["sub-idle"])
+	require.False(t, snapIDs["sub-parked"])
+}
+
+// TestAgentRegistry_IrcAdapterStatusIsRaceFree guards the reason the IRC
+// adapter and roster read peers through snapshotVisibleTo/snapshot rather
+// than the *AgentRef-returning Get/ListVisibleTo: refs are stored by
+// pointer and SetStatus mutates Status in place, so reading Status off a
+// returned ref races with any concurrent status write. Run under -race.
+func TestAgentRegistry_IrcAdapterStatusIsRaceFree(t *testing.T) {
+	t.Parallel()
+
+	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
+	r.Register(AgentRef{
+		ID:          "0-Main",
+		DisplayName: "Main",
+		Kind:        AgentKindMain,
+		Status:      AgentStatusIdle,
+		Agent:       &mockSessionAgent{},
+	})
+	adapter := r.AsIrcRegistry()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 2000 {
+			r.SetStatus("0-Main", AgentStatusRunning)
+			r.SetStatus("0-Main", AgentStatusIdle)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 2000 {
+			adapter.Get("0-Main")
+			adapter.ListVisibleTo("other")
+			renderIrcPeerRoster(r, "other")
+		}
+	}()
+	wg.Wait()
 }
