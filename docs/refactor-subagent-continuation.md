@@ -6,6 +6,13 @@
 > `docs/pitfalls/fantasy-dual-message-state.md`。
 >
 > 行号基于编写本文时的工作区状态，实施时以符号名搜索为准。
+>
+> **本文档是三份重构方案中的基础层**，另两份依赖或让位于它：
+> `docs/refactor-irc.md`（代理间通信）以本文档阶段 1 为硬前置，且已采纳
+> §3.1 的裁决——不新增 `follow_up` 工具，续用统一走 `send_message`/`irc`；
+> `docs/refactor-subagent-result-contract.md`（结果投影与 locator 卫生）
+> 可独立交付，与本文档共享 control plane / data plane 的边界原则。
+> 三份文档的清理清单存在两处交叉（C1、C10 涉及的过时注释），谁先落地谁做。
 
 ## 1. 动机
 
@@ -199,10 +206,15 @@ type AgentRef struct {
 - **R2 重名**：`DisplayName` 不保证唯一。解析歧义必须报错列候选，
   不允许"最新的赢"（与 Claude Code 不同，crush 的名字来自 LLM 起的任务
   名，歧义概率高）。
-- **R3 worktree 隔离**：worktree 子代理完成后 merge-back 已发生、
-  worktree 可能已清理。阶段 1 对 `Isolation == worktree` 的 parked 代理
-  cold revive 时降级为 `none`（共享父工作区）并在返回文本中注明；
-  不要尝试重建 worktree。
+- **R3 worktree 隔离**：`Isolation == worktree` 的代理在**任何**复活时都降级为
+  `none`（共享父工作区）并在返回文本中注明；不要尝试重建 worktree。
+
+  ⚠️ 本条最初写作"仅 parked 的 cold revive 降级"，那个限定基于错误前提——
+  它假设 worktree 活到 park 才被清理。实际上 `runSubAgentDirect` 为每次
+  worktree 隔离的运行都 `defer cleanupWorktreeIfNeeded`（成功失败都一样），
+  所以 worktree 在**第一次运行结束**时就已 merge back 并删除，远早于
+  keep-alive 窗口。若 warm revive 不降级，会静默创建第二个无关的 worktree。
+  实施时已按"任何复活都降级"处理，warm/cold 各有一条测试。
 - **R4 handoff 前缀**：`ExistingSessionID` 非空时跳过 handoff
   （`coordinator.go:3047`），复活场景正确——历史已在会话里，勿重复注入。
 - **R5 内存**：parked 条目常驻注册表（无 SessionAgent，占用极小）。
