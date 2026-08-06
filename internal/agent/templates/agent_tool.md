@@ -52,7 +52,9 @@ Tasks run in parallel under a concurrency limit. There is no dependency graph an
 
 ## Continuing a subagent
 
-`run_in_background: true` returns an agent ID instead of blocking. That agent stays addressable after it finishes: send it more work with `send_message(agent_id, message)` and it resumes its **existing conversation**, keeping every file it read and conclusion it reached.
+**Any subagent that has completed stays addressable — do not re-spawn it for follow-up work.** Send it more work with `send_message(agent_id, message)` (or `irc` if you're another subagent) and it resumes its **existing conversation**, keeping every file it read and conclusion it reached. This works for a subagent that just finished (idle) and for one that has since gone dormant after a period of inactivity (parked) — a dormant one is simply rebuilt from its saved history before it picks up the new prompt, transparently to you.
+
+`run_in_background: true` additionally returns an agent ID immediately instead of blocking, for work you want to keep running while you do something else — the same `send_message(agent_id, message)` addressing applies to it once it starts.
 
 Prefer continuing over re-spawning when the new work builds on what that subagent already learned — a fresh subagent starts from a handoff summary and has to rediscover the details. Re-spawn only when the task is genuinely independent or you want an untainted second opinion.
 
@@ -72,4 +74,5 @@ Subagents in the same `tasks` array can coordinate via the `irc` tool (always av
 
 - **Run in parallel when B needs a small piece from A** (a type signature, config key, file path) — B asks A over IRC instead of waiting. **Still sequence** when one task produces a large contract the other consumes wholesale.
 - Keep IRC to quick questions, not long-form transfer; subagents should answer what their own tools (read/grep/glob) can.
+- A message to a busy peer does not interrupt its current work — it is queued and answered from that peer's own turn later. A message to a peer that has finished or gone dormant wakes it for a real turn.
 - **Verification**: after a batch completes, verify combined output (type checks/tests/lint). Fix minor issues directly; dispatch a fix-up subagent for significant gaps. Never mark complete on self-reports alone.

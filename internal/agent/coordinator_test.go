@@ -50,6 +50,10 @@ type mockSessionAgent struct {
 	// queuedPrompts records calls handed to QueuePrompt while busy==true,
 	// for tests asserting a follow-up was queued rather than run.
 	queuedPrompts []SessionAgentCall
+	// ircQueued records calls handed to EnqueueIRC, for tests asserting an
+	// IRC peer message was injected onto the steering queue rather than
+	// triggering a real turn.
+	ircQueued []SessionAgentCall
 }
 
 func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -87,6 +91,12 @@ func (m *mockSessionAgent) PrioritizeQueuedPrompt(sessionID string, index int) b
 }
 func (m *mockSessionAgent) EnqueueSteer(string, SessionAgentCall) bool { return false }
 func (m *mockSessionAgent) RemoveQueuedTurn(string, string) bool       { return false }
+
+func (m *mockSessionAgent) EnqueueIRC(sessionID string, call SessionAgentCall) bool {
+	call.SessionID = sessionID
+	m.ircQueued = append(m.ircQueued, call)
+	return m.busy
+}
 
 func (m *mockSessionAgent) QueuePrompt(sessionID string, call SessionAgentCall) bool {
 	if !m.busy {

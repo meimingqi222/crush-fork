@@ -175,6 +175,12 @@ type coordinator struct {
 	// agentRegistry tracks all running agents for IRC peer discovery.
 	agentRegistry *AgentRegistry
 
+	// ircBus is the coordinator-owned IRC message bus
+	// (docs/refactor-irc.md §3, phase 1). It replaces the old
+	// tools.SetIrcResponder global singleton, which crossed coordinators,
+	// tests, and concurrent sessions.
+	ircBus *ircBus
+
 	// lifecycle manages the keep-alive window for completed subagents so a
 	// follow-up delivered via send_message/resumeSubagent can reuse the
 	// live SessionAgent instance (warm revive) instead of rebuilding one
@@ -305,6 +311,7 @@ func NewCoordinator(
 	c.agentRegistry = GlobalAgentRegistry()
 	c.mainAgentID = "0-Main"
 	c.lifecycle = newSubagentLifecycleManager(c.agentRegistry, &c.childSessionAgents)
+	c.ircBus = newIRCBus(c)
 
 	agent, err := c.buildAgent(ctx, prompt, agentCfg, false)
 	if err != nil {
@@ -353,21 +360,6 @@ func NewCoordinator(
 			}
 		}
 	}()
-
-	// Bug fix (docs/refactor-irc.md §2.1(a)): "from" here must be the actual
-	// sender's agent ID, not the recipient's. It used to be called with the
-	// recipient ID in both the sender and recipient slots, so every
-	// recipient's prompt claimed the message came from itself.
-	tools.SetIrcResponder(func(ctx context.Context, from, to, message string) (string, error) {
-		ref, ok := c.agentRegistry.Get(to)
-		if !ok {
-			return "", fmt.Errorf("agent %q not found in registry", to)
-		}
-		if ref.Agent == nil {
-			return "", fmt.Errorf("agent %q has no active agent instance", to)
-		}
-		return ref.Agent.RespondAsBackground(ctx, from, message)
-	})
 
 	return c, nil
 }
@@ -3464,8 +3456,8 @@ func (c *coordinator) resolveSubagentRef(nameOrID string) (AgentRef, error) {
 			ids[i] = m.ID
 		}
 		return AgentRef{}, fmt.Errorf(
-			"multiple subagents are named %q; address one by its ID instead: %s",
-			nameOrID, strings.Join(ids, ", "),
+			"%w: multiple subagents are named %q; address one by its ID instead: %s",
+			toolruntime.ErrAgentAmbiguous, nameOrID, strings.Join(ids, ", "),
 		)
 	}
 }
@@ -4690,7 +4682,7 @@ func (c *coordinator) backgroundAgentMessenger() toolruntime.BackgroundAgentMess
 			}
 			return resp.Content, true, nil
 		case AgentStatusAborted:
-			return "", true, fmt.Errorf("subagent %q failed and cannot be resumed; spawn a new one", address)
+			return "", true, fmt.Errorf("%w: subagent %q failed and cannot be resumed; spawn a new one", toolruntime.ErrAgentAborted, address)
 		default:
 			return "", false, nil
 		}

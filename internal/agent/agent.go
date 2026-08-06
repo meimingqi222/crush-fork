@@ -154,6 +154,22 @@ type SessionAgentCall struct {
 	// formatted with an explicit priority notice so the model treats them
 	// as the current active instruction.
 	Steering bool
+	// PeerSteering marks a steering-queue entry that originated from an IRC
+	// peer message (EnqueueIRC) rather than a user redirect (EnqueueSteer).
+	// The drain loop in PrepareStep reads this to pick
+	// formatPeerSteeringPrompt instead of formatSteeringPrompt --
+	// formatSteeringPrompt's supersede wording is a user-only privilege
+	// (docs/refactor-irc.md §2.2(a)); a peer cannot override the model's
+	// current task. Together with EnqueueIRC never calling signalSteering,
+	// this is what keeps a peer message from preempting a running
+	// cooperative tool the way a real user steer does (§2.2(b)).
+	PeerSteering bool
+	// PeerFrom is the sending agent's ID, set together with PeerSteering.
+	PeerFrom string
+	// PeerMessageID correlates this injected message with its originating
+	// IRCMessage, so the formatted prompt can tell the model which
+	// message_id to pass as reply_to.
+	PeerMessageID string
 	// BypassQueuePause allows this queued call to be processed even if the
 	// queue is paused. Used for auto-resume calls after summarization.
 	BypassQueuePause bool
@@ -217,6 +233,16 @@ type SessionAgent interface {
 	IsQueuePaused(sessionID string) bool
 	PrioritizeQueuedPrompt(sessionID string, index int) bool
 	EnqueueSteer(sessionID string, call SessionAgentCall) bool
+	// EnqueueIRC enqueues an inbound peer (IRC) message on sessionID's
+	// steering queue without signaling the cooperative steering interrupt
+	// (docs/refactor-irc.md §2.2(b)) -- unlike EnqueueSteer, it does not
+	// require the session to be busy: an idle session's queued message
+	// rides along with whatever starts its next turn (see the sessionAgent
+	// implementation's doc comment). Returns whether the session was busy
+	// at enqueue time, which callers use to distinguish an
+	// "injected into the active turn" outcome from a "queued, no turn
+	// running yet" one.
+	EnqueueIRC(sessionID string, call SessionAgentCall) bool
 	RemoveQueuedTurn(sessionID, turnID string) bool
 	// QueuePrompt enqueues call for sessionID and returns true, but only if
 	// the session is currently busy; it returns false without enqueueing
@@ -1257,7 +1283,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					if steer.Prompt == "" {
 						continue
 					}
-					steer.Prompt = formatSteeringPrompt(steer.Prompt)
+					if steer.PeerSteering {
+						// A peer message must not read as a redirect that
+						// supersedes the current task (docs/refactor-irc.md
+						// §2.2(a)) -- only a real user steer gets that
+						// framing.
+						steer.Prompt = formatPeerSteeringPrompt(steer.Prompt, steer.PeerFrom, steer.PeerMessageID)
+					} else {
+						steer.Prompt = formatSteeringPrompt(steer.Prompt)
+					}
 					userMessage, createErr := a.createUserMessage(callContext, steer)
 					if createErr != nil {
 						return callContext, prepared, createErr

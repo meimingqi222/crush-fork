@@ -157,7 +157,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 	}
 
 	builtin = append(builtin,
-		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry()),
+		agenttools.NewIrcTool(c.agentRegistry.AsIrcRegistry(), c.ircBus),
 		agenttools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 	// resolve only works in plan mode -- resolve.go rejects the call with an

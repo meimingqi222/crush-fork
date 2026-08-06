@@ -23,9 +23,8 @@ const (
 	// docs/refactor-subagent-continuation.md §3.2 for the full state
 	// machine (running -> idle -> parked, with idle/parked both revivable
 	// by an addressed message).
-	AgentStatusParked    AgentStatus = "parked"
-	AgentStatusCompleted AgentStatus = "completed"
-	AgentStatusAborted   AgentStatus = "aborted"
+	AgentStatusParked  AgentStatus = "parked"
+	AgentStatusAborted AgentStatus = "aborted"
 )
 
 type AgentKind string
@@ -131,6 +130,11 @@ func (r *AgentRegistry) List() []*AgentRef {
 	return result
 }
 
+// ListVisibleTo returns the peers addressable by id: running, idle, and
+// parked entries (docs/refactor-subagent-continuation.md §4 phase 2 item 1).
+// Parked peers stay visible -- and addressable, via resumeSubagent's cold
+// revive -- because a completed subagent is still a valid send_message/irc
+// target; only Aborted (failed/canceled, no revive path) is excluded.
 func (r *AgentRegistry) ListVisibleTo(id string) []*AgentRef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -139,12 +143,27 @@ func (r *AgentRegistry) ListVisibleTo(id string) []*AgentRef {
 		if ref.ID == id {
 			continue
 		}
-		if ref.Status != AgentStatusRunning && ref.Status != AgentStatusIdle {
+		if !isAddressableStatus(ref.Status) {
 			continue
 		}
 		result = append(result, ref)
 	}
 	return result
+}
+
+// isAddressableStatus reports whether status belongs to a peer that should
+// appear in the IRC-visible roster: running, idle, or parked (revivable by
+// an addressed message -- see AgentRegistry.SetParked). Aborted entries are
+// excluded; they have no revive path (resumeSubagent returns a "cannot be
+// resumed" error for them; see coordinator.resolveSubagentRef's caller in
+// backgroundAgentMessenger).
+func isAddressableStatus(status AgentStatus) bool {
+	switch status {
+	case AgentStatusRunning, AgentStatusIdle, AgentStatusParked:
+		return true
+	default:
+		return false
+	}
 }
 
 // agentSnapshot is a value copy of the AgentRef fields needed to describe a
@@ -196,7 +215,7 @@ func (r *AgentRegistry) snapshotVisibleTo(id string) []agentSnapshot {
 		if ref.ID == id {
 			continue
 		}
-		if ref.Status != AgentStatusRunning && ref.Status != AgentStatusIdle {
+		if !isAddressableStatus(ref.Status) {
 			continue
 		}
 		result = append(result, snapshotOf(ref))
@@ -215,8 +234,12 @@ func (r *AgentRegistry) snapshotVisibleTo(id string) []agentSnapshot {
 // path (e.g. SetStatus at run start/end) that could drift out of sync with
 // the SessionAgent's actual run state.
 //
-// Terminal statuses (Aborted, Completed) are returned unchanged: a finished
-// agent has no meaningful "busy" reading, and this must not resurrect it.
+// Terminal/parked statuses (Aborted, Parked) are returned unchanged: a
+// finished or parked agent has no meaningful "busy" reading, and this must
+// not resurrect it. (There is no AgentStatusCompleted -- see its removal
+// note in docs/refactor-subagent-continuation.md §7 C6: the state machine's
+// success terminal is Idle, demoted to Parked by the lifecycle TTL, not a
+// separate "completed" status.)
 func (r *AgentRegistry) EffectiveStatus(id string) (AgentStatus, bool) {
 	snap, ok := r.snapshot(id)
 	if !ok {
@@ -385,15 +408,25 @@ type ircRegistryAdapter struct {
 }
 
 // peerInfo projects a snapshot into the model/tool-facing peer shape,
-// deriving the observable status outside the registry lock.
+// deriving the observable status outside the registry lock. Parked peers get
+// a Note telling the model a message will bring them back (see
+// AgentRegistry.SetParked / coordinator.resumeSubagent): without it a parked
+// entry in `irc list` reads exactly like an idle one, and nothing tells the
+// model that addressing it triggers a cold revive (rebuilding the SessionAgent
+// from its saved profile) rather than an instant delivery.
 func peerInfo(snap agentSnapshot) agenttools.IrcPeerInfo {
-	return agenttools.IrcPeerInfo{
+	status := effectiveStatus(snap.Status, snap.Agent)
+	info := agenttools.IrcPeerInfo{
 		ID:          snap.ID,
 		DisplayName: snap.DisplayName,
 		Kind:        string(snap.Kind),
-		Status:      string(effectiveStatus(snap.Status, snap.Agent)),
+		Status:      string(status),
 		ParentID:    snap.ParentID,
 	}
+	if status == AgentStatusParked {
+		info.Note = "message revives"
+	}
+	return info
 }
 
 func (a *ircRegistryAdapter) Get(id string) (agenttools.IrcPeerInfo, bool) {
@@ -424,7 +457,11 @@ func renderIrcPeerRoster(registry *AgentRegistry, selfID string) string {
 	b.WriteString("Use `irc` with op=send to communicate with any peer. Use op=list to check current availability.\n\n")
 	for _, snap := range snaps {
 		peer := peerInfo(snap)
-		fmt.Fprintf(&b, "- `%s` — %s (%s, %s)\n", peer.ID, peer.DisplayName, peer.Kind, peer.Status)
+		if peer.Note != "" {
+			fmt.Fprintf(&b, "- `%s` — %s (%s, %s — %s)\n", peer.ID, peer.DisplayName, peer.Kind, peer.Status, peer.Note)
+		} else {
+			fmt.Fprintf(&b, "- `%s` — %s (%s, %s)\n", peer.ID, peer.DisplayName, peer.Kind, peer.Status)
+		}
 	}
 	b.WriteString("</irc_peers>")
 	return b.String()

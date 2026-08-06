@@ -4,14 +4,10 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"log/slog"
 	"strings"
-	"sync"
-	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/toolruntime"
-	"github.com/google/uuid"
 )
 
 //go:embed irc.md
@@ -36,6 +32,12 @@ type IrcParams struct {
 	// await_reply=false unreachable for DMs (see executeIrcSend). nil means
 	// "use the default"; a non-nil value is always honored as-is.
 	AwaitReply *bool `json:"await_reply,omitempty" description:"Wait for a reply from the recipient. Omit to use the default (true for a DM, false for a broadcast); pass true or false to force that behavior explicitly."`
+	// ReplyTo correlates this send with an earlier inbound message's ID,
+	// telling the recipient (and, once the phase-2 waiter lands -- see
+	// docs/refactor-irc.md §8 phase 2 -- any sender blocked on op=wait)
+	// which message this is answering. Optional; only meaningful when
+	// replying to a peer message you received.
+	ReplyTo string `json:"reply_to,omitempty" description:"Message ID this send replies to, if any (from a message you previously received)"`
 }
 
 type IrcReply struct {
@@ -49,22 +51,71 @@ type IrcPeerInfo struct {
 	Kind        string `json:"kind"`
 	Status      string `json:"status"`
 	ParentID    string `json:"parent_id,omitempty"`
+	// Note is an optional peer-specific hint for the model, e.g. "message
+	// revives" for a parked peer (see docs/refactor-subagent-
+	// continuation.md §4 phase 2 item 1): parked peers are addressable but
+	// sending to one triggers a cold revive instead of an instant delivery,
+	// and the model should know that before it waits on a reply.
+	Note string `json:"note,omitempty"`
 }
-
-// IrcResponder generates a reply on behalf of the recipient (to). from is
-// the sending agent's ID and must be threaded through to whatever generates
-// the reply so the recipient's prompt correctly attributes the message (see
-// docs/refactor-irc.md §2.1(a) -- a prior version of this callback only took
-// one agent ID and the caller wired it up backwards, so recipients were told
-// they'd received a message from themselves).
-type IrcResponder func(ctx context.Context, from, to, message string) (string, error)
 
 type IrcRegistry interface {
 	Get(id string) (IrcPeerInfo, bool)
 	ListVisibleTo(id string) []IrcPeerInfo
 }
 
-func NewIrcTool(registry IrcRegistry) fantasy.AgentTool {
+// IrcSendRequest is a single-target delivery request handed to an IrcSender.
+// It mirrors the coordinator-owned message envelope (docs/refactor-irc.md
+// §3.2's IRCMessage) but stays in the tools package so this file has no
+// dependency on the agent package's concrete bus type.
+type IrcSendRequest struct {
+	From        string
+	To          string
+	Body        string
+	ReplyTo     string
+	ExpectReply bool
+}
+
+// IrcSendResult is the tool-facing projection of a delivery receipt
+// (docs/refactor-irc.md §3.2's IRCDeliveryReceipt). Outcome is one of the
+// agent package's IRCDeliveryOutcome string values ("injected", "woken",
+// "revived", "queued", "failed") but is carried as a plain string here for
+// the same reason IrcSendRequest exists: this package must not import the
+// agent package that defines the enum.
+type IrcSendResult struct {
+	MessageID string
+	To        string
+	Outcome   string
+	// Reply is the recipient's actual reply text, when one was produced
+	// synchronously (an idle/parked peer's real revived turn) or via the
+	// phase-1 legacy fallback for a busy peer with ExpectReply set (see the
+	// bus implementation's doc comment for why that fallback exists and
+	// when it goes away). Empty when no reply is available yet.
+	Reply string
+	Error string
+}
+
+// IrcSender delivers IRC messages via the coordinator-owned bus
+// (docs/refactor-irc.md §3, phase 1). It replaces the old package-level
+// IrcResponder singleton: that global crossed coordinators, tests, and
+// concurrent sessions, whereas a sender is constructed per-coordinator and
+// injected into NewIrcTool like the registry already is.
+//
+// Send/Broadcast never select a provider or construct an agent turn
+// themselves -- delivery to a peer that needs a real turn (an idle or
+// parked subagent) routes through the coordinator's existing
+// resumeSubagent, which already owns that responsibility.
+type IrcSender interface {
+	Send(ctx context.Context, req IrcSendRequest) IrcSendResult
+	// Broadcast delivers body to every peer visible to from except parked
+	// ones (docs/refactor-irc.md §4: broadcast never revives parked peers,
+	// to avoid a thundering-herd of cold revives). Returns one result per
+	// attempted target; parked/self peers are simply absent, not reported
+	// as failures.
+	Broadcast(ctx context.Context, from, body string, expectReply bool, replyTo string) []IrcSendResult
+}
+
+func NewIrcTool(registry IrcRegistry, sender IrcSender) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		IrcToolName,
 		string(ircDescription),
@@ -75,7 +126,7 @@ func NewIrcTool(registry IrcRegistry) fantasy.AgentTool {
 			}
 			switch params.Op {
 			case IrcOpSend:
-				return executeIrcSend(ctx, registry, selfID, params)
+				return executeIrcSend(ctx, sender, selfID, params)
 			case IrcOpList:
 				return executeIrcList(registry, selfID)
 			default:
@@ -85,7 +136,7 @@ func NewIrcTool(registry IrcRegistry) fantasy.AgentTool {
 	)
 }
 
-func executeIrcSend(ctx context.Context, registry IrcRegistry, selfID string, params IrcParams) (fantasy.ToolResponse, error) {
+func executeIrcSend(ctx context.Context, sender IrcSender, selfID string, params IrcParams) (fantasy.ToolResponse, error) {
 	message := strings.TrimSpace(params.Message)
 	if message == "" {
 		return fantasy.NewTextResponse("Failed: message is required for send"), nil
@@ -95,93 +146,102 @@ func executeIrcSend(ctx context.Context, registry IrcRegistry, selfID string, pa
 	if to == "" {
 		return fantasy.NewTextResponse("Failed: to is required for send; use an agent ID or 'all'"), nil
 	}
+	if to == selfID {
+		return fantasy.NewTextResponse("Failed: cannot send a message to yourself"), nil
+	}
+
+	if sender == nil {
+		return fantasy.NewTextResponse("Failed: the IRC message bus is not available in the current context."), nil
+	}
 
 	// Default: wait for a DM's reply, but not a broadcast's. An explicit
 	// await_reply (true or false) always overrides the default -- this is
 	// the whole point of AwaitReply being *bool rather than bool: a bare
 	// bool cannot distinguish "not passed" from "passed as false", which
 	// used to make await_reply=false unreachable for DMs.
-	awaitReply := to != "all"
+	expectReply := to != "all"
 	if params.AwaitReply != nil {
-		awaitReply = *params.AwaitReply
+		expectReply = *params.AwaitReply
 	}
+	replyTo := strings.TrimSpace(params.ReplyTo)
 
-	var targets []IrcPeerInfo
 	if to == "all" {
-		targets = registry.ListVisibleTo(selfID)
-	} else {
-		peer, ok := registry.Get(to)
-		if !ok {
-			return fantasy.NewTextResponse(fmt.Sprintf("Failed: agent %q not found", to)), nil
-		}
-		if peer.Status != "running" && peer.Status != "idle" {
-			return fantasy.NewTextResponse(fmt.Sprintf("Failed: agent %q is %s, not reachable", to, peer.Status)), nil
-		}
-		if peer.ID == selfID {
-			return fantasy.NewTextResponse("Failed: cannot send a message to yourself"), nil
-		}
-		targets = []IrcPeerInfo{peer}
+		results := sender.Broadcast(ctx, selfID, message, expectReply, replyTo)
+		return fantasy.NewTextResponse(formatBroadcastResults(results)), nil
 	}
 
-	if len(targets) == 0 {
-		return fantasy.NewTextResponse("No reachable peers found."), nil
-	}
+	result := sender.Send(ctx, IrcSendRequest{
+		From:        selfID,
+		To:          to,
+		Body:        message,
+		ReplyTo:     replyTo,
+		ExpectReply: expectReply,
+	})
+	return fantasy.NewTextResponse(formatSendResult(result)), nil
+}
 
-	var delivered []string
+// formatSendResult renders a single delivery receipt for the model. Outcome
+// values come from the agent package's IRCDeliveryOutcome (see IrcSendResult's
+// doc comment); unrecognized values fall back to a generic "delivered"
+// phrasing rather than erroring, so a future outcome value degrades
+// gracefully instead of breaking the tool.
+func formatSendResult(result IrcSendResult) string {
+	if result.Outcome == "failed" || (result.Outcome == "" && result.Error != "") {
+		return fmt.Sprintf("Failed: %s", result.Error)
+	}
+	var b strings.Builder
+	switch result.Outcome {
+	case "injected":
+		fmt.Fprintf(&b, "Message delivered to %s and queued for their attention at their next safe point.", result.To)
+	case "woken":
+		fmt.Fprintf(&b, "Message delivered to %s; it was idle, so it ran a full turn to answer.", result.To)
+	case "revived":
+		fmt.Fprintf(&b, "Message delivered to %s; it had gone dormant (parked) and was revived to answer.", result.To)
+	case "queued":
+		fmt.Fprintf(&b, "Message queued for %s. It is idle and will see this on its own next turn; no reply is available yet.", result.To)
+	default:
+		fmt.Fprintf(&b, "Message delivered to %s.", result.To)
+	}
+	if result.Reply != "" {
+		fmt.Fprintf(&b, "\n\nReply from %s: %s", result.To, truncateReply(result.Reply, 500))
+	}
+	return b.String()
+}
+
+func formatBroadcastResults(results []IrcSendResult) string {
+	if len(results) == 0 {
+		return "No reachable peers found."
+	}
+	var delivered, failed []string
 	var replies []IrcReply
-	var failed []string
-
-	responder := getIrcResponder()
-
-	for _, target := range targets {
-		// messageID exists purely for log correlation right now -- there is
-		// no persisted IRCMessage envelope yet (that lands with the message
-		// bus in docs/refactor-irc.md's phase 1). It still lets "sent" and
-		// "delivered/failed" log lines for the same send be joined.
-		messageID := uuid.New().String()[:8]
-		deliveredMsg := fmt.Sprintf("[IRC `%s` → you]\n\n%s", selfID, message)
-		slog.Debug("IRC message send started",
-			"message_id", messageID, "from", selfID, "to", target.ID, "await_reply", awaitReply)
-
-		if awaitReply && responder != nil {
-			start := time.Now()
-			replyText, err := responder(ctx, selfID, target.ID, deliveredMsg)
-			elapsed := time.Since(start)
-			if err != nil {
-				slog.Warn("IRC message delivery failed",
-					"message_id", messageID, "from", selfID, "to", target.ID, "elapsed", elapsed, "error", err)
-				failed = append(failed, fmt.Sprintf("%s: %s", target.ID, err.Error()))
-				continue
-			}
-			slog.Debug("IRC message delivered with reply",
-				"message_id", messageID, "from", selfID, "to", target.ID, "elapsed", elapsed, "reply_chars", len([]rune(replyText)))
-			delivered = append(delivered, target.ID)
-			replies = append(replies, IrcReply{
-				From: target.ID,
-				Text: replyText,
-			})
-		} else {
-			slog.Debug("IRC message delivered without waiting for a reply",
-				"message_id", messageID, "from", selfID, "to", target.ID)
-			delivered = append(delivered, target.ID)
+	for _, r := range results {
+		if r.Outcome == "failed" {
+			failed = append(failed, fmt.Sprintf("%s: %s", r.To, r.Error))
+			continue
+		}
+		delivered = append(delivered, r.To)
+		if r.Reply != "" {
+			replies = append(replies, IrcReply{From: r.To, Text: r.Reply})
 		}
 	}
 
-	var result strings.Builder
+	var b strings.Builder
 	if len(delivered) > 0 {
-		result.WriteString(fmt.Sprintf("Message delivered to %d peer(s): %s", len(delivered), strings.Join(delivered, ", ")))
+		fmt.Fprintf(&b, "Message delivered to %d peer(s): %s", len(delivered), strings.Join(delivered, ", "))
 	}
 	if len(replies) > 0 {
-		result.WriteString("\n\nReplies:")
+		b.WriteString("\n\nReplies:")
 		for _, reply := range replies {
-			result.WriteString(fmt.Sprintf("\n- %s: %s", reply.From, truncateReply(reply.Text, 500)))
+			fmt.Fprintf(&b, "\n- %s: %s", reply.From, truncateReply(reply.Text, 500))
 		}
 	}
 	if len(failed) > 0 {
-		result.WriteString(fmt.Sprintf("\n\nFailed: %s", strings.Join(failed, ", ")))
+		fmt.Fprintf(&b, "\n\nFailed: %s", strings.Join(failed, ", "))
 	}
-
-	return fantasy.NewTextResponse(result.String()), nil
+	if b.Len() == 0 {
+		return "No reachable peers found."
+	}
+	return b.String()
 }
 
 func executeIrcList(registry IrcRegistry, selfID string) (fantasy.ToolResponse, error) {
@@ -197,7 +257,11 @@ func executeIrcList(registry IrcRegistry, selfID string) (fantasy.ToolResponse, 
 			if peer.ParentID != "" {
 				parentInfo = fmt.Sprintf(", parent=%s", peer.ParentID)
 			}
-			result.WriteString(fmt.Sprintf("- `%s` — %s (%s, %s%s)\n", peer.ID, peer.DisplayName, peer.Kind, peer.Status, parentInfo))
+			note := ""
+			if peer.Note != "" {
+				note = fmt.Sprintf(" — %s", peer.Note)
+			}
+			result.WriteString(fmt.Sprintf("- `%s` — %s (%s, %s%s)%s\n", peer.ID, peer.DisplayName, peer.Kind, peer.Status, parentInfo, note))
 		}
 	}
 
@@ -210,21 +274,4 @@ func truncateReply(text string, maxRunes int) string {
 		return text
 	}
 	return string(runes[:maxRunes]) + "…"
-}
-
-var (
-	globalResponder IrcResponder
-	responderMu     sync.RWMutex
-)
-
-func SetIrcResponder(responder IrcResponder) {
-	responderMu.Lock()
-	defer responderMu.Unlock()
-	globalResponder = responder
-}
-
-func getIrcResponder() IrcResponder {
-	responderMu.RLock()
-	defer responderMu.RUnlock()
-	return globalResponder
 }

@@ -12,6 +12,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/toolruntime"
 	"github.com/google/uuid"
 )
 
@@ -99,6 +100,30 @@ func (e *backgroundAgentEntry) ToInfo() BackgroundAgentInfo {
 
 // backgroundAgentRegistry manages the lifecycle of asynchronously running agents.
 // It is safe for concurrent use.
+//
+// Deprecation note (docs/refactor-subagent-continuation.md §7 C4): nameToID/
+// LookupByName/ResolveAddress below are a second, independent name→identity
+// resolution namespace, parallel to AgentRegistry's ID/DisplayName lookup
+// (resolveSubagentRef). They were evaluated for consolidation in this pass
+// and deliberately left separate:
+//
+//   - Background agents (this registry) are never registered in
+//     AgentRegistry at all -- they have no AgentRef, no IRC roster presence,
+//     and no parked/revive state machine. Unifying the two lookups would
+//     first require deciding whether background agents should become
+//     AgentRegistry entries (changing their IRC visibility, a product
+//     decision this refactor does not make) or whether AgentRegistry lookups
+//     should grow a background-agent-aware branch (duplicating logic in the
+//     other direction).
+//   - coordinator.backgroundAgentMessenger already composes the two
+//     correctly at the call site (backgroundAgentRegistry.ResolveAddress
+//     first, AgentRegistry.resolveSubagentRef as fallback), so the
+//     duplication is not causing an addressing bug today -- collapsing it
+//     now would be a scope change with real regression risk (two independent
+//     ID spaces, two independent test suites) for a code-cleanliness gain.
+//
+// Left as two namespaces rather than merged; revisit if background agents
+// ever need IRC/roster visibility, which would force the question anyway.
 type backgroundAgentRegistry struct {
 	mu       sync.RWMutex
 	agents   map[string]*backgroundAgentEntry
@@ -274,7 +299,11 @@ func (r *backgroundAgentRegistry) Enqueue(agentID string, command backgroundAgen
 	r.mu.RUnlock()
 
 	if runner == nil || commands == nil {
-		return 0, fmt.Errorf("background agent %q does not accept follow-up prompts", agentID)
+		// Stop() was called (shutdown-only, see its doc comment) or the
+		// agent was never resumable to begin with. Closest of the four
+		// send_message error categories (docs/refactor-subagent-
+		// continuation.md §7 C7) is "aborted": there is no revive path.
+		return 0, fmt.Errorf("%w: background agent %q does not accept follow-up prompts", toolruntime.ErrAgentAborted, agentID)
 	}
 
 	depth := len(commands) + 1
@@ -282,7 +311,7 @@ func (r *backgroundAgentRegistry) Enqueue(agentID string, command backgroundAgen
 	case commands <- command:
 		return depth, nil
 	default:
-		return 0, fmt.Errorf("background agent %q queue is full", agentID)
+		return 0, fmt.Errorf("%w: background agent %q queue is full", toolruntime.ErrAgentQueueFull, agentID)
 	}
 }
 
@@ -355,7 +384,21 @@ func (r *backgroundAgentRegistry) processQueuedCommands(agentID string, entry *b
 	}
 }
 
-// Stop terminates a background agent's command processor goroutine.
+// Stop terminates a background agent's command processor goroutine and
+// clears its runner, permanently disabling follow-up prompts (Enqueue
+// returns ErrAgentAborted afterward -- see Enqueue's doc comment).
+//
+// This is deliberately irreversible and is meant for coordinator shutdown
+// only, not for the "agent finished, may still receive follow-ups" case the
+// AgentRegistry-based state machine now models with AgentStatusParked (see
+// docs/refactor-subagent-continuation.md §7 C5). Introducing an equivalent
+// parked state here would require capturing enough of the runner's closure
+// state to reconstruct it later, which backgroundAgentEntry does not
+// currently retain (unlike AgentRef, which saves ProfileName/Role/Isolation
+// precisely so resumeSubagent can rebuild a SessionAgent from them). Callers
+// that need resumable subagents should go through the AgentRegistry/agent
+// tool path (send_message's AgentRegistry fallback, reached via
+// coordinator.backgroundAgentMessenger) rather than backgroundAgentRegistry.
 func (r *backgroundAgentRegistry) Stop(agentID string) {
 	r.mu.Lock()
 	if entry, ok := r.agents[agentID]; ok && entry.stopChan != nil {

@@ -652,6 +652,129 @@ func TestSteerMessageIsInjectedIntoActiveRun(t *testing.T) {
 	require.Equal(t, 0, sessionAgent.QueuedPrompts(sess.ID))
 }
 
+// TestEnqueueIRC_DoesNotSignalSteering covers docs/refactor-irc.md §2.2(b):
+// unlike EnqueueSteer, a peer message must not cancel the session's
+// cooperative steering signal -- a running tool (e.g. foreground bash) must
+// not be told to yield just because a peer sent something. Contrasted
+// directly against EnqueueSteer, which does cancel it, in the same test so a
+// regression in either direction fails loudly.
+func TestEnqueueIRC_DoesNotSignalSteering(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := newQueueControlTestAgent(env)
+
+	sess, err := env.sessions.Create(t.Context(), "irc no signal")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a.steeringSignals.Set(sess.ID, cancel)
+	a.activeRequests.Set(sess.ID, func() {}) // marks the session busy
+
+	busy := a.EnqueueIRC(sess.ID, SessionAgentCall{Prompt: "peer message", PeerSteering: true, PeerFrom: "0-Main::peer-1"})
+	require.True(t, busy)
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("EnqueueIRC must not cancel the session's steering signal")
+	default:
+	}
+	require.Len(t, a.queuedSteeringSnapshot(sess.ID), 1, "the message must still land on the steering queue")
+
+	// Contrast: a real user steer does cancel the signal.
+	require.True(t, a.EnqueueSteer(sess.ID, SessionAgentCall{Prompt: "user steer"}))
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("EnqueueSteer must still cancel the steering signal (regression guard for the contrast itself)")
+	}
+}
+
+// TestEnqueueIRC_QueuesOnIdleSession covers the other half of EnqueueIRC's
+// contract with EnqueueSteer: EnqueueSteer refuses to enqueue for an idle
+// session (returns false, no-op), but EnqueueIRC must accept it -- this is
+// what makes docs/refactor-irc.md §4.1(b)'s "idle primary agent: queue only"
+// behavior fall out of the existing queue mechanics instead of needing a
+// second, parallel pending-message store (§7).
+func TestEnqueueIRC_QueuesOnIdleSession(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	a := newQueueControlTestAgent(env)
+
+	sess, err := env.sessions.Create(t.Context(), "irc idle queue")
+	require.NoError(t, err)
+
+	require.False(t, a.EnqueueSteer(sess.ID, SessionAgentCall{Prompt: "should not enqueue"}),
+		"EnqueueSteer must refuse an idle session")
+	require.Empty(t, a.queuedSteeringSnapshot(sess.ID))
+
+	busy := a.EnqueueIRC(sess.ID, SessionAgentCall{Prompt: "peer message to idle session", PeerSteering: true})
+	require.False(t, busy, "the session was idle at enqueue time")
+	require.Len(t, a.queuedSteeringSnapshot(sess.ID), 1, "EnqueueIRC must still enqueue for an idle session")
+}
+
+// TestPeerSteerMessageIsInjectedWithoutSupersedeWording is the peer-message
+// counterpart of TestSteerMessageIsInjectedIntoActiveRun, guarding
+// docs/refactor-irc.md §2.2(a): a peer message injected at the same drain
+// point must not read as something that supersedes the model's current
+// task, unlike a real user steer.
+func TestPeerSteerMessageIsInjectedWithoutSupersedeWording(t *testing.T) {
+	t.Parallel()
+
+	env := testEnv(t)
+	testAgent := &steerCaptureTestAgent{t: t}
+	sessionAgent := newQueuePrepareTestSessionAgent(env, testAgent)
+
+	sess, err := env.sessions.Create(t.Context(), "peer steer inject")
+	require.NoError(t, err)
+	_, err = env.messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "seed"},
+		},
+	})
+	require.NoError(t, err)
+
+	testAgent.afterFirstPrepare = func() {
+		require.True(t, sessionAgent.EnqueueIRC(sess.ID, SessionAgentCall{
+			SessionID:     sess.ID,
+			Prompt:        "are you touching config.go?",
+			PeerSteering:  true,
+			PeerFrom:      "0-Main::peer-1",
+			PeerMessageID: "msg-42",
+		}))
+	}
+
+	_, err = sessionAgent.Run(t.Context(), SessionAgentCall{
+		SessionID:       sess.ID,
+		Prompt:          "run now",
+		MaxOutputTokens: 1000,
+	})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, testAgent.secondPrepareMsgs)
+	var userText strings.Builder
+	for _, m := range testAgent.secondPrepareMsgs {
+		if m.Role != fantasy.MessageRoleUser {
+			continue
+		}
+		for _, part := range m.Content {
+			if tp, ok := part.(fantasy.TextPart); ok {
+				userText.WriteString(tp.Text)
+			}
+		}
+	}
+	text := userText.String()
+	require.Contains(t, text, "are you touching config.go?")
+	require.Contains(t, text, "<peer_message>")
+	require.Contains(t, text, "0-Main::peer-1")
+	require.Contains(t, text, "msg-42")
+	require.NotContains(t, text, "supersedes",
+		"a peer message must not read as overriding the model's current task priorities")
+	require.NotContains(t, text, "<user_query>", "a peer message must not be framed as a user query")
+}
+
 func TestFlushStrandedSteeringMessagesPromotesToQueueFront(t *testing.T) {
 	t.Parallel()
 

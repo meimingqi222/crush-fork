@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -50,10 +51,10 @@ func NewSendMessageTool(service mailbox.Service) fantasy.AgentTool {
 				}
 				disposition, found, err := messenger(ctx, agentID, message)
 				if err != nil {
-					return fantasy.NewTextResponse(fmt.Sprintf("Failed: %s", strings.TrimSpace(err.Error()))), nil
+					return fantasy.NewTextResponse(formatMessengerError(agentID, err)), nil
 				}
 				if !found {
-					return fantasy.NewTextResponse(fmt.Sprintf("Failed: Background agent %q not found. Please ensure that the agent ID or name is correct and currently active.", agentID)), nil
+					return fantasy.NewTextResponse(fmt.Sprintf("Failed: agent %q not found (unknown ID or name). Please ensure that the agent ID or name is correct and currently active.", agentID)), nil
 				}
 				switch disposition {
 				case "queued":
@@ -89,4 +90,25 @@ func NewSendMessageTool(service mailbox.Service) fantasy.AgentTool {
 			return fantasy.NewTextResponse(fmt.Sprintf("Message sent to agent %s in mailbox %s.", envelope.TargetAgentID, envelope.MailboxID)), nil
 		},
 	)
+}
+
+// formatMessengerError classifies a BackgroundAgentMessenger error into one
+// of four categories (docs/refactor-subagent-continuation.md §7 C7:
+// unknown/ambiguous/aborted/queue-full -- "unknown" is handled separately by
+// the found=false branch, not an error) using the toolruntime sentinels the
+// messenger wraps its errors with, rather than string-matching agent-package
+// error text this package cannot import. Errors that don't match any
+// sentinel (e.g. a provider failure surfaced during a synchronous revive)
+// fall through to the raw message so nothing is silently swallowed.
+func formatMessengerError(agentID string, err error) string {
+	switch {
+	case errors.Is(err, toolruntime.ErrAgentAmbiguous):
+		return fmt.Sprintf("Failed: %s", strings.TrimSpace(err.Error()))
+	case errors.Is(err, toolruntime.ErrAgentAborted):
+		return fmt.Sprintf("Failed: agent %q failed or was stopped and cannot be resumed; spawn a new one.", agentID)
+	case errors.Is(err, toolruntime.ErrAgentQueueFull):
+		return fmt.Sprintf("Failed: agent %q's follow-up queue is full; wait for it to drain before sending more.", agentID)
+	default:
+		return fmt.Sprintf("Failed: %s", strings.TrimSpace(err.Error()))
+	}
 }

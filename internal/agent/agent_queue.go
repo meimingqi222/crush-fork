@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/sessionevent"
@@ -52,6 +54,33 @@ func (a *sessionAgent) EnqueueSteer(sessionID string, call SessionAgentCall) boo
 	// cooperative tools (e.g. foreground bash) can yield at a safe point.
 	a.signalSteering(sessionID)
 	return true
+}
+
+// EnqueueIRC rides the same steering queue as EnqueueSteer but, deliberately,
+// does neither of the two things EnqueueSteer does for a user redirect
+// (docs/refactor-irc.md §2.2):
+//
+//   - it does not call signalSteering, so a peer message never preempts a
+//     running cooperative tool the way a user steer does -- it waits for the
+//     next natural PrepareStep drain point;
+//   - it does not require the session to be busy. An idle session's queued
+//     message simply sits in the steering queue until the next time
+//     PrepareStep runs for that session -- which happens for busy sessions'
+//     subsequent steps too, but for an idle session only happens when
+//     something else starts a new turn (the user's next prompt for the
+//     primary agent; resumeSubagent's revive turn for a subagent). This is
+//     exactly the "queue only, don't start a turn" behavior
+//     docs/refactor-irc.md §4.1(b) requires for an idle primary agent, and
+//     it falls out of the existing queue mechanics for free rather than
+//     needing a second, parallel pending-message store (§7's "avoid a
+//     second queue" constraint).
+//
+// Returns whether the session was busy at enqueue time.
+func (a *sessionAgent) EnqueueIRC(sessionID string, call SessionAgentCall) bool {
+	call.SessionID = sessionID
+	call.Steering = true
+	a.enqueueSteer(sessionID, call)
+	return a.IsSessionBusy(sessionID)
 }
 
 // QueuePrompt enqueues call for sessionID's message queue and reports true,
@@ -430,4 +459,30 @@ func formatSteeringPrompt(prompt string) string {
 		prompt = string(runes[:steeringMaxPromptChars-1]) + "…"
 	}
 	return "The user sent a message while you were working. Treat it as the active instruction; it supersedes earlier directions if they conflict.\n<user_query>\n" + prompt + "\n</user_query>"
+}
+
+// formatPeerSteeringPrompt wraps a mid-turn message from another agent (IRC)
+// for injection at the same drain point formatSteeringPrompt uses, but with
+// deliberately different framing (docs/refactor-irc.md §2.2(a)): a peer
+// message is an incoming notification, not an instruction from the entity
+// this agent answers to, so it must not read as something that supersedes
+// the current task the way a user steer does. It also tells the model how
+// to reply in its own normal turn (via the irc tool's reply_to), since no
+// automatic reply is generated on this path -- see docs/refactor-irc.md §6.
+func formatPeerSteeringPrompt(prompt, from, messageID string) string {
+	runes := []rune(prompt)
+	if len(runes) > steeringMaxPromptChars {
+		prompt = string(runes[:steeringMaxPromptChars-1]) + "…"
+	}
+	fromLabel := strings.TrimSpace(from)
+	if fromLabel == "" {
+		fromLabel = "an unknown peer"
+	}
+	replyHint := ""
+	if strings.TrimSpace(messageID) != "" {
+		replyHint = fmt.Sprintf(" If a reply is warranted, call `irc` with op=send, to=%q, and reply_to=%q during your normal turn.", fromLabel, messageID)
+	} else {
+		replyHint = fmt.Sprintf(" If a reply is warranted, call `irc` with op=send and to=%q during your normal turn.", fromLabel)
+	}
+	return "You have an incoming message from peer agent `" + fromLabel + "`. This does not change your current task priorities -- keep working on what you were doing." + replyHint + "\n<peer_message>\n" + prompt + "\n</peer_message>"
 }

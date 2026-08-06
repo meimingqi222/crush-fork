@@ -55,11 +55,14 @@ func TestAgentRegistry_ListVisibleTo(t *testing.T) {
 	r.Register(AgentRef{ID: "main", DisplayName: "Main", Kind: AgentKindMain, Status: AgentStatusRunning})
 	r.Register(AgentRef{ID: "task-1", DisplayName: "Task 1", Kind: AgentKindSub, Status: AgentStatusRunning})
 	r.Register(AgentRef{ID: "task-2", DisplayName: "Task 2", Kind: AgentKindSub, Status: AgentStatusIdle})
-	r.Register(AgentRef{ID: "task-3", DisplayName: "Task 3", Kind: AgentKindSub, Status: AgentStatusCompleted})
+	r.Register(AgentRef{ID: "task-3", DisplayName: "Task 3", Kind: AgentKindSub, Status: AgentStatusParked})
 	r.Register(AgentRef{ID: "task-4", DisplayName: "Task 4", Kind: AgentKindSub, Status: AgentStatusAborted})
 
+	// Running, idle, and parked are all visible (docs/refactor-subagent-
+	// continuation.md §4 phase 2 item 1: parked peers stay addressable, only
+	// aborted is excluded).
 	visible := r.ListVisibleTo("main")
-	require.Len(t, visible, 2)
+	require.Len(t, visible, 3)
 
 	ids := make(map[string]bool)
 	for _, ref := range visible {
@@ -67,6 +70,8 @@ func TestAgentRegistry_ListVisibleTo(t *testing.T) {
 	}
 	require.True(t, ids["task-1"])
 	require.True(t, ids["task-2"])
+	require.True(t, ids["task-3"])
+	require.False(t, ids["task-4"])
 }
 
 func TestAgentRegistry_SetStatus(t *testing.T) {
@@ -76,11 +81,11 @@ func TestAgentRegistry_SetStatus(t *testing.T) {
 
 	r.Register(AgentRef{ID: "task-1", DisplayName: "Task 1", Kind: AgentKindSub, Status: AgentStatusRunning})
 
-	r.SetStatus("task-1", AgentStatusCompleted)
+	r.SetStatus("task-1", AgentStatusAborted)
 
 	got, ok := r.Get("task-1")
 	require.True(t, ok)
-	require.Equal(t, AgentStatusCompleted, got.Status)
+	require.Equal(t, AgentStatusAborted, got.Status)
 }
 
 // TestAgentRegistry_EffectiveStatus_ReflectsBusyAgent guards against the
@@ -117,20 +122,17 @@ func TestAgentRegistry_EffectiveStatus_ReflectsBusyAgent(t *testing.T) {
 }
 
 // TestAgentRegistry_EffectiveStatus_LeavesTerminalStatusesAlone ensures the
-// derivation never resurrects a finished agent: Aborted/Completed must be
-// returned as-is even if a stale Agent reference reports busy.
+// derivation never resurrects a finished agent: Aborted must be returned
+// as-is even if a stale Agent reference reports busy. (Parked has its own
+// coverage in TestAgentRegistry_EffectiveStatus_ParkedStaysParked; there is
+// no AgentStatusCompleted -- see its removal note in agent_registry.go.)
 func TestAgentRegistry_EffectiveStatus_LeavesTerminalStatusesAlone(t *testing.T) {
 	t.Parallel()
 
 	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
-	r.Register(AgentRef{ID: "done", DisplayName: "Done", Kind: AgentKindSub, Status: AgentStatusCompleted, Agent: &mockSessionAgent{busy: true}})
 	r.Register(AgentRef{ID: "dead", DisplayName: "Dead", Kind: AgentKindSub, Status: AgentStatusAborted, Agent: &mockSessionAgent{busy: true}})
 
-	status, ok := r.EffectiveStatus("done")
-	require.True(t, ok)
-	require.Equal(t, AgentStatusCompleted, status)
-
-	status, ok = r.EffectiveStatus("dead")
+	status, ok := r.EffectiveStatus("dead")
 	require.True(t, ok)
 	require.Equal(t, AgentStatusAborted, status)
 }
@@ -171,7 +173,7 @@ func TestAgentRegistry_AsIrcRegistry(t *testing.T) {
 
 	r.Register(AgentRef{ID: "0-Main", DisplayName: "Main", Kind: AgentKindMain, Status: AgentStatusRunning})
 	r.Register(AgentRef{ID: "0-Main::t1", DisplayName: "Explore", Kind: AgentKindSub, Status: AgentStatusRunning, ParentID: "0-Main"})
-	r.Register(AgentRef{ID: "0-Main::t2", DisplayName: "Fix", Kind: AgentKindSub, Status: AgentStatusCompleted, ParentID: "0-Main"})
+	r.Register(AgentRef{ID: "0-Main::t2", DisplayName: "Fix", Kind: AgentKindSub, Status: AgentStatusParked, ParentID: "0-Main"})
 
 	irc := r.AsIrcRegistry()
 
@@ -189,9 +191,17 @@ func TestAgentRegistry_AsIrcRegistry(t *testing.T) {
 	_, ok = irc.Get("nonexistent")
 	require.False(t, ok)
 
+	// Both the running and the parked subagent are visible; parked stays
+	// addressable (docs/refactor-subagent-continuation.md §4 phase 2 item
+	// 1) and its Note flags the revive.
 	visible := irc.ListVisibleTo("0-Main")
-	require.Len(t, visible, 1)
-	require.Equal(t, "0-Main::t1", visible[0].ID)
+	require.Len(t, visible, 2)
+	ids := make(map[string]string)
+	for _, p := range visible {
+		ids[p.ID] = p.Status
+	}
+	require.Equal(t, "running", ids["0-Main::t1"])
+	require.Equal(t, "parked", ids["0-Main::t2"])
 }
 
 func TestAgentRegistry_OnChange(t *testing.T) {
@@ -205,7 +215,7 @@ func TestAgentRegistry_OnChange(t *testing.T) {
 		r.OnChange(func() { changes++ })
 
 		r.Register(AgentRef{ID: "a", DisplayName: "A", Kind: AgentKindSub, Status: AgentStatusRunning})
-		r.SetStatus("a", AgentStatusCompleted)
+		r.SetStatus("a", AgentStatusAborted)
 
 		require.GreaterOrEqual(t, changes, int32(2))
 	})
@@ -269,15 +279,16 @@ func TestRenderIrcPeerRoster(t *testing.T) {
 		require.NotContains(t, result, "sub-1")
 	})
 
-	t.Run("excludes completed and aborted peers", func(t *testing.T) {
+	t.Run("excludes aborted peers but includes parked with a revive hint", func(t *testing.T) {
 		t.Parallel()
 		r := &AgentRegistry{refs: make(map[string]*AgentRef)}
 		r.Register(AgentRef{ID: "main", DisplayName: "Main", Kind: AgentKindMain, Status: AgentStatusRunning})
-		r.Register(AgentRef{ID: "done", DisplayName: "Done", Kind: AgentKindSub, Status: AgentStatusCompleted})
+		r.Register(AgentRef{ID: "dormant", DisplayName: "Dormant", Kind: AgentKindSub, Status: AgentStatusParked})
 		r.Register(AgentRef{ID: "dead", DisplayName: "Dead", Kind: AgentKindSub, Status: AgentStatusAborted})
 
 		result := renderIrcPeerRoster(r, "main")
-		require.NotContains(t, result, "Done")
+		require.Contains(t, result, "Dormant")
+		require.Contains(t, result, "message revives")
 		require.NotContains(t, result, "Dead")
 	})
 }
@@ -316,13 +327,13 @@ func TestAgentRegistry_EffectiveStatus_ParkedStaysParked(t *testing.T) {
 	require.Equal(t, AgentStatusParked, status)
 }
 
-// TestAgentRegistry_ListVisibleTo_ExcludesParked is the second half of test
-// 7: phase 1 keeps parked subagents out of the IRC-visible roster (phase 2
-// is what makes them addressable there -- see
-// docs/refactor-subagent-continuation.md §4 phase 2 item 1). This also
-// guards against a panic: ListVisibleTo/snapshotVisibleTo must not try to
-// call IsBusy() on a parked ref's (now nil) Agent.
-func TestAgentRegistry_ListVisibleTo_ExcludesParked(t *testing.T) {
+// TestAgentRegistry_ListVisibleTo_IncludesParked is the second half of test
+// 7, updated for docs/refactor-subagent-continuation.md §4 phase 2 item 1:
+// parked subagents are now addressable in the IRC-visible roster (a message
+// revives them), unlike phase 1, which kept them hidden. This also guards
+// against a panic: ListVisibleTo/snapshotVisibleTo must not try to call
+// IsBusy() on a parked ref's (now nil) Agent.
+func TestAgentRegistry_ListVisibleTo_IncludesParked(t *testing.T) {
 	t.Parallel()
 
 	r := &AgentRegistry{refs: make(map[string]*AgentRef)}
@@ -337,7 +348,7 @@ func TestAgentRegistry_ListVisibleTo_ExcludesParked(t *testing.T) {
 		ids[ref.ID] = true
 	}
 	require.True(t, ids["sub-idle"])
-	require.False(t, ids["sub-parked"], "parked subagents must stay out of the phase-1 roster")
+	require.True(t, ids["sub-parked"], "parked subagents must stay addressable in the roster")
 
 	snaps := r.snapshotVisibleTo("main")
 	snapIDs := make(map[string]bool)
@@ -345,7 +356,7 @@ func TestAgentRegistry_ListVisibleTo_ExcludesParked(t *testing.T) {
 		snapIDs[snap.ID] = true
 	}
 	require.True(t, snapIDs["sub-idle"])
-	require.False(t, snapIDs["sub-parked"])
+	require.True(t, snapIDs["sub-parked"])
 }
 
 // TestAgentRegistry_IrcAdapterStatusIsRaceFree guards the reason the IRC

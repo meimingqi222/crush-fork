@@ -57,14 +57,60 @@ the parent LLM's responsibility.
 `completed`, `completed_with_warnings`, `failed`, `canceled`, `blocked`.
 Cancellation propagates via `ctx.Done()`.
 
-### Keep-alive / lifecycle manager
+### Status machine and keep-alive / lifecycle manager
 
-On a clean (non-failed) completion the child `SessionAgent` is **kept live**
-for a warm-revive window via `subagentLifecycleManager` (`subagent_lifecycle.go`):
-`Adopt(childID, agentID, TTL)` arms a 5-minute (`defaultSubagentAdoptTTL`)
-timer; a follow-up `agent` call targeting the same `ExistingSessionID` can
-warm-revive instead of rebuilding from disk. After the TTL the entry is
-`Park`ed. `Revoke` cancels a pending timer early (used when re-spawning).
+`AgentRegistry` (`agent_registry.go`) is the single source of truth for a
+subagent's identity and status: `running` → `idle` (success) or `aborted`
+(failure/cancellation, terminal, no revive path) → `parked` (after the
+keep-alive TTL). There is no `completed` status — a successful subagent's
+terminal path is `idle`, later demoted to `parked`; it never becomes a
+separate "completed" state. `parked` and `aborted` entries are **not**
+removed from the registry: they stay addressable/diagnosable until their
+parent session is deleted (`removeSubagentsForParentSession`).
+
+Follow-up work reaches a subagent by **messaging it**, not by re-invoking the
+`agent` tool: `send_message`/`irc` resolve the target against
+`AgentRegistry` (`coordinator.resolveSubagentRef`, exact ID or unique
+DisplayName; a DisplayName collision is a hard error listing candidates, not
+"newest wins") and dispatch by status:
+
+- **`running`**: the follow-up is enqueued on the subagent's own steering
+  queue (`SessionAgent.QueuePrompt`/`EnqueueIRC`) and consumed once the
+  current turn ends or at its next safe drain point — never run as a second
+  concurrent turn against the same child session.
+- **`idle`** (warm revive): `subagentLifecycleManager` (`subagent_lifecycle.go`)
+  keeps the child `SessionAgent` instance live in `childSessionAgents` for a
+  5-minute (`defaultSubagentAdoptTTL`) window after `Adopt(childID, agentID,
+  TTL)` is called on completion. Within that window,
+  `coordinator.resumeSubagent` reuses the live instance directly.
+- **`parked`** (cold revive): once the TTL fires, `Park` releases the
+  in-memory `SessionAgent` (`childSessionAgents.Delete`) and demotes the
+  registry entry to `AgentStatusParked` via `AgentRegistry.SetParked` --
+  it does **not** unregister the entry. `resumeSubagent` rebuilds a fresh
+  `SessionAgent` from the ref's saved spawn contract (`ProfileName`, `Role`,
+  `ParentSessionID`, resolved `Isolation`) through the same
+  `buildSubAgentForType` construction path spawn uses, then loads the
+  persisted child session history from SQLite. Both revive tiers set
+  `ExistingSessionID`, which skips the handoff-prefix rebuild (the history is
+  already in the session) and feed into `runSubAgentDirect` exactly like a
+  fresh spawn.
+- **`aborted`**: `resumeSubagent`/`resolveSubagentRef`'s callers return an
+  explicit "cannot be resumed; spawn a new one" error -- never a silent
+  no-op or a fabricated response.
+
+`Revoke` cancels a pending TTL timer early (used when re-spawning into the
+same child session). Worktree isolation is always downgraded to a shared
+workspace on **any** revive (warm or cold): `runSubAgentDirect` merges back
+and removes a worktree when its first run ends, long before a keep-alive
+window or park could apply, so a revive that tried to keep `isolation:
+worktree` would silently create a second, unrelated worktree.
+
+Parked (and idle) subagents are also addressable over `irc`: they appear in
+`irc list`/the peer roster with a "message revives" note, and a direct `irc
+send` to one goes through the same `resumeSubagent` cold-revive path. A
+broadcast (`to: "all"`) does not revive parked peers -- only a direct address
+does, to avoid a thundering herd of cold revives from one broadcast. See
+`docs/refactor-irc.md` for the message-bus layer built on top of this.
 
 ## Isolation
 

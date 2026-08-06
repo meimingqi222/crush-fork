@@ -2,6 +2,7 @@ package toolruntime
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -200,6 +201,25 @@ func BackgroundAgentLookupFromContext(ctx context.Context) BackgroundAgentLookup
 	lookup, _ := ctx.Value(backgroundAgentLookupKey{}).(BackgroundAgentLookup)
 	return lookup
 }
+
+// Sentinel errors a BackgroundAgentMessenger implementation can wrap its
+// returned error with so send_message (in the tools package, which cannot
+// import the agent package that implements the messenger) can classify a
+// delivery failure without string-matching agent-package error text. See
+// docs/refactor-subagent-continuation.md §7 C7: the messenger's error
+// branches collapse to four categories -- unknown (found=false, no error
+// needed), ambiguous, aborted, and queue-full.
+var (
+	// ErrAgentAmbiguous indicates a DisplayName matched more than one
+	// subagent; the wrapped error's message lists the candidate IDs.
+	ErrAgentAmbiguous = errors.New("ambiguous agent address")
+	// ErrAgentAborted indicates the target agent failed or was canceled and
+	// has no revive path.
+	ErrAgentAborted = errors.New("agent aborted, cannot be resumed")
+	// ErrAgentQueueFull indicates the target agent's follow-up queue is at
+	// capacity.
+	ErrAgentQueueFull = errors.New("agent queue is full")
+)
 
 type BackgroundAgentMessenger func(ctx context.Context, agentID, prompt string) (disposition string, found bool, err error)
 
