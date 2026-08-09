@@ -351,7 +351,7 @@ func TestEnforceStepToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFullOut
 	assert.Contains(t, truncated.Content, "Step tool-result budget exhausted")
 	assert.Contains(t, truncated.Content, "archive://")
 	assert.Contains(t, truncated.Content, "The full output was saved")
-	assert.Contains(t, truncated.Content, "Use the read tool with offset/limit or grep")
+	assert.Contains(t, truncated.Content, "Use the read tool with offset/limit, or the grep tool with path=")
 	assert.True(t, strings.HasPrefix(truncated.Content, strings.Repeat("tail", 500)))
 	assert.NotContains(t, truncated.Content, strings.Repeat("head", 20))
 	assert.Equal(t, contextWindowStepToolResultCharsLimit, used)
@@ -382,7 +382,7 @@ func TestEnforceMessageToolResultBudget_PreviewsWhenBudgetExhausted_PersistsFull
 	assert.Contains(t, budgeted[1].Content, "Message tool-result budget exhausted")
 	assert.Contains(t, budgeted[1].Content, "archive://")
 	assert.Contains(t, budgeted[1].Content, "The full output was saved")
-	assert.Contains(t, budgeted[1].Content, "Use the read tool with offset/limit or grep")
+	assert.Contains(t, budgeted[1].Content, "Use the read tool with offset/limit, or the grep tool with path=")
 	assert.True(t, strings.HasPrefix(budgeted[1].Content, strings.Repeat("tail", 500)))
 	assert.NotContains(t, budgeted[1].Content, strings.Repeat("head", 20))
 

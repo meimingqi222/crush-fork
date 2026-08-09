@@ -139,7 +139,7 @@ func (c *coordinator) registerAgentTools(ctx context.Context, agent config.Agent
 		editTool,
 		agenttools.NewReadToolWithArchiveDir(c.lspManager, c.permissions, c.filetracker, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls, nil, archiveDirectory(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()), discoveredSkills, c.cfg.Config().Options.SkillsPaths...),
 		agenttools.NewGlobTool(c.cfg.WorkingDir()),
-		agenttools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
+		agenttools.NewGrepToolWithArchiveDir(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep, archiveDirectory(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir())),
 		agenttools.NewSourcegraphTool(nil),
 		agenttools.NewCrushTool(c.cfg, c.lspManager, c.memoryEngine(), filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")),
 		agenttools.NewGoalTool(c.sessions, c.goalRuntime),

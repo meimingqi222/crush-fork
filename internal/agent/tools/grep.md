@@ -60,3 +60,10 @@ When literal_text=false (supports standard regex):
 - Check if results truncated and refine search pattern if needed
 - Use literal_text=true for exact text with special characters (dots, parentheses, etc.)
 </tips>
+
+<archive_search>
+- Set path to an archive:// URI (e.g. archive://<id>) to search a single archived oversized read result instead of a directory
+- Selector suffixes like archive://<id>:raw are accepted and ignored
+- Matches are reported under the archive URI so you can follow up with read for more context
+- Intended for locating text inside large tool-result archives without re-reading them
+</archive_search>

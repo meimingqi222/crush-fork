@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -575,4 +576,91 @@ func TestGrepSortingByModTime(t *testing.T) {
 	// Newer file should come first (sorted by mod time descending)
 	require.Equal(t, file2, matches[0].path, "newer file should be first")
 	require.Equal(t, file1, matches[1].path, "older file should be second")
+}
+
+func TestRunArchiveGrepSearch(t *testing.T) {
+	t.Parallel()
+
+	archiveDir := t.TempDir()
+	archiveID := "aabbccddeeff00112233445566778899"
+	require.NoError(t, os.WriteFile(filepath.Join(archiveDir, archiveID+".txt"), []byte("alpha\nbeta\ngamma\nalpha again\n"), 0o644))
+
+	t.Run("matches reported under archive URI", func(t *testing.T) {
+		result, err := runArchiveGrepSearch(t.Context(), GrepParams{Pattern: "alpha", Path: "archive://aabbccddeeff"}, archiveDir, 100, 0, 0)
+		require.NoError(t, err)
+		require.Len(t, result.matches, 2)
+		for _, m := range result.matches {
+			require.Equal(t, "archive://aabbccddeeff", m.path)
+		}
+		// NumberOfMatches is populated by the tool handler, not by
+		// runArchiveGrepSearch; assert the raw match count here.
+		require.Equal(t, 2, len(result.matches))
+	})
+
+	t.Run("literal text escaped", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(archiveDir, archiveID+".txt"), []byte("a.b\naxb\n"), 0o644))
+		result, err := runArchiveGrepSearch(t.Context(), GrepParams{Pattern: "a.b", LiteralText: true, Path: "archive://aabbccddeeff"}, archiveDir, 100, 0, 0)
+		require.NoError(t, err)
+		// Literal "a.b" (with dot escaped) should only match line 1.
+		require.Len(t, result.matches, 1)
+		require.Equal(t, 1, result.matches[0].lineNum)
+	})
+
+	t.Run("selector suffix ignored", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(archiveDir, archiveID+".txt"), []byte("needle in haystack\n"), 0o644))
+		result, err := runArchiveGrepSearch(t.Context(), GrepParams{Pattern: "needle", Path: "archive://aabbccddeeff:raw"}, archiveDir, 100, 0, 0)
+		require.NoError(t, err)
+		require.Len(t, result.matches, 1)
+		require.Equal(t, "archive://aabbccddeeff", result.matches[0].path)
+	})
+
+	t.Run("truncation applies", func(t *testing.T) {
+		var buf strings.Builder
+		for i := 0; i < 5; i++ {
+			buf.WriteString("match line\n")
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(archiveDir, archiveID+".txt"), []byte(buf.String()), 0o644))
+		result, err := runArchiveGrepSearch(t.Context(), GrepParams{Pattern: "match", Path: "archive://aabbccddeeff"}, archiveDir, 3, 0, 0)
+		require.NoError(t, err)
+		require.Len(t, result.matches, 3)
+		require.True(t, result.truncated)
+	})
+
+	t.Run("unconfigured archive dir", func(t *testing.T) {
+		_, err := runArchiveGrepSearch(t.Context(), GrepParams{Pattern: "x", Path: "archive://aabbccddeeff"}, "", 100, 0, 0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not configured")
+	})
+
+	t.Run("bad archive reference", func(t *testing.T) {
+		_, err := runArchiveGrepSearch(t.Context(), GrepParams{Pattern: "x", Path: "archive://nothex"}, archiveDir, 100, 0, 0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid archive reference")
+	})
+}
+
+func TestGrepToolArchiveSearchReportsURIMetadata(t *testing.T) {
+	t.Parallel()
+
+	fallbackDir := t.TempDir()
+	archiveDir := t.TempDir()
+	archiveID := "aabbccddeeff00112233445566778899"
+	require.NoError(t, os.WriteFile(filepath.Join(archiveDir, archiveID+".txt"), []byte("needle in haystack\n"), 0o644))
+
+	tool := NewGrepToolWithArchiveDir(fallbackDir, config.ToolGrep{}, archiveDir)
+	ctx := context.WithValue(t.Context(), WorkingDirContextKey, fallbackDir)
+	input, err := json.Marshal(GrepParams{Pattern: "needle", Path: "archive://aabbccddeeff:raw"})
+	require.NoError(t, err)
+	response, err := tool.Run(ctx, fantasy.ToolCall{ID: "grep-archive-meta", Name: GrepToolName, Input: string(input)})
+	require.NoError(t, err)
+	require.False(t, response.IsError)
+
+	// Metadata must report the archive URI itself, not a bogus
+	// `workingDir/archive:/...` filesystem join.
+	var metadata GrepResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(response.Metadata), &metadata))
+	require.Equal(t, "archive://aabbccddeeff", metadata.ResolvedPath)
+	require.Equal(t, "archive://aabbccddeeff", metadata.DisplayPath)
+	require.Equal(t, "archive://aabbccddeeff", metadata.InputPath)
+	require.Contains(t, response.Content, "Found 1 matches")
 }

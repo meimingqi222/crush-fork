@@ -128,6 +128,15 @@ func escapeRegexPattern(pattern string) string {
 }
 
 func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
+	return NewGrepToolWithArchiveDir(workingDir, config, "")
+}
+
+// NewGrepToolWithArchiveDir creates a grep tool that can also search
+// archive:// URIs (tool-result archives written by read). When params.Path
+// starts with archive://, the URI is resolved to the underlying archive file
+// and searched as a single file; matches are reported under the archive URI so
+// the model can follow up with read.
+func NewGrepToolWithArchiveDir(workingDir string, config config.ToolGrep, archiveDir string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		GrepToolName,
 		string(grepDescription),
@@ -157,16 +166,41 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 			if ctxAfter > 5 {
 				ctxAfter = 5
 			}
-			result, err := runGrepSearch(searchCtx, params, toolPath.AbsolutePath, 100, ctxBefore, ctxAfter)
+			var result grepExecutionResult
+			var err error
+			archiveSearch := strings.HasPrefix(params.Path, "archive://")
+			if archiveSearch {
+				result, err = runArchiveGrepSearch(searchCtx, params, archiveDir, 100, ctxBefore, ctxAfter)
+			} else {
+				result, err = runGrepSearch(searchCtx, params, toolPath.AbsolutePath, 100, ctxBefore, ctxAfter)
+			}
+			archiveURI := pathInput
+			if archiveSearch {
+				// Strip any selector suffix (e.g. :raw or :100) so metadata and
+				// follow-up read calls reference the clean archive URI.
+				archiveURI = parsePathSelector(pathInput).filePath
+			}
 			if err != nil {
+				// For archive searches the target is a tool-result archive, not
+				// a filesystem path, so report the URI as-is (SmartJoin would
+				// otherwise invent a bogus `workingDir/archive:/...` join).
+				pathMeta := toolPath
+				recovery := "Verify the search path exists. Use glob to list files before retrying."
+				if archiveSearch {
+					pathMeta = archiveURIToolPath(archiveURI, effectiveWorkingDir)
+					recovery = "Verify the archive reference is correct and still present. Use the read tool to re-inspect the archived output."
+				}
 				return fantasy.WithResponseMetadata(
 					fantasy.NewTextErrorResponse(fmt.Sprintf("error searching files: %v", err)),
-					NewToolPathErrorMetadata(toolPath, "search_failed",
-						"Verify the search path exists. Use glob to list files before retrying."),
+					NewToolPathErrorMetadata(pathMeta, "search_failed", recovery),
 				), nil
 			}
 
-			result.metadata.ToolPathMetadata = NewToolPathMetadata(toolPath)
+			if archiveSearch {
+				result.metadata.ToolPathMetadata = NewToolPathMetadata(archiveURIToolPath(archiveURI, effectiveWorkingDir))
+			} else {
+				result.metadata.ToolPathMetadata = NewToolPathMetadata(toolPath)
+			}
 
 			var output strings.Builder
 			if len(result.matches) == 0 {
@@ -286,6 +320,69 @@ func runGrepSearch(ctx context.Context, params GrepParams, rootPath string, limi
 	}
 
 	return grepExecutionResult{matches: matches, truncated: truncated, metadata: metadata}, nil
+}
+
+// archiveURIToolPath builds a ToolPath representing an archive:// URI rather
+// than a filesystem path. It is used so observability/error metadata for
+// archive searches reports the URI itself instead of a bogus
+// `workingDir/archive://...` join produced by ResolveToolPath.
+func archiveURIToolPath(uri, workingDir string) ToolPath {
+	return ToolPath{
+		InputPath:        uri,
+		WorkingDir:       workingDir,
+		AbsolutePath:     uri,
+		DisplayPath:      uri,
+		IsOutsideSession: false,
+	}
+}
+
+// runArchiveGrepSearch searches a single tool-result archive (resolved from an
+// archive:// URI) for a regex pattern. Matches are reported under the archive
+// URI so the model can follow up with read for more context. Unlike
+// runGrepSearch it never walks a directory, so include filters and ignore
+// files do not apply.
+func runArchiveGrepSearch(ctx context.Context, params GrepParams, archiveDir string, limit int, contextBefore, contextAfter int) (grepExecutionResult, error) {
+	metadata := GrepResponseMetadata{
+		Pattern:     params.Pattern,
+		LiteralText: params.LiteralText,
+	}
+	if archiveDir == "" {
+		return grepExecutionResult{}, fmt.Errorf("archive directory is not configured")
+	}
+	// Strip any selector suffix (e.g. :raw or :100) so grep can be pointed at
+	// the same archive:// URI that read surfaces in its continuation hint.
+	archiveURI := parsePathSelector(params.Path).filePath
+	filePath, err := resolveArchiveFilePath(archiveURI, archiveDir)
+	if err != nil {
+		return grepExecutionResult{}, err
+	}
+
+	searchPattern := params.Pattern
+	if params.LiteralText {
+		searchPattern = escapeRegexPattern(params.Pattern)
+	}
+	regex, err := searchRegexCache.get(searchPattern)
+	if err != nil {
+		return grepExecutionResult{}, fmt.Errorf("invalid regex pattern: %w", err)
+	}
+
+	fileMatches, err := fileContainsPattern(filePath, regex, contextBefore, contextAfter)
+	if err != nil {
+		return grepExecutionResult{}, err
+	}
+
+	// Report matches under the archive URI so the model can follow up with
+	// read for more context.
+	for i := range fileMatches {
+		fileMatches[i].path = archiveURI
+	}
+
+	truncated := len(fileMatches) > limit
+	if truncated {
+		fileMatches = fileMatches[:limit]
+	}
+
+	return grepExecutionResult{matches: fileMatches, truncated: truncated, metadata: metadata}, nil
 }
 
 func validateGrepPath(rootPath string) (string, error) {

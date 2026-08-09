@@ -132,7 +132,7 @@ func (a *sessionAgent) truncateToolResult(sessionID string, tr message.ToolResul
 
 func truncatedToolResultNotice(omitted int, fullOutputPath string) string {
 	if fullOutputPath != "" {
-		return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the read tool with offset/limit or grep to inspect the saved file.]", omitted, filepath.ToSlash(fullOutputPath))
+		return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the read tool with offset/limit, or the grep tool with path=`%s`, to search inside it. Only the grep tool can read archive:// paths; shell grep cannot.]", omitted, filepath.ToSlash(fullOutputPath), fullOutputPath)
 	}
 	return fmt.Sprintf("\n\n[%d characters omitted — output exceeded the context window limit. This excerpt is incomplete; do not guess from it or assume it contains the full result. If you need more detail, rerun the tool with a narrower scope or use a precise read with offset/limit when available.]", omitted)
 }
@@ -150,7 +150,7 @@ func exhaustedToolResultPreview(content string) (string, int, int) {
 func stepBudgetExhaustedToolResultNotice(originalChars, previewChars int, fullOutputPath string) string {
 	omitted := originalChars - previewChars
 	if fullOutputPath != "" {
-		return fmt.Sprintf("[Step tool-result budget exhausted. Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the read tool with offset/limit or grep to inspect the saved file.]", previewChars, originalChars, omitted, filepath.ToSlash(fullOutputPath))
+		return fmt.Sprintf("[Step tool-result budget exhausted. Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the read tool with offset/limit, or the grep tool with path=`%s`, to search inside it. Only the grep tool can read archive:// paths; shell grep cannot.]", previewChars, originalChars, omitted, filepath.ToSlash(fullOutputPath), fullOutputPath)
 	}
 	return fmt.Sprintf("[Step tool-result budget exhausted. Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. Re-run the tool with a narrower scope if you still need it, or use a precise read with offset/limit when available.]", previewChars, originalChars, omitted)
 }
@@ -158,7 +158,7 @@ func stepBudgetExhaustedToolResultNotice(originalChars, previewChars int, fullOu
 func messageBudgetExhaustedToolResultNotice(totalUsed, originalChars, previewChars int, fullOutputPath string) string {
 	omitted := originalChars - previewChars
 	if fullOutputPath != "" {
-		return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the read tool with offset/limit or grep to inspect the saved file.]", totalUsed, contextWindowMessageToolResultCharsLimit, previewChars, originalChars, omitted, filepath.ToSlash(fullOutputPath))
+		return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. The full output was saved to `%s`. Use the read tool with offset/limit, or the grep tool with path=`%s`, to search inside it. Only the grep tool can read archive:// paths; shell grep cannot.]", totalUsed, contextWindowMessageToolResultCharsLimit, previewChars, originalChars, omitted, filepath.ToSlash(fullOutputPath), fullOutputPath)
 	}
 	return fmt.Sprintf("[Message tool-result budget exhausted (%d/%d chars used). Showing the last %d of %d characters as a preview; %d characters omitted from this excerpt. This excerpt is incomplete; do not guess from it or assume it contains the full result. Re-run the tool with a narrower scope if you still need it, or use a precise read with offset/limit when available.]", totalUsed, contextWindowMessageToolResultCharsLimit, previewChars, originalChars, omitted)
 }

@@ -357,6 +357,11 @@ func handleEmbeddedSkillRead(
 	var output string
 	if sel.raw {
 		output = displayContent
+		// Surface silent truncation when raw mode hits an explicit line limit.
+		if readResult.HasMore {
+			nextLine := readOffset + len(lines) + 1
+			output += fmt.Sprintf("\n(Truncated after line %d. Use path=%q to continue reading.)\n", readOffset+len(lines), fmt.Sprintf("%s:%d", params.Path, nextLine))
+		}
 	} else {
 		output = "<file>\n"
 		if useHashline {
@@ -664,6 +669,13 @@ func handleFileRead(
 	if sel.raw {
 		// Raw mode: verbatim text, no line numbers, no wrapping.
 		output = content
+		// Raw mode has no line-number footer; surface silent truncation at the
+		// default line limit so the caller knows to paginate.
+		if readResult.HasMore {
+			nextLine := readOffset + len(lines) + 1
+			slashPath := filepath.ToSlash(params.Path)
+			output += fmt.Sprintf("\n(Truncated after line %d. Use path=%q to continue reading.)\n", readOffset+len(lines), fmt.Sprintf("%s:%d", slashPath, nextLine))
+		}
 	} else {
 		output = "<file>\n"
 		if useHashline {
